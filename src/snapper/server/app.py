@@ -125,6 +125,10 @@ from snapper.application.db_stats.snapshotter import (
 )
 from snapper.application.market_data_watchdog.watchdog import MarketDataWatchdog
 from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
+from snapper.application.portfolio.pnl_snapshotter_config import (
+    resolve_enabled as _resolve_pnl_snapshotter_enabled,
+)
 from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
@@ -993,6 +997,88 @@ async def _stop_db_stats_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
+async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSettings) -> None:
+    """Build + start the :class:`PortfolioPnlSnapshotter` singleton on instance 0.
+
+    Mirrors :func:`_start_db_stats_snapshotter`: the attribute is attached to
+    ``app.state`` only after a successful start. Unlike the metrics sampler the
+    Phase-5B writer is a single-writer job (decision D12), so it runs ONLY on the
+    coordinator instance (single deployment, or partition instance 0); other
+    instances leave ``app.state.pnl_snapshotter`` at its pre-init ``None``. It is
+    DISABLED unless ``PNL_SNAPSHOTTER_ENABLED`` is truthy, so a production rollout
+    is an explicit operator flip.
+
+    Args:
+        app: FastAPI application whose ``state`` will hold the snapshotter.
+        db_url: SQLAlchemy URL for the underlying async repository.
+        settings: Runtime settings carrying the coordinator partition identity.
+    """
+    if settings.coordinator_instance_count != 1 and settings.coordinator_instance_id != 0:
+        logger.info(
+            "Skipping PortfolioPnlSnapshotter on coordinator instance %s/%s; instance 0 owns it",
+            settings.coordinator_instance_id,
+            settings.coordinator_instance_count,
+        )
+        return
+    try:
+        enabled = _resolve_pnl_snapshotter_enabled(os.environ.get("PNL_SNAPSHOTTER_ENABLED"))
+        repo = get_repository(db_url) if enabled else None
+        snapshotter = PortfolioPnlSnapshotter(repo=repo, disabled=not enabled)
+        await snapshotter.start()
+    except Exception:
+        logger.exception("PortfolioPnlSnapshotter startup failed — Phase-5B sampling is off")
+        return
+    app.state.pnl_snapshotter = snapshotter
+    if snapshotter.disabled:
+        logger.info(
+            "PortfolioPnlSnapshotter attached in disabled mode (PNL_SNAPSHOTTER_ENABLED unset)"
+        )
+    else:
+        logger.info("PortfolioPnlSnapshotter started (interval=%ss)", snapshotter.interval_seconds)
+
+
+async def _stop_pnl_snapshotter(app: FastAPI) -> None:
+    """Stop the :class:`PortfolioPnlSnapshotter` singleton if attached.
+
+    Tolerates partial-init state where startup was skipped (non-coordinator
+    instance) or failed before the attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    snapshotter: PortfolioPnlSnapshotter | None = getattr(app.state, "pnl_snapshotter", None)
+    if snapshotter is None:
+        return
+    await snapshotter.stop()
+
+
+async def _start_background_writers(app: FastAPI, *, db_url: str, settings: AppSettings) -> None:
+    """Start the DB-stats and Phase-5B P&L writer singletons in one lifespan step.
+
+    Groups the two ``app.state`` background writers behind a single call so the
+    lifespan body stays flat. Both attributes are pre-set to ``None`` by the
+    lifespan before its ``try`` block, so a skipped or failed start still leaves
+    the attribute-absent contract intact for teardown.
+
+    Args:
+        app: FastAPI application whose ``state`` will hold the writers.
+        db_url: SQLAlchemy URL for the underlying async repositories.
+        settings: Runtime settings carrying the coordinator partition identity.
+    """
+    await _start_db_stats_snapshotter(app, db_url=db_url)
+    await _start_pnl_snapshotter(app, db_url=db_url, settings=settings)
+
+
+async def _stop_background_writers(app: FastAPI) -> None:
+    """Stop the Phase-5B P&L and DB-stats writer singletons in reverse order.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    await _stop_pnl_snapshotter(app)
+    await _stop_db_stats_snapshotter(app)
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -1059,7 +1145,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.zmq_bridge_task = None
     app.state.system_metrics_snapshotter = None
     app.state.retention_scheduler = None
-    app.state.db_stats_snapshotter = None
+    app.state.db_stats_snapshotter = app.state.pnl_snapshotter = None
     app.state.market_data_watchdog = None
     app.state.ai_research_trigger = None
     app.state.ai_review_maintenance = None
@@ -1177,7 +1263,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _start_ai_review_maintenance(app, db_url=settings.db_url)
         _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
-        await _start_db_stats_snapshotter(app, db_url=settings.db_url)
+        await _start_background_writers(app, db_url=settings.db_url, settings=settings)
         await _start_remote_summary_cache(
             app,
             own_coordinator=process_factory.coordinator_topic_slug(),
@@ -1227,7 +1313,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_egress_snapshot_cache(app)
         await _stop_remote_summary_cache(app)
         await _stop_command_ack_registry(app)
-        await _stop_db_stats_snapshotter(app)
+        await _stop_background_writers(app)
         await _stop_retention_scheduler(app)
         await _stop_ai_delegate_watchdog(app)
         await _stop_ai_review_maintenance(app)

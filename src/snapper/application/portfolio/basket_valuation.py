@@ -150,10 +150,14 @@ class ValuationProvenance:
 
     ``rate`` is the exact finite conversion actually applied: ``1.0`` for the USD
     identity, the pinned plane's close (direct) or its reciprocal (inverse) for a
-    fiat leg, and the candle ``close`` for a crypto leg. ``candle`` always pins the
-    consumed candle version for a fiat or crypto leg — a priced leg with no version
-    identity is withheld rather than emitted — and is ``None`` only for the USD
-    identity, which consumes no candle.
+    fiat leg, and the candle ``close`` for a crypto leg. ``close`` is the EXACT
+    candle close consumed (``1.0`` for the identity), stored verbatim so an
+    inverse-fiat leg records the divisor actually used rather than the reciprocal
+    ``rate``; a downstream partition re-values through the same path per unit and
+    stays bit-consistent with this leg. ``candle`` always pins the consumed candle
+    version for a fiat or crypto leg — a priced leg with no version identity is
+    withheld rather than emitted — and is ``None`` only for the USD identity, which
+    consumes no candle.
     """
 
     kind: ValuationProvenanceKind
@@ -161,6 +165,7 @@ class ValuationProvenance:
     quote: str
     exchange: str
     rate: float
+    close: float
     candle: CandleVersionIdentity | None
 
 
@@ -195,6 +200,7 @@ def _identity_leg(exchange: str, qty: float) -> ValuedLeg:
         quote="USD",
         exchange=exchange,
         rate=1.0,
+        close=1.0,
         candle=None,
     )
     return ValuedLeg(usd_value=qty, provenance=provenance, reason=None)
@@ -245,6 +251,7 @@ def _value_fiat(
         quote=resolved.quote,
         exchange=resolved.exchange,
         rate=rate,
+        close=resolved.close,
         candle=version,
     )
     return ValuedLeg(usd_value=usd, provenance=provenance, reason=None)
@@ -322,6 +329,7 @@ def _value_crypto(
         quote=chosen.quote,
         exchange=chosen.exchange,
         rate=chosen.close,
+        close=chosen.close,
         candle=CandleVersionIdentity(
             instrument_public_id=chosen.instrument_public_id,
             native_symbol=chosen.native_symbol,

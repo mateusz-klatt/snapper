@@ -493,6 +493,7 @@ class PortfolioPnlSampleRow(TypedDict):
     mark_source: str | None
     mark_time: datetime | None
     audit_json: str
+    watermarks_json: str
 
 
 class PortfolioPnlSampleBatchResult(TypedDict):
@@ -722,6 +723,30 @@ class PnlCryptoUsdPlaneRow(TypedDict):
     open_at: datetime
     close: float
     candle_timestamp: datetime
+
+
+class PnlScopePositionVersionRow(TypedDict):
+    """One temporal position version labelling the Phase-5B partition per minute.
+
+    Returned by ``get_pnl_scope_position_inventory_window`` for one
+    ``(wallet, mode)`` scope over a chunk knowledge window: every SCD2 ``Position``
+    version overlapping the window, joined author-time to its owning instrument,
+    symbol and spec, with the version's ``[valid_from, valid_to)`` knowledge
+    interval. A pure per-minute resolver picks each grid minute ``M``'s active
+    versions (``valid_from <= M < valid_to``), so a position that opened after
+    earlier minutes never labels them (A2 causality). ``base_currency`` is the
+    symbol base, ``quantity`` the signed size, and ``is_spot_margin`` is ``True``
+    UNLESS the author-time spec PROVES a ``spot``, non-``spot_margin_rollover``
+    instrument — a missing spec, a non-spot kind, or the spot-margin funding model
+    all fail closed to ``True`` (the basket total never depends on positions).
+    """
+
+    exchange: str
+    base_currency: str
+    quantity: float
+    is_spot_margin: bool
+    valid_from: datetime
+    valid_to: datetime
 
 
 class PositionRow(TypedDict):

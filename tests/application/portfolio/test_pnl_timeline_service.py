@@ -23,6 +23,8 @@ import pytest
 from sqlalchemy import create_engine
 
 from snapper.application.portfolio import pnl_timeline_service
+from snapper.application.portfolio.basket_valuation import ValuationEvidence
+from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
@@ -34,10 +36,15 @@ from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_
 from snapper.application.portfolio.pnl_timeline_service import PnlAiDecisionMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlAnchorEvidenceError
 from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
+from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
+from snapper.application.portfolio.pnl_timeline_service import _derive_series_replay_metadata
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _execution_rows_with_effective_time
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _opening_mark_requirements
 from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
@@ -50,6 +57,7 @@ from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.application.portfolio.pnl_timeline_service import ensure_wallet_pnl_anchor
+from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
@@ -5667,3 +5675,145 @@ class TestAnchorEvidenceDefenses:
         )
         with pytest.raises(PnlAnchorEvidenceError, match=message):
             _parse_anchor(row)
+
+
+class TestSeriesReplayMetadata:
+    """Engine replay-metadata output for the Phase-5B late-fill boundary (R3)."""
+
+    def test_ceil_to_minute_keeps_aligned_instant(self) -> None:
+        """A minute-aligned instant is its own ceiling."""
+        assert _ceil_to_minute(_m(1)) == _m(1)
+
+    def test_ceil_to_minute_rounds_up_within_minute(self) -> None:
+        """A sub-minute instant ceils to the next minute."""
+        assert _ceil_to_minute(_m(1) + timedelta(seconds=30)) == _m(2)
+
+    def test_effective_time_reuses_the_pool_clamp(self) -> None:
+        """An out-of-order fill in one pool clamps forward to the running max."""
+        rows = [
+            _exec_row(_I1, 1, 5, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+        ]
+        pairs = _execution_rows_with_effective_time(rows)
+        assert [effective for _, effective in pairs] == [_m(5), _m(5)]
+
+    def test_earliest_affected_uses_clamped_not_raw_order(self) -> None:
+        """The earliest affected minute is the clamped effective, never the raw."""
+        rows = [
+            _exec_row(_I1, 1, 5, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+        ]
+        metadata = _derive_series_replay_metadata(rows, {}, _m(10))
+        assert metadata.earliest_affected_minute == _m(5)
+        assert metadata.max_scope_sequence_by_exchange == {"kraken": 2}
+
+    def test_watermark_excludes_effective_beyond_to_time(self) -> None:
+        """A fill whose clamped effective is past ``to_time`` never advances it."""
+        rows = [_exec_row(_I1, 3, 5, "buy", 1.0, 100.0, 0.0, "USD")]
+        metadata = _derive_series_replay_metadata(rows, {}, _m(4))
+        assert metadata.max_scope_sequence_by_exchange == {}
+        assert metadata.earliest_affected_minute == _m(5)
+
+    def test_baseline_above_sequence_reports_no_affected_minute(self) -> None:
+        """A fill at or below the caller's baseline is not a late fill."""
+        rows = [_exec_row(_I1, 2, 1, "buy", 1.0, 100.0, 0.0, "USD")]
+        metadata = _derive_series_replay_metadata(rows, {"kraken": 5}, _m(10))
+        assert metadata.earliest_affected_minute is None
+        assert metadata.max_scope_sequence_by_exchange == {"kraken": 2}
+
+    async def test_series_without_baseline_omits_metadata(self) -> None:
+        """An existing caller that omits the baseline gets no replay metadata."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0), _candle(_m(1), 120.0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _m(3))
+        assert result.replay_metadata is None
+
+    async def test_series_with_baseline_reports_metadata(self) -> None:
+        """A baseline watermark map flows the R3 boundary into the result."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0), _candle(_m(1), 120.0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            options=PnlSeriesReplayOptions(baseline_watermarks={}),
+        )
+        assert isinstance(result.replay_metadata, PnlSeriesReplayMetadata)
+        assert result.replay_metadata.max_scope_sequence_by_exchange == {"kraken": 1}
+        assert result.replay_metadata.earliest_affected_minute == _m(0)
+
+    def test_max_scope_sequence_keeps_the_highest_seen(self) -> None:
+        """A later fill with a lower scope_sequence never lowers the watermark."""
+        rows = [
+            _exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I2, 1, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+        ]
+        metadata = _derive_series_replay_metadata(rows, {}, _m(10))
+        assert metadata.max_scope_sequence_by_exchange == {"kraken": 2}
+        assert metadata.earliest_affected_minute == _m(0)
+
+
+class TestLoadBasketFiatEvidence:
+    """Fiat forex evidence discovery for Phase-5B basket valuation (D6/R8)."""
+
+    async def test_walutomat_eur_and_pln_price_via_forex_planes(self) -> None:
+        """EUR and PLN legs value off EUR-USD and inverse USD-PLN candles."""
+        fx_rows = [
+            _fx_row("EUR", "USD", 1, 1.1, exchange="kraken"),
+            _fx_row("EUR", "USD", 2, 1.1, exchange="kraken"),
+            _fx_row("USD", "PLN", 1, 4.0, exchange="walutomat"),
+            _fx_row("USD", "PLN", 2, 4.0, exchange="walutomat"),
+        ]
+        repo = FakeRepo(fx_rows=fx_rows)
+        rates, venues, versions = await load_basket_fiat_evidence(
+            repo, frozenset({"EUR", "PLN"}), _m(1), _m(2), _m(3)
+        )
+        evidence = ValuationEvidence(
+            fiat_rates=rates, fiat_venues=venues, fiat_versions=versions, crypto_planes={}
+        )
+        eur_leg = value_currency("walutomat", "EUR", 100.0, _m(1), evidence)
+        pln_leg = value_currency("walutomat", "PLN", 400.0, _m(1), evidence)
+        assert eur_leg.usd_value == pytest.approx(110.0)
+        assert pln_leg.usd_value == pytest.approx(100.0)
+        assert eur_leg.provenance is not None
+        assert eur_leg.provenance.candle is not None
+
+    async def test_missing_pln_close_at_minute_fails_that_minute_closed(self) -> None:
+        """A fiat pair with no close at a minute withholds that minute's leg."""
+        fx_rows = [_fx_row("USD", "PLN", 1, 4.0, exchange="walutomat")]
+        repo = FakeRepo(fx_rows=fx_rows)
+        rates, venues, versions = await load_basket_fiat_evidence(
+            repo, frozenset({"PLN"}), _m(1), _m(2), _m(3)
+        )
+        evidence = ValuationEvidence(
+            fiat_rates=rates, fiat_venues=venues, fiat_versions=versions, crypto_planes={}
+        )
+        assert value_currency(
+            "walutomat", "PLN", 400.0, _m(1), evidence
+        ).usd_value == pytest.approx(100.0)
+        withheld = value_currency("walutomat", "PLN", 400.0, _m(2), evidence)
+        assert withheld.usd_value is None
+        assert withheld.reason == "missing_rate"
+
+    async def test_usd_only_currency_set_requests_nothing(self) -> None:
+        """A basket of only the valuation currency loads no fiat evidence."""
+        rates, venues, versions = await load_basket_fiat_evidence(
+            FakeRepo(), frozenset({"USD"}), _m(1), _m(2), _m(3)
+        )
+        assert (rates, venues, versions) == ({}, {}, {})
+
+    async def test_crypto_currency_yields_no_forex_plane(self) -> None:
+        """A crypto currency finds no forex plane and stays out of the venue map."""
+        rates, venues, versions = await load_basket_fiat_evidence(
+            FakeRepo(), frozenset({"BTC"}), _m(1), _m(2), _m(3)
+        )
+        assert venues == {}
+        assert versions == {}

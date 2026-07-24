@@ -21,6 +21,7 @@ from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anch
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import VenueAccountObservation
+from snapper.data.repository import PortfolioPnlSampleConflictError
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import PortfolioPnlSampleScopeError
@@ -41,17 +42,24 @@ _ANCHOR_PUBLIC_ID = portfolio_pnl_anchor_public_id(_WALLET, "live", "USD")
 _EPOCH = "00000000-0000-7000-8000-000000000102"
 _OTHER_EPOCH = "00000000-0000-7000-8000-000000000188"
 _SESSION = "00000000-0000-7000-8000-000000000103"
+_ORIG = "22222222-0000-7000-8000-000000000002"
 
 _VALID_VALUATION = {
     "kind": "crypto_candle",
+    "orientation": "crypto",
+    "currency": "BTC",
     "base": "BTC",
     "quote": "USD",
     "exchange": "kraken",
     "rate": 65000.0,
+    "close": 65000.0,
     "candle": {
         "candle_id": 42,
         "candle_public_id": "cndl-1",
         "candle_timestamp": "2026-07-20T12:00:00+00:00",
+        "candle_open_at": "2026-07-20T11:59:00+00:00",
+        "instrument_public_id": "inst-btc",
+        "native_symbol": "BTC/USD",
     },
 }
 _VALID_OBSERVATION = {
@@ -59,17 +67,25 @@ _VALID_OBSERVATION = {
     "exchange": "kraken",
     "balance_observed_at": "2026-07-20T12:00:30+00:00",
 }
+_VALID_COVERAGE = {
+    "leveraged_inventory_excluded": False,
+    "non_finite_position_excluded": False,
+    "venue_scope": "spot_only",
+    "external_flows_adjusted": False,
+}
 
 
 def _complete_audit(
     valuation: list[object] | None = None,
     observations: list[object] | None = None,
+    coverage: object | None = None,
     **extra: object,
 ) -> str:
     """Serialize one complete-row audit envelope with A3/A5 provenance records."""
     envelope: dict[str, object] = {
         "valuation": [dict(_VALID_VALUATION)] if valuation is None else valuation,
         "observations": [dict(_VALID_OBSERVATION)] if observations is None else observations,
+        "coverage": dict(_VALID_COVERAGE) if coverage is None else coverage,
     }
     envelope.update(extra)
     return json.dumps(envelope)
@@ -78,7 +94,14 @@ def _complete_audit(
 def _incomplete_audit(reason_codes: object = ("missing_mark",)) -> str:
     """Serialize one incomplete-row audit envelope with a reason-code list."""
     codes = list(reason_codes) if isinstance(reason_codes, tuple) else reason_codes
-    return json.dumps({"valuation": [], "observations": [], "reason_codes": codes})
+    return json.dumps(
+        {
+            "valuation": [],
+            "observations": [],
+            "reason_codes": codes,
+            "coverage": dict(_VALID_COVERAGE),
+        }
+    )
 
 
 _COMPLETE_AUDIT_JSON = _complete_audit()
@@ -114,6 +137,7 @@ def _complete_sample(
         "mark_source": "finalized_1m_candle_close",
         "mark_time": point_time,
         "audit_json": _COMPLETE_AUDIT_JSON,
+        "watermarks_json": "{}",
     }
 
 
@@ -147,6 +171,7 @@ def _incomplete_sample(
         "mark_source": None,
         "mark_time": None,
         "audit_json": _incomplete_audit(reasons),
+        "watermarks_json": "{}",
     }
 
 
@@ -516,14 +541,45 @@ def test_validator_rejects_scope_mismatch(scope: PortfolioPnlSampleScope) -> Non
             id="non_numeric_rate",
         ),
         pytest.param(
+            {"valuation": [{k: v for k, v in _VALID_VALUATION.items() if k != "close"}]},
+            "close must be a finite number",
+            id="missing_close",
+        ),
+        pytest.param(
             {"valuation": [{k: v for k, v in _VALID_VALUATION.items() if k != "candle"}]},
             "must carry a candle identity",
             id="priced_missing_candle",
         ),
         pytest.param(
-            {"valuation": [{**_VALID_VALUATION, "kind": "identity"}]},
+            {"valuation": [{**_VALID_VALUATION, "kind": "identity", "orientation": "identity"}]},
             "identity valuation record must carry no candle",
             id="identity_with_candle",
+        ),
+        pytest.param(
+            {"valuation": [{k: v for k, v in _VALID_VALUATION.items() if k != "currency"}]},
+            "currency must be a nonempty string",
+            id="missing_currency",
+        ),
+        pytest.param(
+            {"valuation": [{**_VALID_VALUATION, "orientation": "sideways"}]},
+            "orientation is not canonical",
+            id="bad_orientation",
+        ),
+        pytest.param(
+            {
+                "valuation": [
+                    {
+                        **_VALID_VALUATION,
+                        "candle": {
+                            k: v
+                            for k, v in cast(dict[str, object], _VALID_VALUATION["candle"]).items()
+                            if k != "candle_open_at"
+                        },
+                    }
+                ]
+            },
+            "candle_open_at must be a nonempty string",
+            id="candle_missing_open_at",
         ),
         pytest.param(
             {
@@ -596,7 +652,7 @@ def test_validator_accepts_empty_basket_zero_equity_complete() -> None:
         cash_usd=0.0,
         position_value_usd=0.0,
         drawdown=0.0,
-        audit_json=json.dumps({"valuation": [], "observations": [dict(_VALID_OBSERVATION)]}),
+        audit_json=_complete_audit(valuation=[]),
     )
     SQLAlchemyRepository._validate_portfolio_pnl_sample(row, _scope())
 
@@ -605,17 +661,15 @@ def test_validator_accepts_an_identity_valuation_record() -> None:
     """A USD identity leg is priced without a candle version identity."""
     identity = {
         "kind": "identity",
+        "orientation": "identity",
+        "currency": "USD",
         "base": "USD",
         "quote": "USD",
         "exchange": "kraken",
         "rate": 1.0,
+        "close": 1.0,
     }
-    row = _mutate(
-        _complete_sample(),
-        audit_json=json.dumps(
-            {"valuation": [identity], "observations": [dict(_VALID_OBSERVATION)]}
-        ),
-    )
+    row = _mutate(_complete_sample(), audit_json=_complete_audit(valuation=[identity]))
     SQLAlchemyRepository._validate_portfolio_pnl_sample(row, _scope())
 
 
@@ -712,7 +766,7 @@ async def test_supersede_late_fill_replaces_a_complete_sample(
         timestamp=_M1 + timedelta(minutes=3),
     )
     superseded = await repository.supersede_portfolio_pnl_sample(
-        _scope(), replacement, late_fill_correction=True
+        _scope(), replacement, late_fill_correction=True, expected_public_id=original["public_id"]
     )
     assert superseded["realized_pnl"] == 99.0
     assert superseded["public_id"] == original["public_id"]
@@ -726,12 +780,13 @@ async def test_supersede_self_heal_replaces_a_retryable_incomplete_sample(
 ) -> None:
     """A self-heal supersedes an incomplete row carrying only retryable codes."""
     await repository.record_portfolio_pnl_samples(
-        [_incomplete_sample(_M1, reasons=("missing_mark",))], _scope()
+        [_incomplete_sample(_M1, public_id=_ORIG, reasons=("missing_mark",))], _scope()
     )
     healed = await repository.supersede_portfolio_pnl_sample(
         _scope(),
         _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
         late_fill_correction=False,
+        expected_public_id=_ORIG,
     )
     assert healed["valuation_status"] == "complete"
 
@@ -740,12 +795,15 @@ async def test_supersede_self_heal_refuses_a_complete_sample(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Self-heal without the late-fill flag refuses to touch a complete row."""
-    await repository.record_portfolio_pnl_samples([_complete_sample(_M1)], _scope())
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1, public_id=_ORIG)], _scope()
+    )
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="refuses a complete sample"):
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
             late_fill_correction=False,
+            expected_public_id=_ORIG,
         )
 
 
@@ -754,13 +812,14 @@ async def test_supersede_self_heal_refuses_a_final_reason_row(
 ) -> None:
     """Self-heal refuses an incomplete row carrying a final reason code."""
     await repository.record_portfolio_pnl_samples(
-        [_incomplete_sample(_M1, reasons=("fill_gap_evidence",))], _scope()
+        [_incomplete_sample(_M1, public_id=_ORIG, reasons=("fill_gap_evidence",))], _scope()
     )
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="final reason code"):
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _incomplete_sample(_M1, reasons=("missing_mark",)),
             late_fill_correction=False,
+            expected_public_id=_ORIG,
         )
 
 
@@ -773,7 +832,7 @@ async def test_supersede_self_heal_refuses_a_codeless_incomplete_row(
             PortfolioPnlPoint(
                 **SQLAlchemyRepository._portfolio_pnl_sample_orm_kwargs(
                     _mutate(
-                        _incomplete_sample(_M1),
+                        _incomplete_sample(_M1, public_id=_ORIG),
                         audit_json=json.dumps({"reason_codes": []}),
                     )
                 ),
@@ -786,6 +845,7 @@ async def test_supersede_self_heal_refuses_a_codeless_incomplete_row(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
             late_fill_correction=False,
+            expected_public_id=_ORIG,
         )
 
 
@@ -795,7 +855,7 @@ async def test_supersede_refuses_when_no_active_sample_exists(
     """Superseding a minute with no active sample is refused."""
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="no active row"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(), _complete_sample(_M1), late_fill_correction=True
+            _scope(), _complete_sample(_M1), late_fill_correction=True, expected_public_id=_ORIG
         )
 
 
@@ -808,7 +868,7 @@ async def test_supersede_refuses_a_scope_epoch_the_anchor_disowns(
     replacement = _mutate(_complete_sample(_M1), epoch_public_id=_OTHER_EPOCH)
     with pytest.raises(PortfolioPnlSampleScopeError, match="does not match the active anchor"):
         await repository.supersede_portfolio_pnl_sample(
-            other_scope, replacement, late_fill_correction=True
+            other_scope, replacement, late_fill_correction=True, expected_public_id=_ORIG
         )
 
 
@@ -820,7 +880,7 @@ async def test_supersede_refuses_a_cross_epoch_active_row(
         s.add(
             PortfolioPnlPoint(
                 **SQLAlchemyRepository._portfolio_pnl_sample_orm_kwargs(
-                    _mutate(_complete_sample(_M1), epoch_public_id=_OTHER_EPOCH)
+                    _mutate(_complete_sample(_M1), public_id=_ORIG, epoch_public_id=_OTHER_EPOCH)
                 ),
                 known_to=KNOWN_TO_MAX,
             )
@@ -831,6 +891,7 @@ async def test_supersede_refuses_a_cross_epoch_active_row(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
             late_fill_correction=True,
+            expected_public_id=_ORIG,
         )
 
 
@@ -844,6 +905,7 @@ async def test_supersede_validates_the_replacement(
             _scope(),
             _mutate(_complete_sample(_M1), drawdown=3.0),
             late_fill_correction=True,
+            expected_public_id=_ORIG,
         )
 
 
@@ -863,7 +925,7 @@ async def test_supersede_refuses_a_scope_without_an_active_anchor(
     """Supersede also refuses an unsampleable scope before touching a row."""
     with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
         await bare_repository.supersede_portfolio_pnl_sample(
-            _scope(), _complete_sample(_M1), late_fill_correction=True
+            _scope(), _complete_sample(_M1), late_fill_correction=True, expected_public_id=_ORIG
         )
 
 
@@ -946,11 +1008,14 @@ async def test_range_read_excludes_a_superseded_row(
     repository: SQLAlchemyRepository,
 ) -> None:
     """A superseded (closed) row never appears in the active range read."""
-    await repository.record_portfolio_pnl_samples([_complete_sample(_M1)], _scope())
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1, public_id=_ORIG)], _scope()
+    )
     await repository.supersede_portfolio_pnl_sample(
         _scope(),
         _mutate(_complete_sample(_M1), realized_pnl=42.0, timestamp=_M1 + timedelta(minutes=3)),
         late_fill_correction=True,
+        expected_public_id=_ORIG,
     )
     rows = await repository.get_portfolio_pnl_samples(_query(), _M1, _M1)
     assert [row["realized_pnl"] for row in rows] == [42.0]
@@ -968,7 +1033,7 @@ async def test_peak_read_maximizes_complete_equity_only(
         ],
         _scope(),
     )
-    assert await repository.get_portfolio_pnl_sample_peak(_query()) == 425.0
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) == 425.0
 
 
 async def test_peak_read_excludes_superseded_rows(
@@ -976,7 +1041,8 @@ async def test_peak_read_excludes_superseded_rows(
 ) -> None:
     """A superseded high-equity row never advances the re-derived peak."""
     await repository.record_portfolio_pnl_samples(
-        [_mutate(_complete_sample(_M1), cash_usd=1000.0, position_value_usd=0.0)], _scope()
+        [_mutate(_complete_sample(_M1), public_id=_ORIG, cash_usd=1000.0, position_value_usd=0.0)],
+        _scope(),
     )
     await repository.supersede_portfolio_pnl_sample(
         _scope(),
@@ -987,8 +1053,9 @@ async def test_peak_read_excludes_superseded_rows(
             timestamp=_M1 + timedelta(minutes=3),
         ),
         late_fill_correction=True,
+        expected_public_id=_ORIG,
     )
-    assert await repository.get_portfolio_pnl_sample_peak(_query()) == 10.0
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) == 10.0
 
 
 async def test_peak_read_returns_none_without_a_complete_sample(
@@ -996,7 +1063,7 @@ async def test_peak_read_returns_none_without_a_complete_sample(
 ) -> None:
     """An epoch with no complete sample has no peak."""
     await repository.record_portfolio_pnl_samples([_incomplete_sample(_M1)], _scope())
-    assert await repository.get_portfolio_pnl_sample_peak(_query()) is None
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) is None
 
 
 async def test_latest_sample_progress_read(
@@ -1165,3 +1232,168 @@ async def test_collision_read_short_circuits_on_no_minutes(
     """The by-minute collision read never issues an empty IN query."""
     async with repository.session() as s:
         assert await repository._read_active_portfolio_pnl_samples_by_minute(s, _scope(), []) == {}
+
+
+@pytest.mark.parametrize(
+    ("watermarks_json", "message"),
+    [
+        ("", "watermarks_json must be a nonempty string"),
+        ("{bad", "must contain valid JSON"),
+        ("[]", "must be a canonical watermark map"),
+        ('{"kraken":0}', "must be a canonical watermark map"),
+        ('{"kraken": 5}', "must be canonically serialized"),
+    ],
+)
+def test_validator_rejects_bad_watermarks(watermarks_json: str, message: str) -> None:
+    """Every sample requires a present, valid, canonical watermark map (B2)."""
+    with pytest.raises(ValueError, match=message):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(
+            _mutate(_complete_sample(), watermarks_json=watermarks_json), _scope()
+        )
+
+
+def test_validator_accepts_a_nonempty_watermark_map() -> None:
+    """A canonical per-exchange watermark map is accepted."""
+    SQLAlchemyRepository._validate_portfolio_pnl_sample(
+        _mutate(_complete_sample(), watermarks_json='{"kraken":7}'), _scope()
+    )
+
+
+@pytest.mark.parametrize(
+    ("coverage", "message"),
+    [
+        (789, "coverage must be a present object"),
+        (
+            {k: v for k, v in _VALID_COVERAGE.items() if k != "leveraged_inventory_excluded"},
+            "leveraged_inventory_excluded must be a boolean",
+        ),
+        (
+            {**_VALID_COVERAGE, "non_finite_position_excluded": "no"},
+            "non_finite_position_excluded must be a boolean",
+        ),
+        ({**_VALID_COVERAGE, "venue_scope": "all"}, "venue_scope must be 'spot_only'"),
+        (
+            {**_VALID_COVERAGE, "external_flows_adjusted": True},
+            "external_flows_adjusted must be false",
+        ),
+    ],
+)
+def test_validator_rejects_bad_coverage(coverage: object, message: str) -> None:
+    """The self-describing coverage disclosure enforces its schema (A4)."""
+    with pytest.raises(ValueError, match=message):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(
+            _mutate(_complete_sample(), audit_json=_complete_audit(coverage=coverage)), _scope()
+        )
+
+
+def test_validator_accepts_a_disclosed_leveraged_exclusion() -> None:
+    """A complete sample may disclose an excluded leveraged position (A4)."""
+    coverage = {**_VALID_COVERAGE, "leveraged_inventory_excluded": True}
+    SQLAlchemyRepository._validate_portfolio_pnl_sample(
+        _mutate(_complete_sample(), audit_json=_complete_audit(coverage=coverage)), _scope()
+    )
+
+
+async def test_supersede_conflict_on_a_stale_public_id(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A supersede whose expected public_id no longer matches loses the CAS (B3)."""
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1, public_id=_ORIG)], _scope()
+    )
+    with pytest.raises(PortfolioPnlSampleConflictError, match="lost its optimistic CAS"):
+        await repository.supersede_portfolio_pnl_sample(
+            _scope(),
+            _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=3)),
+            late_fill_correction=True,
+            expected_public_id="99999999-0000-7000-8000-000000000009",
+        )
+
+
+async def test_peak_read_is_causal_before_the_bound(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The peak reads only complete samples strictly before the bound (A1)."""
+    await repository.record_portfolio_pnl_samples(
+        [
+            _mutate(_complete_sample(_M1), cash_usd=100.0, position_value_usd=0.0),
+            _mutate(_complete_sample(_M3), cash_usd=500.0, position_value_usd=0.0),
+        ],
+        _scope(),
+    )
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M2) == 100.0
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) == 500.0
+
+
+async def test_retract_closes_the_active_row_without_a_successor(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A retract closes the active sample leaving honest absence (N1)."""
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1, public_id=_ORIG)], _scope()
+    )
+    await repository.retract_portfolio_pnl_sample(
+        _scope(), _M1, expected_public_id=_ORIG, bus_time=_M1 + timedelta(minutes=5)
+    )
+    assert await _active_samples(repository) == []
+
+
+async def test_retract_drops_the_row_from_the_causal_peak(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A retracted high-equity minute no longer feeds the re-derived peak (N1)."""
+    await repository.record_portfolio_pnl_samples(
+        [
+            _mutate(
+                _complete_sample(_M1, public_id=_ORIG), cash_usd=10000.0, position_value_usd=0.0
+            ),
+            _mutate(_complete_sample(_M2), cash_usd=200.0, position_value_usd=0.0),
+        ],
+        _scope(),
+    )
+    await repository.retract_portfolio_pnl_sample(
+        _scope(), _M1, expected_public_id=_ORIG, bus_time=_M1 + timedelta(minutes=5)
+    )
+    assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) == 200.0
+
+
+async def test_retract_refuses_the_anchor(repository: SQLAlchemyRepository) -> None:
+    """Retracting the anchor minute is refused (N1)."""
+    with pytest.raises(PortfolioPnlSampleSupersedeError, match="must not target the anchor"):
+        await repository.retract_portfolio_pnl_sample(
+            _scope(), _T0, expected_public_id=_ORIG, bus_time=_M1
+        )
+
+
+async def test_retract_refuses_when_no_active_row(repository: SQLAlchemyRepository) -> None:
+    """Retracting a minute with no active sample is refused (N1)."""
+    with pytest.raises(PortfolioPnlSampleSupersedeError, match="no active row"):
+        await repository.retract_portfolio_pnl_sample(
+            _scope(), _M1, expected_public_id=_ORIG, bus_time=_M2
+        )
+
+
+async def test_retract_conflict_on_a_stale_public_id(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A retract whose expected public_id no longer matches loses the CAS (N1/B3)."""
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1, public_id=_ORIG)], _scope()
+    )
+    with pytest.raises(PortfolioPnlSampleConflictError, match="retract lost its optimistic CAS"):
+        await repository.retract_portfolio_pnl_sample(
+            _scope(),
+            _M1,
+            expected_public_id="99999999-0000-7000-8000-000000000009",
+            bus_time=_M1 + timedelta(minutes=5),
+        )
+
+
+async def test_retract_refuses_a_scope_without_an_active_anchor(
+    bare_repository: SQLAlchemyRepository,
+) -> None:
+    """Retract also refuses an unsampleable scope before touching a row (N1)."""
+    with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
+        await bare_repository.retract_portfolio_pnl_sample(
+            _scope(), _M1, expected_public_id=_ORIG, bus_time=_M2
+        )

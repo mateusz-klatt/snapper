@@ -324,6 +324,7 @@ from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PnlCryptoUsdPlaneRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
+from snapper.data.repository_types import PnlScopePositionVersionRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
@@ -772,6 +773,18 @@ class PortfolioPnlSampleSupersedeError(RuntimeError):
     the minute, the active row's epoch does not match the write scope, or a
     self-heal attempt (no late-fill-correction flag) targets a complete row or a
     row carrying a final (non-retryable) reason code.
+    """
+
+
+class PortfolioPnlSampleConflictError(RuntimeError):
+    """Raised when a Phase-5B sample supersede loses its optimistic CAS.
+
+    The caller passes the ``public_id`` of the active row it read and planned its
+    replacement against; if the active row under the write lock carries a
+    different ``public_id`` (a concurrent writer superseded it first) the
+    close-and-insert is refused rather than blindly overwriting the newer version.
+    The snapshotter treats this like a batch conflict: log loudly, leave the
+    durable progress untouched, and retry from durable state next tick.
     """
 
 
@@ -1666,10 +1679,13 @@ _PNL_SAMPLE_NEVER_PERSIST_REASONS: frozenset[str] = frozenset({"pnl_untrusted"})
 """A ``pnl_untrusted`` minute writes NO row at all (R1); the validator rejects one
 defensively if ever handed it."""
 
-_PNL_SAMPLE_AUDIT_KEYS: frozenset[str] = frozenset({"valuation", "observations", "reason_codes"})
+_PNL_SAMPLE_AUDIT_KEYS: frozenset[str] = frozenset(
+    {"valuation", "observations", "reason_codes", "coverage"}
+)
 """The only permitted top-level keys of a sample audit envelope. Unknown
 top-level keys are rejected; forward-compatible extra fields inside individual
-records are allowed."""
+records are allowed. ``coverage`` is the R10/R11 self-describing partition and
+scope disclosure (A4)."""
 
 _PNL_SAMPLE_VALUATION_KINDS: frozenset[str] = frozenset({"identity", "fiat_fx", "crypto_candle"})
 """Canonical price-plane kinds for one audit valuation record (A3/A5), mirroring
@@ -1678,6 +1694,17 @@ the basket valuator's provenance kinds."""
 _PNL_SAMPLE_VALUATION_CANDLE_KINDS: frozenset[str] = frozenset({"fiat_fx", "crypto_candle"})
 """Valuation kinds that MUST carry a candle version identity; ``identity``
 (USD) consumes no candle and must carry none."""
+
+_PNL_SAMPLE_VALUATION_ORIENTATIONS: dict[object, frozenset[str]] = {
+    "identity": frozenset({"identity"}),
+    "fiat_fx": frozenset({"direct", "inverse"}),
+    "crypto_candle": frozenset({"crypto"}),
+}
+"""The explicit conversion orientation each valuation kind must record (A3): USD
+identity, a fiat plane used ``direct`` or ``inverse``, or a ``crypto`` leg."""
+
+_PNL_SAMPLE_VENUE_SCOPE: str = "spot_only"
+"""The v1 coverage venue scope constant (R11): futures venues are out of scope."""
 
 
 @dataclass(frozen=True)
@@ -3104,6 +3131,7 @@ class Repository(ABC):
         replacement: PortfolioPnlSampleRow,
         *,
         late_fill_correction: bool,
+        expected_public_id: str,
     ) -> PortfolioPnlSampleRow:
         """Close the active sample for one minute and insert its replacement.
 
@@ -3111,8 +3139,31 @@ class Repository(ABC):
         late-fill recompute-forward (``late_fill_correction=True``) and bounded
         self-heal of a retryable ``incomplete`` row (``late_fill_correction=False``
         — refused unless the active row is ``incomplete`` and carries only
-        retryable reason codes). Refuses when no active sample exists for the
-        minute or its scope/epoch does not match.
+        retryable reason codes). ``expected_public_id`` is the ``public_id`` of the
+        active row the caller read; a mismatch under the write lock raises
+        :class:`PortfolioPnlSampleConflictError` (optimistic CAS). Refuses when no
+        active sample exists for the minute or its scope/epoch does not match.
+        """
+        ...
+
+    @abstractmethod
+    async def retract_portfolio_pnl_sample(
+        self,
+        scope: PortfolioPnlSampleScope,
+        point_time: datetime,
+        *,
+        expected_public_id: str,
+        bus_time: datetime,
+    ) -> None:
+        """Close the active sample for one minute WITHOUT a successor (decision N1).
+
+        SCD2 close-only: a forward recompute that yields NO sample for a minute
+        whose P&L tier fell to untrusted (e.g. a late fill exposes a fill gap) must
+        retract the stale monetary row so it stops serving and stops contaminating
+        the causal peak, honouring R1 ("untrusted = no active row"). Advisory-locked
+        and scope-anchor-verified like the other writers; ``expected_public_id`` is
+        the optimistic CAS against the active row's ``public_id``. Refuses (typed)
+        when the minute is the anchor ``t0`` or no active sample exists.
         """
         ...
 
@@ -3138,13 +3189,15 @@ class Repository(ABC):
     async def get_portfolio_pnl_sample_peak(
         self,
         query: PortfolioPnlSampleQuery,
+        before: datetime,
     ) -> float | None:
-        """Return the peak equity over one epoch's complete samples.
+        """Return the causal peak equity over complete samples before a minute.
 
         The maximum of ``cash_usd + position_value_usd`` across the full R4
-        predicate set plus ``valuation_status='complete'`` (decision R4/D8), for
-        peak re-derivation on restart. Returns ``None`` when the epoch has no
-        complete sample. Callers re-check finiteness app-side.
+        predicate set plus ``valuation_status='complete'`` and
+        ``point_time < before`` (decision R4/D8/A1), so a recompute seeds a
+        minute's running peak from only its causal past. Returns ``None`` when no
+        complete sample precedes ``before``. Callers re-check finiteness app-side.
         """
         ...
 
@@ -3255,6 +3308,31 @@ class Repository(ABC):
 
         Returns:
             Position dicts denormalized with instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_scope_position_inventory_window(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[PnlScopePositionVersionRow]:
+        """Return the temporal spot-labelling position versions for a window (R6/A2).
+
+        Every SCD2 ``Position`` version of one ``(wallet, mode)`` scope overlapping
+        the knowledge window ``[window_start, window_end]`` (``timestamp <=
+        window_end`` and ``known_to > window_start``), each joined author-time (at
+        the version's own ``timestamp``) to its owning instrument, symbol and spec,
+        projected to ``(exchange, base_currency, quantity, is_spot_margin,
+        valid_from, valid_to)`` where ``[valid_from, valid_to)`` is the version's
+        knowledge interval. A pure per-minute resolver picks each grid minute's
+        active versions so inventory labels only the minutes it actually existed
+        for (A2 causality). ``is_spot_margin`` fails closed to ``True`` unless the
+        author-time spec proves a ``spot``, non-``spot_margin_rollover`` instrument.
+        Positions only LABEL the cash/position split; the equity total never
+        depends on them.
         """
         ...
 
@@ -11002,43 +11080,93 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("portfolio P&L sample calc_version must equal the sample constant")
         SQLAlchemyRepository._validate_portfolio_pnl_sample_point_time(sample, scope)
         SQLAlchemyRepository._validate_portfolio_pnl_sample_cumulatives(sample)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_watermarks(sample)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_watermarks(sample: PortfolioPnlSampleRow) -> None:
+        """Require a canonical per-exchange watermark map on every sample (B2).
+
+        The map records the max ``scope_sequence`` per exchange the sample's
+        replay reflects; the durable cold-start baseline reads it back, so it must
+        be present, a valid watermark map (possibly empty) and canonically
+        serialized for byte-stable idempotency. Distinct from the anchor, whose map
+        is frozen — a sample's advances forward with each recompute.
+        """
+        raw = sample["watermarks_json"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("portfolio P&L sample watermarks_json must be a nonempty string")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "portfolio P&L sample watermarks_json must contain valid JSON"
+            ) from exc
+        if not SQLAlchemyRepository._pnl_timeline_watermarks_are_valid(payload):
+            raise ValueError(
+                "portfolio P&L sample watermarks_json must be a canonical watermark map"
+            )
+        if raw != json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True):
+            raise ValueError("portfolio P&L sample watermarks_json must be canonically serialized")
 
     @staticmethod
     def _validate_portfolio_pnl_sample_candle_identity(candle: JsonValue) -> None:
-        """Require candle_id / candle_public_id / candle_timestamp on a priced leg."""
+        """Require the full candle version identity on a priced leg (A3/A5).
+
+        Beyond the version-pinning ``candle_id`` / ``candle_public_id`` /
+        ``candle_timestamp`` a priced leg records ``candle_open_at`` and its owning
+        ``instrument_public_id`` / ``native_symbol`` so a later candle correction is
+        attributable to the exact instrument, bar and version consumed.
+        """
         if not isinstance(candle, dict):
             raise ValueError("portfolio P&L priced valuation record must carry a candle identity")
         candle_id = candle.get("candle_id")
         if isinstance(candle_id, bool) or not isinstance(candle_id, int):
             raise ValueError("portfolio P&L candle identity candle_id must be an integer")
-        public_id = candle.get("candle_public_id")
-        if not isinstance(public_id, str) or not public_id:
-            raise ValueError(
-                "portfolio P&L candle identity candle_public_id must be a nonempty string"
-            )
-        candle_timestamp = candle.get("candle_timestamp")
-        if not isinstance(candle_timestamp, str) or not candle_timestamp:
-            raise ValueError(
-                "portfolio P&L candle identity candle_timestamp must be a nonempty string"
-            )
+        for field_name in (
+            "candle_public_id",
+            "candle_timestamp",
+            "candle_open_at",
+            "instrument_public_id",
+            "native_symbol",
+        ):
+            value = candle.get(field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"portfolio P&L candle identity {field_name} must be a nonempty string"
+                )
 
     @staticmethod
     def _validate_portfolio_pnl_sample_valuation_record(record: JsonValue) -> None:
-        """Enforce the A3/A5 schema of one audit valuation record."""
+        """Enforce the A3/A5 schema of one audit valuation record.
+
+        Every record names the CONSUMED basket ``currency`` and an explicit
+        ``orientation`` (``identity``/``crypto`` or the fiat ``direct``/``inverse``)
+        so a stored price is self-describing; priced (fiat/crypto) kinds carry the
+        full candle version identity, and the ``identity`` (USD) kind carries none.
+        """
         if not isinstance(record, dict):
             raise ValueError("portfolio P&L sample valuation record must be an object")
         kind = record.get("kind")
         if kind not in _PNL_SAMPLE_VALUATION_KINDS:
             raise ValueError("portfolio P&L sample valuation record kind is not canonical")
-        for field_name in ("base", "quote", "exchange"):
+        for field_name in ("base", "quote", "exchange", "currency"):
             value = record.get(field_name)
             if not isinstance(value, str) or not value:
                 raise ValueError(
                     f"portfolio P&L sample valuation record {field_name} must be a nonempty string"
                 )
-        rate = record.get("rate")
-        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
-            raise ValueError("portfolio P&L sample valuation record rate must be a finite number")
+        if record.get("orientation") not in _PNL_SAMPLE_VALUATION_ORIENTATIONS[kind]:
+            raise ValueError("portfolio P&L sample valuation record orientation is not canonical")
+        for numeric_field in ("rate", "close"):
+            value = record.get(numeric_field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    f"portfolio P&L sample valuation record {numeric_field} must be a finite number"
+                )
         candle = record.get("candle")
         if kind in _PNL_SAMPLE_VALUATION_CANDLE_KINDS:
             SQLAlchemyRepository._validate_portfolio_pnl_sample_candle_identity(candle)
@@ -11083,6 +11211,26 @@ class SQLAlchemyRepository(Repository):
         """Reject unknown top-level audit keys (record extra fields stay allowed)."""
         if set(audit) - _PNL_SAMPLE_AUDIT_KEYS:
             raise ValueError("portfolio P&L sample audit has unknown top-level keys")
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_coverage(audit: JsonObject) -> None:
+        """Require the self-describing partition and scope disclosure (A4/R10/R11).
+
+        Every sample carries a ``coverage`` object so the row is self-describing:
+        the two partition-exclusion booleans (a margin or short position labels the
+        equity as cash and MUST disclose it), the ``venue_scope='spot_only'``
+        constant (R11) and the ``external_flows_adjusted=false`` constant (R10).
+        """
+        coverage = audit.get("coverage")
+        if not isinstance(coverage, dict):
+            raise ValueError("portfolio P&L sample audit coverage must be a present object")
+        for field_name in ("leveraged_inventory_excluded", "non_finite_position_excluded"):
+            if not isinstance(coverage.get(field_name), bool):
+                raise ValueError(f"portfolio P&L sample coverage {field_name} must be a boolean")
+        if coverage.get("venue_scope") != _PNL_SAMPLE_VENUE_SCOPE:
+            raise ValueError("portfolio P&L sample coverage venue_scope must be 'spot_only'")
+        if coverage.get("external_flows_adjusted") is not False:
+            raise ValueError("portfolio P&L sample coverage external_flows_adjusted must be false")
 
     @staticmethod
     def _validate_portfolio_pnl_sample_complete(sample: PortfolioPnlSampleRow) -> None:
@@ -11135,6 +11283,7 @@ class SQLAlchemyRepository(Repository):
         if not valuation and not empty_basket:
             raise ValueError("portfolio P&L complete sample audit valuation must be non-empty")
         SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_coverage(audit)
 
     @staticmethod
     def _validate_portfolio_pnl_sample_incomplete(sample: PortfolioPnlSampleRow) -> None:
@@ -11157,6 +11306,7 @@ class SQLAlchemyRepository(Repository):
         SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)
         codes = SQLAlchemyRepository._portfolio_pnl_sample_reason_codes(audit)
         SQLAlchemyRepository._validate_portfolio_pnl_sample_reason_codes(codes)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_coverage(audit)
 
     @staticmethod
     def _validate_portfolio_pnl_sample(
@@ -11233,7 +11383,7 @@ class SQLAlchemyRepository(Repository):
             "drawdown": row["drawdown"],
             "mark_source": row["mark_source"],
             "mark_time": row["mark_time"],
-            "watermarks_json": None,
+            "watermarks_json": row["watermarks_json"],
             "opening_basket_json": row["audit_json"],
             "contributions_json": None,
         }
@@ -11265,6 +11415,7 @@ class SQLAlchemyRepository(Repository):
             "mark_source": point.mark_source,
             "mark_time": point.mark_time,
             "audit_json": cast(str, point.opening_basket_json),
+            "watermarks_json": cast(str, point.watermarks_json),
         }
 
     @staticmethod
@@ -11286,6 +11437,7 @@ class SQLAlchemyRepository(Repository):
             row["mark_source"],
             row["mark_time"],
             row["audit_json"],
+            row["watermarks_json"],
         )
 
     @staticmethod
@@ -11528,13 +11680,17 @@ class SQLAlchemyRepository(Repository):
         replacement: PortfolioPnlSampleRow,
         *,
         late_fill_correction: bool,
+        expected_public_id: str,
     ) -> PortfolioPnlSampleRow:
         """Close one active sample and insert its validated replacement (SCD2).
 
         Both sanctioned paths (late-fill recompute-forward and bounded self-heal)
         run inside one locked transaction. The replacement is validated against the
-        canonical scope; the active row for the minute must exist and match the
-        scope's epoch. Without ``late_fill_correction`` the active row must be
+        canonical scope; the active row for the minute must exist, match the
+        scope's epoch, and still carry ``expected_public_id`` — the ``public_id``
+        the caller read and planned against — or the close-and-insert is refused
+        with :class:`PortfolioPnlSampleConflictError` (optimistic CAS, never
+        last-writer-wins). Without ``late_fill_correction`` the active row must be
         ``incomplete`` and carry only retryable reason codes. The SCD2 bus time is
         clamped up to the closed row's timestamp so the close interval stays valid.
         """
@@ -11552,6 +11708,10 @@ class SQLAlchemyRepository(Repository):
                 if existing is None:
                     raise PortfolioPnlSampleSupersedeError(
                         "portfolio P&L sample supersede found no active row for the minute"
+                    )
+                if existing.public_id != expected_public_id:
+                    raise PortfolioPnlSampleConflictError(
+                        "portfolio P&L sample supersede lost its optimistic CAS"
                     )
                 self._guard_portfolio_pnl_sample_supersede(
                     existing, canonical_scope, late_fill_correction=late_fill_correction
@@ -11579,6 +11739,52 @@ class SQLAlchemyRepository(Repository):
                 await s.rollback()
                 raise
 
+    async def retract_portfolio_pnl_sample(
+        self,
+        scope: PortfolioPnlSampleScope,
+        point_time: datetime,
+        *,
+        expected_public_id: str,
+        bus_time: datetime,
+    ) -> None:
+        """Close the active sample for one minute without a successor (SCD2 close).
+
+        See the abstract declaration. Under the per-scope advisory lock the scope's
+        active anchor is verified, the anchor minute is refused, the active sample
+        is CAS-checked against ``expected_public_id`` and then closed by advancing
+        its ``known_to`` (clamped above its own timestamp) — leaving honest absence.
+        """
+        canonical_scope = self._normalize_portfolio_pnl_sample_scope(scope)
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical_scope)
+            try:
+                await self._verify_portfolio_pnl_sample_scope_anchor(s, canonical_scope)
+                if point_time <= canonical_scope.anchor_point_time:
+                    raise PortfolioPnlSampleSupersedeError(
+                        "portfolio P&L sample retract must not target the anchor"
+                    )
+                existing = await self._read_active_portfolio_pnl_sample_at(
+                    s, canonical_scope, point_time
+                )
+                if existing is None:
+                    raise PortfolioPnlSampleSupersedeError(
+                        "portfolio P&L sample retract found no active row for the minute"
+                    )
+                if existing.public_id != expected_public_id:
+                    raise PortfolioPnlSampleConflictError(
+                        "portfolio P&L sample retract lost its optimistic CAS"
+                    )
+                close_time = max(bus_time, existing.timestamp)
+                await s.execute(
+                    update(PortfolioPnlPoint)
+                    .where(PortfolioPnlPoint.id == existing.id)
+                    .values(known_to=close_time)
+                )
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+
     async def get_portfolio_pnl_samples(
         self,
         query: PortfolioPnlSampleQuery,
@@ -11600,18 +11806,23 @@ class SQLAlchemyRepository(Repository):
             rows = (await s.execute(stmt)).scalars().all()
             return [self._portfolio_pnl_sample_to_row(row) for row in rows]
 
-    async def get_portfolio_pnl_sample_peak(self, query: PortfolioPnlSampleQuery) -> float | None:
-        """Return MAX(cash_usd + position_value_usd) over the epoch's complete samples.
+    async def get_portfolio_pnl_sample_peak(
+        self, query: PortfolioPnlSampleQuery, before: datetime
+    ) -> float | None:
+        """Return MAX(cash_usd + position_value_usd) over complete samples before a minute.
 
-        The full R4 predicate set plus ``valuation_status='complete'``. Callers
-        re-check finiteness app-side; ``None`` means the epoch has no complete
-        sample.
+        The full R4 predicate set plus ``valuation_status='complete'`` and
+        ``point_time < before``, so the peak is CAUSAL: a recompute of minute ``m``
+        seeds its running peak from only the samples strictly before ``m`` and can
+        never borrow a later minute's higher equity. Callers re-check finiteness
+        app-side; ``None`` means no complete sample precedes ``before``.
         """
         stmt = select(
             func.max(PortfolioPnlPoint.cash_usd + PortfolioPnlPoint.position_value_usd)
         ).where(
             *self._portfolio_pnl_sample_query_filters(query),
             PortfolioPnlPoint.valuation_status == "complete",
+            PortfolioPnlPoint.point_time < before,
         )
         async with self.session() as s:
             return (await s.execute(stmt)).scalar()
@@ -14458,6 +14669,89 @@ class SQLAlchemyRepository(Repository):
                     "wallet_public_id": pos.wallet_public_id,
                 }
                 for pos, inst, sym, cycle_pid in result.all()
+            ]
+
+    async def get_pnl_scope_position_inventory_window(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[PnlScopePositionVersionRow]:
+        """Return the temporal spot-labelling position versions proven from spec.
+
+        See the abstract declaration for the window overlap, the author-time joins
+        and the fail-closed ``is_spot_margin`` contract. Each version overlapping
+        ``[window_start, window_end]`` is joined to the instrument, symbol and spec
+        active at the version's own ``timestamp``; ``is_spot_margin`` is ``False``
+        only when that spec proves ``instrument_kind == 'spot'`` whose
+        ``funding_type`` is distinct from ``'spot_margin_rollover'``. The version's
+        ``[timestamp, known_to)`` becomes its ``[valid_from, valid_to)`` interval
+        so a pure resolver labels only the minutes the version was known for.
+        """
+        is_spot_margin = case(
+            (
+                and_(
+                    InstrumentSpec.instrument_kind == "spot",
+                    InstrumentSpec.funding_type.is_distinct_from("spot_margin_rollover"),
+                ),
+                False,
+            ),
+            else_=True,
+        )
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Instrument.exchange,
+                    Symbol.base,
+                    Position.quantity,
+                    is_spot_margin,
+                    Position.timestamp,
+                    Position.known_to,
+                )
+                .select_from(Position)
+                .join(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= Position.timestamp,
+                        Instrument.known_to > Position.timestamp,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        Symbol.timestamp <= Position.timestamp,
+                        Symbol.known_to > Position.timestamp,
+                    ),
+                )
+                .outerjoin(
+                    InstrumentSpec,
+                    and_(
+                        InstrumentSpec.instrument_public_id == Instrument.public_id,
+                        InstrumentSpec.timestamp <= Position.timestamp,
+                        InstrumentSpec.known_to > Position.timestamp,
+                    ),
+                )
+                .where(
+                    Position.wallet_public_id == wallet_public_id,
+                    Position.mode == mode,
+                    Position.timestamp <= window_end,
+                    Position.known_to > window_start,
+                )
+                .order_by(Position.timestamp, Instrument.exchange, Symbol.base)
+            )
+            return [
+                {
+                    "exchange": exchange,
+                    "base_currency": base,
+                    "quantity": quantity,
+                    "is_spot_margin": bool(margin),
+                    "valid_from": valid_from,
+                    "valid_to": valid_to,
+                }
+                for exchange, base, quantity, margin, valid_from, valid_to in result.all()
             ]
 
     @staticmethod

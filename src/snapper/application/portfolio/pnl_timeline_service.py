@@ -58,9 +58,12 @@ from pydantic import ValidationError
 from pydantic import field_validator
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
+from snapper.application.portfolio.basket_valuation import CandleVersionIdentity
+from snapper.application.portfolio.basket_valuation import FiatVersionMap
 from snapper.application.portfolio.fill_booking import booked_signed_quantity
 from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_rates import FxPairKey
+from snapper.application.portfolio.fx_rates import FxRateKey
 from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
 from snapper.application.portfolio.fx_rates import convert_amount
@@ -299,6 +302,29 @@ class _SeriesReadEvidence:
 
     visible_anchor: PortfolioPnlAnchorRow | None
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
+
+
+@dataclass(frozen=True, slots=True)
+class PnlSeriesReplayOptions:
+    """Optional replay inputs for :func:`build_wallet_pnl_series` (D3).
+
+    Bundles the builder's two independent optional replay knobs into one argument
+    so its parameter surface stays small: the marker endpoint's preloaded anchor
+    read and prefix bundle (avoiding a duplicate durable boundary read), and the
+    snapshotter's per-exchange baseline watermark map that turns on R3 late-fill
+    replay metadata. Both default to absent, which reproduces the plain series
+    build with no preloaded evidence and no replay metadata.
+    """
+
+    preloaded_evidence: _SeriesReadEvidence | None = None
+    baseline_watermarks: Mapping[str, int] | None = None
+
+
+_NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
+"""Shared empty replay options: no preloaded evidence and no replay metadata.
+
+Used as the immutable default for :func:`build_wallet_pnl_series` so a caller that
+supplies neither knob shares one frozen instance instead of allocating per call."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,9 +732,16 @@ class PnlFxRateSource:
 
 @dataclass(frozen=True)
 class PnlWalletSeriesResult(PnlTimelineResult):
-    """A pure P&L series augmented with attributable FX rate venues."""
+    """A pure P&L series augmented with attributable FX rate venues.
+
+    ``replay_metadata`` is the optional Phase-5B late-fill boundary (R3),
+    populated only when :func:`build_wallet_pnl_series` is called with a baseline
+    watermark map and the scope has a visible anchor with a post-t0 window; it
+    stays ``None`` for every existing caller so their result shape is unchanged.
+    """
 
     rate_sources: tuple[PnlFxRateSource, ...]
+    replay_metadata: PnlSeriesReplayMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,21 +798,113 @@ def _preactivation_pnl_series(
     )
 
 
-def _execution_rows_effective_through(
+def _execution_rows_with_effective_time(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
-    to_time: datetime,
-) -> list[PnlTimelineOpeningExecutionRow]:
-    """Bound accounting consumers by the kernel's monotone-clamped event time."""
+) -> list[tuple[PnlTimelineOpeningExecutionRow, datetime]]:
+    """Pair each suffix execution with its per-pool monotone-clamped event time.
+
+    The single source of the service-level clamp: each durable shard pool's
+    running maximum event time is carried forward so an out-of-order row is placed
+    at that maximum. Both the accounting window bound
+    (:func:`_execution_rows_effective_through`) and the replay-metadata boundary
+    (:func:`_derive_series_replay_metadata`) read this exact result, so the clamp
+    arithmetic is written once and never duplicated.
+
+    Args:
+        execution_rows: Suffix rows in ``(exchange, scope_sequence)`` order.
+
+    Returns:
+        Each row paired with its clamped effective time, preserving input order.
+    """
     last_effective: dict[tuple[str, str], datetime] = {}
-    bounded: list[PnlTimelineOpeningExecutionRow] = []
+    paired: list[tuple[PnlTimelineOpeningExecutionRow, datetime]] = []
     for row in execution_rows:
         pool_key = (row["instrument_public_id"], row["shard_key"])
         event_time = row["timestamp"]
         effective_time = max(last_effective.get(pool_key, event_time), event_time)
         last_effective[pool_key] = effective_time
+        paired.append((row, effective_time))
+    return paired
+
+
+def _execution_rows_effective_through(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    to_time: datetime,
+) -> list[PnlTimelineOpeningExecutionRow]:
+    """Bound accounting consumers by the kernel's monotone-clamped event time."""
+    return [
+        row
+        for row, effective_time in _execution_rows_with_effective_time(execution_rows)
+        if effective_time <= to_time
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class PnlSeriesReplayMetadata:
+    """Late-fill boundary derived from one series computation's suffix (R3).
+
+    The snapshotter passes the per-exchange baseline watermark map reflected in
+    its already-persisted samples; the engine reports, without duplicating the
+    clamp, which suffix executions crossed that baseline and how far the watermark
+    advanced. ``max_scope_sequence_by_exchange`` is the greatest ``scope_sequence``
+    per exchange whose clamped effective time is at or before the series ``to_time``
+    — the watermark the samples through ``to_time`` reflect, recorded by the caller
+    as the next baseline. ``earliest_affected_minute`` is the minute ceiling of the
+    earliest clamped effective time among executions ABOVE the caller's baseline,
+    or ``None`` when no suffix execution crosses it. The caller supersedes forward
+    only when that minute is at or before its last persisted minute.
+    """
+
+    max_scope_sequence_by_exchange: dict[str, int]
+    earliest_affected_minute: datetime | None
+
+
+def _ceil_to_minute(instant: datetime) -> datetime:
+    """Return the first minute-aligned instant at or after ``instant``."""
+    floored = instant.replace(second=0, microsecond=0)
+    return floored if floored == instant else floored + timedelta(minutes=1)
+
+
+def _derive_series_replay_metadata(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    baseline_watermarks: Mapping[str, int],
+    to_time: datetime,
+) -> PnlSeriesReplayMetadata:
+    """Derive the late-fill boundary from the clamped suffix and one baseline.
+
+    Reuses :func:`_execution_rows_with_effective_time` so the effective-time clamp
+    is never re-implemented. An execution counts toward the advanced watermark only
+    when its clamped effective time is at or before ``to_time``; it counts toward
+    the earliest affected minute only when its ``scope_sequence`` exceeds the
+    caller's baseline for its exchange (defaulting to zero for an unseen exchange).
+
+    Args:
+        execution_rows: The suffix rows already filtered above the anchor
+            watermark, in commit order.
+        baseline_watermarks: Per-exchange watermark the caller's persisted samples
+            already reflect.
+        to_time: Inclusive series end bounding the advanced watermark.
+
+    Returns:
+        The advanced per-exchange watermark and the earliest affected minute.
+    """
+    max_scope_sequence: dict[str, int] = {}
+    earliest_affected: datetime | None = None
+    for row, effective_time in _execution_rows_with_effective_time(execution_rows):
+        exchange = row["exchange"]
+        scope_sequence = row["scope_sequence"]
         if effective_time <= to_time:
-            bounded.append(row)
-    return bounded
+            current = max_scope_sequence.get(exchange)
+            if current is None or scope_sequence > current:
+                max_scope_sequence[exchange] = scope_sequence
+        if scope_sequence > baseline_watermarks.get(exchange, 0):
+            affected_minute = _ceil_to_minute(effective_time)
+            if earliest_affected is None or affected_minute < earliest_affected:
+                earliest_affected = affected_minute
+    return PnlSeriesReplayMetadata(
+        max_scope_sequence_by_exchange=max_scope_sequence,
+        earliest_affected_minute=earliest_affected,
+    )
 
 
 def _rate_minute(moment: datetime) -> datetime:
@@ -833,6 +958,101 @@ def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
         else:
             rates[key] = row["close"]
     return rates
+
+
+def _basket_fiat_grid_minutes(start: datetime, end: datetime) -> set[datetime]:
+    """Return every minute-aligned grid instant in an inclusive window."""
+    minutes: set[datetime] = set()
+    cursor = start
+    while cursor <= end:
+        minutes.add(cursor)
+        cursor += timedelta(minutes=1)
+    return minutes
+
+
+def _build_fiat_versions(rows: Sequence[PnlFxRateRow]) -> FiatVersionMap:
+    """Index fiat candle version identity by ``(base, quote, exchange, minute)``.
+
+    Deterministic last-writer-wins on a duplicate plane-minute identity; such a
+    key already carries a ``NaN`` rate in :func:`build_fx_rates`, so its version
+    is never consumed. The minute keys the grid instant the bar closed.
+
+    Args:
+        rows: Finalized 1m forex closes from ``get_pnl_fx_rate_candles``.
+
+    Returns:
+        Version identity keyed identically to the fiat rate map.
+    """
+    versions: dict[FxRateKey, CandleVersionIdentity] = {}
+    for row in sorted(
+        rows,
+        key=lambda candle: (
+            candle["base"],
+            candle["quote"],
+            candle["exchange"],
+            candle["open_at"],
+            candle["candle_id"],
+        ),
+    ):
+        key = (row["base"], row["quote"], row["exchange"], row["open_at"] + timedelta(minutes=1))
+        versions[key] = CandleVersionIdentity(
+            instrument_public_id=row["instrument_public_id"],
+            native_symbol=row["native_symbol"],
+            candle_id=row["candle_id"],
+            candle_public_id=row["candle_public_id"],
+            candle_open_at=row["open_at"],
+            candle_timestamp=row["candle_timestamp"],
+        )
+    return versions
+
+
+async def load_basket_fiat_evidence(
+    repo: Repository,
+    currencies: frozenset[str],
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+) -> tuple[FxRateMap, FxVenueMap, FiatVersionMap]:
+    """Discover, elect and load the USD fiat forex evidence valuing a basket (D6/R8).
+
+    Every non-USD currency is requested vs USD in both orientations; the existing
+    FX plane discovery, coverage election and rate fold are reused verbatim (no new
+    conversion math), so a fiat leg values off the SAME finalized forex plane the
+    timeline marks use, with the same deterministic tie-break (Walutomat preferred
+    for a fully-covered PLN pair). A crypto currency yields no forex plane and is
+    silently absent from the venue map, deferring to the crypto plane; a fiat
+    currency with no usable close at a minute is absent too and the basket valuator
+    fails that minute closed. Scoped to USD because v1 samples only USD scopes (D3).
+
+    Args:
+        repo: Repository providing forex plane discovery and candle reads.
+        currencies: Distinct basket currencies to price.
+        start: Inclusive lower grid minute of the chunk.
+        end: Inclusive upper grid minute of the chunk.
+        as_of: Knowledge horizon threading every considered instrument, symbol and
+            candle version.
+
+    Returns:
+        The fiat rate map, the pinned oriented plane per pair, and the parallel
+        version identity map — exactly the three fields
+        :class:`ValuationEvidence` consumes.
+    """
+    minutes = _basket_fiat_grid_minutes(start, end)
+    requirements: dict[FxPairKey, set[datetime]] = {
+        currency_pair_key(currency, "USD"): set(minutes)
+        for currency in currencies
+        if currency and currency != "USD"
+    }
+    if not requirements:
+        return {}, {}, {}
+    candidates = await _discover_fx_candidates(repo, requirements, as_of)
+    candidate_planes = _candidate_planes(candidates, {})
+    rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
+    return (
+        build_fx_rates(rows),
+        _resolve_fx_planes(requirements, candidate_planes, rows, "USD"),
+        _build_fiat_versions(rows),
+    )
 
 
 def _to_timeline_execution(
@@ -3143,9 +3363,9 @@ async def build_wallet_pnl_series(
     granularity: str,
     as_of: datetime,
     valuation_ccy: str = "USD",
-    preloaded_evidence: _SeriesReadEvidence | None = None,
     *,
     allow_anchor_creation: bool = True,
+    options: PnlSeriesReplayOptions = _NO_SERIES_REPLAY_OPTIONS,
 ) -> PnlWalletSeriesResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
@@ -3166,11 +3386,15 @@ async def build_wallet_pnl_series(
         as_of: Effective knowledge horizon for the execution commit watermark,
             accrual SCD2 versions, and candle SCD2 versions.
         valuation_ccy: Currency the series components are expressed in.
-        preloaded_evidence: Optional anchor read and independently proven
-            request/activation snapshots used by the marker endpoint to avoid
-            issuing either durable boundary read twice.
         allow_anchor_creation: Whether this current request may create a missing
             activation anchor. Explicit historical routes always pass ``False``.
+        options: Optional replay inputs (D3). Its ``preloaded_evidence`` supplies
+            the marker endpoint's anchor read and prefix bundle so neither durable
+            boundary read is issued twice; its ``baseline_watermarks`` supplies the
+            caller's persisted per-exchange watermark map (R3) so, when the scope
+            has a post-activation window, the result carries typed replay metadata.
+            Omitting either leaves the corresponding behaviour off — no preloaded
+            evidence and a ``None`` ``replay_metadata`` respectively.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -3194,7 +3418,7 @@ async def build_wallet_pnl_series(
                 knowledge_horizon=as_of,
             ),
             allow_anchor_creation=allow_anchor_creation,
-            preloaded_evidence=preloaded_evidence,
+            preloaded_evidence=options.preloaded_evidence,
         ),
     )
     anchor = anchor_load.anchor
@@ -3220,6 +3444,11 @@ async def build_wallet_pnl_series(
     loaded_execution_rows = replay.loaded_execution_rows
     replayed_execution_rows = replay.replayed_execution_rows
     accrual_rows = replay.accrual_rows
+    replay_metadata = (
+        _derive_series_replay_metadata(loaded_execution_rows, options.baseline_watermarks, to_time)
+        if options.baseline_watermarks is not None
+        else None
+    )
     execution_instrument_ids = list(
         dict.fromkeys(row["instrument_public_id"] for row in replayed_execution_rows)
     )
@@ -3399,6 +3628,7 @@ async def build_wallet_pnl_series(
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
         rate_sources=rate_sources,
+        replay_metadata=replay_metadata,
     )
 
 
@@ -3580,8 +3810,8 @@ async def build_wallet_pnl_timeline(
         granularity,
         as_of,
         valuation_ccy=valuation_ccy,
-        preloaded_evidence=preloaded_evidence,
         allow_anchor_creation=allow_anchor_creation,
+        options=PnlSeriesReplayOptions(preloaded_evidence=preloaded_evidence),
     )
     read_limit = PNL_TIMELINE_MARKER_LIMIT + 1
     signal_rows = await repo.get_pnl_timeline_signals(

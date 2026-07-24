@@ -271,8 +271,8 @@ class TestLifespan:
                 _stop_ai_delegate_watchdog=AsyncMock(),
                 _start_retention_scheduler=AsyncMock(),
                 _stop_retention_scheduler=AsyncMock(),
-                _start_db_stats_snapshotter=AsyncMock(),
-                _stop_db_stats_snapshotter=AsyncMock(),
+                _start_background_writers=AsyncMock(),
+                _stop_background_writers=AsyncMock(),
             ),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
