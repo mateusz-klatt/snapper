@@ -2434,9 +2434,13 @@ class TestWebSocketEndpoints:
         """
         reset_rest_call_tracker_for_tests()
         tracker = get_rest_call_tracker()
-        for _ in range(3):
-            tracker.record_call(ExchangeEnum.WALUTOMAT)
-        response = self.client.get("/api/metrics/rest-rate")
+        with patch(
+            "snapper.infrastructure.rest.tracker.time.monotonic",
+            return_value=100.0,
+        ):
+            for _ in range(3):
+                tracker.record_call(ExchangeEnum.WALUTOMAT)
+            response = self.client.get("/api/metrics/rest-rate")
         assert response.status_code == 200
         payload = response.json()["payload"]
         assert set(payload["exchanges"]) == {ExchangeEnum.WALUTOMAT}
