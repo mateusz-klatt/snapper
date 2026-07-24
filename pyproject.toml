@@ -62,7 +62,7 @@ ruff = "^0.16.0"
 black = {extras = ["jupyter"], version = "^26.5.1"}
 isort = "^8.0.1"
 mypy = "^2.3.0"
-types-PyYAML = ">=6.0.12.20260518"
+types-PyYAML = ">=6.0.12.20260724"
 pytest = "^9.1.1"
 pytest-asyncio = "^1.4.0"
 pytest-timeout = "^2.4.0"
