@@ -59,6 +59,7 @@ from snapper.api.schemas.process import ProcessCreateData
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessCreateResponse
+from snapper.api.schemas.process import ProcessDesiredStateAction
 from snapper.api.schemas.process import ProcessDesiredStateData
 from snapper.api.schemas.process import ProcessDesiredStateRequest
 from snapper.api.schemas.process import ProcessDesiredStateResponse
@@ -1416,6 +1417,56 @@ async def stop_process(
     )
 
 
+def _enforce_desired_state_permission(
+    config: ProcessConfigModel,
+    action: ProcessDesiredStateAction,
+    principal: AuthPrincipal,
+) -> bool:
+    """Enforce the action-specific permission and return strategy classification."""
+    is_strategy = config.role is ProcessRoleEnum.STRATEGY
+    if not is_strategy:
+        enforce_permission(principal, Permission.MANAGE_PROCESSES)
+        return False
+    if action == "enable":
+        enforce_permission(principal, Permission.START_STRATEGIES)
+    elif action == "disable":
+        enforce_permission(principal, Permission.STOP_STRATEGIES)
+    else:
+        enforce_permissions(
+            principal,
+            Permission.START_STRATEGIES,
+            Permission.STOP_STRATEGIES,
+        )
+    return True
+
+
+async def _desired_state_values(
+    config: ProcessConfigModel,
+    action: ProcessDesiredStateAction,
+    restart_nonce: str | None,
+    principal: AuthPrincipal,
+    repo: Repository,
+) -> tuple[bool | None, str | None]:
+    """Resolve the persisted enabled flag and restart generation."""
+    if action == "enable":
+        if config.role is ProcessRoleEnum.STRATEGY:
+            await _enforce_strategy_scope(dict(config.parameters), config.role, principal, repo)
+        return True, None
+    if action == "disable":
+        return False, None
+    if not config.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Process '{config.name}' is disabled; enable it before requesting a restart",
+        )
+    if not restart_nonce:
+        raise HTTPException(
+            status_code=422,
+            detail="A restart action requires a client-minted restart_nonce",
+        )
+    return None, restart_nonce
+
+
 @router.patch(
     "/{name}/desired-state",
     openapi_extra=openapi_schema(ProcessDesiredStateRequest),
@@ -1491,40 +1542,14 @@ async def set_process_desired_state(
     config = next((candidate for candidate in configs if candidate.name == name), None)
     if config is None:
         raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured")
-    is_strategy = config.role is ProcessRoleEnum.STRATEGY
-    if is_strategy:
-        if action == "enable":
-            enforce_permission(principal, Permission.START_STRATEGIES)
-        elif action == "disable":
-            enforce_permission(principal, Permission.STOP_STRATEGIES)
-        else:
-            enforce_permissions(
-                principal,
-                Permission.START_STRATEGIES,
-                Permission.STOP_STRATEGIES,
-            )
-    else:
-        enforce_permission(principal, Permission.MANAGE_PROCESSES)
-    enabled: bool | None = None
-    restart_nonce: str | None = None
-    if action == "enable":
-        if is_strategy:
-            await _enforce_strategy_scope(dict(config.parameters), config.role, principal, repo)
-        enabled = True
-    elif action == "disable":
-        enabled = False
-    else:
-        if not config.enabled:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Process '{name}' is disabled; enable it before requesting a restart",
-            )
-        if not body.payload.restart_nonce:
-            raise HTTPException(
-                status_code=422,
-                detail="A restart action requires a client-minted restart_nonce",
-            )
-        restart_nonce = body.payload.restart_nonce
+    is_strategy = _enforce_desired_state_permission(config, action, principal)
+    enabled, restart_nonce = await _desired_state_values(
+        config,
+        action,
+        body.payload.restart_nonce,
+        principal,
+        repo,
+    )
     try:
         await factory.update_process_config(
             name=name,

@@ -85,6 +85,7 @@ from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
@@ -4121,6 +4122,46 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as exc:
             logger.warning(f"[{work.identity[1]}] spot anchor bootstrap degraded: {exc}")
 
+    @staticmethod
+    def _parse_spot_anchor_witness_rows(
+        client: ExchangeClientBase,
+        witness_rows: list[SpotExecutionWitnessRow],
+        exchange: str,
+    ) -> list[tuple[int, str, int, bool]] | None:
+        """Decode the sealed execution prefix or log the first unusable row."""
+        parsed: list[tuple[int, str, int, bool]] = []
+        for row in witness_rows:
+            row_exec_id = row["exec_id"]
+            components = client.parse_execution_exec_id(row_exec_id) if row_exec_id else None
+            if components is None:
+                logger.info(
+                    f"[{exchange}] spot anchor skipped: execution at scope_sequence "
+                    f"{row['scope_sequence']} has no venue-scheme exec id "
+                    f"({row_exec_id!r}) — the sealed prefix cannot be witnessed"
+                )
+                return None
+            order_id, basis_units, is_terminal = components
+            parsed.append((row["scope_sequence"], order_id, basis_units, is_terminal))
+        return parsed
+
+    @staticmethod
+    async def _read_spot_anchor_order_totals(
+        client: ExchangeClientBase,
+        parsed: list[tuple[int, str, int, bool]],
+        exchange: str,
+    ) -> dict[str, VenueOrderFillLegs] | None:
+        """Read lifetime fill totals or log the first venue-unknown order."""
+        order_totals: dict[str, VenueOrderFillLegs] = {}
+        for order_id in {entry[1] for entry in parsed}:
+            legs = await client.read_order_fill_legs(order_id)
+            if legs is None:
+                logger.info(
+                    f"[{exchange}] spot anchor skipped: venue does not know order {order_id}"
+                )
+                return None
+            order_totals[order_id] = legs
+        return order_totals
+
     async def _bootstrap_spot_anchor(
         self, work: _PortfolioReconciliationWork, evaluated_at: datetime
     ) -> None:
@@ -4198,28 +4239,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         witness_rows = await repository.get_spot_execution_witness_rows(
             wallet, exchange, mode, boundary.source_watermark
         )
-        parsed: list[tuple[int, str, int, bool]] = []
-        for row in witness_rows:
-            row_exec_id = row["exec_id"]
-            components = client.parse_execution_exec_id(row_exec_id) if row_exec_id else None
-            if components is None:
-                logger.info(
-                    f"[{exchange}] spot anchor skipped: execution at scope_sequence "
-                    f"{row['scope_sequence']} has no venue-scheme exec id "
-                    f"({row_exec_id!r}) — the sealed prefix cannot be witnessed"
-                )
-                return
-            order_id, basis_units, is_terminal = components
-            parsed.append((row["scope_sequence"], order_id, basis_units, is_terminal))
-        order_totals: dict[str, VenueOrderFillLegs] = {}
-        for order_id in {entry[1] for entry in parsed}:
-            legs = await client.read_order_fill_legs(order_id)
-            if legs is None:
-                logger.info(
-                    f"[{exchange}] spot anchor skipped: venue does not know order {order_id}"
-                )
-                return
-            order_totals[order_id] = legs
+        parsed = self._parse_spot_anchor_witness_rows(client, witness_rows, exchange)
+        if parsed is None:
+            return
+        order_totals = await self._read_spot_anchor_order_totals(client, parsed, exchange)
+        if order_totals is None:
+            return
         witnesses = build_witnesses_from_reads(capture.tip, parsed, order_totals)
         if witnesses.refusals:
             logger.info(f"[{exchange}] spot anchor witness unresolved: {list(witnesses.refusals)}")

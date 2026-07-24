@@ -4,6 +4,7 @@ This module provides FastAPI routes for user authentication
 including login, logout, token refresh, and user management.
 """
 
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
@@ -46,9 +47,11 @@ from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.schemas.responses import WsTokenData
 from snapper.auth.schemas.responses import WsTokenResponse
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
 from snapper.auth.tokens import PermissionScopeError
+from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import Repository
@@ -68,6 +71,26 @@ from snapper.server.rate_limiting import register_failed_login_attempt
 _AUTH_API_PATH = "/api/auth"
 _REST_STREAM = "rest.control"
 _USER_NOT_FOUND = "User not found"
+
+
+@dataclass(frozen=True)
+class _RefreshIdentity:
+    """Verified refresh claims and their current account identity."""
+
+    token_manager: TokenManager
+    claims: TokenClaims
+    user: UserProfile
+    principal: AuthPrincipal
+
+
+@dataclass(frozen=True)
+class _RefreshRotation:
+    """Winning token rotation and the capabilities it carries."""
+
+    token_pair: TokenPair
+    principal: AuthPrincipal
+    permission_values: list[str] | None
+    permission_scope_version: int | None
 
 
 def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
@@ -355,6 +378,99 @@ async def _apply_wallet_hint(
     return principal
 
 
+async def _load_refresh_identity(
+    request: Request,
+    repo: Repository,
+) -> _RefreshIdentity:
+    """Verify one refresh token and resolve its current account principal."""
+    refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(
+        "refresh_token"
+    )
+    if not refresh_token_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found",
+        )
+    token_manager = get_token_manager()
+    token_data = await token_manager.verify_token_with_db(refresh_token_value, repo)
+    if not token_data or not token_data.jti.startswith("refresh_"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+    user_service = get_user_service()
+    user = await user_service.get_user_by_id(token_data.sub)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=_USER_NOT_FOUND,
+        )
+    principal = await user_service.build_auth_principal(user)
+    principal = principal.model_copy(
+        update={"active_wallet_public_id": token_data.active_wallet_public_id}
+    )
+    return _RefreshIdentity(token_manager, token_data, user, principal)
+
+
+def _refresh_permissions(
+    principal: AuthPrincipal,
+    token_data: TokenClaims,
+) -> set[Permission] | None:
+    """Resolve refresh-token permissions under the carried scope version."""
+    if token_data.permission_scope_version is None:
+        return None
+    return get_effective_permissions(
+        principal.role,
+        token_data.permissions or [],
+        token_data.permission_scope_version,
+    )
+
+
+async def _rotate_refresh_tokens(
+    identity: _RefreshIdentity,
+    principal: AuthPrincipal,
+    permissions: set[Permission] | None,
+    repo: Repository,
+) -> _RefreshRotation:
+    """Rotate once or adopt the idempotent winner of a concurrent rotation."""
+    new_token_pair = identity.token_manager.create_tokens(
+        principal,
+        session_id=identity.claims.sid,
+        permissions=permissions,
+    )
+    rotated_pair = await identity.token_manager.rotate_tokens(
+        new_token_pair,
+        principal.user_public_id,
+        identity.claims.jti,
+        repo,
+    )
+    if rotated_pair is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token already redeemed",
+        )
+    permission_values = (
+        None if permissions is None else [permission.value for permission in permissions]
+    )
+    permission_scope_version: int | None = PERMISSION_SCOPE_VERSION
+    if rotated_pair is new_token_pair:
+        identity.token_manager.blacklist_token(identity.claims.jti)
+    else:
+        winner_claims = identity.token_manager.verify_token(rotated_pair.access_token)
+        if winner_claims is not None:
+            principal = principal.model_copy(
+                update={"active_wallet_public_id": winner_claims.active_wallet_public_id}
+            )
+            permission_values = winner_claims.permissions
+            permission_scope_version = winner_claims.permission_scope_version
+    return _RefreshRotation(
+        rotated_pair,
+        principal,
+        permission_values,
+        permission_scope_version,
+    )
+
+
 @router.post(
     "/refresh",
     openapi_extra=openapi_schema(RefreshTokenRequest, required=False),
@@ -431,78 +547,13 @@ async def refresh_token(
             default exception handler.
     """
     settings = request.app.state.settings
-    refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(
-        "refresh_token"
-    )
-    if not refresh_token_value:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token not found",
-        )
-    token_manager = get_token_manager()
-    token_data = await token_manager.verify_token_with_db(refresh_token_value, repo)
-    if not token_data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-        )
-    if not token_data.jti.startswith("refresh_"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-        )
-    user_service = get_user_service()
-    user = await user_service.get_user_by_id(token_data.sub)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=_USER_NOT_FOUND,
-        )
-    principal = await user_service.build_auth_principal(user)
-    principal = principal.model_copy(
-        update={"active_wallet_public_id": token_data.active_wallet_public_id}
-    )
+    identity = await _load_refresh_identity(request, repo)
     payload = RefreshTokenPayload() if body is None else body.payload
-    principal = await _apply_wallet_hint(payload, principal, repo)
-    refresh_permissions: set[Permission] | None = None
-    if token_data.permission_scope_version is not None:
-        refresh_permissions = get_effective_permissions(
-            principal.role,
-            token_data.permissions or [],
-            token_data.permission_scope_version,
-        )
-    new_token_pair = token_manager.create_tokens(
-        principal,
-        session_id=token_data.sid,
-        permissions=refresh_permissions,
-    )
-    rotated_pair = await token_manager.rotate_tokens(
-        new_token_pair,
-        principal.user_public_id,
-        token_data.jti,
-        repo,
-    )
-    if rotated_pair is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token already redeemed",
-        )
-    response_permission_values = (
-        None
-        if refresh_permissions is None
-        else [permission.value for permission in refresh_permissions]
-    )
-    response_permission_scope_version: int | None = PERMISSION_SCOPE_VERSION
-    if rotated_pair is new_token_pair:
-        token_manager.blacklist_token(token_data.jti)
-    else:
-        winner_claims = token_manager.verify_token(rotated_pair.access_token)
-        if winner_claims is not None:
-            principal = principal.model_copy(
-                update={"active_wallet_public_id": winner_claims.active_wallet_public_id}
-            )
-            response_permission_values = winner_claims.permissions
-            response_permission_scope_version = winner_claims.permission_scope_version
+    principal = await _apply_wallet_hint(payload, identity.principal, repo)
+    permissions = _refresh_permissions(principal, identity.claims)
+    rotation = await _rotate_refresh_tokens(identity, principal, permissions, repo)
+    rotated_pair = rotation.token_pair
+    principal = rotation.principal
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -534,14 +585,16 @@ async def refresh_token(
         path="/",
     )
     ws_token_service = get_ws_token_service()
-    session_id = token_data.sid
-    ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
+    session_id = identity.claims.sid
+    ws_token_result = ws_token_service.generate(
+        user_id=identity.user.username, session_id=session_id
+    )
     sid, seq, _pid, ts = _mint_provenance(request)
     user = _authenticated_session_profile(
-        user,
+        identity.user,
         principal,
-        response_permission_values,
-        response_permission_scope_version,
+        rotation.permission_values,
+        rotation.permission_scope_version,
     )
     return_tokens = _should_return_tokens(request)
     refresh_data = RefreshData(

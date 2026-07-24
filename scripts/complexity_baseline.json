@@ -1134,10 +1134,6 @@
       "ExchangeExecutorService._assemble_spot_replay_boundary": {
         "PLR0913": 8
       },
-      "ExchangeExecutorService._bootstrap_spot_anchor": {
-        "C901": 12,
-        "PLR0915": 51
-      },
       "ExchangeExecutorService._build_corrective_fill": {
         "PLR0913": 6
       },
@@ -1342,8 +1338,6 @@
         "PLR0913": 6
       },
       "set_process_desired_state": {
-        "C901": 12,
-        "PLR0912": 14,
         "PLR0913": 8
       },
       "start_process": {
