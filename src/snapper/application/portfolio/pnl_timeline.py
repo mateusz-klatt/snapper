@@ -1333,50 +1333,128 @@ def _combined_instrument_weights(
     return dict(combined)
 
 
-def _value_point(
-    point_time: datetime,
-    pools: Mapping[PoolKey, _Pool],
-    pool_index: PoolIndex,
-    weights_by_pool: Mapping[PoolKey, Mapping[AttributionKey, float]],
-    marks: MarkMap,
-    seen: Sequence[str],
-    attribution_seen: Sequence[AttributionKey],
-    realized_by_instrument: Mapping[str, float],
-    fee_by_instrument: Mapping[str, float],
-    accrual_by_instrument: Mapping[str, float],
-    realized_by_attribution: Mapping[AttributionKey, float],
-    fee_by_attribution: Mapping[AttributionKey, float],
-    accrual_by_attribution: Mapping[AttributionKey, float],
-    realized_total: float,
-    fee_total: float,
-    accrual_total: float,
-    activation_time: datetime | None,
-    global_reasons: Collection[PnlIncompletenessReasonEntry],
-    untrusted_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReasonEntry]],
-    basis_reasons_by_pool: Mapping[PoolKey, Collection[PnlIncompletenessReason]],
-    mark_incompleteness_reasons: MarkIncompletenessReasonMap,
+@dataclass(frozen=True)
+class _PointCumulatives:
+    """Immutable cumulative flows supplied to one point valuation."""
+
+    realized_by_instrument: Mapping[str, float]
+    fee_by_instrument: Mapping[str, float]
+    accrual_by_instrument: Mapping[str, float]
+    realized_by_attribution: Mapping[AttributionKey, float]
+    fee_by_attribution: Mapping[AttributionKey, float]
+    accrual_by_attribution: Mapping[AttributionKey, float]
+    realized_total: float
+    fee_total: float
+    accrual_total: float
+
+
+@dataclass(frozen=True)
+class _PointValuationContext:
+    """All immutable evidence needed to value one timeline grid point."""
+
+    point_time: datetime
+    pools: Mapping[PoolKey, _Pool]
+    pool_index: PoolIndex
+    weights_by_pool: Mapping[PoolKey, Mapping[AttributionKey, float]]
+    marks: MarkMap
+    seen: Sequence[str]
+    attribution_seen: Sequence[AttributionKey]
+    cumulatives: _PointCumulatives
+    activation_time: datetime | None
+    global_reasons: Collection[PnlIncompletenessReasonEntry]
+    untrusted_reasons_by_instrument: Mapping[
+        str,
+        Collection[PnlIncompletenessReasonEntry],
+    ]
+    basis_reasons_by_pool: Mapping[PoolKey, Collection[PnlIncompletenessReason]]
+    mark_incompleteness_reasons: MarkIncompletenessReasonMap
+
+
+@dataclass(frozen=True)
+class _PointPreparation:
+    """Validated and reconciled cumulative inputs for instrument valuation."""
+
+    instrument_untrusted_reasons: Mapping[
+        str,
+        Collection[PnlIncompletenessReasonEntry],
+    ]
+    realized_by_instrument: Mapping[str, float]
+    fee_by_instrument: Mapping[str, float]
+    accrual_by_instrument: Mapping[str, float]
+    attribution_keys: Sequence[AttributionKey]
+
+
+@dataclass(frozen=True)
+class _InstrumentPoolState:
+    """Active pools and combined attribution weights for one instrument."""
+
+    active_pool_keys: Sequence[PoolKey]
+    weights: Mapping[AttributionKey, float]
+
+
+@dataclass(frozen=True)
+class _InstrumentValuationInputs:
+    """Pools, mark evidence, and basis failures for one instrument."""
+
+    pool_state: _InstrumentPoolState
+    mark: float | None
+    is_activation_point: bool
+    mark_unavailable: bool
+    unavailable_basis_keys: Sequence[PoolKey]
+
+
+@dataclass
+class _PointAccumulator:
+    """Mutable point-local valuation outputs collected in stable order."""
+
+    point_reasons: set[PnlIncompletenessReasonEntry] = field(default_factory=set)
+    contributions: list[PnlInstrumentContribution] = field(default_factory=list)
+    unrealized_by_attribution: defaultdict[AttributionKey, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    unrealized_incomplete: set[AttributionKey] = field(default_factory=set)
+    unrealized_total: float = 0.0
+
+
+@dataclass(frozen=True)
+class _ReconciledAttribution:
+    """Exactly reconciled point-level attribution component mappings."""
+
+    realized: Mapping[AttributionKey, float]
+    fee: Mapping[AttributionKey, float]
+    accrual: Mapping[AttributionKey, float]
+    unrealized: Mapping[AttributionKey, float]
+
+
+def _context_untrusted_point(
+    context: _PointValuationContext,
+    attribution_keys: Sequence[AttributionKey],
+    reasons: Collection[PnlIncompletenessReasonEntry],
 ) -> PnlTimelinePoint:
-    """Value shard pools and aggregate marks and contributions by instrument."""
-    established_global_reasons = set(global_reasons)
-    if established_global_reasons:
-        for instrument_reasons in untrusted_reasons_by_instrument.values():
-            established_global_reasons.update(instrument_reasons)
-        return _untrusted_point(
-            point_time,
-            seen,
-            attribution_seen,
-            established_global_reasons,
-        )
+    """Build a fully withheld point using stable identities from one context."""
+    return _untrusted_point(
+        context.point_time,
+        context.seen,
+        attribution_keys,
+        reasons,
+    )
+
+
+def _point_instrument_untrusted_reasons(
+    context: _PointValuationContext,
+) -> dict[str, set[PnlIncompletenessReasonEntry]]:
+    """Collect latched and non-finite instrument cumulative causes."""
     instrument_untrusted_reasons = {
         instrument_public_id: set(reasons)
-        for instrument_public_id, reasons in untrusted_reasons_by_instrument.items()
+        for instrument_public_id, reasons in context.untrusted_reasons_by_instrument.items()
         if reasons
     }
-    for instrument_public_id in seen:
+    cumulatives = context.cumulatives
+    for instrument_public_id in context.seen:
         if (
-            not math.isfinite(realized_by_instrument.get(instrument_public_id, 0.0))
-            or not math.isfinite(fee_by_instrument.get(instrument_public_id, 0.0))
-            or not math.isfinite(accrual_by_instrument.get(instrument_public_id, 0.0))
+            not math.isfinite(cumulatives.realized_by_instrument.get(instrument_public_id, 0.0))
+            or not math.isfinite(cumulatives.fee_by_instrument.get(instrument_public_id, 0.0))
+            or not math.isfinite(cumulatives.accrual_by_instrument.get(instrument_public_id, 0.0))
         ):
             instrument_untrusted_reasons.setdefault(instrument_public_id, set()).add(
                 _instrument_incompleteness_reason(
@@ -1385,14 +1463,97 @@ def _value_point(
                     instrument_public_id,
                 )
             )
-    aggregate_cumulatives_finite = (
-        math.isfinite(realized_total) and math.isfinite(fee_total) and math.isfinite(accrual_total)
+    return instrument_untrusted_reasons
+
+
+def _point_cumulatives_are_finite(context: _PointValuationContext) -> bool:
+    """Return whether all three aggregate cumulative flows are finite."""
+    cumulatives = context.cumulatives
+    return (
+        math.isfinite(cumulatives.realized_total)
+        and math.isfinite(cumulatives.fee_total)
+        and math.isfinite(cumulatives.accrual_total)
     )
-    if not aggregate_cumulatives_finite and not instrument_untrusted_reasons:
-        return _untrusted_point(
-            point_time,
-            seen,
-            attribution_seen,
+
+
+def _reconcile_point_instrument_cumulatives(
+    context: _PointValuationContext,
+    instrument_untrusted_reasons: Mapping[
+        str,
+        Collection[PnlIncompletenessReasonEntry],
+    ],
+) -> tuple[Mapping[str, float], Mapping[str, float], Mapping[str, float]] | None:
+    """Reconcile finite instrument flows, retaining maps when any is untrusted."""
+    cumulatives = context.cumulatives
+    if instrument_untrusted_reasons:
+        return (
+            cumulatives.realized_by_instrument,
+            cumulatives.fee_by_instrument,
+            cumulatives.accrual_by_instrument,
+        )
+    realized = _values_with_residue(
+        cumulatives.realized_by_instrument,
+        context.seen,
+        cumulatives.realized_total,
+    )
+    fee = _values_with_residue(
+        cumulatives.fee_by_instrument,
+        context.seen,
+        cumulatives.fee_total,
+    )
+    accrual = _values_with_residue(
+        cumulatives.accrual_by_instrument,
+        context.seen,
+        cumulatives.accrual_total,
+    )
+    if realized is None or fee is None or accrual is None:
+        return None
+    return realized, fee, accrual
+
+
+def _point_attribution_keys(context: _PointValuationContext) -> list[AttributionKey]:
+    """Return all stable attribution keys established by cumulative flows."""
+    cumulatives = context.cumulatives
+    return _sorted_attribution_keys(
+        set(context.attribution_seen)
+        | set(cumulatives.realized_by_attribution)
+        | set(cumulatives.fee_by_attribution)
+        | set(cumulatives.accrual_by_attribution)
+    )
+
+
+def _point_attribution_flows_are_finite(
+    context: _PointValuationContext,
+    attribution_keys: Sequence[AttributionKey],
+) -> bool:
+    """Return whether every keyed cumulative attribution flow is finite."""
+    cumulatives = context.cumulatives
+    return all(
+        math.isfinite(cumulatives.realized_by_attribution.get(key, 0.0))
+        and math.isfinite(cumulatives.fee_by_attribution.get(key, 0.0))
+        and math.isfinite(cumulatives.accrual_by_attribution.get(key, 0.0))
+        for key in attribution_keys
+    )
+
+
+def _prepare_point_valuation(
+    context: _PointValuationContext,
+) -> _PointPreparation | PnlTimelinePoint:
+    """Validate global and cumulative evidence before mark valuation."""
+    established_global_reasons = set(context.global_reasons)
+    if established_global_reasons:
+        for latched_reasons in context.untrusted_reasons_by_instrument.values():
+            established_global_reasons.update(latched_reasons)
+        return _context_untrusted_point(
+            context,
+            context.attribution_seen,
+            established_global_reasons,
+        )
+    instrument_reasons = _point_instrument_untrusted_reasons(context)
+    if not _point_cumulatives_are_finite(context) and not instrument_reasons:
+        return _context_untrusted_point(
+            context,
+            context.attribution_seen,
             {
                 _global_incompleteness_reason(
                     "cumulative_non_finite",
@@ -1400,55 +1561,25 @@ def _value_point(
                 )
             },
         )
-    reconciled_realized_by_instrument: Mapping[str, float] = realized_by_instrument
-    reconciled_fee_by_instrument: Mapping[str, float] = fee_by_instrument
-    reconciled_accrual_by_instrument: Mapping[str, float] = accrual_by_instrument
-    if not instrument_untrusted_reasons:
-        realized_instruments = _values_with_residue(
-            realized_by_instrument,
-            seen,
-            realized_total,
+    reconciled = _reconcile_point_instrument_cumulatives(context, instrument_reasons)
+    if reconciled is None:
+        return _context_untrusted_point(
+            context,
+            context.attribution_seen,
+            {
+                _global_incompleteness_reason(
+                    "instrument_reconciliation_failed",
+                    "untrusted",
+                )
+            },
         )
-        fee_instruments = _values_with_residue(
-            fee_by_instrument,
-            seen,
-            fee_total,
-        )
-        accrual_instruments = _values_with_residue(
-            accrual_by_instrument,
-            seen,
-            accrual_total,
-        )
-        if realized_instruments is None or fee_instruments is None or accrual_instruments is None:
-            return _untrusted_point(
-                point_time,
-                seen,
-                attribution_seen,
-                {
-                    _global_incompleteness_reason(
-                        "instrument_reconciliation_failed",
-                        "untrusted",
-                    )
-                },
-            )
-        reconciled_realized_by_instrument = realized_instruments
-        reconciled_fee_by_instrument = fee_instruments
-        reconciled_accrual_by_instrument = accrual_instruments
-    attribution_keys = _sorted_attribution_keys(
-        set(attribution_seen)
-        | set(realized_by_attribution)
-        | set(fee_by_attribution)
-        | set(accrual_by_attribution)
-    )
-    if not instrument_untrusted_reasons and any(
-        not math.isfinite(realized_by_attribution.get(key, 0.0))
-        or not math.isfinite(fee_by_attribution.get(key, 0.0))
-        or not math.isfinite(accrual_by_attribution.get(key, 0.0))
-        for key in attribution_keys
+    attribution_keys = _point_attribution_keys(context)
+    if not instrument_reasons and not _point_attribution_flows_are_finite(
+        context,
+        attribution_keys,
     ):
-        return _untrusted_point(
-            point_time,
-            seen,
+        return _context_untrusted_point(
+            context,
             attribution_keys,
             {
                 _global_incompleteness_reason(
@@ -1457,314 +1588,528 @@ def _value_point(
                 )
             },
         )
-    unrealized_total = 0.0
-    point_reasons = {
-        reason for reasons in instrument_untrusted_reasons.values() for reason in reasons
-    }
-    contributions: list[PnlInstrumentContribution] = []
-    unrealized_by_attribution: defaultdict[AttributionKey, float] = defaultdict(float)
-    unrealized_incomplete: set[AttributionKey] = set()
-    for instrument_public_id in seen:
-        if instrument_public_id in instrument_untrusted_reasons:
-            contributions.append(
-                PnlInstrumentContribution(
-                    instrument_public_id=instrument_public_id,
-                    native_symbol=None,
-                    exchange=None,
-                    realized_pnl=None,
-                    fee_pnl=None,
-                    accrual_pnl=None,
-                    unrealized_pnl=None,
+    realized, fee, accrual = reconciled
+    return _PointPreparation(
+        instrument_untrusted_reasons=instrument_reasons,
+        realized_by_instrument=realized,
+        fee_by_instrument=fee,
+        accrual_by_instrument=accrual,
+        attribution_keys=attribution_keys,
+    )
+
+
+def _instrument_pool_state(
+    context: _PointValuationContext,
+    instrument_public_id: str,
+) -> _InstrumentPoolState:
+    """Return active pool keys and combined weights for one instrument."""
+    active_pool_keys: list[PoolKey] = []
+    combined_weights: defaultdict[AttributionKey, float] = defaultdict(float)
+    for pool_key in context.pool_index.get(instrument_public_id, ()):
+        pool_weights = context.weights_by_pool.get(pool_key, {})
+        for attribution_key in _sorted_attribution_keys(set(pool_weights)):
+            combined_weights[attribution_key] += pool_weights[attribution_key]
+        pool = context.pools.get(pool_key)
+        if pool is not None and abs(pool.position_qty) >= FLAT_EPSILON:
+            active_pool_keys.append(pool_key)
+    return _InstrumentPoolState(
+        active_pool_keys=active_pool_keys,
+        weights=dict(combined_weights),
+    )
+
+
+def _mark_unavailable(
+    context: _PointValuationContext,
+    instrument_public_id: str,
+    is_activation_point: bool,
+    mark: float | None,
+) -> bool:
+    """Return whether a non-activation point lacks a finite mark."""
+    return not is_activation_point and (mark is None or not math.isfinite(mark))
+
+
+def _withhold_instrument_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+    inputs: _InstrumentValuationInputs,
+) -> None:
+    """Stamp exact mark and basis causes for one withheld instrument value."""
+    if inputs.mark_unavailable:
+        mark_reason = context.mark_incompleteness_reasons.get(
+            (instrument_public_id, context.point_time),
+            "mark_unavailable",
+        )
+        accumulator.point_reasons.add(
+            _instrument_incompleteness_reason(
+                mark_reason,
+                "mark_incomplete",
+                instrument_public_id,
+            )
+        )
+    for pool_key in inputs.unavailable_basis_keys:
+        basis_reasons = context.basis_reasons_by_pool.get(pool_key)
+        if not basis_reasons:
+            raise ValueError("an unavailable entry basis requires a stamped causal reason")
+        for basis_reason in basis_reasons:
+            accumulator.point_reasons.add(
+                _instrument_incompleteness_reason(
+                    basis_reason,
+                    "mark_incomplete",
+                    instrument_public_id,
                 )
             )
-            continue
-        instrument_pool_keys: list[PoolKey] = []
-        combined_weights: defaultdict[AttributionKey, float] = defaultdict(float)
-        for pool_key in pool_index.get(instrument_public_id, ()):
-            pool_weights = weights_by_pool.get(pool_key, {})
-            for attribution_key in _sorted_attribution_keys(set(pool_weights)):
-                combined_weights[attribution_key] += pool_weights[attribution_key]
-            pool = pools.get(pool_key)
-            if pool is not None and abs(pool.position_qty) >= FLAT_EPSILON:
-                instrument_pool_keys.append(pool_key)
-        instrument_weights = dict(combined_weights)
-        realized = reconciled_realized_by_instrument.get(instrument_public_id, 0.0)
-        fee = reconciled_fee_by_instrument.get(instrument_public_id, 0.0)
-        accrual = reconciled_accrual_by_instrument.get(instrument_public_id, 0.0)
-        if not instrument_pool_keys:
-            instrument_unrealized: float | None = 0.0
-        else:
-            is_activation_point = activation_time is not None and point_time == activation_time
-            mark = 0.0 if is_activation_point else marks.get((instrument_public_id, point_time))
-            mark_unavailable = not is_activation_point and (mark is None or not math.isfinite(mark))
-            unavailable_basis_keys = [
-                pool_key
-                for pool_key in instrument_pool_keys
-                if not is_positive_finite(pools[pool_key].entry_price)
-                or basis_reasons_by_pool.get(pool_key)
-            ]
-            if mark_unavailable or unavailable_basis_keys:
-                instrument_unrealized = None
-                if mark_unavailable:
-                    mark_reason = mark_incompleteness_reasons.get(
-                        (instrument_public_id, point_time),
-                        "mark_unavailable",
+    instrument_keys = _sorted_attribution_keys(set(inputs.pool_state.weights))
+    accumulator.unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
+
+
+def _non_finite_instrument_unrealized(
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+    instrument_weights: Mapping[AttributionKey, float],
+) -> None:
+    """Stamp one non-finite instrument valuation and affected attribution keys."""
+    accumulator.point_reasons.add(
+        _instrument_incompleteness_reason(
+            "unrealized_non_finite",
+            "mark_incomplete",
+            instrument_public_id,
+        )
+    )
+    instrument_keys = _sorted_attribution_keys(set(instrument_weights))
+    accumulator.unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
+
+
+def _allocate_instrument_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+    pool_values: Sequence[tuple[PoolKey, float]],
+) -> None:
+    """Allocate finite shard unrealized values and latch keyed overflow."""
+    for pool_key, pool_unrealized in pool_values:
+        allocations = _allocate_by_weights(
+            pool_unrealized,
+            context.weights_by_pool.get(pool_key, {}),
+        )
+        for key, amount in allocations.items():
+            accumulator.unrealized_by_attribution[key] += amount
+            if not math.isfinite(accumulator.unrealized_by_attribution[key]):
+                accumulator.unrealized_incomplete.add(key)
+                accumulator.point_reasons.add(
+                    _instrument_incompleteness_reason(
+                        "attribution_value_non_finite",
+                        "mark_incomplete",
+                        instrument_public_id,
                     )
-                    point_reasons.add(
-                        _instrument_incompleteness_reason(
-                            mark_reason,
-                            "mark_incomplete",
-                            instrument_public_id,
-                        )
-                    )
-                for pool_key in unavailable_basis_keys:
-                    basis_reasons = basis_reasons_by_pool.get(pool_key)
-                    if not basis_reasons:
-                        raise ValueError(
-                            "an unavailable entry basis requires a stamped causal reason"
-                        )
-                    for basis_reason in basis_reasons:
-                        point_reasons.add(
-                            _instrument_incompleteness_reason(
-                                basis_reason,
-                                "mark_incomplete",
-                                instrument_public_id,
-                            )
-                        )
-                instrument_keys = _sorted_attribution_keys(set(instrument_weights))
-                unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
-            else:
-                trusted_mark = cast(float, mark)
-                pool_values: list[tuple[PoolKey, float]] = []
-                instrument_unrealized = 0.0
-                for pool_key in instrument_pool_keys:
-                    pool = pools[pool_key]
-                    trusted_entry_price = cast(float, pool.entry_price)
-                    pool_unrealized = (
-                        0.0
-                        if is_activation_point
-                        else pool.position_qty * (trusted_mark - trusted_entry_price)
-                    )
-                    instrument_unrealized += pool_unrealized
-                    if not math.isfinite(pool_unrealized) or not math.isfinite(
-                        instrument_unrealized
-                    ):
-                        instrument_unrealized = None
-                        break
-                    pool_values.append((pool_key, pool_unrealized))
-                if instrument_unrealized is None:
-                    point_reasons.add(
-                        _instrument_incompleteness_reason(
-                            "unrealized_non_finite",
-                            "mark_incomplete",
-                            instrument_public_id,
-                        )
-                    )
-                    instrument_keys = _sorted_attribution_keys(set(instrument_weights))
-                    unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
-                else:
-                    unrealized_total += instrument_unrealized
-                    for pool_key, pool_unrealized in pool_values:
-                        allocations = _allocate_by_weights(
-                            pool_unrealized,
-                            weights_by_pool.get(pool_key, {}),
-                        )
-                        for key, amount in allocations.items():
-                            unrealized_by_attribution[key] += amount
-                            if not math.isfinite(unrealized_by_attribution[key]):
-                                unrealized_incomplete.add(key)
-                                point_reasons.add(
-                                    _instrument_incompleteness_reason(
-                                        "attribution_value_non_finite",
-                                        "mark_incomplete",
-                                        instrument_public_id,
-                                    )
-                                )
-        contributions.append(
+                )
+
+
+def _trusted_instrument_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+    inputs: _InstrumentValuationInputs,
+) -> float | None:
+    """Value finite-mark shard pools without changing their summation order."""
+    trusted_mark = cast(float, inputs.mark)
+    pool_values: list[tuple[PoolKey, float]] = []
+    instrument_unrealized = 0.0
+    for pool_key in inputs.pool_state.active_pool_keys:
+        pool = context.pools[pool_key]
+        trusted_entry_price = cast(float, pool.entry_price)
+        pool_unrealized = (
+            0.0
+            if inputs.is_activation_point
+            else pool.position_qty * (trusted_mark - trusted_entry_price)
+        )
+        instrument_unrealized += pool_unrealized
+        if not math.isfinite(pool_unrealized) or not math.isfinite(instrument_unrealized):
+            _non_finite_instrument_unrealized(
+                accumulator,
+                instrument_public_id,
+                inputs.pool_state.weights,
+            )
+            return None
+        pool_values.append((pool_key, pool_unrealized))
+    accumulator.unrealized_total += instrument_unrealized
+    _allocate_instrument_unrealized(
+        context,
+        accumulator,
+        instrument_public_id,
+        pool_values,
+    )
+    return instrument_unrealized
+
+
+def _instrument_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+    pool_state: _InstrumentPoolState,
+) -> float | None:
+    """Value or honestly withhold one instrument's active pools."""
+    is_activation_point = (
+        context.activation_time is not None and context.point_time == context.activation_time
+    )
+    mark = (
+        0.0
+        if is_activation_point
+        else context.marks.get((instrument_public_id, context.point_time))
+    )
+    mark_unavailable = _mark_unavailable(
+        context,
+        instrument_public_id,
+        is_activation_point,
+        mark,
+    )
+    unavailable_basis_keys = [
+        pool_key
+        for pool_key in pool_state.active_pool_keys
+        if not is_positive_finite(context.pools[pool_key].entry_price)
+        or context.basis_reasons_by_pool.get(pool_key)
+    ]
+    inputs = _InstrumentValuationInputs(
+        pool_state=pool_state,
+        mark=mark,
+        is_activation_point=is_activation_point,
+        mark_unavailable=mark_unavailable,
+        unavailable_basis_keys=unavailable_basis_keys,
+    )
+    if mark_unavailable or unavailable_basis_keys:
+        _withhold_instrument_unrealized(
+            context,
+            accumulator,
+            instrument_public_id,
+            inputs,
+        )
+        return None
+    return _trusted_instrument_unrealized(
+        context,
+        accumulator,
+        instrument_public_id,
+        inputs,
+    )
+
+
+def _append_instrument_contribution(
+    context: _PointValuationContext,
+    preparation: _PointPreparation,
+    accumulator: _PointAccumulator,
+    instrument_public_id: str,
+) -> None:
+    """Append one instrument contribution in the caller's stable order."""
+    if instrument_public_id in preparation.instrument_untrusted_reasons:
+        accumulator.contributions.append(
             PnlInstrumentContribution(
                 instrument_public_id=instrument_public_id,
                 native_symbol=None,
                 exchange=None,
-                realized_pnl=realized,
-                fee_pnl=fee,
-                accrual_pnl=accrual,
-                unrealized_pnl=instrument_unrealized,
-            )
-        )
-    attribution_keys = _sorted_attribution_keys(
-        set(attribution_keys)
-        | set(unrealized_by_attribution)
-        | set(unrealized_incomplete)
-        | {key for pool_weights in weights_by_pool.values() for key in pool_weights}
-    )
-    if instrument_untrusted_reasons:
-        attribution = tuple(
-            PnlAttributionContribution(
-                origin=origin,
-                strategy_name=strategy_name,
                 realized_pnl=None,
                 fee_pnl=None,
                 accrual_pnl=None,
                 unrealized_pnl=None,
             )
-            for origin, strategy_name in attribution_keys
         )
-        return PnlTimelinePoint(
-            point_time=point_time,
-            realized_pnl=None,
-            fee_pnl=None,
-            accrual_pnl=None,
-            unrealized_pnl=None,
-            net_pnl=None,
-            valuation_status="incomplete",
-            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
-            per_instrument=tuple(contributions),
-            attribution=attribution,
+        return
+    pool_state = _instrument_pool_state(context, instrument_public_id)
+    instrument_unrealized = (
+        0.0
+        if not pool_state.active_pool_keys
+        else _instrument_unrealized(
+            context,
+            accumulator,
+            instrument_public_id,
+            pool_state,
         )
-    if not point_reasons and math.isfinite(unrealized_total):
-        unrealized_by_instrument = {
-            contribution.instrument_public_id: contribution.unrealized_pnl
-            for contribution in contributions
-            if contribution.unrealized_pnl is not None
-        }
-        reconciled_unrealized_by_instrument = _values_with_residue(
-            unrealized_by_instrument,
-            seen,
-            unrealized_total,
-        )
-        if reconciled_unrealized_by_instrument is None:
-            return _untrusted_point(
-                point_time,
-                seen,
-                attribution_keys,
-                {
-                    _global_incompleteness_reason(
-                        "instrument_reconciliation_failed",
-                        "untrusted",
-                    )
-                },
-            )
-        contributions = [
-            PnlInstrumentContribution(
-                instrument_public_id=contribution.instrument_public_id,
-                native_symbol=contribution.native_symbol,
-                exchange=contribution.exchange,
-                realized_pnl=contribution.realized_pnl,
-                fee_pnl=contribution.fee_pnl,
-                accrual_pnl=contribution.accrual_pnl,
-                unrealized_pnl=reconciled_unrealized_by_instrument[
-                    contribution.instrument_public_id
-                ],
-            )
-            for contribution in contributions
-        ]
-    realized_attribution = _values_with_residue(
-        realized_by_attribution, attribution_keys, realized_total
     )
-    fee_attribution = _values_with_residue(fee_by_attribution, attribution_keys, fee_total)
-    accrual_attribution = _values_with_residue(
-        accrual_by_attribution, attribution_keys, accrual_total
+    accumulator.contributions.append(
+        PnlInstrumentContribution(
+            instrument_public_id=instrument_public_id,
+            native_symbol=None,
+            exchange=None,
+            realized_pnl=preparation.realized_by_instrument.get(instrument_public_id, 0.0),
+            fee_pnl=preparation.fee_by_instrument.get(instrument_public_id, 0.0),
+            accrual_pnl=preparation.accrual_by_instrument.get(instrument_public_id, 0.0),
+            unrealized_pnl=instrument_unrealized,
+        )
     )
-    if realized_attribution is None or fee_attribution is None or accrual_attribution is None:
-        point_reasons.add(
-            _global_incompleteness_reason(
-                "attribution_reconciliation_failed",
-                "untrusted",
-            )
-        )
-        return _untrusted_point(
-            point_time,
-            seen,
-            attribution_keys,
-            point_reasons,
-        )
-    if not point_reasons and math.isfinite(unrealized_total) and not unrealized_incomplete:
-        reconciled_unrealized = _values_with_residue(
-            unrealized_by_attribution, attribution_keys, unrealized_total
-        )
-        if reconciled_unrealized is None:
-            point_reasons.add(
-                _global_incompleteness_reason(
-                    "attribution_reconciliation_failed",
-                    "untrusted",
-                )
-            )
-            return _untrusted_point(
-                point_time,
-                seen,
-                attribution_keys,
-                point_reasons,
-            )
-    else:
-        reconciled_unrealized = dict(unrealized_by_attribution)
+
+
+def _complete_attribution_keys(
+    context: _PointValuationContext,
+    preparation: _PointPreparation,
+    accumulator: _PointAccumulator,
+) -> list[AttributionKey]:
+    """Include mark allocations and all current inventory ownership keys."""
+    return _sorted_attribution_keys(
+        set(preparation.attribution_keys)
+        | set(accumulator.unrealized_by_attribution)
+        | set(accumulator.unrealized_incomplete)
+        | {key for pool_weights in context.weights_by_pool.values() for key in pool_weights}
+    )
+
+
+def _instrument_untrusted_valued_point(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution_keys: Sequence[AttributionKey],
+) -> PnlTimelinePoint:
+    """Withhold aggregates while retaining independently useful instrument rows."""
     attribution = tuple(
         PnlAttributionContribution(
             origin=origin,
             strategy_name=strategy_name,
-            realized_pnl=realized_attribution[(origin, strategy_name)],
-            fee_pnl=fee_attribution[(origin, strategy_name)],
-            accrual_pnl=accrual_attribution[(origin, strategy_name)],
+            realized_pnl=None,
+            fee_pnl=None,
+            accrual_pnl=None,
+            unrealized_pnl=None,
+        )
+        for origin, strategy_name in attribution_keys
+    )
+    return PnlTimelinePoint(
+        point_time=context.point_time,
+        realized_pnl=None,
+        fee_pnl=None,
+        accrual_pnl=None,
+        unrealized_pnl=None,
+        net_pnl=None,
+        valuation_status="incomplete",
+        incompleteness_reasons=canonical_incompleteness_reasons(accumulator.point_reasons),
+        per_instrument=tuple(accumulator.contributions),
+        attribution=attribution,
+    )
+
+
+def _reconcile_instrument_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+) -> bool:
+    """Reconcile finite per-instrument marks and report exact representability."""
+    if accumulator.point_reasons or not math.isfinite(accumulator.unrealized_total):
+        return True
+    unrealized_by_instrument = {
+        contribution.instrument_public_id: contribution.unrealized_pnl
+        for contribution in accumulator.contributions
+        if contribution.unrealized_pnl is not None
+    }
+    reconciled = _values_with_residue(
+        unrealized_by_instrument,
+        context.seen,
+        accumulator.unrealized_total,
+    )
+    if reconciled is None:
+        return False
+    accumulator.contributions = [
+        PnlInstrumentContribution(
+            instrument_public_id=contribution.instrument_public_id,
+            native_symbol=contribution.native_symbol,
+            exchange=contribution.exchange,
+            realized_pnl=contribution.realized_pnl,
+            fee_pnl=contribution.fee_pnl,
+            accrual_pnl=contribution.accrual_pnl,
+            unrealized_pnl=reconciled[contribution.instrument_public_id],
+        )
+        for contribution in accumulator.contributions
+    ]
+    return True
+
+
+def _reconcile_attribution(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution_keys: Sequence[AttributionKey],
+) -> _ReconciledAttribution | None:
+    """Reconcile all attribution components or refuse an unprovable residue."""
+    cumulatives = context.cumulatives
+    realized = _values_with_residue(
+        cumulatives.realized_by_attribution,
+        attribution_keys,
+        cumulatives.realized_total,
+    )
+    fee = _values_with_residue(
+        cumulatives.fee_by_attribution,
+        attribution_keys,
+        cumulatives.fee_total,
+    )
+    accrual = _values_with_residue(
+        cumulatives.accrual_by_attribution,
+        attribution_keys,
+        cumulatives.accrual_total,
+    )
+    if realized is None or fee is None or accrual is None:
+        return None
+    if (
+        not accumulator.point_reasons
+        and math.isfinite(accumulator.unrealized_total)
+        and not accumulator.unrealized_incomplete
+    ):
+        unrealized = _values_with_residue(
+            accumulator.unrealized_by_attribution,
+            attribution_keys,
+            accumulator.unrealized_total,
+        )
+        if unrealized is None:
+            return None
+    else:
+        unrealized = dict(accumulator.unrealized_by_attribution)
+    return _ReconciledAttribution(
+        realized=realized,
+        fee=fee,
+        accrual=accrual,
+        unrealized=unrealized,
+    )
+
+
+def _attribution_contributions(
+    reconciled: _ReconciledAttribution,
+    unrealized_incomplete: Collection[AttributionKey],
+    attribution_keys: Sequence[AttributionKey],
+) -> tuple[PnlAttributionContribution, ...]:
+    """Build stable public attribution rows from reconciled component maps."""
+    return tuple(
+        PnlAttributionContribution(
+            origin=origin,
+            strategy_name=strategy_name,
+            realized_pnl=reconciled.realized[(origin, strategy_name)],
+            fee_pnl=reconciled.fee[(origin, strategy_name)],
+            accrual_pnl=reconciled.accrual[(origin, strategy_name)],
             unrealized_pnl=(
                 None
                 if (origin, strategy_name) in unrealized_incomplete
-                else reconciled_unrealized.get((origin, strategy_name), 0.0)
+                else reconciled.unrealized.get((origin, strategy_name), 0.0)
             ),
         )
         for origin, strategy_name in attribution_keys
     )
-    if point_reasons:
-        return PnlTimelinePoint(
-            point_time=point_time,
-            realized_pnl=realized_total,
-            fee_pnl=fee_total,
-            accrual_pnl=accrual_total,
-            unrealized_pnl=None,
-            net_pnl=None,
-            valuation_status="incomplete",
-            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
-            per_instrument=tuple(contributions),
-            attribution=attribution,
-        )
-    net = realized_total + fee_total + accrual_total + unrealized_total
-    if not math.isfinite(unrealized_total):
-        point_reasons.add(
+
+
+def _mark_incomplete_point(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution: tuple[PnlAttributionContribution, ...],
+) -> PnlTimelinePoint:
+    """Build a mark-incomplete point while preserving trusted cumulatives."""
+    cumulatives = context.cumulatives
+    return PnlTimelinePoint(
+        point_time=context.point_time,
+        realized_pnl=cumulatives.realized_total,
+        fee_pnl=cumulatives.fee_total,
+        accrual_pnl=cumulatives.accrual_total,
+        unrealized_pnl=None,
+        net_pnl=None,
+        valuation_status="incomplete",
+        incompleteness_reasons=canonical_incompleteness_reasons(accumulator.point_reasons),
+        per_instrument=tuple(accumulator.contributions),
+        attribution=attribution,
+    )
+
+
+def _finalize_valued_point(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution: tuple[PnlAttributionContribution, ...],
+) -> PnlTimelinePoint:
+    """Build a complete point or withhold non-finite unrealized and net values."""
+    if accumulator.point_reasons:
+        return _mark_incomplete_point(context, accumulator, attribution)
+    cumulatives = context.cumulatives
+    net = (
+        cumulatives.realized_total
+        + cumulatives.fee_total
+        + cumulatives.accrual_total
+        + accumulator.unrealized_total
+    )
+    if not math.isfinite(accumulator.unrealized_total):
+        accumulator.point_reasons.add(
             _global_incompleteness_reason(
                 "unrealized_non_finite",
                 "mark_incomplete",
             )
         )
     if not math.isfinite(net):
-        point_reasons.add(
+        accumulator.point_reasons.add(
             _global_incompleteness_reason(
                 "net_non_finite",
                 "mark_incomplete",
             )
         )
-    if point_reasons:
-        return PnlTimelinePoint(
-            point_time=point_time,
-            realized_pnl=realized_total,
-            fee_pnl=fee_total,
-            accrual_pnl=accrual_total,
-            unrealized_pnl=None,
-            net_pnl=None,
-            valuation_status="incomplete",
-            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
-            per_instrument=tuple(contributions),
-            attribution=attribution,
-        )
+    if accumulator.point_reasons:
+        return _mark_incomplete_point(context, accumulator, attribution)
     return PnlTimelinePoint(
-        point_time=point_time,
-        realized_pnl=realized_total,
-        fee_pnl=fee_total,
-        accrual_pnl=accrual_total,
-        unrealized_pnl=unrealized_total,
+        point_time=context.point_time,
+        realized_pnl=cumulatives.realized_total,
+        fee_pnl=cumulatives.fee_total,
+        accrual_pnl=cumulatives.accrual_total,
+        unrealized_pnl=accumulator.unrealized_total,
         net_pnl=net,
         valuation_status="complete",
         incompleteness_reasons=(),
-        per_instrument=tuple(contributions),
+        per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
     )
+
+
+def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
+    """Value shard pools and aggregate marks and contributions by instrument."""
+    prepared = _prepare_point_valuation(context)
+    if isinstance(prepared, PnlTimelinePoint):
+        return prepared
+    accumulator = _PointAccumulator(
+        point_reasons={
+            reason
+            for reasons in prepared.instrument_untrusted_reasons.values()
+            for reason in reasons
+        }
+    )
+    for instrument_public_id in context.seen:
+        _append_instrument_contribution(
+            context,
+            prepared,
+            accumulator,
+            instrument_public_id,
+        )
+    attribution_keys = _complete_attribution_keys(context, prepared, accumulator)
+    if prepared.instrument_untrusted_reasons:
+        return _instrument_untrusted_valued_point(
+            context,
+            accumulator,
+            attribution_keys,
+        )
+    if not _reconcile_instrument_unrealized(context, accumulator):
+        return _context_untrusted_point(
+            context,
+            attribution_keys,
+            {
+                _global_incompleteness_reason(
+                    "instrument_reconciliation_failed",
+                    "untrusted",
+                )
+            },
+        )
+    reconciled_attribution = _reconcile_attribution(
+        context,
+        accumulator,
+        attribution_keys,
+    )
+    if reconciled_attribution is None:
+        accumulator.point_reasons.add(
+            _global_incompleteness_reason(
+                "attribution_reconciliation_failed",
+                "untrusted",
+            )
+        )
+        return _context_untrusted_point(
+            context,
+            attribution_keys,
+            accumulator.point_reasons,
+        )
+    attribution = _attribution_contributions(
+        reconciled_attribution,
+        accumulator.unrealized_incomplete,
+        attribution_keys,
+    )
+    return _finalize_valued_point(context, accumulator, attribution)
 
 
 def _downsample(points: Sequence[PnlTimelinePoint], step: int) -> list[PnlTimelinePoint]:
@@ -2162,27 +2507,31 @@ def build_pnl_timeline(
             )
         minute_points.append(
             _value_point(
-                point_time,
-                pools,
-                pool_index,
-                weights_by_pool,
-                marks,
-                sorted(seen),
-                _sorted_attribution_keys(attribution_seen),
-                realized_by_instrument,
-                fee_by_instrument,
-                accrual_by_instrument,
-                realized_by_attribution,
-                fee_by_attribution,
-                accrual_by_attribution,
-                realized_total,
-                fee_total,
-                accrual_total,
-                activation_time,
-                global_reasons,
-                untrusted_reasons_by_instrument,
-                basis_reasons_by_pool,
-                resolved_mark_incompleteness_reasons,
+                _PointValuationContext(
+                    point_time=point_time,
+                    pools=pools,
+                    pool_index=pool_index,
+                    weights_by_pool=weights_by_pool,
+                    marks=marks,
+                    seen=sorted(seen),
+                    attribution_seen=_sorted_attribution_keys(attribution_seen),
+                    cumulatives=_PointCumulatives(
+                        realized_by_instrument=realized_by_instrument,
+                        fee_by_instrument=fee_by_instrument,
+                        accrual_by_instrument=accrual_by_instrument,
+                        realized_by_attribution=realized_by_attribution,
+                        fee_by_attribution=fee_by_attribution,
+                        accrual_by_attribution=accrual_by_attribution,
+                        realized_total=realized_total,
+                        fee_total=fee_total,
+                        accrual_total=accrual_total,
+                    ),
+                    activation_time=activation_time,
+                    global_reasons=global_reasons,
+                    untrusted_reasons_by_instrument=untrusted_reasons_by_instrument,
+                    basis_reasons_by_pool=basis_reasons_by_pool,
+                    mark_incompleteness_reasons=resolved_mark_incompleteness_reasons,
+                )
             )
         )
 

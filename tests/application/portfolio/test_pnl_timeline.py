@@ -34,6 +34,8 @@ from snapper.application.portfolio.pnl_timeline import TimelineOpening
 from snapper.application.portfolio.pnl_timeline import TimelineOpeningDerivation
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import _allocate_by_weights
+from snapper.application.portfolio.pnl_timeline import _PointCumulatives
+from snapper.application.portfolio.pnl_timeline import _PointValuationContext
 from snapper.application.portfolio.pnl_timeline import _Pool
 from snapper.application.portfolio.pnl_timeline import _prepare_executions
 from snapper.application.portfolio.pnl_timeline import _reconcile_weights
@@ -387,27 +389,36 @@ class TestMachineReadableIncompletenessReasons:
         """A future basis path cannot silently invent a fallback reason."""
         with pytest.raises(ValueError, match="requires a stamped causal reason"):
             _value_point(
-                _m(0),
-                {("I1", "shard-I1"): _Pool(position_qty=1.0, entry_price=None)},
-                {"I1": (("I1", "shard-I1"),)},
-                {},
-                {("I1", _m(0)): 100.0},
-                ["I1"],
-                [],
-                {},
-                {},
-                {},
-                {},
-                {},
-                {},
-                0.0,
-                0.0,
-                0.0,
-                None,
-                (),
-                {},
-                {},
-                {},
+                _PointValuationContext(
+                    point_time=_m(0),
+                    pools={
+                        ("I1", "shard-I1"): _Pool(
+                            position_qty=1.0,
+                            entry_price=None,
+                        )
+                    },
+                    pool_index={"I1": (("I1", "shard-I1"),)},
+                    weights_by_pool={},
+                    marks={("I1", _m(0)): 100.0},
+                    seen=["I1"],
+                    attribution_seen=[],
+                    cumulatives=_PointCumulatives(
+                        realized_by_instrument={},
+                        fee_by_instrument={},
+                        accrual_by_instrument={},
+                        realized_by_attribution={},
+                        fee_by_attribution={},
+                        accrual_by_attribution={},
+                        realized_total=0.0,
+                        fee_total=0.0,
+                        accrual_total=0.0,
+                    ),
+                    activation_time=None,
+                    global_reasons=(),
+                    untrusted_reasons_by_instrument={},
+                    basis_reasons_by_pool={},
+                    mark_incompleteness_reasons={},
+                )
             )
 
 

@@ -313,12 +313,6 @@
       }
     },
     "src/snapper/application/portfolio/pnl_timeline.py": {
-      "_value_point": {
-        "C901": 36,
-        "PLR0912": 39,
-        "PLR0913": 21,
-        "PLR0915": 110
-      },
       "build_pnl_timeline": {
         "C901": 48,
         "PLR0912": 26,
