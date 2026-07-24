@@ -491,28 +491,47 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         existing: InstrumentSpec | None,
     ) -> InstrumentMetadataInput:
         """Project the existing atomic metadata block without refreshing it."""
+        if existing is None:
+            return InstrumentMetadataInput(
+                tick_size=None,
+                lot_size=None,
+                min_order_size=None,
+                max_order_size=None,
+                cost_decimals=None,
+                qty_decimals=None,
+                margin_initial=None,
+                position_limit_long=None,
+                position_limit_short=None,
+                status=None,
+                contract_size=None,
+                quantity_unit=None,
+                spec_source=None,
+                spec_version=None,
+                spec_observed_at=None,
+                unit_certified=False,
+            )
         quantity_unit: Literal["base_asset", "contract_count"] | None = None
-        if existing is not None and existing.quantity_unit == "base_asset":
+        if existing.quantity_unit == "base_asset":
             quantity_unit = "base_asset"
-        elif existing is not None and existing.quantity_unit == "contract_count":
+        elif existing.quantity_unit == "contract_count":
             quantity_unit = "contract_count"
         return InstrumentMetadataInput(
-            tick_size=existing.tick_size if existing else None,
-            lot_size=existing.lot_size if existing else None,
-            min_order_size=existing.min_order_size if existing else None,
-            max_order_size=existing.max_order_size if existing else None,
-            cost_decimals=existing.cost_decimals if existing else None,
-            qty_decimals=existing.qty_decimals if existing else None,
-            margin_initial=existing.margin_initial if existing else None,
-            position_limit_long=existing.position_limit_long if existing else None,
-            position_limit_short=existing.position_limit_short if existing else None,
-            status=existing.status if existing else None,
-            contract_size=existing.contract_size if existing else None,
+            tick_size=existing.tick_size,
+            lot_size=existing.lot_size,
+            min_order_size=existing.min_order_size,
+            max_order_size=existing.max_order_size,
+            cost_decimals=existing.cost_decimals,
+            qty_decimals=existing.qty_decimals,
+            margin_initial=existing.margin_initial,
+            position_limit_long=existing.position_limit_long,
+            position_limit_short=existing.position_limit_short,
+            status=existing.status,
+            contract_size=existing.contract_size,
             quantity_unit=quantity_unit,
-            spec_source=existing.spec_source if existing else None,
-            spec_version=existing.spec_version if existing else None,
-            spec_observed_at=existing.spec_observed_at if existing else None,
-            unit_certified=existing.unit_certified if existing else False,
+            spec_source=existing.spec_source,
+            spec_version=existing.spec_version,
+            spec_observed_at=existing.spec_observed_at,
+            unit_certified=existing.unit_certified,
         )
 
     @staticmethod

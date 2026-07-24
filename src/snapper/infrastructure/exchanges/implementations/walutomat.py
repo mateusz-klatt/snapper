@@ -564,6 +564,27 @@ def _parse_walutomat_history_item(row: dict[str, Any]) -> VenueAccountHistoryIte
     )
 
 
+def _append_history_page(
+    rows: list[VenueAccountHistoryItem],
+    page: list[VenueAccountHistoryItem],
+    cursor: int,
+    upto_item_id: int,
+) -> tuple[int, bool] | None:
+    """Append one monotone page and report whether it crossed the upper bound."""
+    for item in page:
+        if item.item_id <= cursor:
+            logger.warning(
+                f"Walutomat history range: item id {item.item_id} did not advance "
+                f"past cursor {cursor} — refusing the unfaithful walk"
+            )
+            return None
+        if item.item_id > upto_item_id:
+            return cursor, True
+        rows.append(item)
+        cursor = item.item_id
+    return cursor, False
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -2093,18 +2114,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
             if not isinstance(payload, list):
                 raise ValueError("Walutomat account history result is not a list")
             page = [_parse_walutomat_history_item(row) for row in payload]
-            for item in page:
-                if item.item_id <= cursor:
-                    logger.warning(
-                        f"Walutomat history range: item id {item.item_id} did not advance "
-                        f"past cursor {cursor} — refusing the unfaithful walk"
-                    )
-                    return None
-                if item.item_id > upto_item_id:
-                    return tuple(rows)
-                rows.append(item)
-                cursor = item.item_id
-            if len(page) < item_limit or cursor >= upto_item_id:
+            progress = _append_history_page(rows, page, cursor, upto_item_id)
+            if progress is None:
+                return None
+            cursor, crossed_upper_bound = progress
+            if crossed_upper_bound or len(page) < item_limit or cursor >= upto_item_id:
                 return tuple(rows)
         return tuple(rows)
 

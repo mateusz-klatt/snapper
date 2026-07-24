@@ -203,6 +203,18 @@ class _PrewarmTarget:
     instrument_public_id: str
 
 
+@dataclass(slots=True)
+class _PrewarmRun:
+    """Mutable progress shared by the two bounded prewarm passes."""
+
+    targets: list[_PrewarmTarget]
+    as_of: datetime
+    semaphore: asyncio.Semaphore
+    budget: _PrewarmBudget
+    counts: dict[tuple[AllExchange, str], int]
+    raised: set[tuple[AllExchange, str]]
+
+
 @dataclass(frozen=True, slots=True)
 class PairStats:
     """Computed Pearson + Engle-Granger cointegration for a pair of legs.
@@ -507,36 +519,20 @@ class MarketCacheService:
         started = asyncio.get_event_loop().time()
         as_of = datetime.now(UTC)
         targets, unresolved, skipped_exchanges = await self._collect_prewarm_targets(as_of)
-        semaphore = asyncio.Semaphore(_PREWARM_MAX_CONCURRENCY)
-        budget = _PrewarmBudget(deadline=started + _PREWARM_DEADLINE_S)
-        counts: dict[tuple[AllExchange, str], int] = {}
-        raised: set[tuple[AllExchange, str]] = set()
+        run = _PrewarmRun(
+            targets=targets,
+            as_of=as_of,
+            semaphore=asyncio.Semaphore(_PREWARM_MAX_CONCURRENCY),
+            budget=_PrewarmBudget(deadline=started + _PREWARM_DEADLINE_S),
+            counts={},
+            raised=set(),
+        )
         for open_at_floor in (as_of - _PREWARM_LOOKBACK, None):
-            pending = [
-                target
-                for target in targets
-                if counts.get((target.exchange, target.native_symbol), 0) < _CACHE_CANDLE_LIMIT
-            ]
-            if not pending or budget.exhausted(asyncio.get_event_loop().time()):
+            if not await self._run_prewarm_pass(run, open_at_floor):
                 break
-            slices = [
-                pending[index : index + _PREWARM_INSTRUMENT_SLICE]
-                for index in range(0, len(pending), _PREWARM_INSTRUMENT_SLICE)
-            ]
-            results = await asyncio.gather(
-                *(
-                    self._prewarm_slice(chunk, as_of, open_at_floor, semaphore, budget)
-                    for chunk in slices
-                )
-            )
-            for result in results:
-                for key, (outcome, count) in result.items():
-                    counts[key] = max(counts.get(key, 0), count)
-                    if outcome == "failed":
-                        raised.add(key)
-        warmed = sum(1 for count in counts.values() if count)
-        empty = sum(1 for key, count in counts.items() if not count and key not in raised)
-        failed = sum(1 for key, count in counts.items() if not count and key in raised)
+        warmed = sum(1 for count in run.counts.values() if count)
+        empty = sum(1 for key, count in run.counts.items() if not count and key not in run.raised)
+        failed = sum(1 for key, count in run.counts.items() if not count and key in run.raised)
         elapsed = asyncio.get_event_loop().time() - started
         logger.info(
             "MarketCacheService prewarm complete: {} warmed, {} empty, {} unresolved, "
@@ -555,6 +551,42 @@ class MarketCacheService:
                 failed,
                 skipped_exchanges,
             )
+
+    async def _run_prewarm_pass(
+        self,
+        run: _PrewarmRun,
+        open_at_floor: datetime | None,
+    ) -> bool:
+        """Run one floored or unbounded prewarm pass when work remains."""
+        pending = [
+            target
+            for target in run.targets
+            if run.counts.get((target.exchange, target.native_symbol), 0) < _CACHE_CANDLE_LIMIT
+        ]
+        if not pending or run.budget.exhausted(asyncio.get_event_loop().time()):
+            return False
+        slices = [
+            pending[index : index + _PREWARM_INSTRUMENT_SLICE]
+            for index in range(0, len(pending), _PREWARM_INSTRUMENT_SLICE)
+        ]
+        results = await asyncio.gather(
+            *(
+                self._prewarm_slice(
+                    chunk,
+                    run.as_of,
+                    open_at_floor,
+                    run.semaphore,
+                    run.budget,
+                )
+                for chunk in slices
+            )
+        )
+        for result in results:
+            for key, (outcome, count) in result.items():
+                run.counts[key] = max(run.counts.get(key, 0), count)
+                if outcome == "failed":
+                    run.raised.add(key)
+        return True
 
     async def _collect_prewarm_targets(
         self, as_of: datetime
