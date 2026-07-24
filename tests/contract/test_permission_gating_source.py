@@ -198,33 +198,6 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     AllowedFinding(
         FindingSignature(
             "frontend",
-            "src/features/admin/UserManagement/UserForm.tsx",
-            "role-comparison",
-            "if (formData.role === 'viewer') {",
-        ),
-        "selected role description in the user-management form",
-    ),
-    AllowedFinding(
-        FindingSignature(
-            "frontend",
-            "src/features/admin/UserManagement/UserForm.tsx",
-            "role-comparison",
-            "} else if (formData.role === 'operator') {",
-        ),
-        "selected role description in the user-management form",
-    ),
-    AllowedFinding(
-        FindingSignature(
-            "frontend",
-            "src/features/admin/UserManagement/UserForm.tsx",
-            "role-comparison",
-            "} else if (formData.role === 'admin') {",
-        ),
-        "selected role description in the user-management form",
-    ),
-    AllowedFinding(
-        FindingSignature(
-            "frontend",
             "src/features/admin/UserManagement/UserList.tsx",
             "role-switch",
             "switch (role) {",
