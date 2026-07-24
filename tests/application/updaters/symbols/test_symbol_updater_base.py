@@ -214,6 +214,20 @@ def test_get_last_update_timestamp_returns_none_when_missing(
     assert updater.get_last_update_timestamp_public() is None
 
 
+def test_get_last_update_timestamp_returns_none_without_repository(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Verify an uninitialized repository makes the timestamp unavailable.
+
+    Given: Updater whose repository has not been initialized,
+    When: get_last_update_timestamp is called,
+    Then: None is returned.
+    """
+    updater = updater_factory(3, False)
+    updater.repository = None
+    assert updater.get_last_update_timestamp_public() is None
+
+
 @pytest.mark.asyncio
 async def test_set_last_update_timestamp_creates_setting(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],

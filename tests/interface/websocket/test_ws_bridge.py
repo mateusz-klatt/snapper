@@ -463,6 +463,27 @@ async def test_start_zmq_subscriber_unknown_topic(
 
 
 @pytest.mark.asyncio
+async def test_start_zmq_subscriber_without_context_is_fail_closed(
+    bridge: ZmqWebSocketBridgeService,
+) -> None:
+    """Start ZMQ subscriber fails closed before bridge startup.
+
+    Given: A configured topic but no initialized ZMQ context,
+    When: Starting a subscriber,
+    Then: The failure is logged and no socket or task is tracked.
+    """
+    topic = "market."
+    bridge.context = None
+    with patch("snapper.interface.websocket.bridge.logger") as mock_logger:
+        await bridge.start_zmq_subscriber(topic)
+    assert topic not in bridge.zmq_subscribers
+    assert topic not in bridge.subscriber_tasks
+    mock_logger.exception.assert_called_once_with(
+        f"Failed to start ZMQ subscriber for {topic}: ZMQ context must be initialized in start()"
+    )
+
+
+@pytest.mark.asyncio
 async def test_start_zmq_subscription_missing_pattern(
     bridge: ZmqWebSocketBridgeService,
 ) -> None:

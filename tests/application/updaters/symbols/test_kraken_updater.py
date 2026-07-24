@@ -3067,6 +3067,20 @@ class TestKrakenExtractCcxtMarginField:
         assert metadata.spec_observed_at == observed_at
         assert metadata.unit_certified is False
 
+    def test_inactive_market_produces_inactive_metadata(self) -> None:
+        """An explicitly inactive CCXT market remains inactive in metadata."""
+        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair(
+            "BTC/USD",
+            {
+                "id": "XXBTZUSD",
+                "base": "BTC",
+                "quote": "USD",
+                "active": False,
+            },
+        )
+        assert result is not None
+        assert result["metadata"].status == "inactive"
+
     def test_changed_precision_changes_version_and_invalid_values_fail_closed(self) -> None:
         """Content versions track precision while malformed values remain explicit NULLs."""
         observed_at = datetime(2026, 7, 14, tzinfo=UTC)

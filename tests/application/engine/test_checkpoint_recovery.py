@@ -2317,6 +2317,34 @@ class TestDurableExecutionLineage:
         )
         assert coord4._recovery_certification_failed is True
 
+    def test_malformed_durable_execution_lineage_fails_certification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed durable execution lineage is rejected and quarantined.
+
+        Given: a durable lineage record whose shard key cannot be parsed,
+        When: execution recovery resolves the row's lineage,
+        Then: the row is rejected and projection certification fails closed.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        execution = cast(
+            ExecutionRow,
+            {
+                "instrument": "BTC-USD",
+                "exchange": "kraken",
+            },
+        )
+
+        result = coord._resolve_execution_recovery_lineage(
+            execution,
+            ("malformed-shard-key", wallet),
+            wallet,
+        )
+
+        assert result is None
+        assert coord._recovery_certification_failed is True
+
     @pytest.mark.asyncio
     async def test_engine_divergence_records_both_and_skips_replay(
         self, monkeypatch: pytest.MonkeyPatch
