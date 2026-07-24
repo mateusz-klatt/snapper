@@ -10472,7 +10472,7 @@ class SQLAlchemyRepository(Repository):
             anchor["external_flow_adjustment"],
         )
         if any(
-            not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value) or value != 0.0
+            not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value) or abs(value) > 0.0
             for value in zero_components
         ):
             raise ValueError("portfolio P&L anchor cumulative components must be finite zero")
@@ -10959,7 +10959,7 @@ class SQLAlchemyRepository(Repository):
         for field_name, value in finite_components:
             if not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value):
                 raise ValueError(f"portfolio P&L sample {field_name} must be finite")
-        if sample["external_flow_adjustment"] != 0.0:
+        if abs(sample["external_flow_adjustment"]) > 0.0:
             raise ValueError("portfolio P&L sample external_flow_adjustment must be 0.0 in v1")
 
     @staticmethod
@@ -11124,7 +11124,14 @@ class SQLAlchemyRepository(Repository):
         observations = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "observations")
         if not observations:
             raise ValueError("portfolio P&L complete sample audit observations must be non-empty")
-        empty_basket = sample["cash_usd"] == 0.0 and sample["position_value_usd"] == 0.0
+        cash_usd = sample["cash_usd"]
+        position_value_usd = sample["position_value_usd"]
+        empty_basket = (
+            cash_usd is not None
+            and position_value_usd is not None
+            and abs(cash_usd) <= 0.0
+            and abs(position_value_usd) <= 0.0
+        )
         if not valuation and not empty_basket:
             raise ValueError("portfolio P&L complete sample audit valuation must be non-empty")
         SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)

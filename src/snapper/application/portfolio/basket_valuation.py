@@ -361,7 +361,7 @@ def value_currency(
         A :class:`ValuedLeg` with a finite USD value and provenance, a
         currency-invariant zero, or a withheld value with a typed reason.
     """
-    if qty == 0.0:
+    if abs(qty) <= 0.0:
         return ValuedLeg(usd_value=0.0, provenance=None, reason=None)
     if not math.isfinite(qty):
         return ValuedLeg(usd_value=None, provenance=None, reason="non_finite")
@@ -458,7 +458,7 @@ def _eligible_long_quantities(
     for entry in positions:
         quantity = entry.quantity
         key = (entry.exchange, entry.base_currency)
-        if quantity == 0.0:
+        if abs(quantity) <= 0.0:
             continue
         leveraged_entry = entry.is_spot_margin or quantity < 0.0
         if leveraged_entry:
