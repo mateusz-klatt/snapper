@@ -140,6 +140,7 @@ from collections.abc import Hashable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from heapq import heappop
@@ -456,128 +457,13 @@ def derive_timeline_opening(
         ValueError: When temporal, ordering, shard scope, side, numeric, price
             provenance, surviving basis, mark, or valuation evidence is unsafe.
     """
-    if t0.utcoffset() != timedelta(0) or t0.second != 0 or t0.microsecond != 0:
-        raise ValueError("opening t0 must be aligned to a UTC minute")
-    resolved_untrusted_reasons = (
-        {}
-        if untrusted_price_reasons_by_instrument is None
-        else untrusted_price_reasons_by_instrument
-    )
-    pools: dict[PoolKey, _Pool] = {}
-    last_scope_sequence_by_exchange: dict[str, int] = {}
-    exchange_by_instrument: dict[str, str] = {}
-    scope_by_shard: dict[str, tuple[str, str]] = {}
+    _validate_opening_time(t0)
+    state = _OpeningReplayState()
+    untrusted_reasons = untrusted_price_reasons_by_instrument or {}
     for execution in executions:
-        instrument_public_id = execution.instrument_public_id
-        if not instrument_public_id:
-            raise ValueError("opening execution instrument identity must be non-empty")
-        if not execution.shard_key:
-            raise ValueError("opening execution shard identity must be non-empty")
-        if not execution.exchange:
-            raise ValueError("opening execution exchange identity must be non-empty")
-        previous_scope_sequence = last_scope_sequence_by_exchange.get(execution.exchange)
-        if execution.scope_sequence <= 0 or (
-            previous_scope_sequence is not None
-            and execution.scope_sequence <= previous_scope_sequence
-        ):
-            raise ValueError("opening executions must have increasing positive scope sequences")
-        last_scope_sequence_by_exchange[execution.exchange] = execution.scope_sequence
-        previous_exchange = exchange_by_instrument.setdefault(
-            instrument_public_id,
-            execution.exchange,
-        )
-        if previous_exchange != execution.exchange:
-            raise ValueError("one opening instrument cannot span multiple exchanges")
-        shard_scope = (instrument_public_id, execution.exchange)
-        previous_scope = scope_by_shard.setdefault(execution.shard_key, shard_scope)
-        if previous_scope != shard_scope:
-            raise ValueError("one opening shard cannot span instrument or exchange scopes")
-        if execution.side not in {"buy", "sell"}:
-            raise ValueError("opening execution side must be buy or sell")
-        if not math.isfinite(execution.size) or execution.size < 0.0:
-            raise ValueError("opening execution size must be non-negative and finite")
-        if not math.isfinite(execution.position_delta):
-            raise ValueError("opening execution position delta must be finite")
-        if execution.side == "buy" and execution.position_delta < 0.0:
-            raise ValueError("opening execution position delta must agree with side")
-        if execution.side == "sell" and execution.position_delta > 0.0:
-            raise ValueError("opening execution position delta must agree with side")
-        if resolved_untrusted_reasons.get(instrument_public_id):
-            raise ValueError("opening execution price provenance must be trusted")
-        if execution.position_delta == 0.0:
-            continue
-        if execution.price_incompleteness_reason is not None:
-            raise ValueError("opening execution price provenance must be trusted")
-        if not is_positive_finite(execution.price):
-            raise ValueError("opening execution price must be positive and finite")
-        pool_key = (instrument_public_id, execution.shard_key)
-        pool = pools.get(pool_key, _Pool(0.0, None))
-        outcome = apply_fill(
-            pool.position_qty,
-            pool.entry_price,
-            execution.position_delta,
-            abs(execution.position_delta),
-            execution.price,
-        )
-        if not math.isfinite(outcome.position_qty):
-            raise ValueError("opening position quantity arithmetic must remain finite")
-        if abs(outcome.position_qty) >= FLAT_EPSILON and not is_positive_finite(
-            outcome.entry_price
-        ):
-            raise ValueError("opening cost basis arithmetic must remain positive and finite")
-        pools[pool_key] = _Pool(outcome.position_qty, outcome.entry_price)
-
-    valuations: list[OpeningPoolValuation] = []
-    opening_pools: list[OpeningPool] = []
-    for instrument_public_id, shard_key in sorted(pools):
-        pool = pools[(instrument_public_id, shard_key)]
-        if abs(pool.position_qty) < FLAT_EPSILON:
-            continue
-        mark = t0_marks.get(instrument_public_id)
-        if not is_positive_finite(mark):
-            raise ValueError("surviving opening pool requires a positive finite t0 mark")
-        entry_price = cast(float, pool.entry_price)
-        resolved_mark = mark
-        unrealized = pool.position_qty * (resolved_mark - entry_price)
-        if not math.isfinite(unrealized):
-            raise ValueError("opening pool unrealized value must be finite")
-        exchange = scope_by_shard[shard_key][1]
-        opening_pools.append(
-            OpeningPool(
-                instrument_public_id=instrument_public_id,
-                shard_key=shard_key,
-                exchange=exchange,
-                position_qty=pool.position_qty,
-                entry_price=resolved_mark,
-            )
-        )
-        valuations.append(
-            OpeningPoolValuation(
-                instrument_public_id=instrument_public_id,
-                shard_key=shard_key,
-                exchange=exchange,
-                position_qty=pool.position_qty,
-                historical_entry_price=entry_price,
-                t0_mark=resolved_mark,
-                opening_unrealized_value=unrealized,
-            )
-        )
-    try:
-        raw_opening_unrealized_value = math.fsum(
-            valuation.opening_unrealized_value for valuation in valuations
-        )
-    except OverflowError as error:
-        raise ValueError("opening total unrealized value must be finite") from error
-    if not math.isfinite(raw_opening_unrealized_value):
-        raise ValueError("opening total unrealized value must be finite")
-    return TimelineOpeningDerivation(
-        opening=TimelineOpening(
-            pools=tuple(opening_pools),
-            t0=t0,
-        ),
-        per_pool=tuple(valuations),
-        raw_opening_unrealized_value=raw_opening_unrealized_value,
-    )
+        _validate_opening_execution(state, execution, untrusted_reasons)
+        _apply_opening_execution(state, execution)
+    return _build_opening_derivation(state, t0_marks, t0)
 
 
 @dataclass(frozen=True)
@@ -755,6 +641,190 @@ class _Pool:
 
     position_qty: float
     entry_price: float | None
+
+
+@dataclass
+class _OpeningReplayState:
+    """Mutable accounting and identity state for activation-prefix replay."""
+
+    pools: dict[PoolKey, _Pool] = field(default_factory=dict)
+    last_scope_sequence_by_exchange: dict[str, int] = field(default_factory=dict)
+    exchange_by_instrument: dict[str, str] = field(default_factory=dict)
+    scope_by_shard: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+def _is_exactly_zero(value: float) -> bool:
+    """Return whether a float is exactly zero without widening tolerance."""
+    return math.isclose(value, 0.0, rel_tol=0.0, abs_tol=0.0)
+
+
+def _validate_opening_time(t0: datetime) -> None:
+    """Require the activation anchor to be one UTC grid minute."""
+    if t0.utcoffset() != timedelta(0) or t0.second != 0 or t0.microsecond != 0:
+        raise ValueError("opening t0 must be aligned to a UTC minute")
+
+
+def _validate_opening_execution_identity(
+    state: _OpeningReplayState,
+    execution: TimelineExecution,
+) -> None:
+    """Validate and record one prefix execution's durable scope ordering."""
+    instrument_public_id = execution.instrument_public_id
+    if not instrument_public_id:
+        raise ValueError("opening execution instrument identity must be non-empty")
+    if not execution.shard_key:
+        raise ValueError("opening execution shard identity must be non-empty")
+    if not execution.exchange:
+        raise ValueError("opening execution exchange identity must be non-empty")
+    previous_scope_sequence = state.last_scope_sequence_by_exchange.get(execution.exchange)
+    if execution.scope_sequence <= 0 or (
+        previous_scope_sequence is not None and execution.scope_sequence <= previous_scope_sequence
+    ):
+        raise ValueError("opening executions must have increasing positive scope sequences")
+    state.last_scope_sequence_by_exchange[execution.exchange] = execution.scope_sequence
+    previous_exchange = state.exchange_by_instrument.setdefault(
+        instrument_public_id,
+        execution.exchange,
+    )
+    if previous_exchange != execution.exchange:
+        raise ValueError("one opening instrument cannot span multiple exchanges")
+    shard_scope = (instrument_public_id, execution.exchange)
+    previous_scope = state.scope_by_shard.setdefault(execution.shard_key, shard_scope)
+    if previous_scope != shard_scope:
+        raise ValueError("one opening shard cannot span instrument or exchange scopes")
+
+
+def _validate_opening_execution_values(
+    execution: TimelineExecution,
+    untrusted_price_reasons_by_instrument: Mapping[
+        str,
+        Collection[PnlIncompletenessReason],
+    ],
+) -> None:
+    """Reject unsafe side, quantity, and caller-stamped price evidence."""
+    if execution.side not in {"buy", "sell"}:
+        raise ValueError("opening execution side must be buy or sell")
+    if not math.isfinite(execution.size) or execution.size < 0.0:
+        raise ValueError("opening execution size must be non-negative and finite")
+    if not math.isfinite(execution.position_delta):
+        raise ValueError("opening execution position delta must be finite")
+    if execution.side == "buy" and execution.position_delta < 0.0:
+        raise ValueError("opening execution position delta must agree with side")
+    if execution.side == "sell" and execution.position_delta > 0.0:
+        raise ValueError("opening execution position delta must agree with side")
+    if untrusted_price_reasons_by_instrument.get(execution.instrument_public_id):
+        raise ValueError("opening execution price provenance must be trusted")
+
+
+def _validate_opening_execution(
+    state: _OpeningReplayState,
+    execution: TimelineExecution,
+    untrusted_price_reasons_by_instrument: Mapping[
+        str,
+        Collection[PnlIncompletenessReason],
+    ],
+) -> None:
+    """Validate one activation-prefix execution without mutating pool math."""
+    _validate_opening_execution_identity(state, execution)
+    _validate_opening_execution_values(
+        execution,
+        untrusted_price_reasons_by_instrument,
+    )
+
+
+def _apply_opening_execution(
+    state: _OpeningReplayState,
+    execution: TimelineExecution,
+) -> None:
+    """Replay one validated non-zero prefix execution through average cost."""
+    if _is_exactly_zero(execution.position_delta):
+        return
+    if execution.price_incompleteness_reason is not None:
+        raise ValueError("opening execution price provenance must be trusted")
+    if not is_positive_finite(execution.price):
+        raise ValueError("opening execution price must be positive and finite")
+    pool_key = (execution.instrument_public_id, execution.shard_key)
+    pool = state.pools.get(pool_key, _Pool(0.0, None))
+    outcome = apply_fill(
+        pool.position_qty,
+        pool.entry_price,
+        execution.position_delta,
+        abs(execution.position_delta),
+        execution.price,
+    )
+    if not math.isfinite(outcome.position_qty):
+        raise ValueError("opening position quantity arithmetic must remain finite")
+    if abs(outcome.position_qty) >= FLAT_EPSILON and not is_positive_finite(outcome.entry_price):
+        raise ValueError("opening cost basis arithmetic must remain positive and finite")
+    state.pools[pool_key] = _Pool(outcome.position_qty, outcome.entry_price)
+
+
+def _opening_pool_valuation(
+    state: _OpeningReplayState,
+    pool_key: PoolKey,
+    t0_marks: OpeningMarkMap,
+) -> tuple[OpeningPool, OpeningPoolValuation] | None:
+    """Build one surviving rebased opening pool and historical audit value."""
+    instrument_public_id, shard_key = pool_key
+    pool = state.pools[pool_key]
+    if abs(pool.position_qty) < FLAT_EPSILON:
+        return None
+    mark = t0_marks.get(instrument_public_id)
+    if not is_positive_finite(mark):
+        raise ValueError("surviving opening pool requires a positive finite t0 mark")
+    entry_price = cast(float, pool.entry_price)
+    resolved_mark = cast(float, mark)
+    unrealized = pool.position_qty * (resolved_mark - entry_price)
+    if not math.isfinite(unrealized):
+        raise ValueError("opening pool unrealized value must be finite")
+    exchange = state.scope_by_shard[shard_key][1]
+    opening_pool = OpeningPool(
+        instrument_public_id=instrument_public_id,
+        shard_key=shard_key,
+        exchange=exchange,
+        position_qty=pool.position_qty,
+        entry_price=resolved_mark,
+    )
+    valuation = OpeningPoolValuation(
+        instrument_public_id=instrument_public_id,
+        shard_key=shard_key,
+        exchange=exchange,
+        position_qty=pool.position_qty,
+        historical_entry_price=entry_price,
+        t0_mark=resolved_mark,
+        opening_unrealized_value=unrealized,
+    )
+    return opening_pool, valuation
+
+
+def _build_opening_derivation(
+    state: _OpeningReplayState,
+    t0_marks: OpeningMarkMap,
+    t0: datetime,
+) -> TimelineOpeningDerivation:
+    """Build the deterministic opening and exact aggregate audit value."""
+    valuations: list[OpeningPoolValuation] = []
+    opening_pools: list[OpeningPool] = []
+    for pool_key in sorted(state.pools):
+        resolved = _opening_pool_valuation(state, pool_key, t0_marks)
+        if resolved is None:
+            continue
+        opening_pool, valuation = resolved
+        opening_pools.append(opening_pool)
+        valuations.append(valuation)
+    try:
+        raw_opening_unrealized_value = math.fsum(
+            valuation.opening_unrealized_value for valuation in valuations
+        )
+    except OverflowError as error:
+        raise ValueError("opening total unrealized value must be finite") from error
+    if not math.isfinite(raw_opening_unrealized_value):
+        raise ValueError("opening total unrealized value must be finite")
+    return TimelineOpeningDerivation(
+        opening=TimelineOpening(pools=tuple(opening_pools), t0=t0),
+        per_pool=tuple(valuations),
+        raw_opening_unrealized_value=raw_opening_unrealized_value,
+    )
 
 
 @dataclass(frozen=True)
@@ -997,7 +1067,7 @@ def _values_with_residue[KeyT: Hashable](
         Reconciled values, or ``None`` when exact float reconciliation fails.
     """
     if not keys:
-        return {} if total == 0.0 else None
+        return {} if _is_exactly_zero(total) else None
     reconciled: dict[KeyT, float] = {}
     for key in keys[:-1]:
         reconciled[key] = values.get(key, 0.0)
@@ -1187,7 +1257,7 @@ def _position_changes_by_effective_time(
     """Index only in-window position changes for accrual ambiguity checks."""
     changing: defaultdict[datetime, set[str]] = defaultdict(set)
     for item in prepared:
-        if item.effective_time <= to_time and item.execution.position_delta != 0.0:
+        if item.effective_time <= to_time and not _is_exactly_zero(item.execution.position_delta):
             changing[item.effective_time].add(item.execution.instrument_public_id)
     return changing
 
@@ -1908,7 +1978,7 @@ def build_pnl_timeline(
         pool = pools.get(pool_key, _Pool(0.0, None))
         pre_fill_weights = dict(weights_by_pool.get(pool_key, {}))
         pre_fill_basis_reasons = set(basis_reasons_by_pool.get(pool_key, ()))
-        price_is_trusted = position_size == 0.0 or is_positive_finite(execution.price)
+        price_is_trusted = _is_exactly_zero(position_size) or is_positive_finite(execution.price)
         outcome = apply_fill(
             pool.position_qty,
             pool.entry_price,

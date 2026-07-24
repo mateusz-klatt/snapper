@@ -329,11 +329,6 @@
         "C901": 19,
         "PLR0912": 20,
         "PLR0915": 72
-      },
-      "derive_timeline_opening": {
-        "C901": 26,
-        "PLR0912": 25,
-        "PLR0915": 74
       }
     },
     "src/snapper/application/portfolio/pnl_timeline_service.py": {
