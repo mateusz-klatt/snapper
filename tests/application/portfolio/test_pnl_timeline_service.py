@@ -37,6 +37,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
+from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _opening_mark_requirements
 from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
@@ -5517,6 +5518,20 @@ class TestAnchorEvidenceDefenses:
             _T0,
         )
         assert requirements == {_I1: {("EUR", "USD"): {_T0}}}
+
+    def test_event_fx_requirements_stop_accruals_after_invalid_execution(self) -> None:
+        """An invalid execution suppresses later accrual FX but not earlier evidence."""
+        requirements = _event_fx_minutes(
+            [_exec_row(_I1, 1, 0, "buy", -1.0, 100.0, 0.0, "USD")],
+            [
+                _accrual_row(_I1, -1, 3.0, "EUR"),
+                _accrual_row(_I1, 1, 4.0, "EUR"),
+            ],
+            {_I1: "BTC"},
+            {_I1: "USD"},
+            "USD",
+        )
+        assert requirements == {_I1: {("EUR", "USD"): {_m(-1)}}}
 
     @pytest.mark.parametrize(
         ("opening_pools", "contribution_pools", "native_basket", "raw", "message"),

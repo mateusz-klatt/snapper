@@ -43,7 +43,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
-from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
@@ -434,13 +433,13 @@ def _validated_anchor_raw_unrealized(row: PortfolioPnlAnchorRow) -> float:
         or row["calc_version"] != PNL_TIMELINE_CALC_VERSION
         or row["valuation_status"] != "complete"
         or type(row["realized_pnl"]) is not float
-        or row["realized_pnl"] != 0.0
+        or not _is_exact_zero(row["realized_pnl"])
         or type(row["fee_pnl"]) is not float
-        or row["fee_pnl"] != 0.0
+        or not _is_exact_zero(row["fee_pnl"])
         or type(row["accrual_pnl"]) is not float
-        or row["accrual_pnl"] != 0.0
+        or not _is_exact_zero(row["accrual_pnl"])
         or type(row["external_flow_adjustment"]) is not float
-        or row["external_flow_adjustment"] != 0.0
+        or not _is_exact_zero(row["external_flow_adjustment"])
         or row["cash_usd"] is not None
         or row["position_value_usd"] is not None
         or row["drawdown"] is not None
@@ -790,6 +789,11 @@ def _rate_minute(moment: datetime) -> datetime:
     return moment.replace(second=0, microsecond=0)
 
 
+def _is_exact_zero(value: float) -> bool:
+    """Return whether a floating-point value is exactly positive or negative zero."""
+    return math.isclose(value, 0.0, rel_tol=0.0, abs_tol=0.0)
+
+
 def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
     """Fold FX candle rows into the plane-qualified minute rate map.
 
@@ -866,7 +870,7 @@ def _to_timeline_execution(
     fee_incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["fee"])
-        and row["fee"] != 0.0
+        and not _is_exact_zero(row["fee"])
         and row["fee_asset"] != valuation_ccy
         and converted_fee is None
         else None
@@ -984,7 +988,7 @@ def _to_timeline_accrual(
     incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["amount"])
-        and row["amount"] != 0.0
+        and not _is_exact_zero(row["amount"])
         and row["amount_asset"] != valuation_ccy
         and converted is None
         else None
@@ -1076,10 +1080,14 @@ def _with_instrument_display_identity(
     Returns:
         The contribution with only its display metadata replaced.
     """
-    return replace(
-        contribution,
+    return PnlInstrumentContribution(
+        instrument_public_id=contribution.instrument_public_id,
         native_symbol=None if identity is None else identity[0],
         exchange=None if identity is None else identity[1],
+        realized_pnl=contribution.realized_pnl,
+        fee_pnl=contribution.fee_pnl,
+        accrual_pnl=contribution.accrual_pnl,
+        unrealized_pnl=contribution.unrealized_pnl,
     )
 
 
@@ -1141,19 +1149,38 @@ def _with_instrument_display_identities(
         The same series values and causes with nullable contribution identities.
     """
     points = tuple(
-        replace(
-            point,
-            per_instrument=tuple(
-                _with_instrument_display_identity(
-                    contribution,
-                    identities.get(contribution.instrument_public_id),
-                )
-                for contribution in point.per_instrument
-            ),
-        )
-        for point in result.points
+        _with_point_instrument_display_identities(point, identities) for point in result.points
     )
-    return replace(result, points=points)
+    return PnlTimelineResult(
+        points=points,
+        granularity=result.granularity,
+        valuation_ccy=result.valuation_ccy,
+    )
+
+
+def _with_point_instrument_display_identities(
+    point: PnlTimelinePoint,
+    identities: Mapping[str, tuple[str, str]],
+) -> PnlTimelinePoint:
+    """Attach proven display identities to one immutable timeline point."""
+    return PnlTimelinePoint(
+        point_time=point.point_time,
+        realized_pnl=point.realized_pnl,
+        fee_pnl=point.fee_pnl,
+        accrual_pnl=point.accrual_pnl,
+        unrealized_pnl=point.unrealized_pnl,
+        net_pnl=point.net_pnl,
+        valuation_status=point.valuation_status,
+        incompleteness_reasons=point.incompleteness_reasons,
+        per_instrument=tuple(
+            _with_instrument_display_identity(
+                contribution,
+                identities.get(contribution.instrument_public_id),
+            )
+            for contribution in point.per_instrument
+        ),
+        attribution=point.attribution,
+    )
 
 
 async def _scope_has_fill_gap(
@@ -1599,6 +1626,29 @@ type _FxIdentityPlanes = dict[str, PnlFxRatePlane]
 type _FxPlanesByInstrument = dict[str, dict[FxPairKey, PnlFxRatePlane]]
 """Selected conversion planes keyed by consuming instrument and pair."""
 
+type _PoolKey = tuple[str, str]
+"""Durable instrument and shard identity used by replay state."""
+
+
+@dataclass(frozen=True, slots=True)
+class _EventFxContext:
+    """Immutable denomination evidence used by execution FX replay."""
+
+    base_by_instrument: Mapping[str, str]
+    quote_by_instrument: Mapping[str, str]
+    valuation_ccy: str
+
+
+@dataclass(slots=True)
+class _EventFxReplayState:
+    """Mutable position and trust state for event FX requirements."""
+
+    requirements: _FxInstrumentRequirements
+    last_effective: dict[_PoolKey, datetime]
+    position_qty: dict[_PoolKey, float]
+    basis_unknown: set[_PoolKey]
+    untrusted_at: dict[str, datetime]
+
 
 def _add_fx_minute(
     requirements: _FxInstrumentRequirements,
@@ -1620,6 +1670,130 @@ def _add_fx_minute(
         return
     pair_requirements = requirements.setdefault(instrument_public_id, {})
     pair_requirements.setdefault(currency_pair_key(currency, valuation_ccy), set()).add(minute)
+
+
+def _opening_pool_quantities(opening: TimelineOpening | None) -> dict[_PoolKey, float]:
+    """Return opening quantities keyed by their durable replay pools."""
+    if opening is None:
+        return {}
+    return {
+        (pool.instrument_public_id, pool.shard_key): pool.position_qty for pool in opening.pools
+    }
+
+
+def _next_effective_time(
+    last_effective: dict[_PoolKey, datetime],
+    pool_key: _PoolKey,
+    event_time: datetime,
+) -> datetime:
+    """Clamp one pool event monotonically and retain its new replay cursor."""
+    effective_time = max(last_effective.get(pool_key, event_time), event_time)
+    last_effective[pool_key] = effective_time
+    return effective_time
+
+
+def _record_event_position(
+    state: _EventFxReplayState,
+    pool_key: _PoolKey,
+    old_qty: float,
+    signed_size: float,
+    price_is_known_valid: bool,
+) -> None:
+    """Advance one pool quantity and its unknown-basis latch."""
+    new_qty = old_qty + signed_size
+    if abs(new_qty) < FLAT_EPSILON:
+        new_qty = 0.0
+        state.basis_unknown.discard(pool_key)
+    elif abs(signed_size) > 0.0 and not price_is_known_valid:
+        state.basis_unknown.add(pool_key)
+    state.position_qty[pool_key] = new_qty
+
+
+def _add_execution_fx_requirements(
+    state: _EventFxReplayState,
+    context: _EventFxContext,
+    row: PnlTimelineOpeningExecutionRow,
+) -> None:
+    """Replay one execution into exact FX requirements and trust state."""
+    instrument_public_id = row["instrument_public_id"]
+    pool_key = (instrument_public_id, row["shard_key"])
+    effective_time = _next_effective_time(
+        state.last_effective,
+        pool_key,
+        row["timestamp"],
+    )
+    if instrument_public_id in state.untrusted_at:
+        return
+    size = row["size"]
+    if not math.isfinite(size) or size < 0.0 or not row["shard_key"]:
+        state.untrusted_at[instrument_public_id] = effective_time
+        return
+    old_qty = state.position_qty.get(pool_key, 0.0)
+    signed_size = booked_signed_quantity(
+        row["side"],
+        size,
+        row["fee"],
+        row["fee_asset"],
+        context.base_by_instrument[instrument_public_id],
+        resolve_position_quantity_unit(row["exchange"]),
+    )
+    position_size = abs(signed_size)
+    is_increasing = (old_qty >= 0.0 and signed_size > 0.0) or (old_qty <= 0.0 and signed_size < 0.0)
+    closed_qty = 0.0 if is_increasing else min(position_size, abs(old_qty))
+    price_is_known_valid = is_positive_finite(row["price"])
+    if closed_qty > 0.0 and (not price_is_known_valid or pool_key in state.basis_unknown):
+        state.untrusted_at[instrument_public_id] = effective_time
+        return
+    minute = _rate_minute(row["timestamp"])
+    quote_currency = context.quote_by_instrument.get(instrument_public_id)
+    if (
+        quote_currency is not None
+        and not _is_exact_zero(signed_size)
+        and price_is_known_valid
+        and pool_key not in state.basis_unknown
+    ):
+        _add_fx_minute(
+            state.requirements,
+            instrument_public_id,
+            quote_currency,
+            context.valuation_ccy,
+            minute,
+        )
+    if not _is_exact_zero(row["fee"]):
+        _add_fx_minute(
+            state.requirements,
+            instrument_public_id,
+            row["fee_asset"],
+            context.valuation_ccy,
+            minute,
+        )
+    _record_event_position(
+        state,
+        pool_key,
+        old_qty,
+        signed_size,
+        price_is_known_valid,
+    )
+
+
+def _add_accrual_fx_requirement(
+    state: _EventFxReplayState,
+    valuation_ccy: str,
+    accrual: PnlTimelineAccrualRow,
+) -> None:
+    """Add one publishable nonzero accrual's exact conversion minute."""
+    if _is_exact_zero(accrual["amount"]):
+        return
+    invalid_at = state.untrusted_at.get(accrual["instrument_public_id"])
+    if invalid_at is not None and accrual["accrued_at"] >= invalid_at:
+        return
+    _add_fx_minute(
+        state.requirements,
+        accrual["instrument_public_id"],
+        accrual["amount_asset"],
+        valuation_ccy,
+        _rate_minute(accrual["accrued_at"]),
+    )
 
 
 def _event_fx_minutes(
@@ -1650,88 +1824,174 @@ def _event_fx_minutes(
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    needed: _FxInstrumentRequirements = {}
-    last_effective: dict[tuple[str, str], datetime] = {}
-    position_qty = (
-        {}
-        if opening is None
-        else {
-            (pool.instrument_public_id, pool.shard_key): pool.position_qty for pool in opening.pools
-        }
+    state = _EventFxReplayState(
+        requirements={},
+        last_effective={},
+        position_qty=_opening_pool_quantities(opening),
+        basis_unknown=set(),
+        untrusted_at={},
     )
-    basis_unknown: set[tuple[str, str]] = set()
-    untrusted_at: dict[str, datetime] = {}
+    context = _EventFxContext(
+        base_by_instrument=base_by_instrument,
+        quote_by_instrument=quote_by_instrument,
+        valuation_ccy=valuation_ccy,
+    )
+    for row in execution_rows:
+        _add_execution_fx_requirements(state, context, row)
+    for accrual in accrual_rows:
+        _add_accrual_fx_requirement(state, valuation_ccy, accrual)
+    return state.requirements
+
+
+type _EffectiveMarkEvent = tuple[datetime, str, int, str, float, bool]
+"""Monotone event time, ordering lineage, quantity delta, and invalidity."""
+
+
+@dataclass(slots=True)
+class _MarkReplayState:
+    """Mutable per-instrument position state while visiting mark minutes."""
+
+    event_index: int
+    pool_quantities: dict[str, float]
+    mark_eligible: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkFxWindow:
+    """Immutable grid bounds and global regression shadows for mark selection."""
+
+    grid_start: datetime
+    to_time: datetime
+    regression_shadows: Sequence[tuple[datetime, datetime]]
+
+
+def _mark_event_delta(
+    row: PnlTimelineOpeningExecutionRow,
+    base_asset: str,
+) -> tuple[float, bool]:
+    """Return one replay delta and whether it permanently invalidates later marks."""
+    size = row["size"]
+    if not math.isfinite(size) or size < 0.0:
+        return 0.0, True
+    signed_size = booked_signed_quantity(
+        row["side"],
+        size,
+        row["fee"],
+        row["fee_asset"],
+        base_asset,
+        resolve_position_quantity_unit(row["exchange"]),
+    )
+    invalid_price = abs(signed_size) > 0.0 and not is_positive_finite(row["price"])
+    return signed_size, invalid_price
+
+
+def _effective_mark_events(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    base_by_instrument: Mapping[str, str],
+    quote_by_instrument: Mapping[str, str],
+) -> tuple[dict[str, list[_EffectiveMarkEvent]], list[tuple[datetime, datetime]]]:
+    """Build monotone mark replay events and scope-wide regression shadows."""
+    effective_events: dict[str, list[_EffectiveMarkEvent]] = {}
+    last_effective: dict[_PoolKey, datetime] = {}
+    regression_shadows: list[tuple[datetime, datetime]] = []
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
         pool_key = (instrument_public_id, row["shard_key"])
         event_time = row["timestamp"]
-        effective_time = max(last_effective.get(pool_key, event_time), event_time)
-        last_effective[pool_key] = effective_time
-        if instrument_public_id in untrusted_at:
+        previous_effective = last_effective.get(pool_key)
+        if previous_effective is not None and event_time < previous_effective:
+            regression_shadows.append((event_time, previous_effective))
+        effective_time = _next_effective_time(last_effective, pool_key, event_time)
+        if instrument_public_id not in quote_by_instrument:
             continue
-        size = row["size"]
-        if not math.isfinite(size) or size < 0.0 or not row["shard_key"]:
-            untrusted_at[instrument_public_id] = effective_time
-            continue
-        old_qty = position_qty.get(pool_key, 0.0)
-        signed_size = booked_signed_quantity(
-            row["side"],
-            size,
-            row["fee"],
-            row["fee_asset"],
+        signed_size, invalid_event = _mark_event_delta(
+            row,
             base_by_instrument[instrument_public_id],
-            resolve_position_quantity_unit(row["exchange"]),
         )
-        position_size = abs(signed_size)
-        is_increasing = (old_qty >= 0.0 and signed_size > 0.0) or (
-            old_qty <= 0.0 and signed_size < 0.0
+        effective_events.setdefault(instrument_public_id, []).append(
+            (
+                effective_time,
+                row["exchange"],
+                row["scope_sequence"],
+                row["shard_key"],
+                signed_size,
+                invalid_event,
+            )
         )
-        closed_qty = 0.0 if is_increasing else min(position_size, abs(old_qty))
-        price_is_known_valid = is_positive_finite(row["price"])
-        if closed_qty > 0.0 and (not price_is_known_valid or pool_key in basis_unknown):
-            untrusted_at[instrument_public_id] = effective_time
-            continue
-        minute = _rate_minute(row["timestamp"])
-        quote_currency = quote_by_instrument.get(instrument_public_id)
-        if (
-            quote_currency is not None
-            and signed_size != 0.0
-            and price_is_known_valid
-            and pool_key not in basis_unknown
-        ):
-            _add_fx_minute(
-                needed,
-                instrument_public_id,
-                quote_currency,
-                valuation_ccy,
-                minute,
-            )
-        if row["fee"] != 0.0:
-            _add_fx_minute(
-                needed,
-                instrument_public_id,
-                row["fee_asset"],
-                valuation_ccy,
-                minute,
-            )
-        new_qty = old_qty + signed_size
-        if abs(new_qty) < FLAT_EPSILON:
-            new_qty = 0.0
-            basis_unknown.discard(pool_key)
-        elif position_size > 0.0 and not price_is_known_valid:
-            basis_unknown.add(pool_key)
-        position_qty[pool_key] = new_qty
-    for accrual in accrual_rows:
-        invalid_at = untrusted_at.get(accrual["instrument_public_id"])
-        if accrual["amount"] != 0.0 and (invalid_at is None or accrual["accrued_at"] < invalid_at):
-            _add_fx_minute(
-                needed,
-                accrual["instrument_public_id"],
-                accrual["amount_asset"],
-                valuation_ccy,
-                _rate_minute(accrual["accrued_at"]),
-            )
-    return needed
+    return effective_events, regression_shadows
+
+
+def _candles_by_instrument(
+    candles: Sequence[PnlTimelineCandleRow],
+) -> dict[str, list[PnlTimelineCandleRow]]:
+    """Group mark candles by their consuming instrument."""
+    grouped: dict[str, list[PnlTimelineCandleRow]] = {}
+    for candle in candles:
+        grouped.setdefault(candle["instrument_public_id"], []).append(candle)
+    return grouped
+
+
+def _advance_mark_replay(
+    state: _MarkReplayState,
+    events: Sequence[_EffectiveMarkEvent],
+    mark_minute: datetime,
+) -> None:
+    """Apply all monotone execution events visible at one mark minute."""
+    while state.event_index < len(events) and events[state.event_index][0] <= mark_minute:
+        event = events[state.event_index]
+        shard_key = event[3]
+        pool_quantity = state.pool_quantities.get(shard_key, 0.0) + event[4]
+        if abs(pool_quantity) < FLAT_EPSILON:
+            pool_quantity = 0.0
+        state.pool_quantities[shard_key] = pool_quantity
+        if event[5]:
+            state.mark_eligible = False
+        state.event_index += 1
+
+
+def _mark_minute_is_eligible(
+    candle: PnlTimelineCandleRow,
+    mark_minute: datetime,
+    state: _MarkReplayState,
+    window: _MarkFxWindow,
+) -> bool:
+    """Return whether one positive close truthfully consumes an FX rate."""
+    if not is_positive_finite(candle["close"]) or not state.mark_eligible:
+        return False
+    if mark_minute < window.grid_start or mark_minute > window.to_time:
+        return False
+    if not any(abs(quantity) >= FLAT_EPSILON for quantity in state.pool_quantities.values()):
+        return False
+    return not any(
+        shadow_start <= mark_minute < shadow_end
+        for shadow_start, shadow_end in window.regression_shadows
+    )
+
+
+def _eligible_mark_minutes(
+    instrument_public_id: str,
+    candles: Sequence[PnlTimelineCandleRow],
+    events: Sequence[_EffectiveMarkEvent],
+    opening_quantities: Mapping[_PoolKey, float],
+    window: _MarkFxWindow,
+) -> set[datetime]:
+    """Replay one instrument and return the exact minutes needing mark FX."""
+    state = _MarkReplayState(
+        event_index=0,
+        pool_quantities={
+            shard_key: quantity
+            for (opening_instrument, shard_key), quantity in opening_quantities.items()
+            if opening_instrument == instrument_public_id
+        },
+        mark_eligible=True,
+    )
+    minutes: set[datetime] = set()
+    for candle in sorted(candles, key=lambda item: item["open_at"]):
+        mark_minute = candle["open_at"] + timedelta(minutes=1)
+        _advance_mark_replay(state, events, mark_minute)
+        if _mark_minute_is_eligible(candle, mark_minute, state, window):
+            minutes.add(mark_minute)
+    return minutes
 
 
 def _mark_fx_minutes(
@@ -1766,92 +2026,28 @@ def _mark_fx_minutes(
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    effective_events: dict[
-        str,
-        list[tuple[datetime, str, int, str, float, bool]],
-    ] = {}
-    last_effective: dict[tuple[str, str], datetime] = {}
-    regression_shadows: list[tuple[datetime, datetime]] = []
-    for row in execution_rows:
-        instrument_public_id = row["instrument_public_id"]
-        pool_key = (instrument_public_id, row["shard_key"])
-        event_time = row["timestamp"]
-        previous_effective = last_effective.get(pool_key)
-        if previous_effective is not None and event_time < previous_effective:
-            regression_shadows.append((event_time, previous_effective))
-        effective_time = max(previous_effective or event_time, event_time)
-        last_effective[pool_key] = effective_time
-        if instrument_public_id not in quote_by_instrument:
-            continue
-        size = row["size"]
-        invalid_size = not math.isfinite(size) or size < 0.0
-        resolved_signed_size = (
-            0.0
-            if invalid_size
-            else booked_signed_quantity(
-                row["side"],
-                size,
-                row["fee"],
-                row["fee_asset"],
-                base_by_instrument[instrument_public_id],
-                resolve_position_quantity_unit(row["exchange"]),
-            )
-        )
-        signed_size = resolved_signed_size
-        position_size = abs(signed_size)
-        effective_events.setdefault(instrument_public_id, []).append(
-            (
-                effective_time,
-                row["exchange"],
-                row["scope_sequence"],
-                row["shard_key"],
-                signed_size,
-                invalid_size or (position_size > 0.0 and not is_positive_finite(row["price"])),
-            )
-        )
-    candles_by_instrument: dict[str, list[PnlTimelineCandleRow]] = {}
-    for candle in candles:
-        candles_by_instrument.setdefault(candle["instrument_public_id"], []).append(candle)
+    effective_events, regression_shadows = _effective_mark_events(
+        execution_rows,
+        base_by_instrument,
+        quote_by_instrument,
+    )
     needed: _FxInstrumentRequirements = {}
-    grid_start = from_time.replace(second=0, microsecond=0)
-    opening_quantities: dict[tuple[str, str], float] = {}
-    if opening is not None:
-        opening_quantities = {
-            (pool.instrument_public_id, pool.shard_key): pool.position_qty for pool in opening.pools
-        }
-    for instrument_public_id, instrument_candles in candles_by_instrument.items():
+    opening_quantities = _opening_pool_quantities(opening)
+    window = _MarkFxWindow(
+        grid_start=from_time.replace(second=0, microsecond=0),
+        to_time=to_time,
+        regression_shadows=regression_shadows,
+    )
+    for instrument_public_id, instrument_candles in _candles_by_instrument(candles).items():
         events = sorted(effective_events.get(instrument_public_id, []))
-        event_index = 0
-        pool_quantities = {
-            shard_key: quantity
-            for (opening_instrument, shard_key), quantity in opening_quantities.items()
-            if opening_instrument == instrument_public_id
-        }
-        mark_eligible = True
         quote_currency = quote_by_instrument[instrument_public_id]
-        for candle in sorted(instrument_candles, key=lambda item: item["open_at"]):
-            mark_minute = candle["open_at"] + timedelta(minutes=1)
-            while event_index < len(events) and events[event_index][0] <= mark_minute:
-                shard_key = events[event_index][3]
-                pool_quantity = pool_quantities.get(shard_key, 0.0) + events[event_index][4]
-                if abs(pool_quantity) < FLAT_EPSILON:
-                    pool_quantity = 0.0
-                pool_quantities[shard_key] = pool_quantity
-                if events[event_index][5]:
-                    mark_eligible = False
-                event_index += 1
-            if (
-                not is_positive_finite(candle["close"])
-                or not mark_eligible
-                or mark_minute < grid_start
-                or mark_minute > to_time
-                or not any(abs(quantity) >= FLAT_EPSILON for quantity in pool_quantities.values())
-                or any(
-                    shadow_start <= mark_minute < shadow_end
-                    for shadow_start, shadow_end in regression_shadows
-                )
-            ):
-                continue
+        for mark_minute in _eligible_mark_minutes(
+            instrument_public_id,
+            instrument_candles,
+            events,
+            opening_quantities,
+            window,
+        ):
             _add_fx_minute(
                 needed,
                 instrument_public_id,
@@ -2102,6 +2298,55 @@ async def _load_fx_candidate_rows(
     )
 
 
+def _covered_fx_minutes(
+    requirements: Mapping[FxPairKey, set[datetime]],
+    rows: Sequence[PnlFxRateRow],
+) -> dict[PnlFxRatePlane, set[datetime]]:
+    """Collect usable exact requirement minutes for every candidate plane."""
+    covered: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if not is_positive_finite(close):
+            continue
+        pair = currency_pair_key(base, quote)
+        if minute in requirements.get(pair, set()):
+            covered.setdefault((base, quote, exchange), set()).add(minute)
+    return covered
+
+
+def _preferred_fx_plane(
+    pair: FxPairKey,
+    minutes: set[datetime],
+    planes: set[PnlFxRatePlane],
+    covered: Mapping[PnlFxRatePlane, set[datetime]],
+    valuation_ccy: str,
+) -> PnlFxRatePlane | None:
+    """Select the coverage, venue, and orientation winner for one pair."""
+    if not planes:
+        return None
+    coverage_by_plane = {
+        plane: len(covered.get(plane, set()).intersection(minutes)) for plane in planes
+    }
+    best_coverage = max(coverage_by_plane.values())
+    if best_coverage == 0:
+        return None
+    finalists = {
+        plane for plane, coverage in coverage_by_plane.items() if coverage == best_coverage
+    }
+    if best_coverage == len(minutes) and "PLN" in pair:
+        walutomat = {plane for plane in finalists if plane[2] == "walutomat"}
+        if walutomat:
+            finalists = walutomat
+    selected_exchange = min(plane[2] for plane in finalists)
+    venue_finalists = {plane for plane in finalists if plane[2] == selected_exchange}
+    source_currency = pair[1] if pair[0] == valuation_ccy else pair[0]
+    direct = {
+        plane
+        for plane in venue_finalists
+        if (plane[0], plane[1]) == (source_currency, valuation_ccy)
+    }
+    return min(direct or venue_finalists)
+
+
 def _resolve_fx_planes(
     requirements: Mapping[FxPairKey, set[datetime]],
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
@@ -2126,40 +2371,19 @@ def _resolve_fx_planes(
     Returns:
         One selected oriented plane for each resolvable unordered pair.
     """
-    covered: dict[PnlFxRatePlane, set[datetime]] = {}
-    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
-        if not is_positive_finite(close):
-            continue
-        pair = currency_pair_key(base, quote)
-        if minute in requirements.get(pair, set()):
-            covered.setdefault((base, quote, exchange), set()).add(minute)
+    covered = _covered_fx_minutes(requirements, rows)
     resolved: dict[FxPairKey, PnlFxRatePlane] = {}
     for pair, minutes in requirements.items():
         planes = candidate_planes.get(pair, set())
-        if not planes:
-            continue
-        coverage_by_plane = {
-            plane: len(covered.get(plane, set()).intersection(minutes)) for plane in planes
-        }
-        best_coverage = max(coverage_by_plane.values())
-        if best_coverage == 0:
-            continue
-        finalists = {
-            plane for plane, coverage in coverage_by_plane.items() if coverage == best_coverage
-        }
-        if best_coverage == len(minutes) and "PLN" in pair:
-            walutomat = {plane for plane in finalists if plane[2] == "walutomat"}
-            if walutomat:
-                finalists = walutomat
-        selected_exchange = min(plane[2] for plane in finalists)
-        venue_finalists = {plane for plane in finalists if plane[2] == selected_exchange}
-        source_currency = pair[1] if pair[0] == valuation_ccy else pair[0]
-        direct = {
-            plane
-            for plane in venue_finalists
-            if (plane[0], plane[1]) == (source_currency, valuation_ccy)
-        }
-        resolved[pair] = min(direct or venue_finalists)
+        selected = _preferred_fx_plane(
+            pair,
+            minutes,
+            planes,
+            covered,
+            valuation_ccy,
+        )
+        if selected is not None:
+            resolved[pair] = selected
     return resolved
 
 
@@ -2603,10 +2827,12 @@ def _validated_anchor_scope(scope: _AnchorScope) -> _AnchorScope:
         or scope.activation_time > scope.knowledge_horizon
     ):
         raise ValueError("P&L anchor knowledge_horizon must be UTC and not precede activation")
-    return replace(
-        scope,
+    return _AnchorScope(
         wallet_public_id=wallet_public_id,
+        mode=scope.mode,
         valuation_ccy=valuation_ccy,
+        activation_time=scope.activation_time,
+        knowledge_horizon=scope.knowledge_horizon,
     )
 
 
@@ -2755,16 +2981,18 @@ async def _load_or_create_anchor(
 ) -> _AnchorLoadResult:
     """Load or create an anchor while retaining its sealed request prefix."""
     scope = _validated_anchor_scope(request.scope)
-    visible = (
-        await repo.get_portfolio_pnl_anchor(
+    if request.preloaded_evidence is None:
+        anchor_as_of = None
+        if not request.allow_anchor_creation:
+            anchor_as_of = scope.knowledge_horizon
+        visible = await repo.get_portfolio_pnl_anchor(
             scope.wallet_public_id,
             scope.mode,
             scope.valuation_ccy,
-            None if request.allow_anchor_creation else scope.knowledge_horizon,
+            anchor_as_of,
         )
-        if request.preloaded_evidence is None
-        else request.preloaded_evidence.visible_anchor
-    )
+    else:
+        visible = request.preloaded_evidence.visible_anchor
     execution_prefix_bundle = (
         None
         if request.preloaded_evidence is None
