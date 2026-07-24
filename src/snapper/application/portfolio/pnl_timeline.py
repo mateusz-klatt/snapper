@@ -774,7 +774,7 @@ def _opening_pool_valuation(
     if not is_positive_finite(mark):
         raise ValueError("surviving opening pool requires a positive finite t0 mark")
     entry_price = cast(float, pool.entry_price)
-    resolved_mark = cast(float, mark)
+    resolved_mark = mark
     unrealized = pool.position_qty * (resolved_mark - entry_price)
     if not math.isfinite(unrealized):
         raise ValueError("opening pool unrealized value must be finite")
