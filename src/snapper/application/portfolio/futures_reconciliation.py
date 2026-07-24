@@ -122,6 +122,18 @@ class _CandidateEvaluation:
     status: str
 
 
+@dataclass(frozen=True)
+class _CandidateComparison:
+    """Resolved operands used to build one candidate difference."""
+
+    instrument_public_id: str | None
+    symbol: str
+    internal_quantity: Decimal | None
+    venue_quantity: Decimal | None
+    lot_step: Decimal | None
+    reason: str | None
+
+
 def _decimal(value: float | Decimal) -> Decimal | None:
     """Convert one numeric boundary value to a finite exact decimal.
 
@@ -554,14 +566,13 @@ def _candidate_quantities(
     return internal_quantity, venue_quantity, None
 
 
-def _evaluate_candidate(
+def _candidate_expected_and_actual(
     candidate: _Candidate,
-    specs_by_instrument_public_id: Mapping[str, InstrumentSpecRow | None],
-    now: datetime,
-) -> _CandidateEvaluation:
-    """Build canonical evidence and status for one comparison candidate."""
-    symbol = candidate.venue_symbol or candidate.internal_symbol
-    internal_quantity, venue_quantity, quantity_reason = _candidate_quantities(candidate)
+    symbol: str,
+    internal_quantity: Decimal | None,
+    venue_quantity: Decimal | None,
+) -> tuple[_ExpectedInstrument, _ActualInstrument]:
+    """Build the canonical expected and actual evidence pair."""
     internal_watermark = (
         candidate.internal["source_venue_event_id"] if candidate.internal is not None else None
     )
@@ -577,6 +588,52 @@ def _evaluate_candidate(
         signed_qty=_decimal_string(venue_quantity) if venue_quantity is not None else None,
         symbol=candidate.venue_symbol or symbol,
     )
+    return expected, actual
+
+
+def _candidate_difference(
+    comparison: _CandidateComparison,
+    tolerance: _ToleranceInstrument,
+) -> tuple[_DifferenceInstrument, str]:
+    """Build canonical delta evidence and its status."""
+    difference = _DifferenceInstrument(
+        instrument_public_id=comparison.instrument_public_id,
+        status="incomplete" if comparison.reason is not None else "matched",
+        symbol=comparison.symbol,
+    )
+    if (
+        comparison.reason is None
+        and comparison.internal_quantity is not None
+        and comparison.venue_quantity is not None
+        and comparison.lot_step is not None
+    ):
+        signed_delta = comparison.internal_quantity - comparison.venue_quantity
+        absolute_delta = abs(signed_delta)
+        status = "mismatched" if absolute_delta >= comparison.lot_step else "matched"
+        difference["status"] = status
+        difference["signed_delta"] = _decimal_string(signed_delta)
+        difference["absolute_delta"] = _decimal_string(absolute_delta)
+        return difference, status
+    difference["reason"] = comparison.reason or "evaluation_incomplete"
+    if tolerance.get("reason") is None:
+        tolerance["reason"] = difference["reason"]
+    return difference, "incomplete"
+
+
+def _evaluate_candidate(
+    candidate: _Candidate,
+    specs_by_instrument_public_id: Mapping[str, InstrumentSpecRow | None],
+    now: datetime,
+) -> _CandidateEvaluation:
+    """Build canonical evidence and status for one comparison candidate."""
+    symbol = candidate.venue_symbol or candidate.internal_symbol
+    internal_quantity, venue_quantity, quantity_reason = _candidate_quantities(candidate)
+    expected, actual = _candidate_expected_and_actual(
+        candidate,
+        symbol,
+        internal_quantity,
+        venue_quantity,
+    )
     spec = (
         specs_by_instrument_public_id.get(candidate.instrument_public_id)
         if candidate.instrument_public_id is not None
@@ -589,28 +646,15 @@ def _evaluate_candidate(
         now,
     )
     reason = candidate.reason or quantity_reason or spec_reason
-    difference = _DifferenceInstrument(
+    comparison = _CandidateComparison(
         instrument_public_id=candidate.instrument_public_id,
-        status="incomplete" if reason is not None else "matched",
         symbol=symbol,
+        internal_quantity=internal_quantity,
+        venue_quantity=venue_quantity,
+        lot_step=lot_step,
+        reason=reason,
     )
-    if (
-        reason is None
-        and internal_quantity is not None
-        and venue_quantity is not None
-        and lot_step is not None
-    ):
-        signed_delta = internal_quantity - venue_quantity
-        absolute_delta = abs(signed_delta)
-        status = "mismatched" if absolute_delta >= lot_step else "matched"
-        difference["status"] = status
-        difference["signed_delta"] = _decimal_string(signed_delta)
-        difference["absolute_delta"] = _decimal_string(absolute_delta)
-    else:
-        status = "incomplete"
-        difference["reason"] = reason or "evaluation_incomplete"
-        if tolerance.get("reason") is None:
-            tolerance["reason"] = difference["reason"]
+    difference, status = _candidate_difference(comparison, tolerance)
     return _CandidateEvaluation(expected, actual, difference, tolerance, status)
 
 

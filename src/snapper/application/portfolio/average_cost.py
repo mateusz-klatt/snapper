@@ -64,6 +64,17 @@ class PoolFillOutcome:
     opened_new_side: bool
 
 
+@dataclass(frozen=True)
+class _FillAccounting:
+    """Intermediate entry-price and quantity accounting for one fill."""
+
+    entry_price: float | None
+    realized_delta: float
+    closed_qty: float
+    added_qty: float
+    opened_new_side: bool
+
+
 def classify_transition(old_qty: float, new_qty: float) -> CycleTransition | None:
     """Classify a signed position change into a cycle lifecycle transition.
 
@@ -94,6 +105,55 @@ def classify_transition(old_qty: float, new_qty: float) -> CycleTransition | Non
     if abs(new_qty) > abs(old_qty):
         return "scale_up"
     return None
+
+
+def _increasing_fill(
+    position_qty: float,
+    entry_price: float | None,
+    fill_size: float,
+    fill_price: float,
+) -> _FillAccounting:
+    """Resolve accounting for a same-direction or flat-opening fill."""
+    old_qty = abs(position_qty)
+    new_abs = old_qty + fill_size
+    if entry_price is not None and old_qty > 0.0 and new_abs > 0.0:
+        new_entry = (old_qty * entry_price + fill_size * fill_price) / new_abs
+        opened_new_side = False
+    else:
+        new_entry = fill_price
+        opened_new_side = True
+    return _FillAccounting(new_entry, 0.0, 0.0, fill_size, opened_new_side)
+
+
+def _decreasing_fill(
+    position_qty: float,
+    entry_price: float | None,
+    fill_size: float,
+    fill_price: float,
+) -> _FillAccounting:
+    """Resolve accounting for a reducing, closing, or flipping fill."""
+    close_qty = min(fill_size, abs(position_qty))
+    overshoot = fill_size - close_qty
+    realized_delta = 0.0
+    new_entry: float | None
+    if entry_price is not None and close_qty > 0.0:
+        pnl_per_unit = fill_price - entry_price
+        if position_qty < 0.0:
+            pnl_per_unit = entry_price - fill_price
+        realized_delta = close_qty * pnl_per_unit
+    if overshoot > FLAT_EPSILON:
+        new_entry = fill_price
+        opened_new_side = True
+    else:
+        new_entry = entry_price
+        opened_new_side = False
+    return _FillAccounting(
+        new_entry,
+        realized_delta,
+        close_qty,
+        overshoot,
+        opened_new_side,
+    )
 
 
 def apply_fill(
@@ -128,46 +188,28 @@ def apply_fill(
     is_increasing = (position_qty >= 0.0 and signed_qty > 0.0) or (
         position_qty <= 0.0 and signed_qty < 0.0
     )
-    realized_delta = 0.0
-    closed_qty = 0.0
-    added_qty = 0.0
-    opened_new_side = False
     if is_increasing:
-        old_qty = abs(position_qty)
-        new_abs = old_qty + fill_size
-        if entry_price is not None and old_qty > 0.0 and new_abs > 0.0:
-            new_entry: float | None = (old_qty * entry_price + fill_size * fill_price) / new_abs
-        else:
-            new_entry = fill_price
-            opened_new_side = True
-        added_qty = fill_size
+        accounting = _increasing_fill(position_qty, entry_price, fill_size, fill_price)
     else:
-        close_qty = min(fill_size, abs(position_qty))
-        overshoot = fill_size - close_qty
-        if entry_price is not None and close_qty > 0.0:
-            pnl_per_unit = fill_price - entry_price
-            if position_qty < 0.0:
-                pnl_per_unit = entry_price - fill_price
-            realized_delta = close_qty * pnl_per_unit
-        closed_qty = close_qty
-        added_qty = overshoot
-        if overshoot > FLAT_EPSILON:
-            new_entry = fill_price
-            opened_new_side = True
-        else:
-            new_entry = entry_price
+        accounting = _decreasing_fill(position_qty, entry_price, fill_size, fill_price)
 
     new_qty = position_qty + signed_qty
     if abs(new_qty) < FLAT_EPSILON:
         new_qty = 0.0
-        new_entry = None
+        accounting = _FillAccounting(
+            None,
+            accounting.realized_delta,
+            accounting.closed_qty,
+            accounting.added_qty,
+            accounting.opened_new_side,
+        )
     transition = classify_transition(position_qty, new_qty)
     return PoolFillOutcome(
         position_qty=new_qty,
-        entry_price=new_entry,
-        realized_delta=realized_delta,
-        closed_qty=closed_qty,
-        added_qty=added_qty,
+        entry_price=accounting.entry_price,
+        realized_delta=accounting.realized_delta,
+        closed_qty=accounting.closed_qty,
+        added_qty=accounting.added_qty,
         transition=transition,
-        opened_new_side=opened_new_side,
+        opened_new_side=accounting.opened_new_side,
     )

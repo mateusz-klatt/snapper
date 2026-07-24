@@ -370,15 +370,7 @@
     },
     "src/snapper/application/portfolio/reconciliation_dispatch.py": {
       "dispatch_portfolio_reconciliation": {
-        "C901": 14,
-        "PLR0912": 13,
         "PLR0913": 7
-      }
-    },
-    "src/snapper/application/portfolio/spot_anchor_bootstrap.py": {
-      "spot_anchor_bootstrap_refusals": {
-        "C901": 23,
-        "PLR0912": 22
       }
     },
     "src/snapper/application/portfolio/spot_precision_certification.py": {

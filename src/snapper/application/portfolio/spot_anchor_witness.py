@@ -230,6 +230,45 @@ def _assign_order_witnesses(
     return witnesses, refusals
 
 
+def _group_witness_inputs(
+    executions: Sequence[WitnessExecution],
+    legs: Sequence[WitnessHistoryLeg],
+) -> tuple[dict[str, list[WitnessExecution]], dict[str, list[WitnessHistoryLeg]]]:
+    """Group local executions and identified history legs by venue order."""
+    executions_by_order: dict[str, list[WitnessExecution]] = {}
+    for execution in executions:
+        executions_by_order.setdefault(execution.venue_order_id, []).append(execution)
+    legs_by_order: dict[str, list[WitnessHistoryLeg]] = {}
+    for leg in legs:
+        legs_by_order.setdefault(str(leg.order_id), []).append(leg)
+    return executions_by_order, legs_by_order
+
+
+def _build_order_witnesses(
+    order_id: str,
+    order_executions: Sequence[WitnessExecution],
+    order_totals: Mapping[str, WitnessOrderTotals],
+    order_legs: Sequence[WitnessHistoryLeg],
+    commission_by_order: Mapping[str, Decimal],
+) -> tuple[dict[int, frozenset[int]], set[WitnessRefusal]]:
+    """Build witnesses or one fail-closed refusal set for a venue order."""
+    totals = order_totals.get(order_id)
+    if totals is None:
+        return {}, {"execution_order_totals_missing"}
+    base_currency = totals.bought_currency if totals.is_buy else totals.sold_currency
+    quote_currency = totals.sold_currency if totals.is_buy else totals.bought_currency
+    base_total = totals.bought_amount if totals.is_buy else totals.sold_amount
+    fills, complete = _order_fills(order_legs, base_currency, quote_currency)
+    if not complete:
+        return {}, {"history_fill_leg_incomplete"}
+    realized = fills[-1].running_cumulative if fills else Decimal(0)
+    if realized != base_total:
+        return {}, {"order_base_legs_disagree_with_total"}
+    if commission_by_order.get(order_id, Decimal(0)) != totals.commission_amount:
+        return {}, {"commission_sum_disagrees_with_order_total"}
+    return _assign_order_witnesses(order_executions, fills)
+
+
 def build_execution_witnesses(
     executions: Sequence[WitnessExecution],
     legs: Sequence[WitnessHistoryLeg],
@@ -267,36 +306,17 @@ def build_execution_witnesses(
         leg for leg in attributed if leg.order_id is not None and leg.transaction_id is not None
     ]
 
-    executions_by_order: dict[str, list[WitnessExecution]] = {}
-    for execution in executions:
-        executions_by_order.setdefault(execution.venue_order_id, []).append(execution)
-    legs_by_order: dict[str, list[WitnessHistoryLeg]] = {}
-    for leg in identified:
-        legs_by_order.setdefault(str(leg.order_id), []).append(leg)
+    executions_by_order, legs_by_order = _group_witness_inputs(executions, identified)
 
     witnesses: dict[int, frozenset[int]] = {}
     for order_id, order_executions in executions_by_order.items():
-        totals = order_totals.get(order_id)
-        if totals is None:
-            refusals.add("execution_order_totals_missing")
-            continue
-        base_currency = totals.bought_currency if totals.is_buy else totals.sold_currency
-        quote_currency = totals.sold_currency if totals.is_buy else totals.bought_currency
-        base_total = totals.bought_amount if totals.is_buy else totals.sold_amount
-        fills, complete = _order_fills(
-            legs_by_order.get(order_id, ()), base_currency, quote_currency
+        order_witnesses, order_refusals = _build_order_witnesses(
+            order_id,
+            order_executions,
+            order_totals,
+            legs_by_order.get(order_id, ()),
+            commission_by_order,
         )
-        if not complete:
-            refusals.add("history_fill_leg_incomplete")
-            continue
-        realized = fills[-1].running_cumulative if fills else Decimal(0)
-        if realized != base_total:
-            refusals.add("order_base_legs_disagree_with_total")
-            continue
-        if commission_by_order.get(order_id, Decimal(0)) != totals.commission_amount:
-            refusals.add("commission_sum_disagrees_with_order_total")
-            continue
-        order_witnesses, order_refusals = _assign_order_witnesses(order_executions, fills)
         refusals |= order_refusals
         witnesses.update(order_witnesses)
 

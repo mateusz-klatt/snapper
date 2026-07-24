@@ -246,6 +246,89 @@ def _venue_history_balance_chain_mismatch(
     return False
 
 
+def _balance_observation_refusals(
+    observation: SpotAnchorObservation,
+) -> set[SpotAnchorRefusal]:
+    """Collect balance and observation-window refusals."""
+    refusals: set[SpotAnchorRefusal] = set()
+    if any(
+        not observation.precision_certified.get(asset, False) for asset in observation.balances_1
+    ):
+        refusals.add("asset_precision_uncertified")
+    if not observation.balance_read_bound_to_scope:
+        refusals.add("balance_read_not_current")
+    if not observation.balances_are_venue_raw:
+        refusals.add("balances_not_venue_raw")
+    if _boundary_window_inverted(observation):
+        refusals.add("boundary_window_inverted")
+    if observation.balance_status != "observed" or not observation.balances_1:
+        refusals.add("inventory_not_observed")
+    return refusals
+
+
+def _scope_observation_refusals(
+    observation: SpotAnchorObservation,
+) -> set[SpotAnchorRefusal]:
+    """Collect anchor-scope, venue, and watermark refusals."""
+    refusals: set[SpotAnchorRefusal] = set()
+    if observation.anchor_exists:
+        refusals.add("anchor_already_exists")
+    if observation.margin_signal:
+        refusals.add("margin_not_proven_cash")
+    if observation.source_watermark == 0:
+        refusals.add("scope_without_committed_execution")
+    if observation.exchange not in _VENUE_CURSOR_SCHEMES:
+        refusals.add("venue_cursor_scheme_unregistered")
+    if any(reserved != 0 for reserved in observation.balances_reserved.values()):
+        refusals.add("venue_reserved_funds_present")
+    if not observation.watermark_unchanged:
+        refusals.add("watermark_advanced")
+    return refusals
+
+
+def _cursor_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefusal]:
+    """Collect cursor availability, monotonicity, and balance-read refusals."""
+    refusals: set[SpotAnchorRefusal] = set()
+    tip = observation.tip_0
+    if tip is None or not tip.page or observation.tip_1_item_id is None:
+        refusals.add("venue_cursor_unavailable")
+    if tip is None or observation.tip_1_item_id is None:
+        return refusals
+    if observation.tip_1_item_id < tip.item_id:
+        refusals.add("venue_cursor_regressed")
+    if observation.tip_1_item_id != tip.item_id:
+        refusals.add("venue_history_advanced")
+    elif observation.balances_1 != observation.balances_2:
+        refusals.add("balance_reads_disagree")
+    return refusals
+
+
+def _history_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefusal]:
+    """Collect venue-page integrity and execution-witness refusals."""
+    refusals: set[SpotAnchorRefusal] = set()
+    tip = observation.tip_0
+    if tip is None:
+        return refusals
+    if tip.item_id <= 0:
+        refusals.add("venue_cursor_malformed")
+    if any(item.is_market_fx and not item.is_api_attributed for item in tip.page):
+        refusals.add("venue_history_manual_unattributed")
+    if _venue_history_balance_chain_mismatch(tip.page, observation.balances_1):
+        refusals.add("venue_history_balance_chain_mismatch")
+    attributed_ids = sorted(
+        item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
+    )
+    witnesses = observation.execution_witnesses
+    if not witness_reverse_coverage_holds(
+        witnesses,
+        range(1, observation.source_watermark + 1),
+    ):
+        refusals.add("local_execution_not_in_venue_history")
+    if not witness_bijection_holds(witnesses, attributed_ids):
+        refusals.add("venue_fill_not_ingested")
+    return refusals
+
+
 def spot_anchor_bootstrap_refusals(
     observation: SpotAnchorObservation,
 ) -> tuple[SpotAnchorRefusal, ...]:
@@ -261,60 +344,10 @@ def spot_anchor_bootstrap_refusals(
     Returns:
         The ordered tuple of applicable refusal names (empty when certifiable).
     """
-    refusals: set[SpotAnchorRefusal] = set()
-    tip = observation.tip_0
-    watermark = observation.source_watermark
-
-    if observation.anchor_exists:
-        refusals.add("anchor_already_exists")
-    if any(
-        not observation.precision_certified.get(asset, False) for asset in observation.balances_1
-    ):
-        refusals.add("asset_precision_uncertified")
-    if not observation.balance_read_bound_to_scope:
-        refusals.add("balance_read_not_current")
-    if not observation.balances_are_venue_raw:
-        refusals.add("balances_not_venue_raw")
-    if _boundary_window_inverted(observation):
-        refusals.add("boundary_window_inverted")
-    if observation.balance_status != "observed" or not observation.balances_1:
-        refusals.add("inventory_not_observed")
-    if observation.margin_signal:
-        refusals.add("margin_not_proven_cash")
-    if watermark == 0:
-        refusals.add("scope_without_committed_execution")
-    if observation.exchange not in _VENUE_CURSOR_SCHEMES:
-        refusals.add("venue_cursor_scheme_unregistered")
-    if any(reserved != 0 for reserved in observation.balances_reserved.values()):
-        refusals.add("venue_reserved_funds_present")
-    if not observation.watermark_unchanged:
-        refusals.add("watermark_advanced")
-
-    if tip is None or not tip.page or observation.tip_1_item_id is None:
-        refusals.add("venue_cursor_unavailable")
-    if tip is not None and observation.tip_1_item_id is not None:
-        if observation.tip_1_item_id < tip.item_id:
-            refusals.add("venue_cursor_regressed")
-        if observation.tip_1_item_id != tip.item_id:
-            refusals.add("venue_history_advanced")
-        elif observation.balances_1 != observation.balances_2:
-            refusals.add("balance_reads_disagree")
-    if tip is not None:
-        if tip.item_id <= 0:
-            refusals.add("venue_cursor_malformed")
-        if any(item.is_market_fx and not item.is_api_attributed for item in tip.page):
-            refusals.add("venue_history_manual_unattributed")
-        if _venue_history_balance_chain_mismatch(tip.page, observation.balances_1):
-            refusals.add("venue_history_balance_chain_mismatch")
-        attributed_ids = sorted(
-            item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
-        )
-        witnesses = observation.execution_witnesses
-        if not witness_reverse_coverage_holds(witnesses, range(1, watermark + 1)):
-            refusals.add("local_execution_not_in_venue_history")
-        if not witness_bijection_holds(witnesses, attributed_ids):
-            refusals.add("venue_fill_not_ingested")
-
+    refusals = _balance_observation_refusals(observation)
+    refusals.update(_scope_observation_refusals(observation))
+    refusals.update(_cursor_refusals(observation))
+    refusals.update(_history_refusals(observation))
     return tuple(sorted(refusals))
 
 
