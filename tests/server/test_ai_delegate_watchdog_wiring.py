@@ -13,10 +13,7 @@ from snapper.server.app import _stop_ai_delegate_watchdog
 class TestStartAiDelegateWatchdog:
     """Startup helper attach-on-success behavior."""
 
-    @pytest.mark.asyncio
-    async def test_start_failure_leaves_attribute_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_start_failure_leaves_attribute_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A startup failure is isolated from the rest of lifespan.
 
         Given: A watchdog stand-in whose start raises,
@@ -38,14 +35,11 @@ class TestStartAiDelegateWatchdog:
         monkeypatch.setattr("snapper.server.app.get_repository", MagicMock())
         app = SimpleNamespace(state=SimpleNamespace())
 
-        await _start_ai_delegate_watchdog(app, db_url="sqlite+aiosqlite:///:memory:")
+        _start_ai_delegate_watchdog(app, db_url="sqlite+aiosqlite:///:memory:")
 
         assert not hasattr(app.state, "ai_delegate_watchdog")
 
-    @pytest.mark.asyncio
-    async def test_start_success_attaches_wired_watchdog(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_start_success_attaches_wired_watchdog(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Successful startup wires the shared repository and publisher.
 
         Given: A recording watchdog, repository, and publisher,
@@ -78,7 +72,7 @@ class TestStartAiDelegateWatchdog:
         monkeypatch.setattr("snapper.server.app.get_repository", get_repository)
         app = SimpleNamespace(state=SimpleNamespace())
 
-        await _start_ai_delegate_watchdog(
+        _start_ai_delegate_watchdog(
             app,
             db_url="sqlite+aiosqlite:///:memory:",
             msg_publisher=publisher,

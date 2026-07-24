@@ -267,7 +267,7 @@ class TestLifespan:
                 _stop_ai_research_trigger=stop_ai_research_trigger,
                 _start_ai_review_maintenance=start_ai_review_maintenance,
                 _stop_ai_review_maintenance=stop_ai_review_maintenance,
-                _start_ai_delegate_watchdog=AsyncMock(),
+                _start_ai_delegate_watchdog=MagicMock(),
                 _stop_ai_delegate_watchdog=AsyncMock(),
                 _start_retention_scheduler=AsyncMock(),
                 _stop_retention_scheduler=AsyncMock(),

@@ -664,7 +664,7 @@ async def _stop_ai_review_maintenance(app: FastAPI) -> None:
     await maintenance.stop()
 
 
-async def _start_ai_delegate_watchdog(
+def _start_ai_delegate_watchdog(
     app: FastAPI,
     *,
     db_url: str,
@@ -1175,7 +1175,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_ai_research_trigger(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_ai_review_maintenance(app, db_url=settings.db_url)
-        await _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
+        _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
         await _start_remote_summary_cache(

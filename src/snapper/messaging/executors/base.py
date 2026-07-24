@@ -4145,6 +4145,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         return parsed
 
     @staticmethod
+    def _spot_anchor_has_unattributed_market_fx(tip: VenueAccountHistoryTip) -> bool:
+        """Return whether the captured history contains unattributed market FX."""
+        return any(
+            item.operation_type == "MARKET_FX" and not item.ordered_by.startswith("API/")
+            for item in tip.items
+        )
+
+    @staticmethod
     async def _read_spot_anchor_order_totals(
         client: ExchangeClientBase,
         parsed: list[tuple[int, str, int, bool]],
@@ -4182,10 +4190,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if client is None or capture is None or boundary is None:
             return
         wallet, exchange, mode, session_id, sequence_id = work.identity
-        if any(
-            item.operation_type == "MARKET_FX" and not item.ordered_by.startswith("API/")
-            for item in capture.tip.items
-        ):
+        if self._spot_anchor_has_unattributed_market_fx(capture.tip):
             logger.info(
                 f"[{exchange}] spot anchor skipped: manual/unattributed MARKET_FX activity "
                 f"on the history window (venue_history_manual_unattributed)"

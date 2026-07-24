@@ -344,7 +344,7 @@ def witness_reverse_coverage_holds(
     Returns:
         Whether the coverage holds.
     """
-    return set(witnesses) == set(expected_sequences) and all(legs for legs in witnesses.values())
+    return set(witnesses) == set(expected_sequences) and all(witnesses.values())
 
 
 def witness_bijection_holds(
