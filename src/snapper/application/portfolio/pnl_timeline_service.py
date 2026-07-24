@@ -45,12 +45,14 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
+from types import MappingProxyType
 from typing import Final
 from typing import Literal
 from typing import cast
 from uuid import UUID
 from uuid import uuid7
 
+from loguru import logger
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import TypeAdapter
@@ -93,6 +95,7 @@ from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_
 from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 from snapper.core.numeric import is_positive_finite
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
+from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION as _PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import InstrumentSymbolRefRow
@@ -109,6 +112,7 @@ from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
+from snapper.data.repository_types import PortfolioPnlSampleRow
 
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
@@ -325,6 +329,32 @@ _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOption
 
 Used as the immutable default for :func:`build_wallet_pnl_series` so a caller that
 supplies neither knob shares one frozen instance instead of allocating per call."""
+
+
+@dataclass(frozen=True, slots=True)
+class PnlSeriesReadPolicy:
+    """Separates anchor-mutation permission from money-disclosure eligibility (B1).
+
+    ``allow_anchor_creation`` grants a live request permission to persist a missing
+    activation anchor; it is an anchor-mutation capability only. ``current_truth``
+    is the independent, safe-by-default OFF capability that alone unlocks the
+    Phase-5B observed-equity overlay: the routes set it to ``as_of is None`` (a
+    live current-truth read), and the snapshotter and any other internal caller
+    leave it ``False`` so present-epoch equity is never attached to a historical or
+    forward-only result. The two are deliberately distinct: granting anchor
+    creation must never, by itself, disclose present-epoch money.
+    """
+
+    allow_anchor_creation: bool = True
+    current_truth: bool = False
+
+
+_DEFAULT_READ_POLICY: Final[PnlSeriesReadPolicy] = PnlSeriesReadPolicy()
+"""Shared default read policy: anchor creation permitted, overlay disabled.
+
+The overlay-disabled default makes the observed-equity disclosure opt-in, so a
+caller that never sets ``current_truth`` (the snapshotter, any historical read)
+can never leak present-epoch equity onto its result."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +760,120 @@ class PnlFxRateSource:
     exchange: str
 
 
+class _SampleCoverageAudit(BaseModel):
+    """The venue-scope disclosure parsed from one persisted sample's audit JSON."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    venue_scope: str
+    external_flows_adjusted: bool
+
+
+class _SampleAuditEnvelope(BaseModel):
+    """The minimal projection of a sample's audit JSON the overlay reads back."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    coverage: _SampleCoverageAudit
+
+
+@dataclass(frozen=True, slots=True)
+class PnlPointEquityOverlay:
+    """The persisted observed-equity stocks overlaid on one series point (D13).
+
+    Every field is populated together from one ``complete`` sample or is ``None``
+    together when the point's minute has no qualifying sample. ``equity`` is
+    ``cash + position_value`` computed from the SAME persisted floats the sample
+    stored, never an independent recompute.
+    """
+
+    equity: float | None
+    cash: float | None
+    position_value: float | None
+    drawdown: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class PnlEquityCoverage:
+    """Envelope-level disclosure of the observed-equity overlay (D13/R10/R11).
+
+    ``sampled`` is ``True`` only for a current-truth USD scope whose window is
+    backed by at least one ``complete`` current-epoch sample; every other scope
+    and every fail-closed withholding reports ``sampled=False`` with null/zero
+    provenance. ``venue_scope`` and ``external_flows_adjusted`` are surfaced from
+    the samples' uniform coverage blocks; ``complete_minutes`` / ``first_minute``
+    / ``last_minute`` describe the ``complete`` sample minutes in the requested
+    window; ``sample_calc_version`` is the exact backing sample version.
+    """
+
+    sampled: bool
+    venue_scope: Literal["spot_only"] | None
+    external_flows_adjusted: bool | None
+    complete_minutes: int
+    first_minute: datetime | None
+    last_minute: datetime | None
+    sample_calc_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _EquityOverlayRequest:
+    """The inputs one series computation hands the overlay resolver.
+
+    ``current_truth`` is the caller's explicit, safe-by-default OFF money-disclosure
+    grant (``PnlSeriesReadPolicy.current_truth``), which the routes set to ``as_of
+    is None`` (a live current-truth read) and which every historical, snapshotter,
+    or other internal caller leaves ``False``. It is deliberately decoupled from
+    anchor-creation permission, so granting anchor creation never, by itself,
+    resolves an overlay.
+    """
+
+    wallet_public_id: str
+    mode: str
+    valuation_ccy: str
+    epoch_public_id: str
+    from_time: datetime
+    to_time: datetime
+    current_truth: bool
+    points: tuple[PnlTimelinePoint, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EquityOverlayResult:
+    """The resolved per-minute overlay map and its envelope disclosure."""
+
+    overlay: Mapping[datetime, PnlPointEquityOverlay]
+    coverage: PnlEquityCoverage
+
+
+_EMPTY_EQUITY_OVERLAY: Final[PnlPointEquityOverlay] = PnlPointEquityOverlay(
+    equity=None,
+    cash=None,
+    position_value=None,
+    drawdown=None,
+)
+"""The null overlay served for any point with no qualifying sample."""
+
+_EMPTY_EQUITY_OVERLAY_MAP: Final[Mapping[datetime, PnlPointEquityOverlay]] = MappingProxyType({})
+"""Shared immutable empty overlay map for unsampled series results."""
+
+_UNSAMPLED_EQUITY_COVERAGE: Final[PnlEquityCoverage] = PnlEquityCoverage(
+    sampled=False,
+    venue_scope=None,
+    external_flows_adjusted=None,
+    complete_minutes=0,
+    first_minute=None,
+    last_minute=None,
+    sample_calc_version=None,
+)
+"""The disclosure for every unsampled or fail-closed overlay resolution."""
+
+_UNSAMPLED_EQUITY_OVERLAY_RESULT: Final[_EquityOverlayResult] = _EquityOverlayResult(
+    overlay=_EMPTY_EQUITY_OVERLAY_MAP,
+    coverage=_UNSAMPLED_EQUITY_COVERAGE,
+)
+"""The resolver result withholding the overlay from the whole response."""
+
+
 @dataclass(frozen=True)
 class PnlWalletSeriesResult(PnlTimelineResult):
     """A pure P&L series augmented with attributable FX rate venues.
@@ -738,10 +882,29 @@ class PnlWalletSeriesResult(PnlTimelineResult):
     populated only when :func:`build_wallet_pnl_series` is called with a baseline
     watermark map and the scope has a visible anchor with a post-t0 window; it
     stays ``None`` for every existing caller so their result shape is unchanged.
+
+    ``equity_overlay`` maps a point minute to its persisted observed-equity stocks
+    (D13) and ``equity_coverage`` is the envelope disclosure. Both default to the
+    unsampled shape, so a pre-activation, empty, historical, or non-USD result
+    carries a null overlay without a sample read.
     """
 
     rate_sources: tuple[PnlFxRateSource, ...]
     replay_metadata: PnlSeriesReplayMetadata | None = None
+    equity_overlay: Mapping[datetime, PnlPointEquityOverlay] = _EMPTY_EQUITY_OVERLAY_MAP
+    equity_coverage: PnlEquityCoverage = _UNSAMPLED_EQUITY_COVERAGE
+
+    def equity_overlay_at(self, point_time: datetime) -> PnlPointEquityOverlay:
+        """Return the persisted equity overlay for one point, or the null overlay.
+
+        Args:
+            point_time: The exact grid minute of the point being projected.
+
+        Returns:
+            The overlay stored for that minute, or the all-null overlay when the
+            minute has no qualifying sample.
+        """
+        return self.equity_overlay.get(point_time, _EMPTY_EQUITY_OVERLAY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3354,6 +3517,217 @@ def _series_display_activity_spans(
     return spans
 
 
+def _sample_point_overlay(sample: PortfolioPnlSampleRow) -> PnlPointEquityOverlay | None:
+    """Overlay one complete sample's finite equity trio, or withhold the minute (R4).
+
+    The equity terms are re-checked app-side: a ``complete`` row should carry a
+    finite cash/position/drawdown, but a non-finite or out-of-range value fails the
+    R4 finiteness predicate and yields no overlay for that minute rather than a
+    fabricated number. ``equity`` is ``cash + position_value`` from the SAME stored
+    floats, guarded once more so a finite pair that overflows to infinity also
+    withholds.
+    """
+    cash = sample["cash_usd"]
+    position_value = sample["position_value_usd"]
+    drawdown = sample["drawdown"]
+    if (
+        cash is None
+        or position_value is None
+        or drawdown is None
+        or not math.isfinite(cash)
+        or not math.isfinite(position_value)
+        or not math.isfinite(drawdown)
+        or not 0.0 <= drawdown <= 1.0
+    ):
+        return None
+    equity = cash + position_value
+    if not math.isfinite(equity):
+        return None
+    return PnlPointEquityOverlay(
+        equity=equity,
+        cash=cash,
+        position_value=position_value,
+        drawdown=drawdown,
+    )
+
+
+def _qualified_sample_overlays(
+    request: _EquityOverlayRequest,
+    samples_by_minute: Mapping[datetime, PortfolioPnlSampleRow],
+) -> dict[datetime, PnlPointEquityOverlay]:
+    """Validate every complete row's equity trio, logging each malformed one (M1/R4).
+
+    A ``complete`` sample whose equity terms are null, non-finite, out of the
+    ``[0, 1]`` drawdown range, or overflow on sum is a data inconsistency: it is
+    dropped from the qualified set and logged loudly rather than counted toward the
+    coverage disclosure, so a malformed row can never inflate ``sampled`` or the
+    minute bounds.
+    """
+    qualified: dict[datetime, PnlPointEquityOverlay] = {}
+    for minute, sample in samples_by_minute.items():
+        overlay = _sample_point_overlay(sample)
+        if overlay is None:
+            logger.error(
+                "Dropping malformed complete P&L sample at "
+                f"{minute.isoformat()} for wallet {request.wallet_public_id} "
+                f"mode {request.mode} epoch {request.epoch_public_id}"
+            )
+            continue
+        qualified[minute] = overlay
+    return qualified
+
+
+def _point_equity_overlays(
+    points: Sequence[PnlTimelinePoint],
+    qualified_by_minute: Mapping[datetime, PnlPointEquityOverlay],
+) -> dict[datetime, PnlPointEquityOverlay]:
+    """Select each point its endpoint minute's qualified overlay (endpoint-selection).
+
+    Because a downsampled point's ``point_time`` is its bucket endpoint minute, the
+    exact-minute lookup IS endpoint-selection: a bucket whose endpoint minute has no
+    qualified sample gets no overlay and the stocks are never aggregated.
+    """
+    return {
+        point.point_time: qualified_by_minute[point.point_time]
+        for point in points
+        if point.point_time in qualified_by_minute
+    }
+
+
+def _parse_sample_coverage(audit_json: str) -> tuple[str, bool] | None:
+    """Parse one sample's coverage block, or ``None`` when its audit is unreadable."""
+    try:
+        envelope = _SampleAuditEnvelope.model_validate_json(audit_json, strict=True)
+    except ValidationError:
+        return None
+    return envelope.coverage.venue_scope, envelope.coverage.external_flows_adjusted
+
+
+def _sample_coverage_flags(
+    samples: Sequence[PortfolioPnlSampleRow],
+) -> tuple[Literal["spot_only"], bool] | None:
+    """Fold the samples' coverage blocks into one uniform disclosure, or fail closed.
+
+    Returns the single shared ``(venue_scope, external_flows_adjusted)`` when every
+    complete sample agrees and the scope is the supported spot-only v1 scope;
+    returns ``None`` when a coverage block is unreadable, the samples disagree, or
+    the scope is anything other than ``spot_only`` (R11) so the caller withholds the
+    overlay for the whole response.
+    """
+    disclosures: set[tuple[str, bool]] = set()
+    for sample in samples:
+        parsed = _parse_sample_coverage(sample["audit_json"])
+        if parsed is None:
+            return None
+        disclosures.add(parsed)
+    if len(disclosures) != 1:
+        return None
+    venue_scope, external_flows_adjusted = next(iter(disclosures))
+    if venue_scope != "spot_only":
+        return None
+    return "spot_only", external_flows_adjusted
+
+
+def _build_equity_overlay(
+    request: _EquityOverlayRequest,
+    samples: Sequence[PortfolioPnlSampleRow],
+) -> _EquityOverlayResult:
+    """Fold the bounded complete-sample read into the response overlay (R4/D13/M1).
+
+    Fail-closed on more than one active sample for a minute or on disagreeing
+    coverage blocks: the whole response's overlay is withheld with a loud log. Each
+    malformed ``complete`` row is dropped and logged. The disclosure
+    (``sampled`` / ``complete_minutes`` / bounds) is computed ONLY from the rows
+    that actually produced a point overlay, so a rejected malformed row can never
+    inflate it; zero qualified point overlays is reported as unsampled.
+    """
+    if not samples:
+        return _UNSAMPLED_EQUITY_OVERLAY_RESULT
+    samples_by_minute: dict[datetime, PortfolioPnlSampleRow] = {}
+    for sample in samples:
+        if sample["point_time"] in samples_by_minute:
+            logger.error(
+                "Withholding P&L equity overlay: duplicate active sample at "
+                f"{sample['point_time'].isoformat()} for wallet {request.wallet_public_id} "
+                f"mode {request.mode} epoch {request.epoch_public_id}"
+            )
+            return _UNSAMPLED_EQUITY_OVERLAY_RESULT
+        samples_by_minute[sample["point_time"]] = sample
+    coverage_flags = _sample_coverage_flags(samples)
+    if coverage_flags is None:
+        logger.error(
+            "Withholding P&L equity overlay: sample coverage blocks are unreadable or "
+            f"disagree for wallet {request.wallet_public_id} mode {request.mode} "
+            f"epoch {request.epoch_public_id}"
+        )
+        return _UNSAMPLED_EQUITY_OVERLAY_RESULT
+    venue_scope, external_flows_adjusted = coverage_flags
+    qualified = _qualified_sample_overlays(request, samples_by_minute)
+    overlay = _point_equity_overlays(request.points, qualified)
+    if not overlay:
+        return _UNSAMPLED_EQUITY_OVERLAY_RESULT
+    coverage = PnlEquityCoverage(
+        sampled=True,
+        venue_scope=venue_scope,
+        external_flows_adjusted=external_flows_adjusted,
+        complete_minutes=len(overlay),
+        first_minute=min(overlay),
+        last_minute=max(overlay),
+        sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+    )
+    return _EquityOverlayResult(overlay=MappingProxyType(overlay), coverage=coverage)
+
+
+async def _resolve_equity_overlay(
+    repo: Repository,
+    request: _EquityOverlayRequest,
+) -> _EquityOverlayResult:
+    """Load the one bounded complete-sample read and fold it, when eligible (D13/R4).
+
+    Only a current-truth USD scope is eligible; every other scope withholds the
+    overlay without a read. The single ``get_portfolio_pnl_samples`` call applies
+    the exact R4 predicate set (active, ``point_kind='sample'``, exact scope, the
+    current anchor epoch, the exact sample ``calc_version``, ``complete`` status)
+    over the requested grid window, so there is one bounded sample read per request.
+    """
+    if not request.current_truth or request.valuation_ccy != "USD":
+        return _UNSAMPLED_EQUITY_OVERLAY_RESULT
+    query = PortfolioPnlSampleQuery(
+        wallet_public_id=request.wallet_public_id,
+        mode=request.mode,
+        valuation_ccy=request.valuation_ccy,
+        epoch_public_id=request.epoch_public_id,
+        calc_version=PNL_SAMPLE_CALC_VERSION,
+    )
+    samples = await repo.get_portfolio_pnl_samples(
+        query,
+        request.from_time,
+        request.to_time,
+        status="complete",
+    )
+    return _build_equity_overlay(request, samples)
+
+
+async def _finalize_wallet_pnl_series(
+    repo: Repository,
+    result: PnlTimelineResult,
+    rate_sources: tuple[PnlFxRateSource, ...],
+    replay_metadata: PnlSeriesReplayMetadata | None,
+    overlay_request: _EquityOverlayRequest,
+) -> PnlWalletSeriesResult:
+    """Resolve the equity overlay and assemble the final wallet series result."""
+    overlay = await _resolve_equity_overlay(repo, overlay_request)
+    return PnlWalletSeriesResult(
+        points=result.points,
+        granularity=result.granularity,
+        valuation_ccy=result.valuation_ccy,
+        rate_sources=rate_sources,
+        replay_metadata=replay_metadata,
+        equity_overlay=overlay.overlay,
+        equity_coverage=overlay.coverage,
+    )
+
+
 async def build_wallet_pnl_series(
     repo: Repository,
     wallet_public_id: str,
@@ -3364,7 +3738,7 @@ async def build_wallet_pnl_series(
     as_of: datetime,
     valuation_ccy: str = "USD",
     *,
-    allow_anchor_creation: bool = True,
+    policy: PnlSeriesReadPolicy = _DEFAULT_READ_POLICY,
     options: PnlSeriesReplayOptions = _NO_SERIES_REPLAY_OPTIONS,
 ) -> PnlWalletSeriesResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
@@ -3376,6 +3750,12 @@ async def build_wallet_pnl_series(
     honest empty series. Durable fill gaps and suffix rows whose timestamp is at
     or before t0 globally withhold the result.
 
+    The Phase-5B observed-equity overlay is disclosed ONLY when
+    ``policy.current_truth`` is set — a live current-truth read. That capability
+    is independent of ``policy.allow_anchor_creation``: permitting anchor creation
+    never, by itself, attaches present-epoch equity (B1), so the snapshotter and
+    every historical caller leave ``current_truth`` at its safe-by-default OFF.
+
     Args:
         repo: Repository providing the scope reads and candle marks.
         wallet_public_id: Wallet scope to reconstruct.
@@ -3386,8 +3766,10 @@ async def build_wallet_pnl_series(
         as_of: Effective knowledge horizon for the execution commit watermark,
             accrual SCD2 versions, and candle SCD2 versions.
         valuation_ccy: Currency the series components are expressed in.
-        allow_anchor_creation: Whether this current request may create a missing
-            activation anchor. Explicit historical routes always pass ``False``.
+        policy: Anchor-mutation permission (``allow_anchor_creation``) and the
+            independent, safe-by-default OFF money-disclosure grant
+            (``current_truth``) that alone unlocks the equity overlay. Historical
+            routes pass neither capability; the snapshotter permits no overlay.
         options: Optional replay inputs (D3). Its ``preloaded_evidence`` supplies
             the marker endpoint's anchor read and prefix bundle so neither durable
             boundary read is issued twice; its ``baseline_watermarks`` supplies the
@@ -3417,7 +3799,7 @@ async def build_wallet_pnl_series(
                 activation_time=as_of.replace(second=0, microsecond=0),
                 knowledge_horizon=as_of,
             ),
-            allow_anchor_creation=allow_anchor_creation,
+            allow_anchor_creation=policy.allow_anchor_creation,
             preloaded_evidence=options.preloaded_evidence,
         ),
     )
@@ -3623,12 +4005,21 @@ async def build_wallet_pnl_series(
         )
         for (first, second), (base_currency, quote_currency, exchange) in sorted(used_planes)
     )
-    return PnlWalletSeriesResult(
-        points=result.points,
-        granularity=result.granularity,
-        valuation_ccy=result.valuation_ccy,
-        rate_sources=rate_sources,
-        replay_metadata=replay_metadata,
+    return await _finalize_wallet_pnl_series(
+        repo,
+        result,
+        rate_sources,
+        replay_metadata,
+        _EquityOverlayRequest(
+            wallet_public_id=wallet_public_id,
+            mode=mode,
+            valuation_ccy=valuation_ccy,
+            epoch_public_id=anchor.row["epoch_public_id"],
+            from_time=from_time,
+            to_time=to_time,
+            current_truth=policy.current_truth,
+            points=result.points,
+        ),
     )
 
 
@@ -3731,7 +4122,7 @@ async def build_wallet_pnl_timeline(
     as_of: datetime,
     valuation_ccy: str = "USD",
     *,
-    allow_anchor_creation: bool = True,
+    policy: PnlSeriesReadPolicy = _DEFAULT_READ_POLICY,
 ) -> PnlWalletTimelineResult:
     """Build a wallet series plus independently sourced decision markers.
 
@@ -3759,8 +4150,9 @@ async def build_wallet_pnl_timeline(
         as_of: Effective knowledge horizon shared by the series, signals, and
             AI decision reads.
         valuation_ccy: Currency the series components are expressed in.
-        allow_anchor_creation: Whether a current request may create a missing
-            activation anchor.
+        policy: Anchor-mutation permission and the independent, safe-by-default
+            OFF ``current_truth`` grant that alone unlocks the equity overlay,
+            forwarded unchanged to the series builder.
 
     Returns:
         The existing P&L series and its capped marker overlay.
@@ -3783,11 +4175,11 @@ async def build_wallet_pnl_timeline(
         scope.wallet_public_id,
         scope.mode,
         scope.valuation_ccy,
-        None if allow_anchor_creation else scope.knowledge_horizon,
+        None if policy.allow_anchor_creation else scope.knowledge_horizon,
     )
     execution_prefix_bundle = (
         await _load_anchor_execution_prefix_bundle(repo, scope)
-        if visible_anchor is None and allow_anchor_creation
+        if visible_anchor is None and policy.allow_anchor_creation
         else await _load_execution_prefix_bundle(
             repo,
             scope.wallet_public_id,
@@ -3810,7 +4202,7 @@ async def build_wallet_pnl_timeline(
         granularity,
         as_of,
         valuation_ccy=valuation_ccy,
-        allow_anchor_creation=allow_anchor_creation,
+        policy=policy,
         options=PnlSeriesReplayOptions(preloaded_evidence=preloaded_evidence),
     )
     read_limit = PNL_TIMELINE_MARKER_LIMIT + 1

@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
@@ -30,6 +31,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
+from snapper.data.repository_types import PortfolioPnlSampleRow
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import portfolio_timeline_routes
@@ -259,6 +261,7 @@ def _seeded_repo() -> AsyncMock:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
     repo.list_active_wallets = AsyncMock(return_value=[_wallet_row()])
     repo.pnl_timeline_scope_has_fill_gap = AsyncMock(return_value=False)
+    repo.get_portfolio_pnl_samples = AsyncMock(return_value=[])
     return repo
 
 
@@ -428,7 +431,8 @@ class TestHappyPath:
         assert repo.get_pnl_timeline_candles.await_args.args[3] == response_as_of
         build_call = build.await_args
         assert build_call is not None
-        assert build_call.kwargs["allow_anchor_creation"] is False
+        assert build_call.kwargs["policy"].allow_anchor_creation is False
+        assert build_call.kwargs["policy"].current_truth is False
 
     def test_default_read_horizon_remains_current(
         self,
@@ -449,7 +453,8 @@ class TestHappyPath:
         assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
         build_call = build.await_args
         assert build_call is not None
-        assert build_call.kwargs["allow_anchor_creation"] is True
+        assert build_call.kwargs["policy"].allow_anchor_creation is True
+        assert build_call.kwargs["policy"].current_truth is True
 
     def test_paper_mode_accepts_a_paper_wallet(self) -> None:
         """A paper request succeeds when the active wallet is also paper."""
@@ -593,7 +598,8 @@ class TestMarkerTimeline:
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         build_call = build.await_args
         assert build_call is not None
-        assert build_call.kwargs["allow_anchor_creation"] is True
+        assert build_call.kwargs["policy"].allow_anchor_creation is True
+        assert build_call.kwargs["policy"].current_truth is True
 
     def test_returns_all_marker_kinds_with_no_fill_and_rejection(
         self,
@@ -638,7 +644,8 @@ class TestMarkerTimeline:
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[5] == 2_001
         build_call = build.await_args
         assert build_call is not None
-        assert build_call.kwargs["allow_anchor_creation"] is False
+        assert build_call.kwargs["policy"].allow_anchor_creation is False
+        assert build_call.kwargs["policy"].current_truth is False
 
     def test_withholds_fill_marker_price_without_denomination_proof(self) -> None:
         """The API keeps a fill marker but emits null for its unproved price."""
@@ -950,3 +957,136 @@ class TestValuationCurrency:
         response = _create_client(_seeded_repo()).get(_url(valuation_ccy="JPY"))
         assert response.status_code == 200
         assert response.json()["payload"]["valuation_ccy"] == "JPY"
+
+
+def _sample_audit() -> str:
+    """Serialize one complete sample's canonical coverage-bearing audit envelope."""
+    return json.dumps(
+        {
+            "coverage": {
+                "leveraged_inventory_excluded": False,
+                "non_finite_position_excluded": False,
+                "venue_scope": "spot_only",
+                "external_flows_adjusted": False,
+            },
+            "observations": [],
+            "valuation": [],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _sample_row(
+    point_time: datetime,
+    cash_usd: float,
+    position_value_usd: float,
+    drawdown: float,
+) -> PortfolioPnlSampleRow:
+    """Build one complete persisted sample row for the current live USD epoch."""
+    epoch = portfolio_pnl_anchor_public_id(_WALLET, "live", "USD")
+    return {
+        "public_id": f"sample-{point_time.isoformat()}",
+        "session_id": _ANCHOR_SESSION,
+        "sequence_id": 1,
+        "timestamp": point_time,
+        "wallet_public_id": _WALLET,
+        "mode": "live",
+        "valuation_ccy": "USD",
+        "point_time": point_time,
+        "point_kind": "sample",
+        "epoch_public_id": epoch,
+        "calc_version": PNL_SAMPLE_CALC_VERSION,
+        "valuation_status": "complete",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "external_flow_adjustment": 0.0,
+        "unrealized_pnl": 5.0,
+        "cash_usd": cash_usd,
+        "position_value_usd": position_value_usd,
+        "drawdown": drawdown,
+        "mark_source": PNL_TIMELINE_MARK_SOURCE,
+        "mark_time": point_time,
+        "audit_json": _sample_audit(),
+        "watermarks_json": "{}",
+    }
+
+
+class TestEquityOverlayResponse:
+    """Cover the observed-equity overlay projected onto both endpoints (D13)."""
+
+    def test_series_response_exposes_equity_overlay_and_coverage(self) -> None:
+        """A current USD series carries per-point equity and a sampled disclosure."""
+        t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        repo = _seeded_repo()
+        repo.get_portfolio_pnl_samples = AsyncMock(
+            return_value=[
+                _sample_row(t0, 100.0, 50.0, 0.02),
+                _sample_row(t0 + timedelta(minutes=1), 400.0, 600.0, 0.1),
+                _sample_row(t0 + timedelta(minutes=2), 700.0, 300.0, 0.2),
+            ]
+        )
+        response = _create_client(repo).get(_url())
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload["equity_coverage"] == {
+            "sampled": True,
+            "venue_scope": "spot_only",
+            "external_flows_adjusted": False,
+            "complete_minutes": 3,
+            "first_minute": "2026-07-20T10:00:00Z",
+            "last_minute": "2026-07-20T10:02:00Z",
+            "sample_calc_version": "5B.1",
+        }
+        points = payload["points"]
+        assert (points[0]["equity"], points[0]["cash"], points[0]["position_value"]) == (
+            150.0,
+            100.0,
+            50.0,
+        )
+        assert points[0]["drawdown"] == 0.02
+        assert points[1]["equity"] == 1000.0
+        assert points[2]["equity"] == 1000.0
+        repo.get_portfolio_pnl_samples.assert_awaited_once()
+
+    def test_series_without_samples_is_unsampled_with_null_points(self) -> None:
+        """A scope with no complete sample nulls each point and reports unsampled."""
+        response = _create_client(_seeded_repo()).get(_url())
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload["equity_coverage"] == {
+            "sampled": False,
+            "venue_scope": None,
+            "external_flows_adjusted": None,
+            "complete_minutes": 0,
+            "first_minute": None,
+            "last_minute": None,
+            "sample_calc_version": None,
+        }
+        assert all(point["equity"] is None for point in payload["points"])
+        assert all(point["drawdown"] is None for point in payload["points"])
+
+    def test_historical_request_reads_no_samples(self) -> None:
+        """A historical ``as_of`` request never reads or overlays samples."""
+        repo = _seeded_repo()
+        response = _create_client(repo).get(_url(as_of=_AS_OF))
+        assert response.status_code == 200
+        assert response.json()["payload"]["equity_coverage"]["sampled"] is False
+        repo.get_portfolio_pnl_samples.assert_not_awaited()
+
+    def test_timeline_response_exposes_equity_coverage(self) -> None:
+        """The marker-bearing timeline envelope also carries the overlay disclosure."""
+        t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        repo = _seeded_repo()
+        repo.get_portfolio_pnl_samples = AsyncMock(
+            return_value=[_sample_row(t0 + timedelta(minutes=2), 400.0, 600.0, 0.1)]
+        )
+        response = _create_client(repo).get(_timeline_url())
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload["type"] == "pnl_timeline"
+        assert payload["equity_coverage"]["sampled"] is True
+        assert payload["equity_coverage"]["complete_minutes"] == 1
+        assert payload["points"][2]["equity"] == 1000.0
+        assert payload["points"][0]["equity"] is None

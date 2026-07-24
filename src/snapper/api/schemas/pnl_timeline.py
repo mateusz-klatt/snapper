@@ -115,6 +115,18 @@ class PnlTimelinePointData(StrictBody):
     every cause established at the withholding sites without deriving causes
     from the null fields. ``attribution`` carries composite origin/strategy
     buckets whose components reconcile with the point totals.
+
+    ``equity`` / ``cash`` / ``position_value`` / ``drawdown`` are the Phase-5B
+    observed-equity overlay (decision D13/R4). They are populated ONLY for a
+    current-truth USD request from a persisted ``complete`` sample of the current
+    anchor epoch whose ``point_time`` equals this point's minute — ``equity`` is
+    ``cash_usd + position_value_usd`` taken from the SAME persisted floats, never
+    an independent recompute. They are all ``None`` together whenever the minute
+    has no qualifying sample, the request is historical or non-USD, or the overlay
+    was withheld fail-closed. For a downsampled series the value is the one at the
+    bucket's endpoint minute (endpoint-selection); these stocks are never summed
+    or averaged across a bucket. The 5A P&L fields above are unaffected by the
+    overlay and always come from the live recompute.
     """
 
     point_time: datetime
@@ -123,6 +135,10 @@ class PnlTimelinePointData(StrictBody):
     accrual_pnl: float | None
     unrealized_pnl: float | None
     net_pnl: float | None
+    equity: float | None
+    cash: float | None
+    position_value: float | None
+    drawdown: float | None
     valuation_status: PnlValuationStatus
     incompleteness_reasons: list[PnlIncompletenessReasonData]
     per_instrument: list[PnlInstrumentContributionData]
@@ -204,6 +220,53 @@ type PnlTimelineMarkerData = PnlFillMarkerData | PnlSignalMarkerData | PnlAiDeci
 """Strict marker union distinguished by each model's literal ``kind`` field."""
 
 
+class PnlEquityCoverageData(StrictBody):
+    """Envelope disclosure of the Phase-5B observed-equity overlay (D13/R10/R11).
+
+    ``sampled`` is ``True`` only when the request was current-truth and USD and at
+    least one ``complete`` sample of the current anchor epoch backs the requested
+    window; every other scope (historical ``as_of``, non-USD, no anchor, no
+    sample, or a fail-closed withholding) reports ``sampled=False`` with the
+    remaining fields null or zero. ``venue_scope`` is the v1 spot-only equity
+    denominator (futures venues are excluded from the basket and the completeness
+    denominator, R11). ``external_flows_adjusted`` is ``False`` in v1: deposits and
+    withdrawals are NOT rebased out of the observed-equity and drawdown curves
+    (R10/D14), so the served metric is honestly labelled observed equity rather
+    than a flow-adjusted return. ``complete_minutes`` counts the ``complete``
+    sample minutes in the requested window and ``first_minute`` / ``last_minute``
+    span them. ``sample_calc_version`` is the exact sample-algorithm version that
+    produced the backing samples, distinct from the recompute ``calc_version`` on
+    the envelope.
+    """
+
+    sampled: bool
+    venue_scope: Literal["spot_only"] | None
+    external_flows_adjusted: bool | None
+    complete_minutes: int
+    first_minute: datetime | None
+    last_minute: datetime | None
+    sample_calc_version: str | None
+
+    @model_validator(mode="after")
+    def _require_consistent_coverage(self) -> Self:
+        """Keep the disclosure internally honest for both sampled states."""
+        provenance = (
+            self.venue_scope,
+            self.external_flows_adjusted,
+            self.first_minute,
+            self.last_minute,
+            self.sample_calc_version,
+        )
+        if self.sampled:
+            if None in provenance or self.complete_minutes < 1:
+                raise ValueError(
+                    "a sampled coverage requires full provenance and a complete minute"
+                )
+        elif any(field is not None for field in provenance) or self.complete_minutes != 0:
+            raise ValueError("an unsampled coverage must null every provenance field")
+        return self
+
+
 class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
     """Fields shared by series-only and marker-bearing timeline payloads."""
 
@@ -217,6 +280,7 @@ class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
     mark_source: str
     rate_sources: list[PnlFxRateSourceData]
     calc_version: str
+    equity_coverage: PnlEquityCoverageData
     points: list[PnlTimelinePointData]
 
 

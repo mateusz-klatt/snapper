@@ -86,6 +86,7 @@ from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VA
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
@@ -571,7 +572,7 @@ class PortfolioPnlSnapshotter:
             "1m",
             ctx.as_of,
             valuation_ccy=_USD,
-            allow_anchor_creation=False,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
             options=PnlSeriesReplayOptions(baseline_watermarks=dict(baseline)),
         )
 

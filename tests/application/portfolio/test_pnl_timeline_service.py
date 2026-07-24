@@ -29,20 +29,26 @@ from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
 from snapper.application.portfolio.pnl_timeline_service import PnlAiDecisionMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlAnchorEvidenceError
+from snapper.application.portfolio.pnl_timeline_service import PnlEquityCoverage
 from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlPointEquityOverlay
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import _build_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
 from snapper.application.portfolio.pnl_timeline_service import _derive_series_replay_metadata
+from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayRequest
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _execution_rows_with_effective_time
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
@@ -50,6 +56,12 @@ from snapper.application.portfolio.pnl_timeline_service import _opening_mark_req
 from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
 from snapper.application.portfolio.pnl_timeline_service import _opening_nonflat_instruments
 from snapper.application.portfolio.pnl_timeline_service import _parse_anchor
+from snapper.application.portfolio.pnl_timeline_service import _parse_sample_coverage
+from snapper.application.portfolio.pnl_timeline_service import _point_equity_overlays
+from snapper.application.portfolio.pnl_timeline_service import _qualified_sample_overlays
+from snapper.application.portfolio.pnl_timeline_service import _resolve_equity_overlay
+from snapper.application.portfolio.pnl_timeline_service import _sample_coverage_flags
+from snapper.application.portfolio.pnl_timeline_service import _sample_point_overlay
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
 from snapper.application.portfolio.pnl_timeline_service import build_fx_rates
@@ -63,6 +75,7 @@ from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
+from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
@@ -77,6 +90,7 @@ from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
+from snapper.data.repository_types import PortfolioPnlSampleRow
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 _I1 = "00000000-0000-7000-8000-000000000b01"
@@ -511,6 +525,8 @@ class FakeRepo:
         self._record_winner = record_winner
         self._execution_prefix_error = execution_prefix_error
         self._execution_watermarks = execution_watermarks
+        self._samples: list[PortfolioPnlSampleRow] = []
+        self.sample_calls: list[tuple[PortfolioPnlSampleQuery, datetime, datetime, str | None]] = []
         self.atomic_anchor_error: Exception | None = None
         self._fill_witnesses: list[_TestFillWitness] | None = None
         self.fx_pair_calls: list[list[tuple[str, str]]] = []
@@ -814,6 +830,32 @@ class FakeRepo:
             for row in self._fx_rows
             if (row["base"], row["quote"], row["exchange"]) in requested
             and start <= row["open_at"] <= end
+        ]
+
+    def load_samples(self, samples: Sequence[PortfolioPnlSampleRow]) -> None:
+        """Install the canned sample rows the range read returns."""
+        self._samples = list(samples)
+
+    async def get_portfolio_pnl_samples(
+        self,
+        query: PortfolioPnlSampleQuery,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        status: str | None = None,
+    ) -> list[PortfolioPnlSampleRow]:
+        """Record one bounded sample read and return the matching canned rows."""
+        self.sample_calls.append((query, window_start, window_end, status))
+        return [
+            row
+            for row in self._samples
+            if row["epoch_public_id"] == query.epoch_public_id
+            and row["calc_version"] == query.calc_version
+            and row["wallet_public_id"] == query.wallet_public_id
+            and row["mode"] == query.mode
+            and row["valuation_ccy"] == query.valuation_ccy
+            and window_start <= row["point_time"] <= window_end
+            and (status is None or row["valuation_status"] == status)
         ]
 
 
@@ -1181,7 +1223,16 @@ class TestBuildWalletPnlSeries:
             refs=refs,
             candles=candles,
         )
-        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
         assert result.points[0].accrual_pnl == 0.0
         assert result.points[1].accrual_pnl == -3.0
         assert result.points[2].accrual_pnl == -3.0
@@ -1193,7 +1244,16 @@ class TestBuildWalletPnlSeries:
         refs = [_ref(_I1, "BTC-USD", "USD")]
         candles = [_candle(_m(-1), 100.0), _candle(_m(0), 100.0), _candle(_m(1), 100.0)]
         repo = FakeRepo(executions=executions, accruals=accruals, refs=refs, candles=candles)
-        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
         assert [point.valuation_status for point in result.points] == ["complete"] * 3
         assert [point.accrual_pnl for point in result.points] == [0.0, 0.0, 0.0]
 
@@ -1213,7 +1273,16 @@ class TestBuildWalletPnlSeries:
             refs=refs,
             candles=candles,
         )
-        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
         assert result.points[0].accrual_pnl == 0.0
         assert result.points[1].valuation_status == "incomplete"
         assert result.points[1].accrual_pnl is None
@@ -1390,7 +1459,16 @@ class TestBuildWalletPnlSeries:
     async def test_empty_scope_yields_only_incomplete_or_flat_points(self) -> None:
         """With no executions the series still spans the grid at the granularity."""
         repo = FakeRepo()
-        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
         assert len(result.points) == 3
         assert repo.symbol_ref_calls == []
 
@@ -3541,7 +3619,7 @@ class TestBuildWalletPnlTimeline:
             _T0,
             "1m",
             _m(1),
-            allow_anchor_creation=False,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         )
         assert result.series.points == ()
         assert [
@@ -3567,7 +3645,7 @@ class TestBuildWalletPnlTimeline:
                 _T0,
                 "1m",
                 _m(1),
-                allow_anchor_creation=False,
+                policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
             )
         assert repo.execution_calls == [(_W1, "live", _m(1))]
 
@@ -4744,7 +4822,7 @@ class TestDurableActivationAnchor:
             _T0,
             "1m",
             _T0,
-            allow_anchor_creation=False,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         )
         assert result.points == ()
         assert repo.anchor_record_calls == []
@@ -4769,7 +4847,7 @@ class TestDurableActivationAnchor:
             _m(1),
             "1m",
             _m(1),
-            allow_anchor_creation=False,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         )
         assert result.points == ()
         assert repo.anchor_record_calls == []
@@ -5410,7 +5488,7 @@ class TestAnchorEvidenceDefenses:
                 _T0,
                 "30m",
                 _T0,
-                allow_anchor_creation=False,
+                policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
             )
 
     def test_opening_pool_scan_rejects_identity_scope_and_numeric_poison(
@@ -5817,3 +5895,519 @@ class TestLoadBasketFiatEvidence:
         )
         assert venues == {}
         assert versions == {}
+
+
+def _default_epoch() -> str:
+    """Return the current-anchor epoch id the default FakeRepo anchor exposes."""
+    return portfolio_pnl_anchor_public_id(_W1, "live", "USD")
+
+
+def _sample_audit(
+    *,
+    venue_scope: str = "spot_only",
+    external_flows_adjusted: bool = False,
+) -> str:
+    """Serialize one complete sample's canonical coverage-bearing audit envelope."""
+    return _canonical_test_json(
+        {
+            "coverage": {
+                "leveraged_inventory_excluded": False,
+                "non_finite_position_excluded": False,
+                "venue_scope": venue_scope,
+                "external_flows_adjusted": external_flows_adjusted,
+            },
+            "observations": [],
+            "valuation": [],
+        }
+    )
+
+
+def _sample_row(
+    point_time: datetime,
+    *,
+    cash_usd: float | None = 400.0,
+    position_value_usd: float | None = 600.0,
+    drawdown: float | None = 0.1,
+    audit_json: str | None = None,
+) -> PortfolioPnlSampleRow:
+    """Build one complete persisted sample row for the current live USD epoch.
+
+    The epoch, calc version, scope and status are the exact-predicate values the
+    overlay read matches; tests needing an incomplete row mutate the returned dict.
+    """
+    return {
+        "public_id": f"sample-{point_time.isoformat()}",
+        "session_id": _ANCHOR_SESSION,
+        "sequence_id": 1,
+        "timestamp": point_time,
+        "wallet_public_id": _W1,
+        "mode": "live",
+        "valuation_ccy": "USD",
+        "point_time": point_time,
+        "point_kind": "sample",
+        "epoch_public_id": _default_epoch(),
+        "calc_version": PNL_SAMPLE_CALC_VERSION,
+        "valuation_status": "complete",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "external_flow_adjustment": 0.0,
+        "unrealized_pnl": 5.0,
+        "cash_usd": cash_usd,
+        "position_value_usd": position_value_usd,
+        "drawdown": drawdown,
+        "mark_source": PNL_TIMELINE_MARK_SOURCE,
+        "mark_time": point_time,
+        "audit_json": _sample_audit() if audit_json is None else audit_json,
+        "watermarks_json": "{}",
+    }
+
+
+def _incomplete_sample_row(point_time: datetime) -> PortfolioPnlSampleRow:
+    """Build one incomplete sample row whose equity plane is withheld."""
+    row = _sample_row(point_time, cash_usd=None, position_value_usd=None, drawdown=None)
+    row["valuation_status"] = "incomplete"
+    row["unrealized_pnl"] = None
+    return row
+
+
+def _grid_point(point_time: datetime) -> PnlTimelinePoint:
+    """Build one minimal complete grid point at ``point_time`` for overlay tests."""
+    return PnlTimelinePoint(
+        point_time=point_time,
+        realized_pnl=0.0,
+        fee_pnl=0.0,
+        accrual_pnl=0.0,
+        unrealized_pnl=0.0,
+        net_pnl=0.0,
+        valuation_status="complete",
+        incompleteness_reasons=(),
+        per_instrument=(),
+        attribution=(),
+    )
+
+
+def _overlay_request(
+    points: Sequence[PnlTimelinePoint] = (),
+    *,
+    current_truth: bool = True,
+    valuation_ccy: str = "USD",
+    epoch_public_id: str = "",
+) -> _EquityOverlayRequest:
+    """Build one equity-overlay request over the ``[_T0, _m(2)]`` grid window."""
+    return _EquityOverlayRequest(
+        wallet_public_id=_W1,
+        mode="live",
+        valuation_ccy=valuation_ccy,
+        epoch_public_id=epoch_public_id or _default_epoch(),
+        from_time=_T0,
+        to_time=_m(2),
+        current_truth=current_truth,
+        points=tuple(points),
+    )
+
+
+class TestSamplePointOverlay:
+    """Cover the per-minute finiteness gate and equity derivation (R4)."""
+
+    def test_complete_sample_overlays_the_equity_sum(self) -> None:
+        """A finite complete sample overlays cash, position value, drawdown and sum."""
+        overlay = _sample_point_overlay(
+            _sample_row(_m(1), cash_usd=400.0, position_value_usd=600.0)
+        )
+        assert overlay is not None
+        assert overlay.cash == 400.0
+        assert overlay.position_value == 600.0
+        assert overlay.drawdown == 0.1
+        assert overlay.equity == 1000.0
+
+    def test_equity_is_the_bit_exact_sum_of_the_persisted_floats(self) -> None:
+        """Equity is ``cash + position_value`` from the SAME floats, never rounded."""
+        overlay = _sample_point_overlay(_sample_row(_m(1), cash_usd=0.1, position_value_usd=0.2))
+        assert overlay is not None
+        assert overlay.equity == 0.1 + 0.2
+
+    @pytest.mark.parametrize(
+        ("cash", "position_value", "drawdown"),
+        [
+            (None, 600.0, 0.1),
+            (400.0, None, 0.1),
+            (400.0, 600.0, None),
+            (math.inf, 600.0, 0.1),
+            (400.0, math.nan, 0.1),
+            (400.0, 600.0, math.inf),
+            (400.0, 600.0, 1.5),
+            (400.0, 600.0, -0.1),
+        ],
+    )
+    def test_non_finite_or_out_of_range_term_withholds_the_minute(
+        self,
+        cash: float | None,
+        position_value: float | None,
+        drawdown: float | None,
+    ) -> None:
+        """A null, non-finite, or out-of-[0,1] term yields no overlay for the minute."""
+        overlay = _sample_point_overlay(
+            _sample_row(
+                _m(1),
+                cash_usd=cash,
+                position_value_usd=position_value,
+                drawdown=drawdown,
+            )
+        )
+        assert overlay is None
+
+    def test_finite_terms_summing_to_infinity_withhold_the_minute(self) -> None:
+        """Two finite terms that overflow to infinity still withhold the overlay."""
+        overlay = _sample_point_overlay(
+            _sample_row(_m(1), cash_usd=1e308, position_value_usd=1e308, drawdown=0.1)
+        )
+        assert overlay is None
+
+
+class TestQualifiedSampleOverlays:
+    """Cover the malformed-row drop-and-log validation pass (M1/R4)."""
+
+    def test_valid_rows_qualify_and_malformed_rows_are_dropped(self) -> None:
+        """A complete row with a null money term is dropped, leaving the valid ones."""
+        samples_by_minute = {
+            _m(1): _sample_row(_m(1), cash_usd=100.0, position_value_usd=200.0),
+            _m(2): _sample_row(_m(2), cash_usd=None),
+        }
+        qualified = _qualified_sample_overlays(_overlay_request(), samples_by_minute)
+        assert set(qualified) == {_m(1)}
+        assert qualified[_m(1)].equity == 300.0
+
+
+class TestPointEquityOverlays:
+    """Cover endpoint-selection: exact-minute match, never aggregation (D13)."""
+
+    def test_only_endpoint_minutes_with_qualified_overlays_are_selected(self) -> None:
+        """A point overlays only when its exact minute has a qualified overlay."""
+        points = [_grid_point(_m(1)), _grid_point(_m(2))]
+        qualified = {
+            _m(2): PnlPointEquityOverlay(
+                equity=1000.0,
+                cash=400.0,
+                position_value=600.0,
+                drawdown=0.1,
+            )
+        }
+        overlays = _point_equity_overlays(points, qualified)
+        assert set(overlays) == {_m(2)}
+        assert overlays[_m(2)].equity == 1000.0
+
+
+class TestParseSampleCoverage:
+    """Cover the audit coverage-block parser."""
+
+    def test_valid_audit_returns_scope_and_flag(self) -> None:
+        """A canonical coverage block yields its venue scope and flow flag."""
+        assert _parse_sample_coverage(_sample_audit()) == ("spot_only", False)
+
+    def test_unreadable_audit_returns_none(self) -> None:
+        """An unparsable or coverage-less audit envelope yields ``None``."""
+        assert _parse_sample_coverage("not-json") is None
+        assert _parse_sample_coverage(_canonical_test_json({"observations": []})) is None
+
+
+class TestSampleCoverageFlags:
+    """Cover the uniform-coverage fold and its fail-closed cases (R11)."""
+
+    def test_uniform_spot_only_coverage_folds(self) -> None:
+        """Agreeing spot-only coverage folds to one disclosure tuple."""
+        samples = [_sample_row(_m(1)), _sample_row(_m(2))]
+        assert _sample_coverage_flags(samples) == ("spot_only", False)
+
+    def test_unreadable_sample_fails_closed(self) -> None:
+        """One unreadable audit withholds the whole disclosure."""
+        samples = [_sample_row(_m(1)), _sample_row(_m(2), audit_json="not-json")]
+        assert _sample_coverage_flags(samples) is None
+
+    def test_disagreeing_flow_flag_fails_closed(self) -> None:
+        """Samples disagreeing on the flow flag withhold the disclosure."""
+        samples = [
+            _sample_row(_m(1), audit_json=_sample_audit(external_flows_adjusted=False)),
+            _sample_row(_m(2), audit_json=_sample_audit(external_flows_adjusted=True)),
+        ]
+        assert _sample_coverage_flags(samples) is None
+
+    def test_unsupported_venue_scope_fails_closed(self) -> None:
+        """A non spot-only venue scope is unsupported and withholds the overlay."""
+        samples = [_sample_row(_m(1), audit_json=_sample_audit(venue_scope="futures_only"))]
+        assert _sample_coverage_flags(samples) is None
+
+
+class TestBuildEquityOverlay:
+    """Cover the bounded-read fold, fail-closed guards and coverage (R4/D13)."""
+
+    def test_no_samples_is_unsampled(self) -> None:
+        """An eligible window with no complete sample reports unsampled coverage."""
+        result = _build_equity_overlay(_overlay_request(), [])
+        assert result.coverage.sampled is False
+        assert result.coverage.complete_minutes == 0
+        assert dict(result.overlay) == {}
+
+    def test_duplicate_active_minute_fails_closed(self) -> None:
+        """More than one active sample for a minute withholds the whole overlay."""
+        samples = [_sample_row(_m(1)), _sample_row(_m(1), cash_usd=1.0)]
+        result = _build_equity_overlay(_overlay_request([_grid_point(_m(1))]), samples)
+        assert result.coverage.sampled is False
+        assert dict(result.overlay) == {}
+
+    def test_coverage_disagreement_fails_closed(self) -> None:
+        """Disagreeing coverage blocks withhold the whole overlay."""
+        samples = [
+            _sample_row(_m(1), audit_json=_sample_audit(external_flows_adjusted=False)),
+            _sample_row(_m(2), audit_json=_sample_audit(external_flows_adjusted=True)),
+        ]
+        result = _build_equity_overlay(_overlay_request([_grid_point(_m(1))]), samples)
+        assert result.coverage.sampled is False
+        assert dict(result.overlay) == {}
+
+    def test_happy_path_folds_coverage_and_overlays(self) -> None:
+        """Agreeing complete samples fold into a sampled disclosure and overlays."""
+        samples = [
+            _sample_row(_m(1), cash_usd=100.0, position_value_usd=200.0),
+            _sample_row(_m(2), cash_usd=400.0, position_value_usd=600.0),
+        ]
+        result = _build_equity_overlay(
+            _overlay_request([_grid_point(_m(1)), _grid_point(_m(2))]),
+            samples,
+        )
+        assert result.coverage == PnlEquityCoverage(
+            sampled=True,
+            venue_scope="spot_only",
+            external_flows_adjusted=False,
+            complete_minutes=2,
+            first_minute=_m(1),
+            last_minute=_m(2),
+            sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+        )
+        assert result.overlay[_m(1)].equity == 300.0
+        assert result.overlay[_m(2)].equity == 1000.0
+
+    def test_lone_malformed_complete_row_is_unsampled(self) -> None:
+        """A single malformed complete row leaves the disclosure unsampled (M1)."""
+        samples = [_sample_row(_m(1), cash_usd=None)]
+        result = _build_equity_overlay(_overlay_request([_grid_point(_m(1))]), samples)
+        assert result.coverage.sampled is False
+        assert result.coverage.complete_minutes == 0
+        assert dict(result.overlay) == {}
+
+    def test_mixed_valid_and_malformed_counts_only_the_valid(self) -> None:
+        """A malformed complete row never inflates the coverage of the valid rows (M1)."""
+        samples = [
+            _sample_row(_m(1), cash_usd=100.0, position_value_usd=200.0),
+            _sample_row(_m(2), drawdown=1.5),
+        ]
+        result = _build_equity_overlay(
+            _overlay_request([_grid_point(_m(1)), _grid_point(_m(2))]),
+            samples,
+        )
+        assert result.coverage.sampled is True
+        assert result.coverage.complete_minutes == 1
+        assert (result.coverage.first_minute, result.coverage.last_minute) == (_m(1), _m(1))
+        assert set(result.overlay) == {_m(1)}
+
+
+class TestResolveEquityOverlay:
+    """Cover the eligibility gate and the single bounded sample read (R4/D13)."""
+
+    async def test_non_current_truth_skips_the_read(self) -> None:
+        """A historical request resolves an unsampled overlay without a read."""
+        repo = FakeRepo()
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(repo, _overlay_request(current_truth=False))
+        assert result.coverage.sampled is False
+        assert repo.sample_calls == []
+
+    async def test_non_usd_skips_the_read(self) -> None:
+        """A non-USD scope resolves an unsampled overlay without a read."""
+        repo = FakeRepo()
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(repo, _overlay_request(valuation_ccy="EUR"))
+        assert result.coverage.sampled is False
+        assert repo.sample_calls == []
+
+    async def test_eligible_scope_reads_once_and_folds(self) -> None:
+        """An eligible scope issues exactly one exact-predicate sample read."""
+        repo = FakeRepo()
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(repo, _overlay_request([_grid_point(_m(1))]))
+        assert result.coverage.sampled is True
+        assert len(repo.sample_calls) == 1
+        query, window_start, window_end, status = repo.sample_calls[0]
+        assert query.epoch_public_id == _default_epoch()
+        assert query.calc_version == PNL_SAMPLE_CALC_VERSION
+        assert (window_start, window_end, status) == (_T0, _m(2), "complete")
+
+
+class TestBuildWalletSeriesEquityOverlay:
+    """Cover the overlay end-to-end through the public series builder (R4/D13)."""
+
+    async def test_current_usd_series_carries_overlay_from_one_read(self) -> None:
+        """A current USD series overlays each sampled minute from one bounded read."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0, 1, 2)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples(
+            [
+                _sample_row(_T0, cash_usd=100.0, position_value_usd=50.0),
+                _sample_row(_m(1), cash_usd=400.0, position_value_usd=600.0),
+                _sample_row(_m(2), cash_usd=700.0, position_value_usd=300.0),
+            ]
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
+        assert result.equity_coverage == PnlEquityCoverage(
+            sampled=True,
+            venue_scope="spot_only",
+            external_flows_adjusted=False,
+            complete_minutes=3,
+            first_minute=_T0,
+            last_minute=_m(2),
+            sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+        )
+        assert result.equity_overlay_at(_T0).equity == 150.0
+        assert result.equity_overlay_at(_m(1)).cash == 400.0
+        assert result.equity_overlay_at(_m(2)).position_value == 300.0
+        assert len(repo.sample_calls) == 1
+
+    async def test_overlay_equity_uses_persisted_floats_bit_exact(self) -> None:
+        """The served equity equals ``cash + position_value`` of the stored floats."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples([_sample_row(_T0, cash_usd=0.1, position_value_usd=0.2)])
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
+        assert result.equity_overlay_at(_T0).equity == 0.1 + 0.2
+
+    async def test_missing_and_incomplete_minutes_render_null(self) -> None:
+        """A minute with no complete sample stays null (chart gap, checklist #7)."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0, 1, 2)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples(
+            [
+                _sample_row(_m(1), cash_usd=400.0, position_value_usd=600.0),
+                _incomplete_sample_row(_m(2)),
+            ]
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
+        assert result.equity_overlay_at(_T0).equity is None
+        assert result.equity_overlay_at(_m(1)).equity == 1000.0
+        assert result.equity_overlay_at(_m(2)).equity is None
+        assert result.equity_coverage.complete_minutes == 1
+
+    async def test_downsampled_series_selects_the_bucket_endpoint(self) -> None:
+        """A downsampled point overlays its bucket endpoint minute, never a sum."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0, 1, 2)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples(
+            [
+                _sample_row(_m(1), cash_usd=100.0, position_value_usd=200.0),
+                _sample_row(_m(2), cash_usd=400.0, position_value_usd=600.0),
+            ]
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1d",
+            _T0,
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
+        assert [point.point_time for point in result.points] == [_m(2)]
+        assert result.equity_overlay_at(_m(2)).equity == 1000.0
+        assert result.equity_overlay_at(_m(1)).equity is None
+        assert result.equity_coverage.complete_minutes == 1
+        assert result.equity_coverage.first_minute == _m(2)
+        assert result.equity_coverage.last_minute == _m(2)
+
+    async def test_historical_request_has_no_overlay(self) -> None:
+        """A historical ``as_of`` request never overlays and never reads samples."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples([_sample_row(_T0)])
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        )
+        assert result.equity_coverage.sampled is False
+        assert result.equity_overlay_at(_T0).equity is None
+        assert repo.sample_calls == []
+
+    async def test_current_truth_omitted_gives_no_overlay(self) -> None:
+        """The default policy discloses no overlay and reads no samples (B1)."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples([_sample_row(_T0, cash_usd=100.0, position_value_usd=50.0)])
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _T0)
+        assert result.equity_coverage.sampled is False
+        assert result.equity_overlay_at(_T0).equity is None
+        assert repo.sample_calls == []
+
+    async def test_anchor_creation_alone_does_not_disclose_overlay(self) -> None:
+        """Permitting anchor creation without ``current_truth`` discloses no equity (B1)."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [_candle(_m(n), 100.0) for n in (-1, 0)]
+        repo = FakeRepo(executions=executions, refs=refs, candles=candles)
+        repo.load_samples([_sample_row(_T0, cash_usd=100.0, position_value_usd=50.0)])
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=True),
+        )
+        assert result.equity_coverage.sampled is False
+        assert result.equity_overlay_at(_T0).equity is None
+        assert repo.sample_calls == []

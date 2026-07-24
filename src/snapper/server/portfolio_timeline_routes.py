@@ -34,6 +34,7 @@ from loguru import logger
 
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
+from snapper.api.schemas.pnl_timeline import PnlEquityCoverageData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
@@ -45,13 +46,17 @@ from snapper.api.schemas.pnl_timeline import PnlTimelineData
 from snapper.api.schemas.pnl_timeline import PnlTimelineMarkerData
 from snapper.api.schemas.pnl_timeline import PnlTimelinePointData
 from snapper.api.schemas.pnl_timeline import PnlTimelineResponse
-from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
+from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
+from snapper.application.portfolio.pnl_timeline_service import PnlEquityCoverage
 from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlPointEquityOverlay
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.auth.dependencies import require_permission
@@ -108,6 +113,7 @@ class _ValidatedTimelineRequest:
     as_of: datetime
     valuation_ccy: str
     allow_anchor_creation: bool
+    current_truth: bool
 
 
 def _parse_utc_query_datetime(value: str, parameter_name: str) -> datetime:
@@ -268,55 +274,80 @@ async def _validate_timeline_request(
         as_of=effective_as_of,
         valuation_ccy=normalized_ccy,
         allow_anchor_creation=as_of is None,
+        current_truth=as_of is None,
     )
 
 
-def _point_data(result: PnlTimelineResult) -> list[PnlTimelinePointData]:
-    """Project the pure series result into strict transport point models."""
+def _point_payload(
+    point: PnlTimelinePoint,
+    overlay: PnlPointEquityOverlay,
+) -> PnlTimelinePointData:
+    """Project one pure point plus its equity overlay into a strict point model."""
+    return PnlTimelinePointData(
+        point_time=point.point_time,
+        realized_pnl=point.realized_pnl,
+        fee_pnl=point.fee_pnl,
+        accrual_pnl=point.accrual_pnl,
+        unrealized_pnl=point.unrealized_pnl,
+        net_pnl=point.net_pnl,
+        equity=overlay.equity,
+        cash=overlay.cash,
+        position_value=overlay.position_value,
+        drawdown=overlay.drawdown,
+        valuation_status=point.valuation_status,
+        incompleteness_reasons=[
+            PnlIncompletenessReasonData(
+                reason=entry.reason,
+                withholding_tier=entry.withholding_tier,
+                withholding_scope=entry.withholding_scope,
+                trigger_instrument_public_id=entry.trigger_instrument_public_id,
+            )
+            for entry in point.incompleteness_reasons
+        ],
+        per_instrument=[
+            PnlInstrumentContributionData(
+                instrument_public_id=contribution.instrument_public_id,
+                native_symbol=contribution.native_symbol,
+                exchange=contribution.exchange,
+                realized_pnl=contribution.realized_pnl,
+                fee_pnl=contribution.fee_pnl,
+                accrual_pnl=contribution.accrual_pnl,
+                unrealized_pnl=contribution.unrealized_pnl,
+            )
+            for contribution in point.per_instrument
+        ],
+        attribution=[
+            PnlAttributionContributionData(
+                origin=contribution.origin,
+                strategy_name=contribution.strategy_name,
+                realized_pnl=contribution.realized_pnl,
+                fee_pnl=contribution.fee_pnl,
+                accrual_pnl=contribution.accrual_pnl,
+                unrealized_pnl=contribution.unrealized_pnl,
+            )
+            for contribution in point.attribution
+        ],
+    )
+
+
+def _point_data(result: PnlWalletSeriesResult) -> list[PnlTimelinePointData]:
+    """Project the pure series result plus its equity overlay into transport points."""
     return [
-        PnlTimelinePointData(
-            point_time=point.point_time,
-            realized_pnl=point.realized_pnl,
-            fee_pnl=point.fee_pnl,
-            accrual_pnl=point.accrual_pnl,
-            unrealized_pnl=point.unrealized_pnl,
-            net_pnl=point.net_pnl,
-            valuation_status=point.valuation_status,
-            incompleteness_reasons=[
-                PnlIncompletenessReasonData(
-                    reason=entry.reason,
-                    withholding_tier=entry.withholding_tier,
-                    withholding_scope=entry.withholding_scope,
-                    trigger_instrument_public_id=entry.trigger_instrument_public_id,
-                )
-                for entry in point.incompleteness_reasons
-            ],
-            per_instrument=[
-                PnlInstrumentContributionData(
-                    instrument_public_id=contribution.instrument_public_id,
-                    native_symbol=contribution.native_symbol,
-                    exchange=contribution.exchange,
-                    realized_pnl=contribution.realized_pnl,
-                    fee_pnl=contribution.fee_pnl,
-                    accrual_pnl=contribution.accrual_pnl,
-                    unrealized_pnl=contribution.unrealized_pnl,
-                )
-                for contribution in point.per_instrument
-            ],
-            attribution=[
-                PnlAttributionContributionData(
-                    origin=contribution.origin,
-                    strategy_name=contribution.strategy_name,
-                    realized_pnl=contribution.realized_pnl,
-                    fee_pnl=contribution.fee_pnl,
-                    accrual_pnl=contribution.accrual_pnl,
-                    unrealized_pnl=contribution.unrealized_pnl,
-                )
-                for contribution in point.attribution
-            ],
-        )
-        for point in result.points
+        _point_payload(point, result.equity_overlay_at(point.point_time)) for point in result.points
     ]
+
+
+def _coverage_data(coverage: PnlEquityCoverage) -> PnlEquityCoverageData:
+    """Project the service equity-coverage disclosure into its strict transport model."""
+    return PnlEquityCoverageData(
+        sampled=coverage.sampled,
+        venue_scope=coverage.venue_scope,
+        external_flows_adjusted=coverage.external_flows_adjusted,
+        complete_minutes=coverage.complete_minutes,
+        first_minute=coverage.first_minute,
+        last_minute=coverage.last_minute,
+        sample_calc_version=coverage.sample_calc_version,
+    )
 
 
 def _marker_data(marker: PnlTimelineMarker) -> PnlTimelineMarkerData:
@@ -441,7 +472,10 @@ async def get_pnl_series(
             validated.granularity,
             validated.as_of,
             validated.valuation_ccy,
-            allow_anchor_creation=validated.allow_anchor_creation,
+            policy=PnlSeriesReadPolicy(
+                allow_anchor_creation=validated.allow_anchor_creation,
+                current_truth=validated.current_truth,
+            ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -471,6 +505,7 @@ async def get_pnl_series(
                 for source in result.rate_sources
             ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
+            equity_coverage=_coverage_data(result.equity_coverage),
             points=_point_data(result),
         )
         return PnlSeriesResponse(
@@ -574,7 +609,10 @@ async def get_pnl_timeline(
             validated.granularity,
             validated.as_of,
             validated.valuation_ccy,
-            allow_anchor_creation=validated.allow_anchor_creation,
+            policy=PnlSeriesReadPolicy(
+                allow_anchor_creation=validated.allow_anchor_creation,
+                current_truth=validated.current_truth,
+            ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -604,6 +642,7 @@ async def get_pnl_timeline(
                 for source in result.series.rate_sources
             ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
+            equity_coverage=_coverage_data(result.series.equity_coverage),
             points=_point_data(result.series),
             marker_limit=result.marker_limit,
             markers_truncated=result.markers_truncated,

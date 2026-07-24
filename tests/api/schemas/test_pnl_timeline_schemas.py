@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
+from snapper.api.schemas.pnl_timeline import PnlEquityCoverageData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
@@ -80,6 +81,10 @@ def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
         accrual_pnl=0.0,
         unrealized_pnl=2.0,
         net_pnl=2.5,
+        equity=1000.0,
+        cash=400.0,
+        position_value=600.0,
+        drawdown=0.1,
         valuation_status=status,
         incompleteness_reasons=[] if status == "complete" else _multi_cause_reasons(),
         per_instrument=[
@@ -103,6 +108,32 @@ def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
                 unrealized_pnl=2.0,
             )
         ],
+    )
+
+
+def _unsampled_coverage() -> PnlEquityCoverageData:
+    """Build the unsampled equity-coverage disclosure used by the envelopes."""
+    return PnlEquityCoverageData(
+        sampled=False,
+        venue_scope=None,
+        external_flows_adjusted=None,
+        complete_minutes=0,
+        first_minute=None,
+        last_minute=None,
+        sample_calc_version=None,
+    )
+
+
+def _sampled_coverage() -> PnlEquityCoverageData:
+    """Build the sampled spot-only equity-coverage disclosure."""
+    return PnlEquityCoverageData(
+        sampled=True,
+        venue_scope="spot_only",
+        external_flows_adjusted=False,
+        complete_minutes=3,
+        first_minute=_NOW,
+        last_minute=_NOW,
+        sample_calc_version="5B.1",
     )
 
 
@@ -131,6 +162,7 @@ def _series_data() -> PnlSeriesData:
             )
         ],
         calc_version="5A.1",
+        equity_coverage=_sampled_coverage(),
         points=[_point()],
     )
 
@@ -152,6 +184,7 @@ def _timeline_data() -> PnlTimelineData:
         mark_source="finalized_1m_candle_close",
         rate_sources=[],
         calc_version="5A.2",
+        equity_coverage=_unsampled_coverage(),
         points=[_point()],
         marker_limit=2_000,
         markers_truncated=False,
@@ -227,12 +260,18 @@ class TestStrictContract:
             accrual_pnl=None,
             unrealized_pnl=None,
             net_pnl=None,
+            equity=None,
+            cash=None,
+            position_value=None,
+            drawdown=None,
             valuation_status="incomplete",
             incompleteness_reasons=_multi_cause_reasons(),
             per_instrument=[_contribution()],
             attribution=[_attribution()],
         )
         assert point.net_pnl is None
+        assert point.equity is None
+        assert point.drawdown is None
         assert [reason.reason for reason in point.incompleteness_reasons] == [
             "mark_unavailable",
             "execution_price_invalid",
@@ -327,6 +366,10 @@ class TestStrictContract:
             "accrual_pnl": 0.0,
             "unrealized_pnl": 0.0,
             "net_pnl": 1.0,
+            "equity": None,
+            "cash": None,
+            "position_value": None,
+            "drawdown": None,
             "valuation_status": "complete",
             "incompleteness_reasons": [],
             "per_instrument": [],
@@ -345,6 +388,10 @@ class TestStrictContract:
             "accrual_pnl": 0.0,
             "unrealized_pnl": 0.0,
             "net_pnl": 1.0,
+            "equity": None,
+            "cash": None,
+            "position_value": None,
+            "drawdown": None,
             "valuation_status": "partial",
             "incompleteness_reasons": [],
             "per_instrument": [],
@@ -407,3 +454,66 @@ class TestStrictContract:
         signal["outcome"] = "rejected"
         with pytest.raises(ValidationError):
             PnlSignalMarkerData.model_validate(signal)
+
+
+class TestEquityCoverageContract:
+    """Cover the equity-coverage disclosure and its honesty invariant."""
+
+    def test_point_exposes_nullable_equity_overlay_fields(self) -> None:
+        """A point transports the four nullable observed-equity overlay fields."""
+        point = _point()
+        assert (point.equity, point.cash, point.position_value, point.drawdown) == (
+            1000.0,
+            400.0,
+            600.0,
+            0.1,
+        )
+
+    def test_equity_field_is_required_but_nullable(self) -> None:
+        """The overlay fields are required in the contract but accept honest nulls."""
+        missing = _point().model_dump()
+        missing.pop("equity")
+        with pytest.raises(ValidationError):
+            PnlTimelinePointData.model_validate(missing)
+
+    def test_sampled_coverage_round_trips(self) -> None:
+        """A fully provisioned sampled disclosure validates."""
+        coverage = _sampled_coverage()
+        assert coverage.sampled is True
+        assert coverage.venue_scope == "spot_only"
+        assert coverage.sample_calc_version == "5B.1"
+
+    def test_unsampled_coverage_round_trips(self) -> None:
+        """A wholly null unsampled disclosure validates."""
+        coverage = _unsampled_coverage()
+        assert coverage.sampled is False
+        assert coverage.complete_minutes == 0
+
+    def test_sampled_coverage_requires_full_provenance(self) -> None:
+        """A sampled disclosure cannot drop its scope, span, or minute count."""
+        missing_scope = _sampled_coverage().model_dump()
+        missing_scope["venue_scope"] = None
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(missing_scope)
+        empty_minutes = _sampled_coverage().model_dump()
+        empty_minutes["complete_minutes"] = 0
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(empty_minutes)
+
+    def test_unsampled_coverage_rejects_stray_provenance(self) -> None:
+        """An unsampled disclosure must null every provenance field."""
+        stray_scope = _unsampled_coverage().model_dump()
+        stray_scope["venue_scope"] = "spot_only"
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(stray_scope)
+        stray_minutes = _unsampled_coverage().model_dump()
+        stray_minutes["complete_minutes"] = 2
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(stray_minutes)
+
+    def test_envelope_requires_equity_coverage(self) -> None:
+        """The series envelope cannot drop the equity-coverage disclosure."""
+        payload = _series_data().model_dump()
+        payload.pop("equity_coverage")
+        with pytest.raises(ValidationError):
+            PnlSeriesData.model_validate(payload)
