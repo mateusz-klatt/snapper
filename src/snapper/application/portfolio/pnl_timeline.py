@@ -150,6 +150,7 @@ from typing import Literal
 from typing import cast
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
+from snapper.application.portfolio.average_cost import PoolFillOutcome
 from snapper.application.portfolio.average_cost import apply_fill
 from snapper.core.numeric import is_positive_finite
 
@@ -1619,8 +1620,6 @@ def _instrument_pool_state(
 
 
 def _mark_unavailable(
-    context: _PointValuationContext,
-    instrument_public_id: str,
     is_activation_point: bool,
     mark: float | None,
 ) -> bool:
@@ -1758,8 +1757,6 @@ def _instrument_unrealized(
         else context.marks.get((instrument_public_id, context.point_time))
     )
     mark_unavailable = _mark_unavailable(
-        context,
-        instrument_public_id,
         is_activation_point,
         mark,
     )
@@ -2134,6 +2131,687 @@ def _downsample(points: Sequence[PnlTimelinePoint], step: int) -> list[PnlTimeli
     return result
 
 
+@dataclass(frozen=True)
+class _TimelineBuildEvidence:
+    """Resolved optional lineage and incompleteness evidence for one build."""
+
+    marks: MarkMap
+    lineage: Mapping[str, TimelineExecutionLineage]
+    untrusted_price_reasons_by_instrument: Mapping[
+        str,
+        Collection[PnlIncompletenessReason],
+    ]
+    mark_incompleteness_reasons: MarkIncompletenessReasonMap
+
+
+@dataclass
+class _TimelineBuildState:
+    """Mutable replay, cumulative, and attribution state for one build."""
+
+    pools: dict[PoolKey, _Pool] = field(default_factory=dict)
+    weights_by_pool: dict[PoolKey, dict[AttributionKey, float]] = field(default_factory=dict)
+    seen: set[str] = field(default_factory=set)
+    attribution_seen: set[AttributionKey] = field(default_factory=set)
+    basis_reasons_by_pool: dict[PoolKey, set[PnlIncompletenessReason]] = field(default_factory=dict)
+    untrusted_reasons_by_instrument: dict[
+        str,
+        set[PnlIncompletenessReasonEntry],
+    ] = field(default_factory=dict)
+    activation_time: datetime | None = None
+    scope_by_shard: dict[str, tuple[str, str]] = field(default_factory=dict)
+    exchange_by_instrument: dict[str, str] = field(default_factory=dict)
+    pool_keys_by_instrument: defaultdict[str, set[PoolKey]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
+    realized_by_instrument: defaultdict[str, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    fee_by_instrument: defaultdict[str, float] = field(default_factory=lambda: defaultdict(float))
+    accrual_by_instrument: defaultdict[str, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    realized_by_attribution: defaultdict[AttributionKey, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    fee_by_attribution: defaultdict[AttributionKey, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    accrual_by_attribution: defaultdict[AttributionKey, float] = field(
+        default_factory=lambda: defaultdict(float)
+    )
+    realized_total: float = 0.0
+    fee_total: float = 0.0
+    accrual_total: float = 0.0
+
+
+@dataclass(frozen=True)
+class _TimelineSchedule:
+    """Prepared execution, accrual, and shadow indexes for the grid walk."""
+
+    prepared: Sequence[_PreparedExecution]
+    accruals: Sequence[TimelineAccrual]
+    pool_index: PoolIndex
+    position_changes: Mapping[datetime, set[str]]
+    shadow_trigger_changes: Mapping[int, str | None]
+    minute_grid: Sequence[datetime]
+
+
+@dataclass
+class _EventCursor:
+    """Mutable indexes into the monotone execution and accrual schedules."""
+
+    execution_index: int = 0
+    accrual_index: int = 0
+
+
+@dataclass(frozen=True)
+class _ExecutionApplication:
+    """Validated inputs and average-cost outcome for one execution."""
+
+    execution: TimelineExecution
+    instrument_public_id: str
+    pool_key: PoolKey
+    attribution_key: AttributionKey
+    pre_fill_weights: Mapping[AttributionKey, float]
+    pre_fill_basis_reasons: Collection[PnlIncompletenessReason]
+    position_size: float
+    price_is_trusted: bool
+    outcome: PoolFillOutcome
+
+
+def _resolved_build_evidence(
+    marks: MarkMap,
+    lineage: Mapping[str, TimelineExecutionLineage] | None,
+    untrusted_price_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]] | None,
+    mark_incompleteness_reasons: MarkIncompletenessReasonMap | None,
+) -> _TimelineBuildEvidence:
+    """Resolve optional caller evidence to immutable empty mappings."""
+    return _TimelineBuildEvidence(
+        marks=marks,
+        lineage={} if lineage is None else lineage,
+        untrusted_price_reasons_by_instrument=(
+            {}
+            if untrusted_price_reasons_by_instrument is None
+            else untrusted_price_reasons_by_instrument
+        ),
+        mark_incompleteness_reasons=(
+            {} if mark_incompleteness_reasons is None else mark_incompleteness_reasons
+        ),
+    )
+
+
+def _seed_timeline_pool(
+    state: _TimelineBuildState,
+    seed: OpeningPool,
+) -> None:
+    """Seed one opening pool and retain its exact causal trust state."""
+    instrument_public_id = seed.instrument_public_id
+    pool_key = (instrument_public_id, seed.shard_key)
+    state.pools[pool_key] = _Pool(seed.position_qty, seed.entry_price)
+    state.pool_keys_by_instrument[instrument_public_id].add(pool_key)
+    state.scope_by_shard[seed.shard_key] = (instrument_public_id, seed.exchange)
+    state.exchange_by_instrument[instrument_public_id] = seed.exchange
+    state.seen.add(instrument_public_id)
+    if not math.isfinite(seed.position_qty):
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            "seed_quantity_non_finite",
+        )
+        return
+    if not _is_exactly_zero(abs(seed.position_qty)):
+        state.weights_by_pool[pool_key] = {_UNATTRIBUTED_KEY: abs(seed.position_qty)}
+        state.attribution_seen.add(_UNATTRIBUTED_KEY)
+    if seed.entry_price is None and abs(seed.position_qty) >= FLAT_EPSILON:
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            "cost_basis_unavailable",
+        )
+        state.basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
+    elif abs(seed.position_qty) >= FLAT_EPSILON and not is_positive_finite(seed.entry_price):
+        state.basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
+
+
+def _initialize_timeline_state(
+    opening: TimelineOpening | None,
+) -> _TimelineBuildState:
+    """Return empty replay state optionally seeded at the activation anchor."""
+    state = _TimelineBuildState()
+    if opening is None:
+        return state
+    for seed in opening.pools:
+        _seed_timeline_pool(state, seed)
+    state.activation_time = opening.t0
+    return state
+
+
+def _validate_timeline_execution_scope(
+    state: _TimelineBuildState,
+    execution: TimelineExecution,
+) -> None:
+    """Validate and record one execution's durable shard and instrument scope."""
+    if not execution.instrument_public_id or not execution.shard_key or not execution.exchange:
+        raise ValueError("timeline execution pool identities must be non-empty")
+    execution_scope = (execution.instrument_public_id, execution.exchange)
+    previous_scope = state.scope_by_shard.setdefault(
+        execution.shard_key,
+        execution_scope,
+    )
+    if previous_scope != execution_scope:
+        raise ValueError("one timeline shard cannot span instrument or exchange scopes")
+    previous_exchange = state.exchange_by_instrument.setdefault(
+        execution.instrument_public_id,
+        execution.exchange,
+    )
+    if previous_exchange != execution.exchange:
+        raise ValueError("one timeline instrument cannot span multiple exchanges")
+
+
+def _validate_timeline_execution_scopes(
+    state: _TimelineBuildState,
+    executions: Sequence[TimelineExecution],
+) -> None:
+    """Validate all execution identities before any replay mutation occurs."""
+    for execution in executions:
+        _validate_timeline_execution_scope(state, execution)
+
+
+def _timeline_schedule(
+    state: _TimelineBuildState,
+    executions: Sequence[TimelineExecution],
+    accruals: Sequence[TimelineAccrual],
+    window: TimelineWindow,
+) -> _TimelineSchedule:
+    """Build deterministic event, valuation-pool, and regression indexes."""
+    prepared, shadows = _prepare_executions(executions)
+    pool_index = _valuation_pool_index(
+        state.pool_keys_by_instrument,
+        prepared,
+        window.to_time,
+    )
+    position_changes = _position_changes_by_effective_time(
+        prepared,
+        window.to_time,
+    )
+    sorted_accruals = sorted(
+        (
+            accrual
+            for accrual in accruals
+            if state.activation_time is None or accrual.accrued_at > state.activation_time
+        ),
+        key=lambda item: (item.accrued_at, item.instrument_public_id),
+    )
+    minute_grid = _minute_grid(window.from_time, window.to_time)
+    shadow_trigger_changes = _regression_shadow_trigger_changes(
+        shadows,
+        window.from_time.replace(second=0, microsecond=0),
+        len(minute_grid),
+    )
+    return _TimelineSchedule(
+        prepared=prepared,
+        accruals=sorted_accruals,
+        pool_index=pool_index,
+        position_changes=position_changes,
+        shadow_trigger_changes=shadow_trigger_changes,
+        minute_grid=minute_grid,
+    )
+
+
+def _execution_price_failure(
+    state: _TimelineBuildState,
+    execution: TimelineExecution,
+    pool_key: PoolKey,
+) -> None:
+    """Latch a closing-price failure and every already-stamped basis cause."""
+    instrument_public_id = execution.instrument_public_id
+    price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+    _add_instrument_untrusted_reason(
+        state.untrusted_reasons_by_instrument,
+        instrument_public_id,
+        price_reason,
+    )
+    for basis_reason in state.basis_reasons_by_pool.get(pool_key, ()):
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            basis_reason,
+        )
+
+
+def _begin_execution_application(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    execution: TimelineExecution,
+) -> _ExecutionApplication | None:
+    """Validate one execution and compute its guarded average-cost outcome."""
+    instrument_public_id = execution.instrument_public_id
+    pool_key = (instrument_public_id, execution.shard_key)
+    state.seen.add(instrument_public_id)
+    attribution_key = _execution_attribution(execution, evidence.lineage)
+    state.attribution_seen.add(attribution_key)
+    if execution.fee_incompleteness_reason is not None:
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            execution.fee_incompleteness_reason,
+        )
+    price_proof_reasons = evidence.untrusted_price_reasons_by_instrument.get(
+        instrument_public_id,
+        (),
+    )
+    for price_proof_reason in price_proof_reasons:
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            price_proof_reason,
+        )
+    if price_proof_reasons:
+        return None
+    if (
+        not math.isfinite(execution.size)
+        or execution.size < 0.0
+        or not math.isfinite(execution.position_delta)
+    ):
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            instrument_public_id,
+            "execution_size_invalid",
+        )
+        return None
+    position_size = abs(execution.position_delta)
+    pool = state.pools.get(pool_key, _Pool(0.0, None))
+    pre_fill_weights = dict(state.weights_by_pool.get(pool_key, {}))
+    pre_fill_basis_reasons = set(state.basis_reasons_by_pool.get(pool_key, ()))
+    price_is_trusted = _is_exactly_zero(position_size) or is_positive_finite(execution.price)
+    outcome = apply_fill(
+        pool.position_qty,
+        pool.entry_price,
+        execution.position_delta,
+        position_size,
+        execution.price if price_is_trusted else math.nan,
+    )
+    if not price_is_trusted and outcome.closed_qty > 0.0:
+        _execution_price_failure(state, execution, pool_key)
+        return None
+    return _ExecutionApplication(
+        execution=execution,
+        instrument_public_id=instrument_public_id,
+        pool_key=pool_key,
+        attribution_key=attribution_key,
+        pre_fill_weights=pre_fill_weights,
+        pre_fill_basis_reasons=pre_fill_basis_reasons,
+        position_size=position_size,
+        price_is_trusted=price_is_trusted,
+        outcome=outcome,
+    )
+
+
+def _record_execution_pool_basis(
+    state: _TimelineBuildState,
+    application: _ExecutionApplication,
+) -> None:
+    """Record post-fill pool state and any newly unavailable cost basis."""
+    outcome = application.outcome
+    state.pools[application.pool_key] = _Pool(
+        outcome.position_qty,
+        outcome.entry_price,
+    )
+    if not application.price_is_trusted and abs(outcome.position_qty) >= FLAT_EPSILON:
+        price_reason = (
+            application.execution.price_incompleteness_reason or "execution_price_invalid"
+        )
+        state.basis_reasons_by_pool.setdefault(application.pool_key, set()).add(price_reason)
+    if (
+        abs(outcome.position_qty) >= FLAT_EPSILON
+        and (outcome.entry_price is None or not math.isfinite(outcome.entry_price))
+        and not state.basis_reasons_by_pool.get(application.pool_key)
+    ):
+        state.basis_reasons_by_pool.setdefault(application.pool_key, set()).add(
+            "cost_basis_unavailable"
+        )
+
+
+def _record_execution_realized(
+    state: _TimelineBuildState,
+    application: _ExecutionApplication,
+) -> None:
+    """Accumulate realized P&L and allocate any closed quantity ownership."""
+    outcome = application.outcome
+    realized_delta = (
+        0.0
+        if outcome.closed_qty > 0.0 and application.pre_fill_basis_reasons
+        else outcome.realized_delta
+    )
+    state.realized_by_instrument[application.instrument_public_id] += realized_delta
+    state.realized_total += realized_delta
+    if outcome.closed_qty > 0.0:
+        allocation = _allocate_by_weights(
+            realized_delta,
+            application.pre_fill_weights,
+        )
+        _add_allocations(state.realized_by_attribution, allocation)
+        state.attribution_seen.update(allocation)
+
+
+def _record_execution_fee(
+    state: _TimelineBuildState,
+    application: _ExecutionApplication,
+) -> None:
+    """Accumulate and allocate one execution fee with flip-aware ownership."""
+    execution = application.execution
+    outcome = application.outcome
+    fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
+    state.fee_by_instrument[application.instrument_public_id] += fee_pnl
+    state.fee_total += fee_pnl
+    opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
+    if opened_opposite_side:
+        closing_fee_pnl = fee_pnl * outcome.closed_qty / application.position_size
+        allocation = _allocate_by_weights(
+            closing_fee_pnl,
+            application.pre_fill_weights,
+        )
+        _add_allocations(state.fee_by_attribution, allocation)
+        state.attribution_seen.update(allocation)
+        state.fee_by_attribution[application.attribution_key] += fee_pnl - closing_fee_pnl
+    elif outcome.closed_qty > 0.0:
+        allocation = _allocate_by_weights(
+            fee_pnl,
+            application.pre_fill_weights,
+        )
+        _add_allocations(state.fee_by_attribution, allocation)
+        state.attribution_seen.update(allocation)
+    else:
+        state.fee_by_attribution[application.attribution_key] += fee_pnl
+
+
+def _execution_post_fill_weights(
+    application: _ExecutionApplication,
+) -> Mapping[AttributionKey, float]:
+    """Return candidate ownership weights after one average-cost transition."""
+    outcome = application.outcome
+    opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
+    if opened_opposite_side:
+        return {application.attribution_key: outcome.added_qty}
+    if outcome.closed_qty > 0.0:
+        return _remaining_weights(
+            application.pre_fill_weights,
+            outcome.closed_qty,
+            abs(outcome.position_qty),
+        )
+    if outcome.added_qty > 0.0:
+        post_fill_weights = dict(application.pre_fill_weights)
+        post_fill_weights[application.attribution_key] = (
+            post_fill_weights.get(application.attribution_key, 0.0) + outcome.added_qty
+        )
+        return post_fill_weights
+    return application.pre_fill_weights
+
+
+def _record_execution_weights_and_basis(
+    state: _TimelineBuildState,
+    application: _ExecutionApplication,
+) -> None:
+    """Reconcile ownership and latch or clear pre-existing basis causes."""
+    outcome = application.outcome
+    post_fill_weights = _execution_post_fill_weights(application)
+    state.weights_by_pool[application.pool_key] = _reconcile_weights(
+        post_fill_weights,
+        abs(outcome.position_qty),
+    )
+    state.attribution_seen.update(state.weights_by_pool[application.pool_key])
+    pool_basis_reasons = state.basis_reasons_by_pool.get(application.pool_key)
+    if not pool_basis_reasons:
+        return
+    if outcome.closed_qty > 0.0:
+        for basis_reason in pool_basis_reasons:
+            _add_instrument_untrusted_reason(
+                state.untrusted_reasons_by_instrument,
+                application.instrument_public_id,
+                basis_reason,
+            )
+    if abs(outcome.position_qty) < FLAT_EPSILON:
+        state.basis_reasons_by_pool.pop(application.pool_key, None)
+
+
+def _apply_execution_event(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    execution: TimelineExecution,
+) -> None:
+    """Apply one execution after all same-time accruals."""
+    application = _begin_execution_application(state, evidence, execution)
+    if application is None:
+        return
+    _record_execution_pool_basis(state, application)
+    _record_execution_realized(state, application)
+    _record_execution_fee(state, application)
+    _record_execution_weights_and_basis(state, application)
+
+
+def _apply_accrual_event(
+    state: _TimelineBuildState,
+    pool_index: PoolIndex,
+    accrual: TimelineAccrual,
+    attribution_is_ambiguous: bool,
+) -> None:
+    """Apply one accrual against strictly earlier inventory ownership."""
+    if accrual.incompleteness_reason is not None:
+        _add_instrument_untrusted_reason(
+            state.untrusted_reasons_by_instrument,
+            accrual.instrument_public_id,
+            accrual.incompleteness_reason,
+        )
+    accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
+    state.accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
+    state.accrual_total += accrual_pnl
+    state.seen.add(accrual.instrument_public_id)
+    if attribution_is_ambiguous:
+        allocation = {_UNATTRIBUTED_KEY: accrual_pnl}
+    else:
+        accrual_weights = _combined_instrument_weights(
+            pool_index.get(accrual.instrument_public_id, ()),
+            state.weights_by_pool,
+        )
+        allocation = _allocate_by_weights(accrual_pnl, accrual_weights)
+    _add_allocations(state.accrual_by_attribution, allocation)
+    state.attribution_seen.update(allocation)
+
+
+def _next_event_time(
+    schedule: _TimelineSchedule,
+    cursor: _EventCursor,
+) -> datetime | None:
+    """Return the next execution/accrual instant without advancing indexes."""
+    pending_times: list[datetime] = []
+    if cursor.execution_index < len(schedule.prepared):
+        pending_times.append(schedule.prepared[cursor.execution_index].effective_time)
+    if cursor.accrual_index < len(schedule.accruals):
+        pending_times.append(schedule.accruals[cursor.accrual_index].accrued_at)
+    return min(pending_times) if pending_times else None
+
+
+def _execution_group_end(
+    prepared: Sequence[_PreparedExecution],
+    start: int,
+    event_time: datetime,
+) -> int:
+    """Return the exclusive end of equal-effective-time executions."""
+    end = start
+    while end < len(prepared) and prepared[end].effective_time == event_time:
+        end += 1
+    return end
+
+
+def _accrual_group_end(
+    accruals: Sequence[TimelineAccrual],
+    start: int,
+    event_time: datetime,
+) -> int:
+    """Return the exclusive end of equal-time accruals."""
+    end = start
+    while end < len(accruals) and accruals[end].accrued_at == event_time:
+        end += 1
+    return end
+
+
+def _apply_scheduled_event_time(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    schedule: _TimelineSchedule,
+    cursor: _EventCursor,
+    event_time: datetime,
+) -> None:
+    """Apply one exact-time accrual-first event group and advance cursors."""
+    execution_end = _execution_group_end(
+        schedule.prepared,
+        cursor.execution_index,
+        event_time,
+    )
+    accrual_end = _accrual_group_end(
+        schedule.accruals,
+        cursor.accrual_index,
+        event_time,
+    )
+    for accrual in schedule.accruals[cursor.accrual_index : accrual_end]:
+        _apply_accrual_event(
+            state,
+            schedule.pool_index,
+            accrual,
+            accrual.instrument_public_id in schedule.position_changes.get(event_time, set()),
+        )
+    for item in schedule.prepared[cursor.execution_index : execution_end]:
+        _apply_execution_event(state, evidence, item.execution)
+    cursor.execution_index = execution_end
+    cursor.accrual_index = accrual_end
+
+
+def _apply_events_through_point(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    schedule: _TimelineSchedule,
+    cursor: _EventCursor,
+    point_time: datetime,
+) -> None:
+    """Advance the merged event stream through one inclusive grid instant."""
+    while True:
+        event_time = _next_event_time(schedule, cursor)
+        if event_time is None or event_time > point_time:
+            return
+        _apply_scheduled_event_time(
+            state,
+            evidence,
+            schedule,
+            cursor,
+            event_time,
+        )
+
+
+def _point_global_reasons(
+    activation_time: datetime | None,
+    point_time: datetime,
+    active_shadow_trigger: str | None,
+) -> set[PnlIncompletenessReasonEntry]:
+    """Return global activation and regression causes for one point."""
+    reasons: set[PnlIncompletenessReasonEntry] = set()
+    after_activation = activation_time is None or point_time > activation_time
+    if after_activation and active_shadow_trigger is not None:
+        reasons.add(
+            _global_incompleteness_reason(
+                "scope_order_regression",
+                "untrusted",
+                active_shadow_trigger,
+            )
+        )
+    if activation_time is not None and point_time < activation_time:
+        reasons.add(
+            _global_incompleteness_reason(
+                "before_activation",
+                "untrusted",
+            )
+        )
+    return reasons
+
+
+def _point_valuation_context(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    pool_index: PoolIndex,
+    point_time: datetime,
+    global_reasons: Collection[PnlIncompletenessReasonEntry],
+) -> _PointValuationContext:
+    """Snapshot mutable replay state for immediate point valuation."""
+    return _PointValuationContext(
+        point_time=point_time,
+        pools=state.pools,
+        pool_index=pool_index,
+        weights_by_pool=state.weights_by_pool,
+        marks=evidence.marks,
+        seen=sorted(state.seen),
+        attribution_seen=_sorted_attribution_keys(state.attribution_seen),
+        cumulatives=_PointCumulatives(
+            realized_by_instrument=state.realized_by_instrument,
+            fee_by_instrument=state.fee_by_instrument,
+            accrual_by_instrument=state.accrual_by_instrument,
+            realized_by_attribution=state.realized_by_attribution,
+            fee_by_attribution=state.fee_by_attribution,
+            accrual_by_attribution=state.accrual_by_attribution,
+            realized_total=state.realized_total,
+            fee_total=state.fee_total,
+            accrual_total=state.accrual_total,
+        ),
+        activation_time=state.activation_time,
+        global_reasons=global_reasons,
+        untrusted_reasons_by_instrument=state.untrusted_reasons_by_instrument,
+        basis_reasons_by_pool=state.basis_reasons_by_pool,
+        mark_incompleteness_reasons=evidence.mark_incompleteness_reasons,
+    )
+
+
+def _build_minute_points(
+    state: _TimelineBuildState,
+    evidence: _TimelineBuildEvidence,
+    schedule: _TimelineSchedule,
+) -> list[PnlTimelinePoint]:
+    """Walk the minute grid while preserving event and withholding order."""
+    cursor = _EventCursor()
+    minute_points: list[PnlTimelinePoint] = []
+    active_shadow_trigger: str | None = None
+    for point_index, point_time in enumerate(schedule.minute_grid):
+        if state.activation_time is None or point_time > state.activation_time:
+            _apply_events_through_point(
+                state,
+                evidence,
+                schedule,
+                cursor,
+                point_time,
+            )
+        if point_index in schedule.shadow_trigger_changes:
+            active_shadow_trigger = schedule.shadow_trigger_changes[point_index]
+        global_reasons = _point_global_reasons(
+            state.activation_time,
+            point_time,
+            active_shadow_trigger,
+        )
+        context = _point_valuation_context(
+            state,
+            evidence,
+            schedule.pool_index,
+            point_time,
+            global_reasons,
+        )
+        minute_points.append(_value_point(context))
+    return minute_points
+
+
+def _granularity_step(granularity: str) -> int:
+    """Return the supported bucket width or reject the request."""
+    step = _GRANULARITY_MINUTES.get(granularity)
+    if step is None:
+        raise ValueError(f"unsupported granularity: {granularity!r}")
+    return step
+
+
 def build_pnl_timeline(
     executions: Sequence[TimelineExecution],
     accruals: Sequence[TimelineAccrual],
@@ -2181,360 +2859,17 @@ def build_pnl_timeline(
     Raises:
         ValueError: When ``window.granularity`` is not a supported value.
     """
-    step = _GRANULARITY_MINUTES.get(window.granularity)
-    if step is None:
-        raise ValueError(f"unsupported granularity: {window.granularity!r}")
-
-    pools: dict[PoolKey, _Pool] = {}
-    weights_by_pool: dict[PoolKey, dict[AttributionKey, float]] = {}
-    resolved_lineage = {} if lineage is None else lineage
-    resolved_untrusted_price_reasons = (
-        {}
-        if untrusted_price_reasons_by_instrument is None
-        else untrusted_price_reasons_by_instrument
+    step = _granularity_step(window.granularity)
+    evidence = _resolved_build_evidence(
+        marks,
+        lineage,
+        untrusted_price_reasons_by_instrument,
+        mark_incompleteness_reasons,
     )
-    resolved_mark_incompleteness_reasons = (
-        {} if mark_incompleteness_reasons is None else mark_incompleteness_reasons
-    )
-    seen: set[str] = set()
-    attribution_seen: set[AttributionKey] = set()
-    basis_reasons_by_pool: dict[PoolKey, set[PnlIncompletenessReason]] = {}
-    untrusted_reasons_by_instrument: dict[str, set[PnlIncompletenessReasonEntry]] = {}
-    activation_time: datetime | None = None
-    scope_by_shard: dict[str, tuple[str, str]] = {}
-    exchange_by_instrument: dict[str, str] = {}
-    pool_keys_by_instrument: defaultdict[str, set[PoolKey]] = defaultdict(set)
-    if opening is not None:
-        for seed in opening.pools:
-            instrument_public_id = seed.instrument_public_id
-            pool_key = (instrument_public_id, seed.shard_key)
-            pools[pool_key] = _Pool(seed.position_qty, seed.entry_price)
-            pool_keys_by_instrument[instrument_public_id].add(pool_key)
-            scope_by_shard[seed.shard_key] = (instrument_public_id, seed.exchange)
-            exchange_by_instrument[instrument_public_id] = seed.exchange
-            seen.add(instrument_public_id)
-            if not math.isfinite(seed.position_qty):
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    instrument_public_id,
-                    "seed_quantity_non_finite",
-                )
-            else:
-                if abs(seed.position_qty) > 0.0:
-                    weights_by_pool[pool_key] = {_UNATTRIBUTED_KEY: abs(seed.position_qty)}
-                    attribution_seen.add(_UNATTRIBUTED_KEY)
-                if seed.entry_price is None and abs(seed.position_qty) >= FLAT_EPSILON:
-                    _add_instrument_untrusted_reason(
-                        untrusted_reasons_by_instrument,
-                        instrument_public_id,
-                        "cost_basis_unavailable",
-                    )
-                    basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
-                elif abs(seed.position_qty) >= FLAT_EPSILON and not is_positive_finite(
-                    seed.entry_price
-                ):
-                    basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
-        activation_time = opening.t0
-
-    for execution in executions:
-        if not execution.instrument_public_id or not execution.shard_key or not execution.exchange:
-            raise ValueError("timeline execution pool identities must be non-empty")
-        execution_scope = (execution.instrument_public_id, execution.exchange)
-        previous_scope = scope_by_shard.setdefault(execution.shard_key, execution_scope)
-        if previous_scope != execution_scope:
-            raise ValueError("one timeline shard cannot span instrument or exchange scopes")
-        previous_exchange = exchange_by_instrument.setdefault(
-            execution.instrument_public_id,
-            execution.exchange,
-        )
-        if previous_exchange != execution.exchange:
-            raise ValueError("one timeline instrument cannot span multiple exchanges")
-
-    prepared, shadows = _prepare_executions(executions)
-    pool_index = _valuation_pool_index(
-        pool_keys_by_instrument,
-        prepared,
-        window.to_time,
-    )
-    position_changing_instruments_by_effective_time = _position_changes_by_effective_time(
-        prepared,
-        window.to_time,
-    )
-    sorted_accruals = sorted(
-        (
-            accrual
-            for accrual in accruals
-            if activation_time is None or accrual.accrued_at > activation_time
-        ),
-        key=lambda item: (item.accrued_at, item.instrument_public_id),
-    )
-
-    realized_by_instrument: defaultdict[str, float] = defaultdict(float)
-    fee_by_instrument: defaultdict[str, float] = defaultdict(float)
-    accrual_by_instrument: defaultdict[str, float] = defaultdict(float)
-    realized_by_attribution: defaultdict[AttributionKey, float] = defaultdict(float)
-    fee_by_attribution: defaultdict[AttributionKey, float] = defaultdict(float)
-    accrual_by_attribution: defaultdict[AttributionKey, float] = defaultdict(float)
-    realized_total = 0.0
-    fee_total = 0.0
-    accrual_total = 0.0
-
-    def apply_execution_event(execution: TimelineExecution) -> None:
-        """Apply one execution after all same-time accruals."""
-        nonlocal fee_total
-        nonlocal realized_total
-
-        instrument_public_id = execution.instrument_public_id
-        pool_key = (instrument_public_id, execution.shard_key)
-        seen.add(instrument_public_id)
-        attribution_key = _execution_attribution(execution, resolved_lineage)
-        attribution_seen.add(attribution_key)
-        if execution.fee_incompleteness_reason is not None:
-            _add_instrument_untrusted_reason(
-                untrusted_reasons_by_instrument,
-                instrument_public_id,
-                execution.fee_incompleteness_reason,
-            )
-        price_proof_reasons = resolved_untrusted_price_reasons.get(
-            instrument_public_id,
-            (),
-        )
-        for price_proof_reason in price_proof_reasons:
-            _add_instrument_untrusted_reason(
-                untrusted_reasons_by_instrument,
-                instrument_public_id,
-                price_proof_reason,
-            )
-        if price_proof_reasons:
-            return
-        if (
-            not math.isfinite(execution.size)
-            or execution.size < 0.0
-            or not math.isfinite(execution.position_delta)
-        ):
-            _add_instrument_untrusted_reason(
-                untrusted_reasons_by_instrument,
-                instrument_public_id,
-                "execution_size_invalid",
-            )
-            return
-        signed_qty = execution.position_delta
-        position_size = abs(signed_qty)
-        pool = pools.get(pool_key, _Pool(0.0, None))
-        pre_fill_weights = dict(weights_by_pool.get(pool_key, {}))
-        pre_fill_basis_reasons = set(basis_reasons_by_pool.get(pool_key, ()))
-        price_is_trusted = _is_exactly_zero(position_size) or is_positive_finite(execution.price)
-        outcome = apply_fill(
-            pool.position_qty,
-            pool.entry_price,
-            signed_qty,
-            position_size,
-            execution.price if price_is_trusted else math.nan,
-        )
-        if not price_is_trusted and outcome.closed_qty > 0.0:
-            price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
-            _add_instrument_untrusted_reason(
-                untrusted_reasons_by_instrument,
-                instrument_public_id,
-                price_reason,
-            )
-            for basis_reason in basis_reasons_by_pool.get(pool_key, ()):
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    instrument_public_id,
-                    basis_reason,
-                )
-            return
-        pools[pool_key] = _Pool(outcome.position_qty, outcome.entry_price)
-        if not price_is_trusted and abs(outcome.position_qty) >= FLAT_EPSILON:
-            price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
-            basis_reasons_by_pool.setdefault(pool_key, set()).add(price_reason)
-        if (
-            abs(outcome.position_qty) >= FLAT_EPSILON
-            and (outcome.entry_price is None or not math.isfinite(outcome.entry_price))
-            and not basis_reasons_by_pool.get(pool_key)
-        ):
-            basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
-        opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
-        realized_delta = (
-            0.0 if outcome.closed_qty > 0.0 and pre_fill_basis_reasons else outcome.realized_delta
-        )
-        realized_by_instrument[instrument_public_id] += realized_delta
-        realized_total += realized_delta
-        if outcome.closed_qty > 0.0:
-            realized_allocation = _allocate_by_weights(realized_delta, pre_fill_weights)
-            _add_allocations(realized_by_attribution, realized_allocation)
-            attribution_seen.update(realized_allocation)
-        fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
-        fee_by_instrument[instrument_public_id] += fee_pnl
-        fee_total += fee_pnl
-        if opened_opposite_side:
-            closing_fee_pnl = fee_pnl * outcome.closed_qty / position_size
-            closing_fee_allocation = _allocate_by_weights(closing_fee_pnl, pre_fill_weights)
-            _add_allocations(fee_by_attribution, closing_fee_allocation)
-            attribution_seen.update(closing_fee_allocation)
-            fee_by_attribution[attribution_key] += fee_pnl - closing_fee_pnl
-        elif outcome.closed_qty > 0.0:
-            closing_fee_allocation = _allocate_by_weights(fee_pnl, pre_fill_weights)
-            _add_allocations(fee_by_attribution, closing_fee_allocation)
-            attribution_seen.update(closing_fee_allocation)
-        else:
-            fee_by_attribution[attribution_key] += fee_pnl
-        if opened_opposite_side:
-            post_fill_weights = {attribution_key: outcome.added_qty}
-        elif outcome.closed_qty > 0.0:
-            post_fill_weights = _remaining_weights(
-                pre_fill_weights,
-                outcome.closed_qty,
-                abs(outcome.position_qty),
-            )
-        elif outcome.added_qty > 0.0:
-            post_fill_weights = dict(pre_fill_weights)
-            post_fill_weights[attribution_key] = (
-                post_fill_weights.get(attribution_key, 0.0) + outcome.added_qty
-            )
-        else:
-            post_fill_weights = pre_fill_weights
-        weights_by_pool[pool_key] = _reconcile_weights(
-            post_fill_weights,
-            abs(outcome.position_qty),
-        )
-        attribution_seen.update(weights_by_pool[pool_key])
-        pool_basis_reasons = basis_reasons_by_pool.get(pool_key)
-        if pool_basis_reasons:
-            if outcome.closed_qty > 0.0:
-                for basis_reason in pool_basis_reasons:
-                    _add_instrument_untrusted_reason(
-                        untrusted_reasons_by_instrument,
-                        instrument_public_id,
-                        basis_reason,
-                    )
-            if abs(outcome.position_qty) < FLAT_EPSILON:
-                basis_reasons_by_pool.pop(pool_key, None)
-
-    def apply_accrual_event(
-        accrual: TimelineAccrual,
-        attribution_is_ambiguous: bool,
-    ) -> None:
-        """Apply one accrual against strictly earlier inventory ownership."""
-        nonlocal accrual_total
-
-        if accrual.incompleteness_reason is not None:
-            _add_instrument_untrusted_reason(
-                untrusted_reasons_by_instrument,
-                accrual.instrument_public_id,
-                accrual.incompleteness_reason,
-            )
-        accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
-        accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
-        accrual_total += accrual_pnl
-        seen.add(accrual.instrument_public_id)
-        if attribution_is_ambiguous:
-            accrual_allocation = {_UNATTRIBUTED_KEY: accrual_pnl}
-        else:
-            accrual_weights = _combined_instrument_weights(
-                pool_index.get(accrual.instrument_public_id, ()),
-                weights_by_pool,
-            )
-            accrual_allocation = _allocate_by_weights(accrual_pnl, accrual_weights)
-        _add_allocations(accrual_by_attribution, accrual_allocation)
-        attribution_seen.update(accrual_allocation)
-
-    execution_index = 0
-    accrual_index = 0
-    minute_points: list[PnlTimelinePoint] = []
-    minute_grid = _minute_grid(window.from_time, window.to_time)
-    shadow_trigger_changes = _regression_shadow_trigger_changes(
-        shadows,
-        window.from_time.replace(second=0, microsecond=0),
-        len(minute_grid),
-    )
-    active_shadow_trigger: str | None = None
-    for point_index, point_time in enumerate(minute_grid):
-        if activation_time is None or point_time > activation_time:
-            while True:
-                pending_times: list[datetime] = []
-                if execution_index < len(prepared):
-                    pending_times.append(prepared[execution_index].effective_time)
-                if accrual_index < len(sorted_accruals):
-                    pending_times.append(sorted_accruals[accrual_index].accrued_at)
-                if not pending_times:
-                    break
-                event_time = min(pending_times)
-                if event_time > point_time:
-                    break
-                execution_end = execution_index
-                while (
-                    execution_end < len(prepared)
-                    and prepared[execution_end].effective_time == event_time
-                ):
-                    execution_end += 1
-                accrual_end = accrual_index
-                while (
-                    accrual_end < len(sorted_accruals)
-                    and sorted_accruals[accrual_end].accrued_at == event_time
-                ):
-                    accrual_end += 1
-                for accrual in sorted_accruals[accrual_index:accrual_end]:
-                    apply_accrual_event(
-                        accrual,
-                        accrual.instrument_public_id
-                        in position_changing_instruments_by_effective_time.get(event_time, set()),
-                    )
-                for item in prepared[execution_index:execution_end]:
-                    apply_execution_event(item.execution)
-                execution_index = execution_end
-                accrual_index = accrual_end
-        if point_index in shadow_trigger_changes:
-            active_shadow_trigger = shadow_trigger_changes[point_index]
-        global_reasons: set[PnlIncompletenessReasonEntry] = set()
-        if (
-            activation_time is None or point_time > activation_time
-        ) and active_shadow_trigger is not None:
-            global_reasons.add(
-                _global_incompleteness_reason(
-                    "scope_order_regression",
-                    "untrusted",
-                    active_shadow_trigger,
-                )
-            )
-        if activation_time is not None and point_time < activation_time:
-            global_reasons.add(
-                _global_incompleteness_reason(
-                    "before_activation",
-                    "untrusted",
-                )
-            )
-        minute_points.append(
-            _value_point(
-                _PointValuationContext(
-                    point_time=point_time,
-                    pools=pools,
-                    pool_index=pool_index,
-                    weights_by_pool=weights_by_pool,
-                    marks=marks,
-                    seen=sorted(seen),
-                    attribution_seen=_sorted_attribution_keys(attribution_seen),
-                    cumulatives=_PointCumulatives(
-                        realized_by_instrument=realized_by_instrument,
-                        fee_by_instrument=fee_by_instrument,
-                        accrual_by_instrument=accrual_by_instrument,
-                        realized_by_attribution=realized_by_attribution,
-                        fee_by_attribution=fee_by_attribution,
-                        accrual_by_attribution=accrual_by_attribution,
-                        realized_total=realized_total,
-                        fee_total=fee_total,
-                        accrual_total=accrual_total,
-                    ),
-                    activation_time=activation_time,
-                    global_reasons=global_reasons,
-                    untrusted_reasons_by_instrument=untrusted_reasons_by_instrument,
-                    basis_reasons_by_pool=basis_reasons_by_pool,
-                    mark_incompleteness_reasons=resolved_mark_incompleteness_reasons,
-                )
-            )
-        )
-
+    state = _initialize_timeline_state(opening)
+    _validate_timeline_execution_scopes(state, executions)
+    schedule = _timeline_schedule(state, executions, accruals, window)
+    minute_points = _build_minute_points(state, evidence, schedule)
     return PnlTimelineResult(
         points=tuple(_downsample(minute_points, step)),
         granularity=window.granularity,

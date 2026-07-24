@@ -314,15 +314,7 @@
     },
     "src/snapper/application/portfolio/pnl_timeline.py": {
       "build_pnl_timeline": {
-        "C901": 48,
-        "PLR0912": 26,
-        "PLR0913": 8,
-        "PLR0915": 184
-      },
-      "build_pnl_timeline.apply_execution_event": {
-        "C901": 19,
-        "PLR0912": 20,
-        "PLR0915": 72
+        "PLR0913": 8
       }
     },
     "src/snapper/application/portfolio/pnl_timeline_service.py": {
