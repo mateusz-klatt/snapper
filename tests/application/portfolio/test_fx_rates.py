@@ -16,6 +16,7 @@ import pytest
 from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import required_pairs
+from snapper.application.portfolio.fx_rates import resolve_rate
 
 _M = datetime(2026, 7, 19, 19, 22, tzinfo=UTC)
 _PLANES = {
@@ -153,3 +154,40 @@ class TestRequiredPairs:
         assert required_pairs(frozenset({"EUR", "PLN", "USD", ""}), "USD") == frozenset(
             {("EUR", "USD"), ("USD", "EUR"), ("PLN", "USD"), ("USD", "PLN")}
         )
+
+
+class TestResolveRate:
+    """Cover the plane-selection kernel :func:`convert_amount` delegates to."""
+
+    def test_direct_plane_reports_the_close_and_orientation(self) -> None:
+        """A quoted plane resolves to its close with a direct orientation."""
+        resolved = resolve_rate("EUR", "USD", _M, _rates(EURUSD=1.25), _PLANES)
+        assert resolved is not None
+        assert (resolved.base, resolved.quote, resolved.exchange) == ("EUR", "USD", "kraken")
+        assert resolved.close == pytest.approx(1.25)
+        assert resolved.orientation == "direct"
+
+    def test_inverse_plane_reports_the_reciprocal_orientation(self) -> None:
+        """A reciprocal plane resolves to its close with an inverse orientation."""
+        resolved = resolve_rate("PLN", "USD", _M, _rates(USDPLN=4.0), _PLANES)
+        assert resolved is not None
+        assert resolved.close == pytest.approx(4.0)
+        assert resolved.orientation == "inverse"
+
+    def test_missing_pin_resolves_to_none(self) -> None:
+        """A pair with no pinned plane resolves to None without a rate."""
+        assert resolve_rate("EUR", "USD", _M, _rates(EURUSD=1.25), {}) is None
+
+    def test_missing_minute_resolves_to_none(self) -> None:
+        """A pinned plane without a close at the minute resolves to None."""
+        assert resolve_rate("EUR", "USD", _M, {}, _PLANES) is None
+
+    def test_mismatched_pin_resolves_to_none(self) -> None:
+        """A pin whose legs match neither orientation resolves to None."""
+        rates = {("GBP", "USD", "kraken", _M): 1.4}
+        planes = {("EUR", "USD"): ("GBP", "USD", "kraken")}
+        assert resolve_rate("EUR", "USD", _M, rates, planes) is None
+
+    def test_absent_venue_map_resolves_to_none(self) -> None:
+        """With no venue map at all, no plane can be pinned."""
+        assert resolve_rate("EUR", "USD", _M, _rates(EURUSD=1.25)) is None

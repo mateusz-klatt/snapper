@@ -567,6 +567,14 @@ class PnlFxRateRow(TypedDict):
     choosing between disputed labels. ``exchange`` identifies one candidate
     venue plane; rows from a rival venue cannot enter the same consumer's
     conversion map.
+
+    ``candle_id`` is the row's immutable internal primary key and
+    ``candle_timestamp`` its SCD2 version time; with ``candle_public_id`` they pin
+    the exact candle VERSION a conversion consumed, because a candle correction
+    reuses ``public_id`` while changing ``close``. ``instrument_public_id`` and
+    ``native_symbol`` complete the plane provenance so a valuation's fiat leg
+    records the same version identity the crypto plane already carries. These
+    fields are additive; existing consumers read only the denomination and close.
     """
 
     base: str
@@ -574,6 +582,38 @@ class PnlFxRateRow(TypedDict):
     exchange: str
     open_at: datetime
     close: float
+    native_symbol: str
+    instrument_public_id: str
+    candle_id: int
+    candle_public_id: str
+    candle_timestamp: datetime
+
+
+class PnlCryptoUsdPlaneRow(TypedDict):
+    """One finalized crypto→USD candle eligible for Phase-5B basket valuation.
+
+    Returned by ``get_pnl_crypto_usd_plane_candles`` only for an active spot,
+    non-margin instrument on a real (non-paper) venue whose symbol has ``base``
+    equal to a requested currency and ``quote`` exactly ``USD`` at the knowledge
+    horizon. ``quote`` is therefore always ``USD``; it is projected so a consumer
+    can pin the ``(base, quote, exchange)`` plane identity uniformly with the FX
+    plane. ``candle_id`` is the row's immutable internal primary key and
+    ``candle_timestamp`` its SCD2 version time; with ``candle_public_id`` they pin
+    the exact candle VERSION, because a candle correction reuses ``public_id``
+    while changing ``close``. ``instrument_public_id`` and ``native_symbol``
+    complete the price-plane provenance recorded in every sample's audit JSON.
+    """
+
+    base: str
+    quote: str
+    exchange: str
+    native_symbol: str
+    instrument_public_id: str
+    candle_id: int
+    candle_public_id: str
+    open_at: datetime
+    close: float
+    candle_timestamp: datetime
 
 
 class PositionRow(TypedDict):

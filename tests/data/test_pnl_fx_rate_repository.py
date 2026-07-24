@@ -215,6 +215,19 @@ class TestGetPnlFxRateCandles:
             ("EUR", "USD", "kraken", 1.25)
         ]
 
+    async def test_carries_candle_version_identity(self, repository: SQLAlchemyRepository) -> None:
+        """Each row carries the candle version identity a fiat leg records for provenance."""
+        rows = await repository.get_pnl_fx_rate_candles(
+            [("EUR", "USD", "kraken")], _M, _M, _NOW + timedelta(days=1)
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["instrument_public_id"] == "ins-eurusd-kraken"
+        assert row["native_symbol"] == "EUR-USD"
+        assert isinstance(row["candle_id"], int) and row["candle_id"] > 0
+        assert row["candle_public_id"] != ""
+        assert row["candle_timestamp"] == _M
+
     async def test_pinned_exchange_ignores_rival_at_same_pair_and_minute(
         self, repository: SQLAlchemyRepository
     ) -> None:

@@ -32,9 +32,14 @@ position it belongs to are valued off the same instant with no look-ahead.
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from snapper.core.numeric import is_positive_finite
+
+type FxOrientation = Literal["direct", "inverse"]
+"""Whether a pinned plane is used as quoted (``direct``) or reciprocal."""
 
 type FxPairKey = tuple[str, str]
 """Lexically normalized unordered currency-pair identity."""
@@ -69,6 +74,76 @@ def currency_pair_key(first: str, second: str) -> FxPairKey:
     return (first, second) if first <= second else (second, first)
 
 
+@dataclass(frozen=True)
+class ResolvedRate:
+    """One pinned plane's close resolved for a specific FROM-TO conversion.
+
+    ``close`` is the exact positive-finite candle close of the pinned
+    ``(base, quote, exchange)`` plane at the minute. ``orientation`` records
+    whether that plane is quoted as requested (``direct``: one FROM costs
+    ``close`` TO) or reciprocal (``inverse``: one FROM costs ``1 / close`` TO).
+    The consumer applies the exact same arithmetic the conversion uses and can
+    derive the effective FROM-TO rate without re-selecting a plane.
+    """
+
+    base: str
+    quote: str
+    exchange: str
+    close: float
+    orientation: FxOrientation
+
+
+def resolve_rate(
+    from_currency: str,
+    to_currency: str,
+    minute: datetime,
+    rates: FxRateMap,
+    venues: FxVenueMap | None = None,
+) -> ResolvedRate | None:
+    """Resolve the pinned plane, close and orientation for a conversion.
+
+    This is the plane-selection kernel shared by :func:`convert_amount` and any
+    consumer that also needs the exact close and orientation used (for example
+    to record valuation provenance). It performs no arithmetic on an amount: it
+    pins one oriented plane, reads its close at the exact minute, and classifies
+    the orientation. A missing pin, a missing minute, a non-positive or
+    non-finite close, or a pin that matches neither orientation all yield
+    ``None`` so the caller withholds rather than fabricating a rate.
+
+    Args:
+        from_currency: Currency being converted from.
+        to_currency: Target currency.
+        minute: Grid minute whose ``[minute-1m, minute)`` close is the rate.
+        rates: Preloaded plane-qualified candle closes for this scope.
+        venues: Consumer-pinned oriented plane keyed by unordered currency pair.
+
+    Returns:
+        The resolved plane close and orientation, or ``None`` when no usable
+        close pins the requested currencies at that exact minute.
+    """
+    resolved_venues: FxVenueMap = {} if venues is None else venues
+    plane = resolved_venues.get(currency_pair_key(from_currency, to_currency))
+    if plane is None:
+        return None
+    base_currency, quote_currency, exchange = plane
+    close = rates.get((base_currency, quote_currency, exchange, minute))
+    if not is_positive_finite(close):
+        return None
+    if (base_currency, quote_currency) == (from_currency, to_currency):
+        orientation: FxOrientation = "direct"
+    elif (base_currency, quote_currency) == (to_currency, from_currency):
+        orientation = "inverse"
+    else:
+        return None
+    return ResolvedRate(
+        base=base_currency,
+        quote=quote_currency,
+        exchange=exchange,
+        close=close,
+        orientation=orientation,
+    )
+
+
 def convert_amount(
     amount: float,
     from_currency: str,
@@ -97,20 +172,13 @@ def convert_amount(
         return 0.0
     if from_currency == to_currency:
         return amount
-    resolved_venues: FxVenueMap = {} if venues is None else venues
-    plane = resolved_venues.get(currency_pair_key(from_currency, to_currency))
-    if plane is None:
+    resolved = resolve_rate(from_currency, to_currency, minute, rates, venues)
+    if resolved is None:
         return None
-    base_currency, quote_currency, exchange = plane
-    close = rates.get((base_currency, quote_currency, exchange, minute))
-    if not is_positive_finite(close):
-        return None
-    if (base_currency, quote_currency) == (from_currency, to_currency):
-        converted = amount * close
-    elif (base_currency, quote_currency) == (to_currency, from_currency):
-        converted = amount / close
+    if resolved.orientation == "direct":
+        converted = amount * resolved.close
     else:
-        return None
+        converted = amount / resolved.close
     return converted if math.isfinite(converted) else None
 
 

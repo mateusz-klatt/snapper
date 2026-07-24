@@ -458,6 +458,11 @@ def _fx_row(
         "exchange": exchange,
         "open_at": _m(minute - 1),
         "close": close,
+        "native_symbol": f"{base}-{quote}",
+        "instrument_public_id": f"ins-{base.lower()}{quote.lower()}-{exchange}",
+        "candle_id": minute,
+        "candle_public_id": f"cdl-{base.lower()}{quote.lower()}-{minute}",
+        "candle_timestamp": _m(minute - 1),
     }
 
 

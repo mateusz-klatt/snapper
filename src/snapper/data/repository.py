@@ -319,6 +319,7 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PnlCryptoUsdPlaneRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
@@ -1073,6 +1074,68 @@ def _pnl_fx_symbol_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
         Symbol.quote.is_not(None),
         ~denomination_conflict,
         forex_evidence,
+    ]
+
+
+def _pnl_crypto_usd_spot_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
+    """Prove an eligible spot, non-margin, real-venue crypto→USD price plane.
+
+    Mirrors :func:`_pnl_fx_symbol_proof_filters`: the candle's owner is resolved
+    by author-time joins (the ``Symbol`` and ``InstrumentSpec`` active when the
+    candle was written), while eligibility is proven by cross-version unanimity
+    at the knowledge horizon. A read-time active projection would let a later
+    correction reclassify history — a perpetual re-specced to spot after a candle
+    was written would turn that derivative candle into an eligible spot plane, and
+    a symbol re-denomination would redraw ``base``. Author-time ownership plus
+    as-of unanimity forbid both.
+
+    The outer author-time ``Symbol`` row must itself be known by ``as_of`` and
+    quote exactly ``USD``; the base/quote is proven unanimous, so no ``Symbol``
+    version known by ``as_of`` re-denominates the plane. The outer author-time
+    ``InstrumentSpec`` row must classify a ``spot``, non-``spot_margin_rollover``
+    instrument, and that classification is proven unanimous: if ANY spec version
+    for the instrument known by ``as_of`` is non-spot (including a null kind) or
+    carries the spot-margin funding model, the plane is excluded. The venue must
+    be real — paper instruments (``exchange`` equal to ``paper``) never price a
+    live basket, and ``exchange`` is part of the instrument's logical identity so
+    the author-time owner row certifies it. Null-safe distinctness is used for
+    defence in depth even where a not-null column makes the null branch
+    unreachable.
+
+    Args:
+        as_of: Knowledge horizon for every considered Symbol and spec version.
+
+    Returns:
+        Correlated filters establishing a unanimous ``USD`` denomination, a
+        unanimous spot non-margin classification, and a real venue.
+    """
+    symbol_version = aliased(Symbol)
+    spec_version = aliased(InstrumentSpec)
+    denomination_conflict = exists().where(
+        symbol_version.public_id == Symbol.public_id,
+        symbol_version.timestamp <= as_of,
+        or_(
+            symbol_version.base.is_distinct_from(Symbol.base),
+            symbol_version.quote.is_distinct_from(Symbol.quote),
+        ),
+    )
+    classification_conflict = exists().where(
+        spec_version.instrument_public_id == InstrumentSpec.instrument_public_id,
+        spec_version.timestamp <= as_of,
+        or_(
+            spec_version.instrument_kind.is_distinct_from("spot"),
+            spec_version.funding_type == "spot_margin_rollover",
+        ),
+    )
+    return [
+        Symbol.timestamp <= as_of,
+        Symbol.quote == "USD",
+        InstrumentSpec.timestamp <= as_of,
+        InstrumentSpec.instrument_kind == "spot",
+        InstrumentSpec.funding_type.is_distinct_from("spot_margin_rollover"),
+        Instrument.exchange != "paper",
+        ~denomination_conflict,
+        ~classification_conflict,
     ]
 
 
@@ -2874,6 +2937,44 @@ class Repository(ABC):
 
         Returns:
             Rows ordered by candle open time and plane identity.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_crypto_usd_plane_candles(
+        self,
+        currencies: Sequence[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlCryptoUsdPlaneRow]:
+        """Load finalized crypto→USD spot closes for Phase-5B basket valuation.
+
+        The valuator prices a held crypto currency at minute ``M`` off our OWN
+        finalized one-minute candle on the currency's spot USD instrument. Like
+        ``get_pnl_fx_rate_candles``, each candle is joined to its AUTHOR-TIME
+        owning ``Instrument``, ``Symbol`` and ``InstrumentSpec`` (the versions
+        active when the candle was written), and eligibility is proven by
+        cross-version unanimity at ``as_of``: a later correction is never
+        back-applied to an earlier candle. Eligibility: the symbol's ``base`` is a
+        requested currency and its ``quote`` is unanimously exactly ``USD``; the
+        spec unanimously classifies a ``spot``, non-``spot_margin_rollover``
+        instrument (if any known version disagrees the plane is excluded); and the
+        venue is real (never ``paper``). Rows carry the candle VERSION identity
+        (immutable internal id, public id and version timestamp) so a candle
+        correction that reuses ``public_id`` while changing ``close`` stays
+        attributable to the exact close a sample consumed.
+
+        Args:
+            currencies: Distinct base currencies to price. Empty input returns
+                without a query.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the instrument, symbol, spec and candle
+                temporal predicates, so a corrected candle is seen AS KNOWN then.
+
+        Returns:
+            Rows ordered by ``(base, quote, exchange, open_at, instrument)``.
         """
         ...
 
@@ -12936,6 +13037,11 @@ class SQLAlchemyRepository(Repository):
                     Instrument.exchange,
                     Candle.open_at,
                     Candle.close,
+                    Symbol.native_symbol,
+                    Instrument.public_id,
+                    Candle.id,
+                    Candle.public_id,
+                    Candle.timestamp,
                 )
                 .select_from(Candle)
                 .join(
@@ -12973,10 +13079,143 @@ class SQLAlchemyRepository(Repository):
                     "exchange": exchange,
                     "open_at": open_at,
                     "close": close,
+                    "native_symbol": native_symbol,
+                    "instrument_public_id": instrument_public_id,
+                    "candle_id": candle_id,
+                    "candle_public_id": candle_public_id,
+                    "candle_timestamp": candle_timestamp,
                 }
-                for base, quote, exchange, open_at, close in result.all()
+                for (
+                    base,
+                    quote,
+                    exchange,
+                    open_at,
+                    close,
+                    native_symbol,
+                    instrument_public_id,
+                    candle_id,
+                    candle_public_id,
+                    candle_timestamp,
+                ) in result.all()
             ]
             rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+            return rows
+
+    async def get_pnl_crypto_usd_plane_candles(
+        self,
+        currencies: Sequence[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlCryptoUsdPlaneRow]:
+        """Load finalized crypto→USD spot closes with candle version identity.
+
+        See the abstract declaration for the spot, non-margin, real-venue
+        eligibility proof. Mirroring ``get_pnl_fx_rate_candles``, the candle's
+        owning instrument, symbol and spec are joined at CANDLE author time
+        (the versions active when the candle was written), while the shared
+        ``_pnl_crypto_usd_spot_proof_filters`` establishes as-of denomination and
+        classification unanimity. A later correction therefore never reclassifies
+        a historical candle: a perpetual re-specced to spot cannot retroactively
+        become an eligible spot plane, and a redenominated symbol cannot redraw an
+        earlier candle's base.
+
+        Args:
+            currencies: Distinct base currencies to price.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the instrument, symbol, spec and candle
+                temporal predicates.
+
+        Returns:
+            Rows ordered by ``(base, quote, exchange, open_at, instrument)``.
+        """
+        if not currencies:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Symbol.base,
+                    Symbol.quote,
+                    Instrument.exchange,
+                    Symbol.native_symbol,
+                    Instrument.public_id,
+                    Candle.id,
+                    Candle.public_id,
+                    Candle.open_at,
+                    Candle.close,
+                    Candle.timestamp,
+                )
+                .select_from(Candle)
+                .join(
+                    Instrument,
+                    and_(
+                        Candle.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= Candle.timestamp,
+                        Instrument.known_to > Candle.timestamp,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        Symbol.timestamp <= Candle.timestamp,
+                        Symbol.known_to > Candle.timestamp,
+                    ),
+                )
+                .join(
+                    InstrumentSpec,
+                    and_(
+                        InstrumentSpec.instrument_public_id == Instrument.public_id,
+                        InstrumentSpec.timestamp <= Candle.timestamp,
+                        InstrumentSpec.known_to > Candle.timestamp,
+                    ),
+                )
+                .where(
+                    Symbol.base.in_(list(dict.fromkeys(currencies))),
+                    *_pnl_crypto_usd_spot_proof_filters(as_of),
+                    Candle.timeframe == "1m",
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.complete.is_(True),
+                    *where_active(Candle, as_of),
+                )
+            )
+            rows: list[PnlCryptoUsdPlaneRow] = [
+                {
+                    "base": base,
+                    "quote": quote,
+                    "exchange": exchange,
+                    "native_symbol": native_symbol,
+                    "instrument_public_id": instrument_public_id,
+                    "candle_id": candle_id,
+                    "candle_public_id": candle_public_id,
+                    "open_at": open_at,
+                    "close": close,
+                    "candle_timestamp": candle_timestamp,
+                }
+                for (
+                    base,
+                    quote,
+                    exchange,
+                    native_symbol,
+                    instrument_public_id,
+                    candle_id,
+                    candle_public_id,
+                    open_at,
+                    close,
+                    candle_timestamp,
+                ) in result.all()
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row["base"],
+                    row["quote"],
+                    row["exchange"],
+                    row["open_at"],
+                    row["instrument_public_id"],
+                )
+            )
             return rows
 
     async def get_fill_shard_keys_for_scope(
