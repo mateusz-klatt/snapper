@@ -86,7 +86,7 @@ nbformat = "^5.10.4"
 ipykernel = "^7.3.0"
 matplotlib = "^3.11.1"
 scikit-learn = "^1.9.0"
-tqdm = "^4.69.0"
+tqdm = "^4.69.1"
 types-markdown = "^3.10.2.20260712"
 httpx2 = "^2.9.1"
 
