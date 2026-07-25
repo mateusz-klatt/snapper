@@ -18,6 +18,7 @@ from typing import TypedDict
 from typing import Unpack
 from typing import cast
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
 from unittest.mock import patch
 
@@ -42,6 +43,7 @@ from snapper.data.repository import ExecutionAnnulmentWitnessedError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _ExecutionAnnulmentCommand
 from snapper.data.repository_types import ExecutionAnnulmentRequest
+from snapper.data.repository_types import ExecutionAnnulmentRow
 from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
@@ -104,6 +106,7 @@ class _ExecutionOptions(TypedDict, total=False):
     price: float
     size: float
     exec_id: str | None
+    operator_public_id: str | None
 
 
 def _execution(
@@ -117,7 +120,7 @@ def _execution(
         public_id=public_id,
         order_public_id=options.get("order_public_id", _KRAKEN_ORDER),
         wallet_public_id=options.get("wallet_public_id", _MAIN_WALLET),
-        operator_public_id=None,
+        operator_public_id=options.get("operator_public_id"),
         exchange=exchange,
         mode="live",
         scope_sequence=scope_sequence,
@@ -327,6 +330,19 @@ def _request(digest: str, **overrides: object) -> ExecutionAnnulmentRequest:
     return cast(ExecutionAnnulmentRequest, base)
 
 
+async def _record_annulment(
+    repository: SQLAlchemyRepository,
+    request: ExecutionAnnulmentRequest,
+) -> ExecutionAnnulmentRow:
+    """Record one annulment through the guarded writer, keeping its manifest row.
+
+    The writer's result also names the state of the correction's durability
+    observation; a test whose subject is the manifest row itself projects that
+    row out here so the assertion stays about the row.
+    """
+    return (await repository.record_execution_annulment(request))["annulment"]
+
+
 async def _execution_snapshot(
     repository: SQLAlchemyRepository,
 ) -> list[tuple[str, str, int, float, float, str | None, datetime]]:
@@ -376,7 +392,7 @@ async def test_the_knowledge_instant_is_stamped_by_the_server_not_the_operator(
     backdated = datetime(2020, 1, 1, tzinfo=UTC)
     before = datetime.now(UTC)
 
-    row = await repository.record_execution_annulment(_request(digest, correction_time=backdated))
+    row = await _record_annulment(repository, _request(digest, correction_time=backdated))
 
     after = datetime.now(UTC)
     assert row["correction_time"] == backdated
@@ -413,7 +429,7 @@ async def test_the_knowledge_stamp_postdates_every_lock_the_writer_waits_on(
         fence_released.append(datetime.now(UTC))
 
     with patch.object(SQLAlchemyRepository, "_acquire_execution_annulment_fence", slow_fence):
-        row = await repository.record_execution_annulment(_request(digest))
+        row = await _record_annulment(repository, _request(digest))
 
     assert fence_released
     assert row["timestamp"] >= fence_released[0]
@@ -445,7 +461,7 @@ async def test_the_writer_proves_durability_with_a_second_transaction(
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
-    row = await repository.record_execution_annulment(_request(digest))
+    row = await _record_annulment(repository, _request(digest))
 
     async with repository.session() as s:
         observation = (
@@ -511,7 +527,7 @@ async def test_a_failed_observation_leaves_a_resumable_correction(
         "observe_execution_annulment_visibility",
         failing_observe,
     )
-    row = await repository.record_execution_annulment(_request(digest))
+    row = await _record_annulment(repository, _request(digest))
     monkeypatch.setattr(
         SQLAlchemyRepository,
         "observe_execution_annulment_visibility",
@@ -567,7 +583,7 @@ async def test_annulling_the_kraken_phantom_leaves_the_real_trade_untouched(
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
     before = await _execution_snapshot(repository)
 
-    row = await repository.record_execution_annulment(_request(digest))
+    row = await _record_annulment(repository, _request(digest))
 
     assert row["target_execution_public_id"] == _KRAKEN_PHANTOM
     assert row["target_execution_digest"] == digest
@@ -599,7 +615,7 @@ async def test_a_second_annulment_of_one_execution_conflicts_with_its_winner(
         history.
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    winner = await repository.record_execution_annulment(_request(digest))
+    winner = await _record_annulment(repository, _request(digest))
 
     with pytest.raises(ExecutionAnnulmentConflictError) as conflict:
         await repository.record_execution_annulment(
@@ -651,7 +667,8 @@ async def test_a_target_without_client_order_lineage_is_still_annullable(
     """
     digest = await _expected_digest(repository, _PAPER_LEGACY)
 
-    row = await repository.record_execution_annulment(
+    row = await _record_annulment(
+        repository,
         _request(
             digest,
             target_execution_public_id=_PAPER_LEGACY,
@@ -659,7 +676,7 @@ async def test_a_target_without_client_order_lineage_is_still_annullable(
             exchange="paper",
             scope_sequence=2,
             reason="unwitnessed_legacy_lineage",
-        )
+        ),
     )
 
     assert row["reason"] == "unwitnessed_legacy_lineage"
@@ -685,13 +702,14 @@ async def test_an_unrelated_witness_does_not_block_an_unwitnessed_phantom(
         "exchange": "paper",
     }
 
-    row = await repository.record_execution_annulment(
+    row = await _record_annulment(
+        repository,
         _request(
             phantom_digest,
             target_execution_public_id=_PAPER_PHANTOM,
             scope_sequence=1,
             **common,
-        )
+        ),
     )
 
     with pytest.raises(ExecutionAnnulmentWitnessedError):
@@ -928,7 +946,8 @@ async def test_the_manifest_read_normalizes_wallets_orders_and_narrows_by_exchan
     """
     phantom_digest = await _expected_digest(repository, _PAPER_PHANTOM)
     legacy_digest = await _expected_digest(repository, _PAPER_LEGACY)
-    second = await repository.record_execution_annulment(
+    second = await _record_annulment(
+        repository,
         _request(
             legacy_digest,
             target_execution_public_id=_PAPER_LEGACY,
@@ -936,16 +955,17 @@ async def test_the_manifest_read_normalizes_wallets_orders_and_narrows_by_exchan
             exchange="paper",
             scope_sequence=2,
             reason="unwitnessed_legacy_lineage",
-        )
+        ),
     )
-    first = await repository.record_execution_annulment(
+    first = await _record_annulment(
+        repository,
         _request(
             phantom_digest,
             target_execution_public_id=_PAPER_PHANTOM,
             wallet_public_id=_PAPER_WALLET,
             exchange="paper",
             scope_sequence=1,
-        )
+        ),
     )
 
     assert await repository.get_execution_annulments(_PAPER_WALLET.upper(), "live") == [
@@ -1056,7 +1076,7 @@ async def test_an_observation_integrity_failure_without_a_winner_reraises(
         "observe_execution_annulment_visibility",
         _refuse_observation,
     ):
-        row = await repository.record_execution_annulment(_request(digest))
+        row = await _record_annulment(repository, _request(digest))
     async with repository.session() as s:
         annulment = (
             (
@@ -1087,3 +1107,360 @@ async def test_an_observation_integrity_failure_without_a_winner_reraises(
 
     with pytest.raises(IntegrityError):
         await real_observe(repository, row["public_id"])
+
+
+def _annulment_request_for(
+    digest: str, target: str, **overrides: object
+) -> ExecutionAnnulmentRequest:
+    """Build one request for a named target with the paper-wallet defaults."""
+    base: dict[str, object] = {
+        "target_execution_public_id": target,
+        "wallet_public_id": _PAPER_WALLET,
+        "exchange": "paper",
+    }
+    base.update(overrides)
+    return _request(digest, **base)
+
+
+async def test_the_postgresql_writer_locks_venue_events_before_it_looks_for_a_witness(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The no-witness proof is fenced against the writers that could refute it.
+
+    Given: A repository reporting the ``postgresql`` dialect and a session that
+        records every statement the guarded writer issues.
+    When: One annulment is recorded end to end.
+    Then: The statements are, in order, the isolation pin, the scope advisory
+        lock, ``LOCK TABLE venue_events IN SHARE MODE``, and only afterwards the
+        ``fill_observed`` witness query. That order is the whole invariant: SHARE
+        conflicts with the ROW EXCLUSIVE an INSERT takes, so an in-flight witness
+        either committed before the grant and is SEEN by the fresh READ COMMITTED
+        statement snapshot, or waits behind this transaction and the correction
+        it would contradict is never appended. Issuing the witness query first
+        would let an uncommitted fill slip through and poison the manifest
+        permanently, because both tables are append-only.
+    """
+    statements: list[str] = []
+    session = AsyncMock()
+    session.add = MagicMock()
+    target = _execution(_KRAKEN_PHANTOM, "kraken")
+
+    async def execute(statement: object, parameters: object = None) -> MagicMock:
+        """Record one statement and answer it with the shape the writer expects."""
+        del parameters
+        rendered = " ".join(str(statement).split())
+        statements.append(rendered)
+        result = MagicMock()
+        if rendered.startswith("SELECT executions."):
+            result.scalars.return_value.first.return_value = target
+        elif rendered.startswith("SELECT DISTINCT orders.client_order_id"):
+            result.scalars.return_value.all.return_value = ["client-kraken-1"]
+        else:
+            result.scalars.return_value.first.return_value = None
+        return result
+
+    session.execute = AsyncMock(side_effect=execute)
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    with (
+        patch.object(
+            SQLAlchemyRepository,
+            "dialect_name",
+            new_callable=PropertyMock,
+            return_value="postgresql",
+        ),
+        patch.object(repository, "session") as session_context,
+        patch.object(
+            repository,
+            "_observe_execution_annulment_durability",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        session_context.return_value.__aenter__.return_value = session
+        session_context.return_value.__aexit__.return_value = None
+        await repository.record_execution_annulment(_request(digest))
+
+    assert statements[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert "pg_advisory_xact_lock(hashtext('execution_annulment'), hashtext(:scope))" in (
+        statements[1]
+    )
+    assert statements[2] == "LOCK TABLE venue_events IN SHARE MODE"
+    witness_positions = [
+        index for index, statement in enumerate(statements) if "FROM venue_events" in statement
+    ]
+    assert witness_positions
+    assert min(witness_positions) > 2
+    session.commit.assert_awaited_once_with()
+
+
+async def test_sqlite_needs_no_table_lock_because_its_reservation_serializes_writers(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The dialect split is in the mechanism, never in the guarantee.
+
+    Given: A repository on SQLite, whose annulment transaction opens with
+        ``BEGIN IMMEDIATE``.
+    When: The fence is acquired.
+    Then: No statement at all is issued. ``BEGIN IMMEDIATE`` already holds the
+        database-wide write reservation, so a concurrent witness insert cannot
+        even begin — a ``LOCK TABLE`` here would be a syntax error buying nothing.
+    """
+    session = AsyncMock()
+    command = SQLAlchemyRepository._normalized_execution_annulment_command(_request("f" * 64))
+
+    await repository._acquire_execution_annulment_fence(session, command)
+
+    session.execute.assert_not_awaited()
+
+
+async def test_a_recorded_correction_reports_the_observation_that_completed_it(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A complete correction is a different VALUE from an incomplete one.
+
+    Given: The ordinary writer, whose second transaction succeeds.
+    When: A correction is recorded.
+    Then: The result names the appended manifest row, reports
+        ``visibility_state='observed'``, and carries the observation bound to
+        the correction — so a caller can prove the correction is folded by
+        historical horizons without a second query.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    result = await repository.record_execution_annulment(_request(digest))
+
+    assert result["visibility_state"] == "observed"
+    observation = result["visibility"]
+    assert observation is not None
+    assert observation["annulment_public_id"] == result["annulment"]["public_id"]
+    assert observation["observed_at"] > result["annulment"]["timestamp"]
+
+
+async def test_a_correction_whose_observation_failed_is_reported_as_pending(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Success must never be the word for a historically invisible correction.
+
+    Given: A second transaction that fails after the correction has committed.
+    When: The correction is recorded.
+    Then: The result still carries the durable manifest row — the manifest is
+        append-only, so refusing afterwards would be a lie — but it reports
+        ``visibility_state='pending'`` and no observation. Returning a bare row
+        here was the defect: the caller was told the correction was complete
+        while EVERY historical horizon still refused it.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    with patch.object(
+        SQLAlchemyRepository,
+        "observe_execution_annulment_visibility",
+        _refuse_observation,
+    ):
+        result = await repository.record_execution_annulment(_request(digest))
+
+    assert result["visibility_state"] == "pending"
+    assert result["visibility"] is None
+    assert result["annulment"]["target_execution_public_id"] == _KRAKEN_PHANTOM
+    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == [result["annulment"]]
+
+
+async def _two_unobserved_paper_corrections(
+    repository: SQLAlchemyRepository,
+) -> tuple[ExecutionAnnulmentRow, ExecutionAnnulmentRow]:
+    """Append the legacy correction first, then the phantom, observing neither."""
+    legacy_digest = await _expected_digest(repository, _PAPER_LEGACY)
+    phantom_digest = await _expected_digest(repository, _PAPER_PHANTOM)
+    with patch.object(
+        SQLAlchemyRepository,
+        "observe_execution_annulment_visibility",
+        _refuse_observation,
+    ):
+        legacy = await repository.record_execution_annulment(
+            _annulment_request_for(
+                legacy_digest,
+                _PAPER_LEGACY,
+                scope_sequence=2,
+                reason="unwitnessed_legacy_lineage",
+            )
+        )
+        phantom = await repository.record_execution_annulment(
+            _annulment_request_for(phantom_digest, _PAPER_PHANTOM, scope_sequence=1)
+        )
+    return legacy["annulment"], phantom["annulment"]
+
+
+async def test_the_discovery_read_finds_exactly_the_corrections_no_observation_covers(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A killed process leaves no log, so discovery cannot be based on logs.
+
+    Given: Two paper corrections appended without observations and one Kraken
+        correction appended with its observation.
+    When: The unobserved manifest is discovered for the paper scope, then again
+        after one of them is completed, then for the Kraken scope and for a mode
+        that holds nothing.
+    Then: Only the corrections lacking an observation are returned, ordered
+        oldest-correction-first rather than by scope coordinate, the completed
+        one disappears, and the scope filters hold — an observed correction, a
+        different wallet, and a different mode all return nothing.
+    """
+    legacy, phantom = await _two_unobserved_paper_corrections(repository)
+    kraken_digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    await repository.record_execution_annulment(_request(kraken_digest))
+
+    assert await repository.get_unobserved_execution_annulments(_PAPER_WALLET, "live") == [
+        legacy,
+        phantom,
+    ]
+    assert await repository.get_execution_annulments(_PAPER_WALLET, "live") == [phantom, legacy]
+
+    await repository.observe_execution_annulment_visibility(legacy["public_id"])
+
+    assert await repository.get_unobserved_execution_annulments(_PAPER_WALLET, "live") == [phantom]
+    assert await repository.get_unobserved_execution_annulments(_MAIN_WALLET, "live") == []
+    assert await repository.get_unobserved_execution_annulments(_PAPER_WALLET, "paper") == []
+
+
+async def test_the_discovery_read_is_bounded_and_accepts_an_alias_wallet_spelling(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An operator surface must never be handed an unbounded result set.
+
+    Given: Two unobserved paper corrections.
+    When: The unobserved manifest is discovered with a limit of one, using an
+        upper-cased wallet spelling.
+    Then: Exactly the oldest correction is returned, and the alias spelling
+        resolves to the canonical wallet identity.
+    """
+    legacy, _ = await _two_unobserved_paper_corrections(repository)
+
+    assert await repository.get_unobserved_execution_annulments(
+        _PAPER_WALLET.upper(), "live", 1
+    ) == [legacy]
+
+
+@pytest.mark.parametrize("limit", [0, -1, 1001])
+async def test_every_discovery_read_refuses_an_unsupported_bound(
+    repository: SQLAlchemyRepository,
+    limit: int,
+) -> None:
+    """A bound outside the supported range is a refusal, never a silent clamp.
+
+    Given: A discovery bound below one or above the hard ceiling.
+    When: Either discovery read is issued with it.
+    Then: Both raise, so a caller cannot silently receive a different scan than
+        the one it asked for.
+    """
+    with pytest.raises(ValueError, match="discovery limit"):
+        await repository.get_unobserved_execution_annulments(_MAIN_WALLET, "live", limit)
+    with pytest.raises(ValueError, match="discovery limit"):
+        await repository.get_unwitnessed_executions(_MAIN_WALLET, "live", None, limit)
+
+
+async def test_every_discovery_read_refuses_a_malformed_wallet_identity(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An unparseable wallet is a refusal, never an empty all-clear.
+
+    Given: A wallet spelling that is not a UUID.
+    When: Either discovery read is issued for it.
+    Then: Both raise, because an empty result would read as "this scope is
+        clean" for a scope that was never actually looked at.
+    """
+    with pytest.raises(ValueError, match="wallet_public_id"):
+        await repository.get_unobserved_execution_annulments("not-a-uuid", "live")
+    with pytest.raises(ValueError, match="wallet_public_id"):
+        await repository.get_unwitnessed_executions("not-a-uuid", "live")
+
+
+async def test_the_unwitnessed_read_publishes_the_exact_digest_the_writer_demands(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """What the surface calls annullable is what the guarded writer accepts.
+
+    Given: The measured production shape, in which the Kraken phantom is the one
+        unwitnessed row in the main wallet and the genuine Walutomat trade is
+        witnessed.
+    When: The scope's unwitnessed executions are read, and the digest that read
+        published is fed straight to the guarded writer.
+    Then: Only the phantom is reported, with its blocking economics (size 0,
+        price 0, ``exec_id`` NULL) and no standing correction; the writer accepts
+        the published digest unchanged, so an operator copies a value the
+        database produced instead of deriving one by hand; and a second read
+        shows the row now bound to its correction rather than silently dropping
+        it.
+    """
+    rows = await repository.get_unwitnessed_executions(_MAIN_WALLET, "live")
+
+    assert [row["public_id"] for row in rows] == [_KRAKEN_PHANTOM]
+    blocker = rows[0]
+    assert blocker["exchange"] == "kraken"
+    assert blocker["scope_sequence"] == 1
+    assert blocker["exec_id"] is None
+    assert blocker["size"] == 0.0
+    assert blocker["price"] == 0.0
+    assert blocker["timestamp"] == _KRAKEN_PHANTOM_AT
+    assert blocker["annulment_public_id"] is None
+    assert blocker["canonical_digest"] == await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    published_digest = blocker["canonical_digest"]
+    assert published_digest is not None
+    result = await repository.record_execution_annulment(_request(published_digest))
+
+    corrected = await repository.get_unwitnessed_executions(_MAIN_WALLET, "live")
+    assert corrected[0]["annulment_public_id"] == result["annulment"]["public_id"]
+
+
+async def test_the_unwitnessed_read_narrows_by_venue_and_is_bounded(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The blocker list is scope-ordered, venue-narrowable, and bounded.
+
+    Given: A paper scope holding two unwitnessed rows and one properly witnessed
+        fill.
+    When: The scope is read unnarrowed, narrowed with a mixed-case venue
+        spelling, and read again with a limit of one.
+    Then: The witnessed sibling never appears, rows come back ordered by
+        ``(exchange, scope_sequence)``, the venue spelling normalizes, and the
+        bound truncates rather than being ignored.
+    """
+    rows = await repository.get_unwitnessed_executions(_PAPER_WALLET, "live")
+
+    assert [(row["exchange"], row["scope_sequence"]) for row in rows] == [
+        ("paper", 1),
+        ("paper", 2),
+    ]
+    assert _PAPER_WITNESSED not in {row["public_id"] for row in rows}
+    assert await repository.get_unwitnessed_executions(_PAPER_WALLET, "live", " Paper ") == rows
+    assert await repository.get_unwitnessed_executions(_PAPER_WALLET, "live", "kraken") == []
+    assert await repository.get_unwitnessed_executions(_PAPER_WALLET, "live", None, 1) == rows[:1]
+
+
+async def test_an_uncanonicalizable_blocker_is_listed_without_a_digest(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """One unserializable row must not hide every other blocker in the scope.
+
+    Given: An unwitnessed execution carrying an operator identity that is not a
+        UUID, so its canonical bytes cannot be produced at all.
+    When: The scope's unwitnessed executions are read.
+    Then: The row is listed with ``canonical_digest=None`` instead of raising.
+        That is the honest answer — the guarded writer refuses such a target with
+        ``uncanonicalizable_execution_target`` and no digest would change it —
+        and the Kraken phantom beside it stays visible, which a crash would have
+        hidden.
+    """
+    async with repository.session() as s:
+        s.add(
+            _execution(
+                "00000000-0000-7000-8000-000000000e06",
+                "kraken",
+                scope_sequence=2,
+                operator_public_id="not-a-uuid",
+            )
+        )
+        await s.commit()
+
+    rows = await repository.get_unwitnessed_executions(_MAIN_WALLET, "live", "kraken")
+
+    assert [row["canonical_digest"] is None for row in rows] == [False, True]
+    assert [row["scope_sequence"] for row in rows] == [1, 2]

@@ -283,6 +283,7 @@ from snapper.data.repository_types import ExecutionAnnulmentReason
 from snapper.data.repository_types import ExecutionAnnulmentRequest
 from snapper.data.repository_types import ExecutionAnnulmentRow
 from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
+from snapper.data.repository_types import ExecutionAnnulmentWriteResult
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -379,6 +380,7 @@ from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.data.repository_types import UnwitnessedExecutionRow
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.data.repository_types import UserAlertDefaultRow
@@ -1275,6 +1277,16 @@ _POSITION_CYCLE_LOOKUP_CHUNK_SIZE = 300
 DEFAULT_HIGH_CARDINALITY_LIMIT = 100_000
 _HIGH_CARDINALITY_STREAM_CHUNK_SIZE = 5_000
 _SQLITE_COUNT_GUARD_ROWS = 10_000_000
+EXECUTION_ANNULMENT_DISCOVERY_LIMIT: Final[int] = 100
+"""Default row bound for the two annulment discovery reads.
+
+Both reads back an operator surface that must stay legible and must never be
+handed an unbounded result set; a ledger scope needing more than this many
+corrections or unwitnessed rows in one pass is itself the finding."""
+
+EXECUTION_ANNULMENT_DISCOVERY_LIMIT_MAX: Final[int] = 1_000
+"""Hard ceiling an operator-supplied discovery limit may not exceed."""
+
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -3171,7 +3183,7 @@ class Repository(ABC):
     async def record_execution_annulment(
         self,
         request: ExecutionAnnulmentRequest,
-    ) -> ExecutionAnnulmentRow:
+    ) -> ExecutionAnnulmentWriteResult:
         """Append one uniquely targeted repudiation of one execution.
 
         The sole sanctioned writer of the ``execution_annulments`` manifest,
@@ -3179,7 +3191,15 @@ class Repository(ABC):
         reachable through generic CRUD, an API route, or SCD2 supersede. The
         implementation proves the target exists, sits in the stated
         certification scope, matches the operator-supplied canonical digest,
-        and carries NO ``fill_observed`` witness before it appends.
+        and carries NO ``fill_observed`` witness before it appends — with that
+        last proof held against concurrent witness writers by a lock no witness
+        insert can cross, so the proof cannot be racing an uncommitted fill.
+
+        The result names the correction AND the state of its durability
+        observation. Implementations must report ``pending`` whenever the
+        observation could not be taken, because such a correction is durable but
+        folded by NO historical horizon, and a caller told only "success" would
+        treat an incomplete correction as finished.
 
         Raises:
             ExecutionAnnulmentTargetError: If the target is unknown, sits in a
@@ -3231,6 +3251,58 @@ class Repository(ABC):
         ``correction_time`` on purpose: a knowledge-horizon read must decide
         for itself which corrections were already known, and the row carries
         the instant it needs to do so.
+        """
+        ...
+
+    @abstractmethod
+    async def get_unobserved_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        limit: int = EXECUTION_ANNULMENT_DISCOVERY_LIMIT,
+    ) -> list[ExecutionAnnulmentRow]:
+        """Discover corrections that are durable but historically invisible.
+
+        The recovery read for the half-completed knowledge protocol: it returns
+        the ``(wallet, mode)`` manifest rows carrying NO
+        ``execution_annulment_visibility`` observation, which are exactly the
+        corrections current truth honours and every historical horizon refuses.
+        A process killed between the writer's two transactions leaves such a row
+        and leaves no log line at all, so discovery cannot be based on logs.
+
+        Ordered oldest-correction-first so completion follows the order the
+        corrections were appended in, and bounded by ``limit`` so an operator
+        surface cannot be handed an unbounded result.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID, or the limit is
+                not a positive integer within the supported bound.
+        """
+        ...
+
+    @abstractmethod
+    async def get_unwitnessed_executions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str | None = None,
+        limit: int = EXECUTION_ANNULMENT_DISCOVERY_LIMIT,
+    ) -> list[UnwitnessedExecutionRow]:
+        """Report the executions no durable fill witness supports.
+
+        The read-only diagnosis behind the operator surface: these are the rows
+        that make an opening prefix unprovable, listed with the coordinates,
+        economics, and canonical digest an annulment request must assert, plus
+        the correction that already stands for each one when there is one.
+
+        Implementations must bind witnesses exactly as
+        ``record_execution_annulment`` does — every historical ``Order`` version's
+        ``client_order_id``, no ``known_to`` filter, no horizon cut — so what
+        this reports as annullable is precisely what the writer will accept.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID, or the limit is
+                not a positive integer within the supported bound.
         """
         ...
 
@@ -11891,15 +11963,54 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         command: _ExecutionAnnulmentCommand,
     ) -> None:
-        """Serialize annulment writers for one certification scope.
+        """Serialize annulment writers against each other AND against witnesses.
 
-        Uses the two-argument ``pg_advisory_xact_lock(hashtext('execution_annulment'),
-        hashtext(scope))`` form so the manifest's keyspace is disjoint from the
-        execution ingest fence and the reconciliation wallet locks — annulling a
-        historical row must never contend with live fill ingest. The lock is
-        transaction scoped, so it releases on commit, rollback, and crash.
-        SQLite needs no analogue: the write reservation taken by ``BEGIN
-        IMMEDIATE`` already serializes writers across connections.
+        Two locks, for two different races.
+
+        The advisory lock serializes annulment writers for one certification
+        scope. It uses the two-argument ``pg_advisory_xact_lock(hashtext(
+        'execution_annulment'), hashtext(scope))`` form so the manifest's
+        keyspace is disjoint from the execution ingest fence and the
+        reconciliation wallet locks — annulling a historical row must never
+        contend with live fill ingest for the ADVISORY key.
+
+        ``LOCK TABLE venue_events IN SHARE MODE`` is the second, and it exists
+        because that disjointness is precisely what leaves the no-witness proof
+        exposed. A live writer can hold an INSERTED but UNCOMMITTED
+        ``fill_observed`` row for the very execution being annulled; under READ
+        COMMITTED the proof's witness query cannot see an uncommitted row, so
+        without this lock the annulment could commit, the witness could commit a
+        moment later, and every subsequent fold would refuse the contradicted
+        correction FOREVER — both tables are append-only, so no repair path
+        exists. SHARE conflicts with the ROW EXCLUSIVE mode an ``INSERT`` takes,
+        which decides the race in the only safe direction: an in-flight witness
+        either committed before the grant and is therefore SEEN, or it waits
+        behind this transaction and the annulment it would contradict is never
+        appended. The precedent is the anchor evidence fence, which locks the
+        same table for the same class of reason
+        (:meth:`_acquire_portfolio_pnl_anchor_evidence_fence`).
+
+        THE INVARIANT: a correction can only be appended when no witness for its
+        target can be in flight, because the writer holds a lock that no witness
+        insert can cross. The witness query must therefore run strictly AFTER
+        this grant — it does; the proving transaction's order is fence, target
+        re-read, witness refusal, insert — and each READ COMMITTED statement
+        takes a fresh snapshot, so the witness query issued after the grant sees
+        everything committed before it. The lock is transaction scoped and is
+        held for no longer than the proving transaction: it releases on commit,
+        rollback, and crash, and this writer commits immediately after the
+        insert, so live fill ingest is blocked only for that window.
+
+        SQLite takes neither lock and needs neither: ``BEGIN IMMEDIATE``, emitted
+        as this transaction's first statement, takes a database-wide write
+        reservation, so a concurrent witness insert cannot even begin — the
+        dialect split is in the mechanism, not in the guarantee.
+
+        What remains true if a witness somehow arrives LATER anyway is
+        unchanged and deliberate: every fold fails closed
+        (:meth:`_refuse_witnessed_execution_annulment_at_read`), and the
+        supported exit is an operator decision on the evidence — never a silent
+        repair — surfaced through ``snapper annulment inspect``.
 
         Args:
             s: The session holding the open write transaction.
@@ -11920,6 +12031,7 @@ class SQLAlchemyRepository(Repository):
             text("SELECT pg_advisory_xact_lock(hashtext('execution_annulment'), hashtext(:scope))"),
             {"scope": scope},
         )
+        await s.execute(text("LOCK TABLE venue_events IN SHARE MODE"))
 
     @staticmethod
     def _execution_annulment_scope_matches(
@@ -12255,7 +12367,7 @@ class SQLAlchemyRepository(Repository):
     async def _observe_execution_annulment_durability(
         self,
         appended: ExecutionAnnulmentRow,
-    ) -> None:
+    ) -> ExecutionAnnulmentVisibilityRow | None:
         """Complete the knowledge protocol, reporting loudly if it cannot.
 
         A failure here is not a failure of the correction: the manifest row is
@@ -12267,14 +12379,22 @@ class SQLAlchemyRepository(Repository):
         :meth:`observe_execution_annulment_visibility` is called for it. The log
         therefore names the exact id that call needs.
 
+        The absent observation is RETURNED as well as logged. A log line is the
+        only trace a process kill between the two transactions can leave, and it
+        leaves none at all if the kill lands first; the returned value is what
+        makes the gap impossible for the writer's own caller to miss, and
+        :meth:`get_unobserved_execution_annulments` is what finds gaps no
+        caller was left alive to see.
+
         Args:
             appended: The correction that was just committed.
 
         Returns:
-            None.
+            The observation proving the correction durable, or ``None`` when it
+            could not be taken and the correction is left historically pending.
         """
         try:
-            await self.observe_execution_annulment_visibility(appended["public_id"])
+            return await self.observe_execution_annulment_visibility(appended["public_id"])
         except Exception:
             logger.exception(
                 "execution annulment {annulment} is durable but has NO visibility "
@@ -12282,20 +12402,28 @@ class SQLAlchemyRepository(Repository):
                 "observe_execution_annulment_visibility completes for it",
                 annulment=appended["public_id"],
             )
+            return None
 
     async def record_execution_annulment(
         self,
         request: ExecutionAnnulmentRequest,
-    ) -> ExecutionAnnulmentRow:
+    ) -> ExecutionAnnulmentWriteResult:
         """Prove one execution is annullable under a scope fence, then append.
 
         The proving protocol runs in ONE transaction: open with explicit dialect
-        guarantees, fence the certification scope, re-read and prove the target
-        (exists, same scope, same canonical digest), refuse any durable fill
-        witness, then append. Nothing is superseded, nothing is closed, and no
-        generic CRUD primitive is involved — the manifest's physical name is
-        registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it
-        cannot be.
+        guarantees, fence the certification scope AND the witness table, re-read
+        and prove the target (exists, same scope, same canonical digest), refuse
+        any durable fill witness, then append. Nothing is superseded, nothing is
+        closed, and no generic CRUD primitive is involved — the manifest's
+        physical name is registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES`
+        precisely so it cannot be.
+
+        The fence's second lock is what makes the no-witness proof a proof
+        rather than a sample: it holds ``venue_events`` in SHARE mode, which no
+        witness insert can cross, so the proof cannot be racing an uncommitted
+        ``fill_observed`` row for its own target. See
+        :meth:`_acquire_execution_annulment_fence` for the full invariant and
+        its dialect split.
 
         Knowledge is PROVEN by a second transaction, not assumed from a stamp.
         A value written inside the transaction above can only ever be stamped
@@ -12326,6 +12454,17 @@ class SQLAlchemyRepository(Repository):
         Current-truth reads are unaffected either way: a read that requested no
         horizon and can see the row has performed the same proof itself.
 
+        That outcome is reported in the RETURN VALUE, not only in a log.
+        ``visibility_state`` is ``observed`` exactly when the observation
+        committed and ``pending`` exactly when it did not, and ``visibility``
+        carries the observation only in the first case — so a caller cannot
+        mistake a historically invisible correction for a complete one, and a
+        pending result is a typed instruction to run
+        ``snapper annulment complete-visibility``. A correction whose process
+        died between the two transactions leaves no caller at all to read this;
+        :meth:`get_unobserved_execution_annulments` is the discovery read that
+        finds it afterwards.
+
         Contradictory-later-witness doctrine, and the exact guarantee it buys.
         The witness check here is NECESSARY but NOT SUFFICIENT: it proves only
         that no ``fill_observed`` row existed at write time. A late venue event
@@ -12351,7 +12490,8 @@ class SQLAlchemyRepository(Repository):
             request: The operator-authored annulment request.
 
         Returns:
-            The appended manifest row.
+            The appended manifest row together with the state of its durability
+            observation.
 
         Raises:
             ValueError: If the request identities or evidence envelope are
@@ -12403,8 +12543,12 @@ class SQLAlchemyRepository(Repository):
             except Exception:
                 await s.rollback()
                 raise
-        await self._observe_execution_annulment_durability(appended)
-        return appended
+        observation = await self._observe_execution_annulment_durability(appended)
+        return {
+            "annulment": appended,
+            "visibility_state": "pending" if observation is None else "observed",
+            "visibility": observation,
+        }
 
     async def get_execution_annulments(
         self,
@@ -12448,6 +12592,218 @@ class SQLAlchemyRepository(Repository):
                 .all()
             )
         return [self._execution_annulment_to_row(row) for row in rows]
+
+    @staticmethod
+    def _validated_execution_annulment_discovery_limit(limit: int) -> int:
+        """Reject an unbounded or nonsensical discovery bound.
+
+        Args:
+            limit: The caller-supplied row bound.
+
+        Returns:
+            The same bound, once proven to sit inside the supported range.
+
+        Raises:
+            ValueError: If the bound is below one or above
+                :data:`EXECUTION_ANNULMENT_DISCOVERY_LIMIT_MAX`.
+        """
+        if limit < 1 or limit > EXECUTION_ANNULMENT_DISCOVERY_LIMIT_MAX:
+            raise ValueError(
+                "execution annulment discovery limit must be between 1 and "
+                f"{EXECUTION_ANNULMENT_DISCOVERY_LIMIT_MAX}"
+            )
+        return limit
+
+    async def get_unobserved_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        limit: int = EXECUTION_ANNULMENT_DISCOVERY_LIMIT,
+    ) -> list[ExecutionAnnulmentRow]:
+        """Discover corrections that are durable but historically invisible.
+
+        The recovery read for a half-completed knowledge protocol. It answers
+        the one question the writer's return value cannot answer for a process
+        that died between its two transactions: WHICH committed corrections
+        carry no ``execution_annulment_visibility`` observation, and are
+        therefore honoured by current truth while every historical horizon
+        refuses them.
+
+        Implemented as an anti-join on the observation's own surrogate key
+        rather than a ``NOT IN`` over identities, so a correction is reported
+        missing only when no observation row exists at all.
+
+        Args:
+            wallet_public_id: Wallet identity whose manifest is scanned.
+            mode: Trading mode of the certification scope.
+            limit: Maximum rows to return, oldest correction first.
+
+        Returns:
+            The unobserved manifest rows ordered by ``(timestamp, public_id)``.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID or the limit is
+                outside the supported range.
+        """
+        wallet = self._canonical_execution_annulment_uuid(wallet_public_id, "wallet_public_id")
+        bound = self._validated_execution_annulment_discovery_limit(limit)
+        async with self.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(ExecutionAnnulment)
+                        .outerjoin(
+                            ExecutionAnnulmentVisibility,
+                            ExecutionAnnulmentVisibility.annulment_public_id
+                            == ExecutionAnnulment.public_id,
+                        )
+                        .where(
+                            ExecutionAnnulment.wallet_public_id == wallet,
+                            ExecutionAnnulment.mode == mode,
+                            ExecutionAnnulmentVisibility.id.is_(None),
+                        )
+                        .order_by(
+                            ExecutionAnnulment.timestamp.asc(),
+                            ExecutionAnnulment.public_id.asc(),
+                        )
+                        .limit(bound)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [self._execution_annulment_to_row(row) for row in rows]
+
+    @staticmethod
+    def _witnessed_order_public_ids() -> Select[tuple[str]]:
+        """Select every order a durable ``fill_observed`` row witnesses.
+
+        Reproduces the guarded writer's binding exactly: an order counts as
+        witnessed when ANY of its historical versions' ``client_order_id``
+        spellings carries a ``fill_observed`` event, with no ``known_to`` filter
+        and no horizon cut. An execution whose order is absent from this set is
+        precisely an execution the writer would accept as unwitnessed, so the
+        operator surface cannot advertise a target the writer then refuses.
+
+        Returns:
+            The distinct order identities carrying durable fill evidence.
+        """
+        return (
+            select(Order.public_id)
+            .join(
+                VenueEvent,
+                and_(
+                    VenueEvent.client_order_id == Order.client_order_id,
+                    VenueEvent.event_type == "fill_observed",
+                ),
+            )
+            .where(Order.client_order_id.is_not(None))
+            .distinct()
+        )
+
+    @staticmethod
+    def _unwitnessed_execution_to_row(
+        execution: Execution,
+        annulment_public_id: str | None,
+    ) -> UnwitnessedExecutionRow:
+        """Project one unwitnessed execution onto its typed operator row.
+
+        The canonical digest is computed through the SAME projection the guarded
+        writer proves against, so the value an operator copies is the value the
+        writer will recompute. A row whose canonical bytes cannot be produced
+        reports ``None`` instead of raising: that row is genuinely unannullable
+        (the writer answers it with ``uncanonicalizable_execution_target``), and
+        an inspection that crashed on it would hide every other blocker in the
+        scope.
+
+        Args:
+            execution: The stored execution row.
+            annulment_public_id: The correction already standing for it, if any.
+
+        Returns:
+            The typed unwitnessed-execution row.
+        """
+        try:
+            digest: str | None = execution_row_digest(
+                SQLAlchemyRepository._execution_chain_record(execution)
+            )
+        except ExecutionChainError:
+            digest = None
+        return {
+            "public_id": execution.public_id,
+            "wallet_public_id": execution.wallet_public_id,
+            "exchange": execution.exchange,
+            "mode": execution.mode,
+            "scope_sequence": int(execution.scope_sequence),
+            "exec_id": execution.exec_id,
+            "price": float(execution.price),
+            "size": float(execution.size),
+            "price_decimal": execution.price_decimal,
+            "size_decimal": execution.size_decimal,
+            "timestamp": execution.timestamp,
+            "canonical_digest": digest,
+            "annulment_public_id": annulment_public_id,
+        }
+
+    async def get_unwitnessed_executions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str | None = None,
+        limit: int = EXECUTION_ANNULMENT_DISCOVERY_LIMIT,
+    ) -> list[UnwitnessedExecutionRow]:
+        """Report the executions no durable fill witness supports.
+
+        The read-only diagnosis an operator runs FIRST: these are the rows that
+        make an opening prefix unprovable, each carrying the coordinates and the
+        canonical digest an annulment request must assert. Rows already
+        repudiated are reported too, with the correction that stands for them,
+        so the surface distinguishes "still blocking" from "already corrected"
+        instead of silently shrinking.
+
+        No ``known_to`` filter is applied, exactly as the prefix proof applies
+        none: an execution is physically immutable and never closes, so a
+        filter here would imply a lifecycle this ledger does not have.
+
+        Args:
+            wallet_public_id: Wallet identity whose ledger is scanned.
+            mode: Trading mode of the certification scope.
+            exchange: Optional single venue to narrow the scan to.
+            limit: Maximum rows to return, in scope-coordinate order.
+
+        Returns:
+            The unwitnessed executions ordered by ``(exchange, scope_sequence)``.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID or the limit is
+                outside the supported range.
+        """
+        wallet = self._canonical_execution_annulment_uuid(wallet_public_id, "wallet_public_id")
+        bound = self._validated_execution_annulment_discovery_limit(limit)
+        filters: list[ColumnElement[bool]] = [
+            Execution.wallet_public_id == wallet,
+            Execution.mode == mode,
+            Execution.order_public_id.not_in(self._witnessed_order_public_ids()),
+        ]
+        if exchange is not None:
+            filters.append(Execution.exchange == exchange.strip().lower())
+        async with self.session() as s:
+            rows = (
+                await s.execute(
+                    select(Execution, ExecutionAnnulment.public_id)
+                    .outerjoin(
+                        ExecutionAnnulment,
+                        ExecutionAnnulment.target_execution_public_id == Execution.public_id,
+                    )
+                    .where(*filters)
+                    .order_by(Execution.exchange.asc(), Execution.scope_sequence.asc())
+                    .limit(bound)
+                )
+            ).all()
+        return [
+            self._unwitnessed_execution_to_row(execution, annulment)
+            for execution, annulment in rows
+        ]
 
     @staticmethod
     def _parse_portfolio_pnl_sample_audit(raw: object) -> JsonObject:

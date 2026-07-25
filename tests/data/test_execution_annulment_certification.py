@@ -477,6 +477,19 @@ def _request(digest: str, **overrides: object) -> ExecutionAnnulmentRequest:
     return cast(ExecutionAnnulmentRequest, base)
 
 
+async def _record_annulment(
+    repository: SQLAlchemyRepository,
+    request: ExecutionAnnulmentRequest,
+) -> ExecutionAnnulmentRow:
+    """Record one annulment through the guarded writer, keeping its manifest row.
+
+    The writer's result also names the state of the correction's durability
+    observation; a test whose subject is the manifest row itself projects that
+    row out here so the assertion stays about the row.
+    """
+    return (await repository.record_execution_annulment(request))["annulment"]
+
+
 async def _annul_kraken_phantom(
     repository: SQLAlchemyRepository,
 ) -> ExecutionAnnulmentRow:
@@ -486,7 +499,7 @@ async def _annul_kraken_phantom(
     honest way for a test to name a horizon before or after the correction.
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    return await repository.record_execution_annulment(_request(digest))
+    return await _record_annulment(repository, _request(digest))
 
 
 class _ManifestOptions(TypedDict, total=False):
@@ -673,8 +686,8 @@ async def test_a_horizon_before_the_correction_keeps_failing(
         a horizon past that stamp proves.
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    correction = await repository.record_execution_annulment(
-        _request(digest, correction_time=datetime(2020, 1, 1, tzinfo=UTC))
+    correction = await _record_annulment(
+        repository, _request(digest, correction_time=datetime(2020, 1, 1, tzinfo=UTC))
     )
 
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):

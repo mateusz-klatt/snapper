@@ -22,6 +22,11 @@ User Management:
     - ``list-users``: List all system users
     - ``reset-password``: Reset user password
 
+Ledger Maintenance:
+    - ``annulment inspect``: Report what blocks one scope's certification
+    - ``annulment annul``: Append one guarded execution annulment
+    - ``annulment complete-visibility``: Complete pending durability observations
+
 Data Updates:
     - ``update-kraken-symbols``: Sync Kraken symbol mappings
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
@@ -123,6 +128,7 @@ from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.cli.dev_pat import dev_mint_pat
+from snapper.cli.execution_annulment import annulment_app
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
@@ -2936,6 +2942,7 @@ def notify() -> None:
 
 
 app.command(name="dev-mint-pat")(dev_mint_pat)
+app.add_typer(annulment_app, name="annulment")
 
 
 @app.command(

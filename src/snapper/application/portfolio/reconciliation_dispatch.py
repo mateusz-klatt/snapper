@@ -3,8 +3,11 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from loguru import logger
+
 from snapper.application.portfolio import futures_reconciliation
 from snapper.application.portfolio import spot_reconciliation
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.spot_reconciliation import SpotInstrumentIdentity
 from snapper.application.portfolio.spot_reconciliation import SpotReplayBoundary
 from snapper.application.portfolio.spot_reconciliation import SpotReplayExecutionRow
@@ -21,6 +24,28 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import PortfolioAccountState
 
 _REAL_METHODS = frozenset({"futures_position", "spot_execution_replay", "margin_ledger_replay"})
+
+LEDGER_INTEGRITY_REFUSAL_PREFIX = "ledger_integrity_refusal:"
+"""Machine-readable marker for an append-only ledger contradiction.
+
+An ``ExecutionChainError`` escaping the spot bundle read is not a transient
+evaluator failure. It is the immutable ledger refusing to answer at all —
+a dangling, scope-crossed, duplicated, digest-mismatched, or
+witness-contradicted annulment binding — and it stays refused at every future
+horizon, because both the manifest and its witnesses are append-only and
+neither can be withdrawn. The only exit is an operator decision on the
+evidence.
+
+The stored ``evaluation_status`` vocabulary is CLOSED by database CHECK
+constraints on both ``portfolio_reconciliation_evaluations`` and the current
+reconciliation state (``models.py``: ``matched``, ``mismatched``,
+``incomplete``, ``unsupported``, ``error``), and every method/status pairing is
+constrained alongside it — so a sixth status would be a migration across two
+tables plus their pairing CHECKs, invasive for a distinction that only needs to
+be RECOGNIZABLE. The refusal therefore stays ``error`` and is made
+distinguishable by this reason prefix, which an operator greps and an automated
+quarantine matches, with the correction and execution identities carried in the
+suffix exactly as the ledger named them."""
 
 _UNCERTIFIED_BOUNDARY_REASON = "uncertified_boundary"
 """The spot evaluator's generic cursor-gate incomplete reason.
@@ -348,10 +373,62 @@ def _apply_spot_certificate_result(
     return evaluation
 
 
+def _ledger_integrity_evaluation(
+    context: _DispatchContext,
+    error: ExecutionChainError,
+) -> PortfolioReconciliationEvaluationRow:
+    """Surface a permanent ledger refusal as its own recognizable outcome.
+
+    Catching this alongside every other exception was the defect: a permanent
+    append-only contradiction and a momentary evaluator failure both became a
+    bare ``error``, so an operator could not tell "retry in a minute" from "this
+    scope will never reconcile again until a human rules on the evidence", and
+    no automated quarantine could either.
+
+    The reason therefore carries :data:`LEDGER_INTEGRITY_REFUSAL_PREFIX` ahead
+    of the ledger's own message, which already names the correction and the
+    execution it binds, and the same facts are logged at ERROR with the
+    certification scope so the refusal is visible without a database query.
+
+    Args:
+        context: The dispatch context whose account and instant are evaluated.
+        error: The typed ledger refusal raised by the bundle read.
+
+    Returns:
+        One ``error`` evaluation whose reason is machine-distinguishable from a
+        transient failure.
+    """
+    account = context.account
+    exchange = str(account.exchange).lower()
+    mode = str(account.mode)
+    logger.error(
+        "spot reconciliation refused by the append-only execution ledger; this is "
+        "permanent until an operator rules on the evidence: wallet={wallet} "
+        "exchange={exchange} mode={mode} refusal={refusal}",
+        wallet=account.wallet_public_id,
+        exchange=exchange,
+        mode=mode,
+        refusal=_bounded_error(error),
+    )
+    return _nonfull_evaluation(
+        account,
+        context.evaluated_at,
+        context.method,
+        "error",
+        f"{LEDGER_INTEGRITY_REFUSAL_PREFIX}{_bounded_error(error)}",
+    )
+
+
 async def _dispatch_spot_reconciliation(
     context: _DispatchContext,
 ) -> PortfolioReconciliationEvaluationRow:
-    """Load, certify, and evaluate one spot account."""
+    """Load, certify, and evaluate one spot account.
+
+    Two failure classes leave this function, and they are deliberately not the
+    same value: a typed ``ExecutionChainError`` is the append-only ledger
+    refusing permanently (see :func:`_ledger_integrity_evaluation`), while
+    anything else is an ordinary transient failure.
+    """
     account = context.account
     boundary = context.boundary
     durable_signal = await context.repository.has_spot_margin_reconciliation_signal(
@@ -418,6 +495,8 @@ async def _dispatch_spot_reconciliation(
             context.evaluated_at,
         )
         return _apply_spot_certificate_result(evaluation, bundle, outcome)
+    except ExecutionChainError as error:
+        return _ledger_integrity_evaluation(context, error)
     except Exception as error:
         return _nonfull_evaluation(
             account,

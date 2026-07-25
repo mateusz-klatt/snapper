@@ -1,5 +1,6 @@
 """Tests for durable-method portfolio reconciliation dispatch."""
 
+from collections.abc import Iterator
 from dataclasses import fields
 from dataclasses import replace
 from datetime import UTC
@@ -12,8 +13,11 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 
 from snapper.application.portfolio import reconciliation_dispatch
+from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.reconciliation_dispatch import LEDGER_INTEGRITY_REFUSAL_PREFIX
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
 from snapper.application.portfolio.walutomat_history_certificate import CertificateOutcome
@@ -231,6 +235,7 @@ def _repository(
     durable_signal: bool = False,
     bundle: FuturesReconciliationBundle | None = None,
     spot_bundle: SpotReconciliationBundle | None = None,
+    spot_error: Exception | None = None,
 ) -> tuple[Repository, AsyncMock, AsyncMock]:
     """Build a typed repository double and expose its dispatch reads."""
     raw = MagicMock(spec=Repository)
@@ -248,8 +253,12 @@ def _repository(
     )
     raw.has_spot_margin_reconciliation_signal = signal_read
     raw.get_futures_reconciliation_bundle = bundle_read
-    raw.get_spot_reconciliation_bundle = AsyncMock(
-        return_value=_unanchored_spot_bundle() if spot_bundle is None else spot_bundle
+    raw.get_spot_reconciliation_bundle = (
+        AsyncMock(side_effect=spot_error)
+        if spot_error is not None
+        else AsyncMock(
+            return_value=_unanchored_spot_bundle() if spot_bundle is None else spot_bundle
+        )
     )
     return cast(Repository, raw), signal_read, bundle_read
 
@@ -1281,3 +1290,93 @@ async def test_spot_branch_bounds_unexpected_errors() -> None:
     )
     assert result["evaluation_status"] == "error"
     assert "boom" in str(result["error"])
+
+
+@pytest.fixture
+def loguru_errors() -> Iterator[list[str]]:
+    """Capture ERROR-level loguru records so the refusal log can be asserted."""
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        """Collect one rendered loguru record."""
+        messages.append(str(message))
+
+    handler_id = logger.add(_sink, level="ERROR")
+    try:
+        yield messages
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_a_permanent_ledger_refusal_is_not_an_ordinary_evaluation_error(
+    loguru_errors: list[str],
+) -> None:
+    """A contradicted annulment is reported as a ledger refusal, not a hiccup.
+
+    Given: A spot bundle read that raises the typed ``ExecutionChainError`` the
+        annulment fold raises when a durable witness now contradicts a committed
+        correction — a permanent condition, because both the manifest and its
+        witnesses are append-only and neither can be withdrawn.
+    When: Dispatch evaluates the spot branch.
+    Then: The stored reason carries the machine-readable ledger-integrity
+        prefix ahead of the ledger's own message, so an operator and any future
+        automated quarantine can tell "this scope will never reconcile again
+        until a human rules on the evidence" from "retry in a minute"; the
+        correction and execution identities survive into the reason; and the
+        same facts are logged at ERROR with the certification scope.
+    """
+    refusal = (
+        "annulled_execution_witnessed: "
+        "annulment_public_id=00000000-0000-7000-8000-0000000009a1 "
+        "execution_public_id=00000000-0000-7000-8000-000000000e01 "
+        "fill_event_public_id=00000000-0000-7000-8000-000000000f01"
+    )
+    repository, _, _ = _repository(spot_error=ExecutionChainError(refusal))
+
+    result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        repository,
+        _account(),
+        _config("spot_execution_replay"),
+        CapabilityStatus.NOT_APPLICABLE,
+        _NOW,
+        boundary=_boundary(),
+    )
+
+    assert result["evaluation_status"] == "error"
+    assert result["error"] == f"{LEDGER_INTEGRITY_REFUSAL_PREFIX}{refusal}"
+    assert "00000000-0000-7000-8000-0000000009a1" in str(result["error"])
+    assert len(loguru_errors) == 1
+    logged = loguru_errors[0]
+    assert f"wallet={_WALLET}" in logged
+    assert "exchange=kraken" in logged
+    assert "mode=live" in logged
+    assert "annulled_execution_witnessed" in logged
+
+
+async def test_a_transient_spot_failure_never_borrows_the_ledger_refusal_marker(
+    loguru_errors: list[str],
+) -> None:
+    """The two failure classes must not be spelled the same way.
+
+    Given: A spot bundle read failing with an ordinary runtime error.
+    When: Dispatch evaluates the spot branch.
+    Then: The reason is the bare bounded message with NO ledger-integrity
+        prefix and nothing is logged at ERROR — otherwise the prefix would mean
+        nothing, and an automated quarantine keyed on it would quarantine
+        scopes that merely need a retry.
+    """
+    repository, _, _ = _repository(spot_error=RuntimeError("bundle read timed out"))
+
+    result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        repository,
+        _account(),
+        _config("spot_execution_replay"),
+        CapabilityStatus.NOT_APPLICABLE,
+        _NOW,
+        boundary=_boundary(),
+    )
+
+    assert result["evaluation_status"] == "error"
+    assert result["error"] == "bundle read timed out"
+    assert not str(result["error"]).startswith(LEDGER_INTEGRITY_REFUSAL_PREFIX)
+    assert loguru_errors == []

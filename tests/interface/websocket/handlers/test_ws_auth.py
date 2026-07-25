@@ -92,6 +92,7 @@ from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
+from snapper.server.dependencies import get_repository_dependency
 
 
 def _make_rest_request() -> MagicMock:
@@ -3701,6 +3702,17 @@ def test_refresh_token_success(
         expires_in=999,
     )
     csrf_manager.token = "csrf-rot"
+
+    async def readable_wallets(
+        user_public_id: str,
+        operator_public_ids: list[str],
+        now: datetime,
+    ) -> list[dict[str, str]]:
+        """Report the carried wallet as still readable by this caller."""
+        return [{"public_id": "wallet-from-old-token"}]
+
+    repo = SimpleNamespace(list_readable_wallets_for_user=readable_wallets)
+    client.app.dependency_overrides[get_repository_dependency] = lambda: repo
     client.cookies.set("refresh_token", "existing-refresh")
     response = client.post("/auth/refresh")
     assert response.status_code == 200

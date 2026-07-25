@@ -543,6 +543,74 @@ class ExecutionAnnulmentVisibilityRow(TypedDict):
     mode: str
 
 
+type ExecutionAnnulmentVisibilityState = Literal["observed", "pending"]
+"""Whether an appended correction already carries its durability observation.
+
+``observed`` means the second transaction of the knowledge protocol committed,
+so historical horizons at or after that observation fold the correction.
+``pending`` means the correction is durable and current truth already honours
+it, while EVERY historical horizon still refuses it — the conservative
+direction — until
+``SQLAlchemyRepository.observe_execution_annulment_visibility`` completes it.
+A pending correction is a real, operator-visible gap, never a benign detail:
+it is discovered by ``get_unobserved_execution_annulments`` and closed by the
+``snapper annulment complete-visibility`` maintenance command."""
+
+
+class ExecutionAnnulmentWriteResult(TypedDict):
+    """One appended correction together with the state of its knowledge proof.
+
+    The writer cannot return the manifest row alone. Its second transaction may
+    fail after the correction is already durable, and the manifest is
+    append-only, so there is nothing to roll back and refusing would be a lie —
+    but reporting plain success would let a caller treat a historically
+    INVISIBLE correction as a finished one. This result therefore makes the two
+    outcomes structurally different values: ``visibility_state`` names which
+    happened, and ``visibility`` carries the observation exactly when one
+    exists. A caller that ignores the state field still cannot mistake the
+    two — it no longer receives a bare ``ExecutionAnnulmentRow`` at all.
+    """
+
+    annulment: ExecutionAnnulmentRow
+    visibility_state: ExecutionAnnulmentVisibilityState
+    visibility: ExecutionAnnulmentVisibilityRow | None
+
+
+class UnwitnessedExecutionRow(TypedDict):
+    """One stored execution that no durable ``fill_observed`` row witnesses.
+
+    The read-only operator view of exactly what blocks a scope's certification.
+    ``canonical_digest`` is the digest the guarded writer will recompute and
+    compare, published here so an operator copies a value the database just
+    produced instead of deriving one by hand; it is ``None`` exactly when the
+    row's canonical bytes cannot be produced at all, which is itself the answer
+    — the writer refuses such a target with ``uncanonicalizable_execution_target``
+    and no digest an operator could supply would change that.
+    ``annulment_public_id`` names the correction that already stands for the
+    row, so an already-corrected execution is visibly no longer blocking rather
+    than silently absent.
+
+    ``price``/``size`` are the stored float columns and ``price_decimal``/
+    ``size_decimal`` the exact stored decimal text when the row carries it, so
+    the phantom shape that motivated the manifest (size 0, price 0, ``exec_id``
+    NULL) is legible without a second query.
+    """
+
+    public_id: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    scope_sequence: int
+    exec_id: str | None
+    price: float
+    size: float
+    price_decimal: str | None
+    size_decimal: str | None
+    timestamp: datetime
+    canonical_digest: str | None
+    annulment_public_id: str | None
+
+
 class PortfolioPnlAnchorRow(TypedDict):
     """Persisted activation seed whose unrealized field is raw audit metadata."""
 
