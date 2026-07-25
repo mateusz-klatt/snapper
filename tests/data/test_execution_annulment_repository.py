@@ -30,10 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.core.json_types import JsonObject
-from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import Order
 from snapper.data.models import VenueEvent
 from snapper.data.repository import ExecutionAnnulmentConflictError
@@ -42,6 +42,7 @@ from snapper.data.repository import ExecutionAnnulmentWitnessedError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _ExecutionAnnulmentCommand
 from snapper.data.repository_types import ExecutionAnnulmentRequest
+from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
 _USER = "0000face-0000-7000-8000-0000000000d1"
@@ -260,6 +261,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Execution.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     ExecutionAnnulment.__table__.create(schema_engine)
+    ExecutionAnnulmentVisibility.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     try:
@@ -417,77 +419,133 @@ async def test_the_knowledge_stamp_postdates_every_lock_the_writer_waits_on(
     assert row["timestamp"] >= fence_released[0]
 
 
-async def test_a_slow_commit_reports_the_horizon_window_it_left_open(
+async def _refuse_observation(
+    self: SQLAlchemyRepository,
+    annulment_public_id: str,
+) -> ExecutionAnnulmentVisibilityRow:
+    """Fail the durability observation so a correction is left unobserved."""
+    del self, annulment_public_id
+    raise RuntimeError("visibility transaction unavailable")
+
+
+async def test_the_writer_proves_durability_with_a_second_transaction(
     repository: SQLAlchemyRepository,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The manifest's one irreducible assumption is measured, not assumed.
+    """The knowledge instant is observed after the commit, never stamped before it.
 
-    Given: A writer whose stamp-to-commit interval outruns the settling margin —
-        the single condition under which a historical read could fold a
-        correction before it was durable.
-    When: The correction is recorded.
-    Then: The row still commits, and an ERROR names the correction, the measured
-        latency, and the exact horizon window in which the early fold was
-        possible. The manifest is append-only so there is nothing to roll back;
-        what matters is that the operator learns immediately instead of the
-        assumption failing in silence.
+    Given: The ordinary writer.
+    When: A correction is recorded.
+    Then: A visibility observation exists for it, bound to both spellings of its
+        identity, and its ``observed_at`` is STRICTLY LATER than the correction's
+        own pre-commit stamp. That ordering is the proof: the observation was
+        taken by a second transaction that had already SEEN the committed row,
+        so ``annulment_durable_at <= observed_at`` holds and a historical fold
+        keyed on ``observed_at`` can never claim knowledge earlier than
+        durability — for any stall, with no margin and nothing to monitor.
     """
-    monkeypatch.setattr(repository_module, "ANNULMENT_KNOWLEDGE_SETTLING_SECONDS", 0.05)
-    reported: list[tuple[str, dict[str, object]]] = []
-
-    def capture(message: str, **values: object) -> None:
-        """Capture the reported breach instead of emitting it."""
-        reported.append((message, values))
-
-    real_commit = AsyncSession.commit
-
-    async def slow_commit(self: AsyncSession) -> None:
-        """Stall the durability boundary past the patched-down margin."""
-        await asyncio.sleep(0.2)
-        await real_commit(self)
-
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    monkeypatch.setattr(repository_module.logger, "error", capture)
-    monkeypatch.setattr(AsyncSession, "commit", slow_commit)
 
     row = await repository.record_execution_annulment(_request(digest))
 
-    assert len(reported) == 1
-    message, values = reported[0]
-    assert "stamp-to-commit latency" in message
-    assert values["annulment"] == row["public_id"]
-    assert cast(float, values["elapsed"]) >= 0.2
-    assert values["start"] == row["timestamp"].isoformat()
-    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == [row]
+    async with repository.session() as s:
+        observation = (
+            (
+                await s.execute(
+                    select(ExecutionAnnulmentVisibility).where(
+                        ExecutionAnnulmentVisibility.annulment_public_id == row["public_id"]
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        annulment = (
+            (
+                await s.execute(
+                    select(ExecutionAnnulment).where(
+                        ExecutionAnnulment.public_id == row["public_id"]
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert observation.annulment_id == annulment.id
+    assert observation.wallet_public_id == _MAIN_WALLET
+    assert observation.exchange == "kraken"
+    assert observation.mode == "live"
+    assert observation.observed_at > row["timestamp"]
 
 
-async def test_a_prompt_commit_reports_nothing(
+async def test_a_failed_observation_leaves_a_resumable_correction(
     repository: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The monitor is silent on the path that always holds.
+    """A correction that could not be observed is durable but not yet knowable.
 
-    Given: The ordinary writer, whose stamp-to-commit interval is a single
-        unfenced round trip.
-    When: A correction is recorded.
-    Then: No breach is reported. The margin is orders of magnitude above the
-        real interval, so an ERROR here would mean the assumption itself has
-        broken — which is exactly why it must never fire routinely.
+    Given: A second transaction that fails after the correction has committed.
+    When: The correction is recorded, and the observation is completed later
+        through the public maintenance surface.
+    Then: The correction is returned and durable regardless — the manifest is
+        append-only, so refusing afterwards would be a lie — while carrying no
+        observation, which withholds it from historical reads rather than
+        letting them fold something unproven. The resumable call then completes
+        it, and repeating that call is idempotent: it returns the SAME
+        observation instead of minting a later one, because a second instant
+        would move the correction's proven knowledge time forward.
     """
-    reported: list[str] = []
-
-    def capture(message: str, **values: object) -> None:
-        """Capture any reported breach."""
-        del values
-        reported.append(message)
-
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    monkeypatch.setattr(repository_module.logger, "error", capture)
+    real_observe = SQLAlchemyRepository.observe_execution_annulment_visibility
+    failed: list[str] = []
 
-    await repository.record_execution_annulment(_request(digest))
+    async def failing_observe(
+        self: SQLAlchemyRepository,
+        annulment_public_id: str,
+    ) -> ExecutionAnnulmentVisibilityRow:
+        """Fail the durability observation exactly once, after the commit."""
+        failed.append(annulment_public_id)
+        raise RuntimeError("visibility transaction unavailable")
 
-    assert reported == []
+    monkeypatch.setattr(
+        SQLAlchemyRepository,
+        "observe_execution_annulment_visibility",
+        failing_observe,
+    )
+    row = await repository.record_execution_annulment(_request(digest))
+    monkeypatch.setattr(
+        SQLAlchemyRepository,
+        "observe_execution_annulment_visibility",
+        real_observe,
+    )
+
+    assert failed == [row["public_id"]]
+    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == [row]
+    async with repository.session() as s:
+        pending = (await s.execute(select(ExecutionAnnulmentVisibility))).scalars().all()
+    assert list(pending) == []
+
+    completed = await repository.observe_execution_annulment_visibility(row["public_id"])
+    repeated = await repository.observe_execution_annulment_visibility(row["public_id"])
+
+    assert completed["annulment_public_id"] == row["public_id"]
+    assert repeated == completed
+
+
+async def test_observing_an_unknown_correction_refuses(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The observation is a proof about a real row, never a bare assertion.
+
+    Given: An identity no correction in this database carries.
+    When: The maintenance surface is asked to observe it.
+    Then: It refuses. An observation minted without a re-read would prove
+        nothing about durability, which is the one thing this ledger exists to
+        establish.
+    """
+    with pytest.raises(ValueError, match="unknown execution annulment"):
+        await repository.observe_execution_annulment_visibility(
+            "00000000-0000-7000-8000-0000000009ff"
+        )
 
 
 async def test_annulling_the_kraken_phantom_leaves_the_real_trade_untouched(
@@ -976,3 +1034,56 @@ async def test_an_unknown_dialect_refuses_both_halves_of_the_protocol(
             await repository._acquire_execution_annulment_fence(session, command)
 
     session.execute.assert_not_awaited()
+
+
+async def test_an_observation_integrity_failure_without_a_winner_reraises(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A collision that is not the idempotent case is never reported as success.
+
+    Given: An observation row already occupying the surrogate-id index for a
+        DIFFERENT correction, so the completion collides on that index while the
+        public-id index — the one the idempotent re-read looks at — is free.
+    When: The correction's observation is completed.
+    Then: The raw ``IntegrityError`` is re-raised rather than being reported as
+        an already-observed success. Returning quietly here would tell the
+        caller a correction is historically knowable when nothing proves it is.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    real_observe = SQLAlchemyRepository.observe_execution_annulment_visibility
+    with patch.object(
+        SQLAlchemyRepository,
+        "observe_execution_annulment_visibility",
+        _refuse_observation,
+    ):
+        row = await repository.record_execution_annulment(_request(digest))
+    async with repository.session() as s:
+        annulment = (
+            (
+                await s.execute(
+                    select(ExecutionAnnulment).where(
+                        ExecutionAnnulment.public_id == row["public_id"]
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        s.add(
+            ExecutionAnnulmentVisibility(
+                annulment_public_id="00000000-0000-7000-8000-0000000009fd",
+                annulment_id=int(annulment.id),
+                observed_at=_CORRECTION_AT,
+                wallet_public_id=_MAIN_WALLET,
+                exchange="kraken",
+                mode="live",
+                session_id=_SESSION,
+                sequence_id=1,
+                timestamp=_CORRECTION_AT,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await s.commit()
+
+    with pytest.raises(IntegrityError):
+        await real_observe(repository, row["public_id"])

@@ -1,11 +1,13 @@
 """Canonical DDL for the append-only execution-ledger immutability triggers.
 
-Two tables share this module because they share one doctrine: ``executions``
-(the ledger of committed fills) and ``execution_annulments`` (the manifest of
-uniquely targeted operator corrections to that ledger). Each gets its own
-installer emitting its own bespoke refusal messages; neither is a generic
-"immutable table" helper, because the harm each refusal prevents is different
-and the message is the operator's first diagnostic.
+Three tables share this module because they share one doctrine: ``executions``
+(the ledger of committed fills), ``execution_annulments`` (the manifest of
+uniquely targeted operator corrections to that ledger), and
+``execution_annulment_visibility`` (the observations proving when each
+correction became durable). Each gets its own installer emitting its own
+bespoke refusal messages; none is a generic "immutable table" helper, because
+the harm each refusal prevents is different and the message is the operator's
+first diagnostic.
 
 The ``executions`` ledger is append-only at runtime: the fenced ingest
 persists a fill with a single ``INSERT`` and no code path may UPDATE or
@@ -46,14 +48,15 @@ The PostgreSQL function ``executions_reject_mutation()`` persists after a
 ``Base.metadata.drop_all`` (which drops the table and its triggers but not
 the standalone function); this is harmless on throwaway databases and
 migration 0030's downgrade drops it explicitly. The same holds for
-``execution_annulments_reject_mutation()`` and migration 0037.
+``execution_annulments_reject_mutation()`` and migration 0037, and for
+``execution_annulment_visibility_reject_mutation()`` and migration 0038.
 
-The annulment installer is the exact mirror of the executions one: same
+The annulment and visibility installers are exact mirrors of the executions one: same
 ``after_create``-plus-migration dual install through a single function, same
 SQLite ``BEFORE UPDATE`` / ``BEFORE DELETE`` pair, same PostgreSQL function plus
 row trigger plus statement TRUNCATE trigger, and the same ``ENABLE ALWAYS``
 promotion so ``session_replication_role = replica`` cannot disable it. The
-SQLite ``REPLACE``-bypass vector is closed for both tables by the connect-time
+SQLite ``REPLACE``-bypass vector is closed for all three tables by the connect-time
 ``PRAGMA recursive_triggers=ON`` in
 :data:`snapper.data.repository._SQLITE_CONNECT_PRAGMAS`, which makes the delete
 that ``INSERT OR REPLACE`` performs fire the ``BEFORE DELETE`` trigger.
@@ -166,6 +169,65 @@ _ANNULMENT_PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER: TextClause = text(
 )
 _ANNULMENT_PG_DROP_FUNCTION: TextClause = text(
     "DROP FUNCTION IF EXISTS execution_annulments_reject_mutation()"
+)
+
+_VISIBILITY_SQLITE_REJECT_UPDATE: TextClause = text(
+    "CREATE TRIGGER IF NOT EXISTS execution_annulment_visibility_reject_update "
+    "BEFORE UPDATE ON execution_annulment_visibility BEGIN "
+    "SELECT RAISE(ABORT, 'execution_annulment_visibility is append-only: UPDATE "
+    "is physically forbidden; an observation whose instant could be moved would "
+    "let a correction claim it was knowable before it was durable'); END"
+)
+_VISIBILITY_SQLITE_REJECT_DELETE: TextClause = text(
+    "CREATE TRIGGER IF NOT EXISTS execution_annulment_visibility_reject_delete "
+    "BEFORE DELETE ON execution_annulment_visibility BEGIN "
+    "SELECT RAISE(ABORT, 'execution_annulment_visibility is append-only: DELETE "
+    "is physically forbidden; removing an observation would retract a "
+    "correction from history that has already been reported with it'); END"
+)
+_VISIBILITY_SQLITE_DROP_UPDATE: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_update"
+)
+_VISIBILITY_SQLITE_DROP_DELETE: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_delete"
+)
+
+_VISIBILITY_PG_FUNCTION: TextClause = text(
+    "CREATE OR REPLACE FUNCTION execution_annulment_visibility_reject_mutation() "
+    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+    "RAISE EXCEPTION 'execution_annulment_visibility is append-only: % is "
+    "physically forbidden; a revisable observation proves nothing about when a "
+    "correction became durable', TG_OP USING ERRCODE = 'raise_exception', "
+    "TABLE = 'execution_annulment_visibility'; RETURN NULL; END; $$"
+)
+_VISIBILITY_PG_DROP_ROW_TRIGGER: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_row_mutation "
+    "ON execution_annulment_visibility"
+)
+_VISIBILITY_PG_CREATE_ROW_TRIGGER: TextClause = text(
+    "CREATE TRIGGER execution_annulment_visibility_reject_row_mutation "
+    "BEFORE UPDATE OR DELETE ON execution_annulment_visibility "
+    "FOR EACH ROW EXECUTE FUNCTION execution_annulment_visibility_reject_mutation()"
+)
+_VISIBILITY_PG_ENABLE_ALWAYS_ROW_TRIGGER: TextClause = text(
+    "ALTER TABLE execution_annulment_visibility "
+    "ENABLE ALWAYS TRIGGER execution_annulment_visibility_reject_row_mutation"
+)
+_VISIBILITY_PG_DROP_TRUNCATE_TRIGGER: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_truncate "
+    "ON execution_annulment_visibility"
+)
+_VISIBILITY_PG_CREATE_TRUNCATE_TRIGGER: TextClause = text(
+    "CREATE TRIGGER execution_annulment_visibility_reject_truncate "
+    "BEFORE TRUNCATE ON execution_annulment_visibility "
+    "FOR EACH STATEMENT EXECUTE FUNCTION execution_annulment_visibility_reject_mutation()"
+)
+_VISIBILITY_PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER: TextClause = text(
+    "ALTER TABLE execution_annulment_visibility "
+    "ENABLE ALWAYS TRIGGER execution_annulment_visibility_reject_truncate"
+)
+_VISIBILITY_PG_DROP_FUNCTION: TextClause = text(
+    "DROP FUNCTION IF EXISTS execution_annulment_visibility_reject_mutation()"
 )
 
 
@@ -281,3 +343,65 @@ def drop_execution_annulment_immutability_triggers(connection: Connection) -> No
     connection.execute(_ANNULMENT_PG_DROP_ROW_TRIGGER)
     connection.execute(_ANNULMENT_PG_DROP_TRUNCATE_TRIGGER)
     connection.execute(_ANNULMENT_PG_DROP_FUNCTION)
+
+
+def install_execution_annulment_visibility_immutability_triggers(
+    connection: Connection,
+) -> None:
+    """Emit the dialect's ``execution_annulment_visibility`` append-only triggers.
+
+    The third member of the same family, installed from the same shared source
+    the ``after_create`` DDL event on
+    ``ExecutionAnnulmentVisibility.__table__`` and migration 0038 both call, so
+    the ``create_all``-built and Alembic-built schemas are byte-identical by
+    construction rather than by convention.
+
+    This table needs the refusal MORE sharply than the two it serves, not less.
+    An observation row is the proof that a correction was durable at a stated
+    instant; a mutable ``observed_at`` would let that instant be moved earlier,
+    which is precisely the claim the visibility ledger exists to make
+    unforgeable — a correction folded into a historical answer it was not
+    durable for. A deletable observation is the mirror hazard: it would retract
+    a correction from history that has already been reported with it, silently
+    changing numbers a reader has seen. Like the manifest, these rows have no
+    lifecycle at all, so the refusal is total rather than a close guard.
+
+    Idempotent on both dialects, with the same statement shapes the manifest
+    installer uses.
+
+    Args:
+        connection: Live SQLAlchemy connection used for DDL execution.
+    """
+    if connection.dialect.name == "sqlite":
+        connection.execute(_VISIBILITY_SQLITE_REJECT_UPDATE)
+        connection.execute(_VISIBILITY_SQLITE_REJECT_DELETE)
+        return
+    connection.execute(_VISIBILITY_PG_FUNCTION)
+    connection.execute(_VISIBILITY_PG_DROP_ROW_TRIGGER)
+    connection.execute(_VISIBILITY_PG_CREATE_ROW_TRIGGER)
+    connection.execute(_VISIBILITY_PG_ENABLE_ALWAYS_ROW_TRIGGER)
+    connection.execute(_VISIBILITY_PG_DROP_TRUNCATE_TRIGGER)
+    connection.execute(_VISIBILITY_PG_CREATE_TRUNCATE_TRIGGER)
+    connection.execute(_VISIBILITY_PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER)
+
+
+def drop_execution_annulment_visibility_immutability_triggers(
+    connection: Connection,
+) -> None:
+    """Remove the ``execution_annulment_visibility`` append-only triggers.
+
+    Idempotent on both dialects (every statement is ``IF EXISTS``). SQLite drops
+    the two per-operation triggers; PostgreSQL drops both triggers and then the
+    shared function, which no ``after_create`` path removes and which survives a
+    ``Base.metadata.drop_all``.
+
+    Args:
+        connection: Live SQLAlchemy connection used for DDL execution.
+    """
+    if connection.dialect.name == "sqlite":
+        connection.execute(_VISIBILITY_SQLITE_DROP_UPDATE)
+        connection.execute(_VISIBILITY_SQLITE_DROP_DELETE)
+        return
+    connection.execute(_VISIBILITY_PG_DROP_ROW_TRIGGER)
+    connection.execute(_VISIBILITY_PG_DROP_TRUNCATE_TRIGGER)
+    connection.execute(_VISIBILITY_PG_DROP_FUNCTION)

@@ -512,6 +512,28 @@ class ExecutionAnnulmentRow(TypedDict):
     evidence_json: str
 
 
+class ExecutionAnnulmentVisibilityRow(TypedDict):
+    """One persisted observation proving when a correction became durable.
+
+    ``observed_at`` is the value every historical fold compares against its read
+    horizon: it was stamped after a reader SAW the committed correction, so it
+    provably postdates durability. ``annulment_public_id`` and ``annulment_id``
+    name the correction under both spellings of its identity, each under its own
+    TOTAL unique index, so one correction has exactly one observation.
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    annulment_public_id: str
+    annulment_id: int
+    observed_at: datetime
+    wallet_public_id: str
+    exchange: str
+    mode: str
+
+
 class PortfolioPnlAnchorRow(TypedDict):
     """Persisted activation seed whose unrealized field is raw audit metadata."""
 

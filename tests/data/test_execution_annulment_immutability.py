@@ -48,6 +48,7 @@ from sqlalchemy.sql.expression import Executable
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.repository import SQLAlchemyRepository
 
 _NOW = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
@@ -316,3 +317,146 @@ async def test_executions_ledger_immutability_is_not_weakened_by_the_manifest(
                 await s.commit()
     async with create_all_repository.session() as s:
         assert (await s.execute(select(Execution.fee))).scalar_one() == 0.5
+
+
+async def _seed_visibility_row(repository: SQLAlchemyRepository) -> int:
+    """Insert one committed durability observation directly (INSERT is permitted).
+
+    Seeds a sealed observation to attack without going through the writer's
+    re-read protocol. Returns the row id.
+    """
+    async with repository.session() as s:
+        s.add(
+            ExecutionAnnulmentVisibility(
+                annulment_public_id=_TARGET,
+                annulment_id=1,
+                observed_at=_NOW,
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                timestamp=_NOW,
+                known_to=KNOWN_TO_MAX,
+                session_id=_SESSION,
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+        return int((await s.execute(select(ExecutionAnnulmentVisibility.id))).scalar_one())
+
+
+def _visibility_mutation_vectors(row_id: int) -> dict[str, Executable]:
+    """Build every raw mutation vector the observation ledger must reject.
+
+    The same bypasses the manifest suite uses — raw ``text()`` SQL, an
+    ORM-enabled ``update``/``delete`` on the session, and a
+    ``quoted_name(quote=False)`` identifier injection — so a rejection can only
+    come from the physical trigger.
+    """
+    injected = table(
+        quoted_name("execution_annulment_visibility", quote=False),
+        column("id"),
+        column("observed_at"),
+    )
+    backdated = "2020-01-01 00:00:00.000000"
+    return {
+        "raw text UPDATE": text(
+            "UPDATE execution_annulment_visibility SET observed_at = :moved WHERE id = :id"
+        ).bindparams(moved=backdated, id=row_id),
+        "raw text DELETE": text(
+            "DELETE FROM execution_annulment_visibility WHERE id = :id"
+        ).bindparams(id=row_id),
+        "ORM update": update(ExecutionAnnulmentVisibility)
+        .where(ExecutionAnnulmentVisibility.id == row_id)
+        .values(observed_at=datetime(2020, 1, 1, tzinfo=UTC)),
+        "ORM delete": delete(ExecutionAnnulmentVisibility).where(
+            ExecutionAnnulmentVisibility.id == row_id
+        ),
+        "aliased delete": delete(aliased(ExecutionAnnulmentVisibility)),
+        "identifier injection": update(injected).values(observed_at=backdated),
+    }
+
+
+@pytest.mark.parametrize("vector", sorted(_visibility_mutation_vectors(1)))
+async def test_create_all_visibility_rejects_every_raw_mutation_vector(
+    create_all_repository: SQLAlchemyRepository,
+    vector: str,
+) -> None:
+    """No raw vector can move or remove a durability observation.
+
+    Given: One sealed observation in a ``create_all``-built database.
+    When: Each raw mutation vector is issued straight on the session.
+    Then: Every one is physically refused and the observed instant is unchanged.
+        This is the sharpest refusal of the three planes: a movable
+        ``observed_at`` would let a correction claim it was knowable before it
+        was durable — forging the exact proof this ledger exists to make
+        unforgeable — and a deletable one would retract a correction from a
+        history already reported with it.
+    """
+    row_id = await _seed_visibility_row(create_all_repository)
+    statement = _visibility_mutation_vectors(row_id)[vector]
+    async with create_all_repository.session() as s:
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(statement)
+            await s.commit()
+    async with create_all_repository.session() as s:
+        assert (
+            await s.execute(select(ExecutionAnnulmentVisibility.observed_at))
+        ).scalar_one() == _NOW
+
+
+@pytest.mark.parametrize("vector", sorted(_visibility_mutation_vectors(1)))
+async def test_migrated_visibility_rejects_every_raw_mutation_vector(
+    migration_repository: SQLAlchemyRepository,
+    vector: str,
+) -> None:
+    """The migration-built observation ledger refuses exactly as the ORM-built one.
+
+    Given: One sealed observation in a database built by Alembic to head, where
+        migration 0039 installed the triggers rather than ``after_create``.
+    When: Each raw mutation vector is issued straight on the session.
+    Then: Every one is physically refused. Both install paths call the same
+        shared installer, so this proves the production table carries the same
+        physical refusal the test fixtures do.
+    """
+    row_id = await _seed_visibility_row(migration_repository)
+    statement = _visibility_mutation_vectors(row_id)[vector]
+    async with migration_repository.session() as s:
+        with pytest.raises(DBAPIError, match="append-only"):
+            await s.execute(statement)
+            await s.commit()
+    async with migration_repository.session() as s:
+        assert (
+            await s.execute(select(ExecutionAnnulmentVisibility.observed_at))
+        ).scalar_one() == _NOW
+
+
+async def test_visibility_insert_still_appends(
+    create_all_repository: SQLAlchemyRepository,
+) -> None:
+    """Liveness: the observation ledger still accepts the one mutation it needs.
+
+    Given: A database carrying the observation triggers.
+    When: Two observations for different corrections are appended.
+    Then: Both persist. The refusal is total for UPDATE and DELETE and absent
+        for INSERT, which is what an append-only proof plane requires.
+    """
+    await _seed_visibility_row(create_all_repository)
+    async with create_all_repository.session() as s:
+        s.add(
+            ExecutionAnnulmentVisibility(
+                annulment_public_id="0000face-0000-7000-8000-00000000e102",
+                annulment_id=2,
+                observed_at=_NOW,
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                timestamp=_NOW,
+                known_to=KNOWN_TO_MAX,
+                session_id=_SESSION,
+                sequence_id=2,
+            )
+        )
+        await s.commit()
+    async with create_all_repository.session() as s:
+        count = await s.scalar(select(func.count()).select_from(ExecutionAnnulmentVisibility))
+    assert count == 2

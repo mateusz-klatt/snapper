@@ -351,6 +351,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "backtest_comparisons",
         "backtest_runs",
         "device_alert_prefs",
+        "execution_annulment_visibility",
         "execution_annulments",
         "execution_plans",
         "executions",
@@ -422,6 +423,13 @@ repudiate a production booking defect after an operator diagnosed it; a demo
 seed that manufactured corrections would be inventing evidence of a defect that
 never happened. The table therefore stays empty in every seeded database, and
 its wallet spelling is proven by the repository writer's own tests instead.
+
+``execution_annulment_visibility`` is deliberately EXCLUDED for the same
+reason as the manifest it observes: its rows are appended only by the guarded
+correction protocol, and a demo seed that manufactured durability observations
+would be inventing proof for corrections that never happened. It stays empty in
+every seeded database, and its wallet spelling is proven by the repository
+writer's own tests instead.
 
 ``wallet_user_read_grants`` is deliberately EXCLUDED. The demo seed already
 gives its viewer wallet visibility through the operator plane, so a read grant

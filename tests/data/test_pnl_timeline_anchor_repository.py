@@ -38,6 +38,7 @@ from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anch
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import PortfolioPnlPoint
@@ -299,6 +300,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
     ExecutionAnnulment.__table__.create(schema_engine)
+    ExecutionAnnulmentVisibility.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     PortfolioPnlPoint.__table__.create(schema_engine)
     schema_engine.dispose()
@@ -1288,6 +1290,7 @@ def _mutated_prefix_evidence(
 _PHANTOM_ORDER_PUBLIC_ID = "00000000-0000-7000-8000-000000000186"
 _PHANTOM_CLIENT_ORDER_ID = "anchor-fence-phantom-client"
 _ANNULLING_USER = "0000face-0000-7000-8000-0000000000d1"
+_ANNULMENT_PUBLIC_ID = "0000face-0000-7000-8000-0000000000d9"
 
 
 def _phantom_source_order() -> Order:
@@ -1345,6 +1348,7 @@ async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
         )
         s.add(
             ExecutionAnnulment(
+                public_id=_ANNULMENT_PUBLIC_ID,
                 target_execution_public_id=phantom.public_id,
                 target_execution_digest=execution_row_digest(
                     SQLAlchemyRepository._execution_chain_record(phantom)
@@ -1357,6 +1361,21 @@ async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
                 correction_time=_T0 - timedelta(minutes=1),
                 reason="unwitnessed_phantom",
                 evidence_json='{"diagnosis":"unwitnessed booking in the anchor fence fixture"}',
+                session_id=_SESSION_PUBLIC_ID,
+                sequence_id=9,
+                timestamp=_T0 - timedelta(minutes=5),
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await s.flush()
+        s.add(
+            ExecutionAnnulmentVisibility(
+                annulment_public_id=_ANNULMENT_PUBLIC_ID,
+                annulment_id=1,
+                observed_at=_T0 - timedelta(minutes=5),
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
                 session_id=_SESSION_PUBLIC_ID,
                 sequence_id=9,
                 timestamp=_T0 - timedelta(minutes=5),

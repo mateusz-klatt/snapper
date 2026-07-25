@@ -38,6 +38,9 @@ from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
+from snapper.data.ledger_triggers import (
+    install_execution_annulment_visibility_immutability_triggers,
+)
 from snapper.data.ledger_triggers import install_execution_immutability_triggers
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
@@ -1075,7 +1078,12 @@ class ExecutionAnnulment(TemporalMixin, Base):
 
     New theorem: *effective accounting history is the deterministic fold of a
     physically immutable contiguous execution prefix and a uniquely targeted,
-    physically immutable annulment manifest.*
+    physically immutable annulment manifest whose knowledge instant is PROVEN
+    by an append-only visibility observation rather than assumed from a
+    pre-commit stamp.* The observation plane is
+    :class:`ExecutionAnnulmentVisibility`; without its row a correction is
+    durable but not yet historically knowable, and history refuses rather than
+    folding it.
 
     Binding. One row targets exactly ONE execution by
     ``target_execution_public_id`` (its immutable public identity) AND
@@ -1233,6 +1241,131 @@ def _install_execution_annulment_immutability_triggers(
     run (migration 0037 calls the same installer explicitly).
     """
     install_execution_annulment_immutability_triggers(connection)
+
+
+class ExecutionAnnulmentVisibility(TemporalMixin, Base):
+    """Append-only observations proving when each correction became DURABLE.
+
+    Doctrine. A correction's knowledge instant decides which historical answers
+    may fold it, so it has to be a fact rather than a claim. The manifest row
+    cannot supply one: its ``timestamp`` is stamped by the writer just BEFORE
+    the insert, and no supported dialect will assign a commit-time value to an
+    ordinary column, so a stalled writer could commit a row carrying an instant
+    from before it existed — and a historical read landing in that gap would
+    fold a correction the database could not have shown it.
+
+    This table closes that class outright. After the manifest transaction
+    COMMITS, a SECOND transaction re-reads the annulment by its immutable public
+    id; SEEING a committed row is proof of durability, and only then is
+    ``observed_at`` stamped and this row appended. The proof is therefore:
+
+        ``annulment_durable_at <= observed_at``
+
+    because the observation cannot be taken before the read that witnessed the
+    row. Folding a correction into a historical horizon only when
+    ``observed_at <= as_of`` can consequently never claim knowledge earlier than
+    durability, for any stall of any length. There is no margin, no clock
+    heuristic, and nothing to monitor.
+
+    A correction whose observation is missing — the second transaction failed,
+    or has not run yet — is simply not folded by historical reads. That is the
+    conservative direction: the scope's certification refuses rather than
+    fabricating economics, and
+    ``SQLAlchemyRepository.observe_execution_annulment_visibility`` completes
+    the record afterwards. Current-truth reads need no observation at all: a
+    read that asked for NO horizon and can SEE the manifest row has performed
+    the durability proof itself.
+
+    Append-only for the same reason the manifest is, only more sharply. A
+    mutable ``observed_at`` would let the proven instant be moved earlier, which
+    is exactly the forgery this ledger exists to prevent; a deletable
+    observation would retract a correction from history that has already been
+    reported with it. ``uq_execution_annulment_visibility_annulment`` and
+    ``uq_execution_annulment_visibility_annulment_id`` are both TOTAL, so one
+    correction has exactly one observation under either spelling of its
+    identity, and the completion path is idempotent by collision rather than by
+    a check-then-write race.
+    """
+
+    __tablename__ = "execution_annulment_visibility"
+    __table_args__ = (
+        Index(
+            "uq_execution_annulment_visibility_annulment",
+            "annulment_public_id",
+            unique=True,
+        ),
+        Index(
+            "uq_execution_annulment_visibility_annulment_id",
+            "annulment_id",
+            unique=True,
+        ),
+        Index(
+            "ix_execution_annulment_visibility_public_id",
+            "public_id",
+            unique=True,
+        ),
+        Index(
+            "ix_execution_annulment_visibility_scope",
+            "wallet_public_id",
+            "mode",
+            "observed_at",
+        ),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            name="ck_execution_annulment_visibility_exchange_lower",
+        ),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_execution_annulment_visibility_mode"),
+        CheckConstraint(
+            "annulment_id >= 1",
+            name="ck_execution_annulment_visibility_annulment_id",
+        ),
+        CheckConstraint(
+            _CK_EXECUTION_ANNULMENT_KNOWN_TO_OPEN,
+            name="ck_execution_annulment_visibility_known_to_open",
+        ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    annulment_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    """Public identity of the correction this observation proves durable."""
+    annulment_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
+    """The correction's immutable surrogate id, recorded alongside its public id.
+
+    Both are stored for the same reason the manifest binds its target by id AND
+    digest: an observation must name one exact row and be checkable against it
+    from either direction, so a public id re-pointed at different storage cannot
+    quietly inherit an older proof."""
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    """The instant a reader SAW the committed correction — its proven knowledge time.
+
+    Stamped after a successful re-read in a transaction later than the one that
+    appended the correction, so it provably postdates durability. This is the
+    only value any historical fold compares against a read horizon."""
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+
+
+@event.listens_for(ExecutionAnnulmentVisibility.__table__, "after_create")
+def _install_execution_annulment_visibility_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install the append-only triggers when the visibility ledger is created.
+
+    Fires on ``Base.metadata.create_all`` and any other fresh creation of the
+    table with the connection's true dialect, so every ``create_all``-built
+    database physically rejects UPDATE/DELETE on the observations just like the
+    migration-built production table. ``create_all`` defaults to
+    ``checkfirst=True`` so this fires only on actual creation, and migrations
+    use ``op.*`` rather than ``create_all`` so it never fires during a migration
+    run (migration 0038 calls the same installer explicitly).
+    """
+    install_execution_annulment_visibility_immutability_triggers(connection)
 
 
 class Position(TemporalMixin, Base):

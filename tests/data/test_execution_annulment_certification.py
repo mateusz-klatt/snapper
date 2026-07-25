@@ -37,6 +37,7 @@ from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import Instrument
 from snapper.data.models import Order
@@ -45,7 +46,6 @@ from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
-from snapper.data.repository import ANNULMENT_KNOWLEDGE_SETTLING_SECONDS
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository_types import ExecutionAnnulmentRequest
@@ -385,6 +385,7 @@ async def _build_repository(
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
     ExecutionAnnulment.__table__.create(schema_engine)
+    ExecutionAnnulmentVisibility.__table__.create(schema_engine)
     ExecutionPlanCheckpoint.__table__.create(schema_engine)
     PortfolioPnlPoint.__table__.create(schema_engine)
     Position.__table__.create(schema_engine)
@@ -523,13 +524,69 @@ def _manifest_row(**options: Unpack[_ManifestOptions]) -> ExecutionAnnulment:
     )
 
 
+def _visibility_row(
+    observed_at: datetime,
+    annulment_public_id: str = _ANNULMENT_PUBLIC_ID,
+) -> ExecutionAnnulmentVisibility:
+    """Build one durability observation for a hand-built manifest row.
+
+    Appended directly so a test can choose the proven instant; the real writer
+    stamps it from the clock after re-reading the committed correction.
+    """
+    return ExecutionAnnulmentVisibility(
+        annulment_public_id=annulment_public_id,
+        annulment_id=1,
+        observed_at=observed_at,
+        wallet_public_id=_MAIN_WALLET,
+        exchange="kraken",
+        mode="live",
+        session_id=_SESSION,
+        sequence_id=1,
+        timestamp=observed_at,
+        known_to=KNOWN_TO_MAX,
+    )
+
+
+async def _observed_at(
+    repository: SQLAlchemyRepository,
+    annulment_public_id: str,
+) -> datetime:
+    """Return the instant one correction was PROVEN durable."""
+    async with repository.session() as s:
+        observation = (
+            (
+                await s.execute(
+                    select(ExecutionAnnulmentVisibility).where(
+                        ExecutionAnnulmentVisibility.annulment_public_id == annulment_public_id
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        return observation.observed_at
+
+
 async def _certify_main_live_with(
     repository: SQLAlchemyRepository,
     annulment_rows: list[ExecutionAnnulment],
 ) -> None:
-    """Certify ``main``/``live`` against a hand-built manifest without storing it."""
+    """Certify ``main``/``live`` against a hand-built manifest and its observations.
+
+    Each stored correction gets a durability observation well before the read
+    horizon, because binding validation only runs on corrections the horizon can
+    PROVE were durable — an unobserved row is withheld before its binding is
+    ever examined, which would make these refusal tests pass vacuously.
+    """
     async with repository.session() as s:
         s.add_all(annulment_rows)
+        for annulment in annulment_rows:
+            s.add(
+                _visibility_row(
+                    _CORRECTION_AT,
+                    annulment_public_id=annulment.public_id,
+                )
+            )
         await s.commit()
     await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
 
@@ -620,7 +677,7 @@ async def test_a_horizon_before_the_correction_keeps_failing(
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            correction["timestamp"] - timedelta(seconds=1),
+            await _observed_at(repository, correction["public_id"]) - timedelta(seconds=1),
         )
 
     proven = await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
@@ -751,7 +808,7 @@ async def test_a_witness_beyond_the_read_horizon_still_contradicts(
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            correction["timestamp"] + timedelta(seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS * 2),
+            await _observed_at(repository, correction["public_id"]) + timedelta(seconds=1),
         )
 
 
@@ -1007,65 +1064,99 @@ async def test_the_hash_chain_tip_is_untouched_by_the_correction(
 
 async def _store_bound_manifest_row(
     repository: SQLAlchemyRepository,
-    timestamp: datetime,
+    observed_at: datetime | None = None,
 ) -> None:
-    """Store one correctly bound Kraken-phantom correction at a chosen stamp."""
+    """Store one correctly bound Kraken-phantom correction, optionally observed.
+
+    ``observed_at=None`` leaves the correction with NO visibility observation —
+    durable, but never proven durable at any past instant — which is exactly the
+    state a failed second transaction leaves behind.
+    """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
     async with repository.session() as s:
-        s.add(_manifest_row(target_execution_digest=digest, timestamp=timestamp))
+        s.add(_manifest_row(target_execution_digest=digest))
+        if observed_at is not None:
+            s.add(_visibility_row(observed_at))
         await s.commit()
 
 
-async def test_a_correction_inside_the_settling_window_is_not_historically_knowable(
+async def test_a_correction_is_not_folded_historically_before_it_was_observed(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """History refuses rather than assumes while a correction is still settling.
+    """A horizon may fold a correction only once it PROVABLY existed.
 
-    Given: A correctly bound correction stamped only 30 seconds before a
-        historical horizon — inside the settling margin, so this horizon cannot
-        prove the row was already DURABLE when it passed, only that the stamp
-        it carries is older.
-    When: The scope is certified at that horizon, and again once the horizon has
-        cleared the margin.
-    Then: Inside the window the correction is not folded and certification
-        REFUSES, because the phantom stays unexcluded; past the margin the same
-        row folds and the scope proves. The direction matters: refusing is a
-        visible, retryable state, while folding a correction the horizon may not
-        have been able to see would silently fabricate economics for a past that
-        has already been reported.
+    Given: A correctly bound correction whose durability was observed at a known
+        instant, with its own pre-commit stamp an hour earlier — the shape a
+        stalled writer leaves, and the exact case no settling margin could ever
+        cover.
+    When: The scope is certified at a horizon after the stamp but BEFORE the
+        observation, and again after the observation.
+    Then: Before the observation the correction is not folded and certification
+        REFUSES, because the phantom stays unexcluded; after it, the same row
+        folds and the scope proves. The stamp is never consulted: only the
+        observation, which cannot precede durability because it was taken after
+        a reader saw the committed row.
     """
-    historical = datetime.now(UTC) - timedelta(hours=1)
-    await _store_bound_manifest_row(repository, historical - timedelta(seconds=30))
+    observed_at = datetime.now(UTC) - timedelta(hours=1)
+    await _store_bound_manifest_row(repository, observed_at)
 
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
-        await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", historical)
+        await repository.get_pnl_timeline_execution_prefix(
+            _MAIN_WALLET,
+            "live",
+            observed_at - timedelta(seconds=1),
+        )
 
-    settled = await repository.get_pnl_timeline_execution_prefix(
+    proven = await repository.get_pnl_timeline_execution_prefix(
         _MAIN_WALLET,
         "live",
-        historical + timedelta(seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS * 2),
+        observed_at,
     )
 
-    assert [row["public_id"] for row in settled["executions"]] == [_WALUTOMAT_TRADE]
-    assert [row["public_id"] for row in settled["annulments"]] == [_ANNULMENT_PUBLIC_ID]
+    assert [row["public_id"] for row in proven["executions"]] == [_WALUTOMAT_TRADE]
+    assert [row["public_id"] for row in proven["annulments"]] == [_ANNULMENT_PUBLIC_ID]
 
 
-async def test_current_truth_folds_a_correction_the_settling_margin_would_withhold(
+async def test_a_correction_with_no_observation_is_never_folded_historically(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """A read that can SEE the row needs nothing settled — it is already durable.
+    """An unproven correction is withheld from history, however old its stamp.
 
-    Given: A correction stamped seconds ago, which no requested horizon would
-        yet fold.
+    Given: A correction whose visibility observation is missing entirely — the
+        state a failed second transaction leaves — carrying a stamp from long
+        before the horizon.
+    When: The scope is certified at that historical horizon.
+    Then: It refuses. Nothing about the stamp can establish that the row was
+        durable then, so history declines to assume it; the correction becomes
+        historically knowable only once
+        ``observe_execution_annulment_visibility`` completes.
+    """
+    await _store_bound_manifest_row(repository)
+
+    with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
+        await repository.get_pnl_timeline_execution_prefix(
+            _MAIN_WALLET,
+            "live",
+            datetime.now(UTC) - timedelta(hours=1),
+        )
+
+
+async def test_current_truth_folds_a_correction_with_no_observation(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A read that can SEE the row has already performed the proof itself.
+
+    Given: A correction with NO visibility observation at all.
     When: The scope is certified with NO horizon requested — what every route
         does when ``as_of`` is absent, and what the trader tick and the
         reconciliation capture do by construction.
     Then: It folds immediately and the scope proves. A row a reader can see is
-        committed, so there is nothing left to settle and no earlier answer to
-        contradict; withholding it here would make an operator's just-recorded
-        correction invisible to the very read they recorded it for.
+        committed, which is the same fact the observation ledger records for
+        historical reads; demanding a stored observation here would withhold an
+        operator's just-recorded correction from the very read they recorded it
+        for while proving nothing extra.
     """
-    await _store_bound_manifest_row(repository, datetime.now(UTC) - timedelta(seconds=5))
+    await _store_bound_manifest_row(repository)
 
     prefix = await repository.get_pnl_timeline_execution_prefix(
         _MAIN_WALLET,
@@ -1083,18 +1174,15 @@ async def test_an_explicitly_requested_present_horizon_gets_no_exemption(
 ) -> None:
     """The exemption keys on INTENT, never on how recent the horizon looks.
 
-    Given: A correction stamped seconds ago, and a caller that names an instant
+    Given: A correction with no observation, and a caller that names an instant
         of its own — one that happens to be the present.
     When: The scope is certified at that REQUESTED horizon.
     Then: The correction is withheld and certification refuses, exactly as for
         any other past instant. Current truth is not "a recent horizon", it is
         "no horizon": a caller that names an instant is making a claim about the
-        past, and a caller naming one inside the settling window is precisely
-        the caller that must not be told a correction was already knowable
-        there. Keying the exemption on proximity to the reader's clock would
-        hand that caller the answer only an unrequested read has earned.
+        past and must be answered from proof alone.
     """
-    await _store_bound_manifest_row(repository, datetime.now(UTC) - timedelta(seconds=5))
+    await _store_bound_manifest_row(repository)
 
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
@@ -1104,20 +1192,20 @@ async def test_an_explicitly_requested_present_horizon_gets_no_exemption(
         )
 
 
-async def test_the_derived_planes_withhold_an_unsettled_correction_too(
+async def test_the_derived_planes_withhold_an_unobserved_correction_too(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Recovery and the scope listing apply the same settling margin.
+    """Recovery and the scope listing demand the same durability proof.
 
-    Given: A correctly bound correction stamped inside the settling margin of a
-        historical horizon.
+    Given: A correctly bound correction whose durability was observed AFTER the
+        horizon being read.
     When: The recovery read and the timeline scope read run at that horizon.
     Then: Neither excludes the repudiated booking. A derived plane that folded
-        earlier than certification would rebuild state from a history the
-        certified path refuses to agree with.
+        on weaker evidence than certification would rebuild state from a history
+        the certified path refuses to agree with.
     """
     historical = datetime.now(UTC) - timedelta(hours=1)
-    await _store_bound_manifest_row(repository, historical - timedelta(seconds=30))
+    await _store_bound_manifest_row(repository, historical + timedelta(seconds=1))
 
     recovered = await repository.get_executions_for_recovery(as_of=historical)
     timeline = await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", historical)
@@ -1201,6 +1289,7 @@ async def test_the_derived_planes_refuse_an_unprovable_manifest_binding(
     """
     async with repository.session() as s:
         s.add(_manifest_row(timestamp=_AS_OF - timedelta(minutes=1)))
+        s.add(_visibility_row(_CORRECTION_AT))
         await s.commit()
 
     with pytest.raises(ExecutionChainError, match="annulment_digest_mismatch"):
@@ -1226,12 +1315,12 @@ async def test_recovery_and_timeline_reads_drop_the_repudiated_booking(
     recovered = await repository.get_executions_for_recovery(as_of=_AS_OF)
     timeline = await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", _AS_OF)
     historical_recovered = await repository.get_executions_for_recovery(
-        as_of=correction["timestamp"] - timedelta(seconds=1)
+        as_of=await _observed_at(repository, correction["public_id"]) - timedelta(seconds=1)
     )
     historical_timeline = await repository.get_pnl_timeline_executions(
         _MAIN_WALLET,
         "live",
-        correction["timestamp"] - timedelta(seconds=1),
+        await _observed_at(repository, correction["public_id"]) - timedelta(seconds=1),
     )
 
     assert [row["public_id"] for row in recovered] == [

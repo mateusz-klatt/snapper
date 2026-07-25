@@ -200,6 +200,7 @@ from snapper.data.models import Candle
 from snapper.data.models import DeviceAlertPref
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
@@ -281,6 +282,7 @@ from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionAnnulmentReason
 from snapper.data.repository_types import ExecutionAnnulmentRequest
 from snapper.data.repository_types import ExecutionAnnulmentRow
+from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -1541,83 +1543,91 @@ def venue_event_fill_identity() -> ColumnElement[str]:
     )
 
 
-ANNULMENT_KNOWLEDGE_SETTLING_SECONDS: Final[float] = 60.0
-"""How long a correction's knowledge stamp must age before HISTORY may fold it.
+def execution_annulment_is_historically_visible(as_of: datetime) -> ColumnElement[bool]:
+    """Return the predicate proving a correction was DURABLE at one past horizon.
 
-The writer stamps a correction's knowledge instant at the last point before its
-insert, but the row only becomes visible to other readers at COMMIT — so for a
-brief interval a committed row carries a stamp fractionally older than its own
-durability. No supported dialect can close that on the write side: neither
-PostgreSQL nor SQLite will assign a commit-time value to an ordinary column. A
-proof-grade knowledge instant would need commit-timestamp tracking (PostgreSQL
-``track_commit_timestamp``, which SQLite has no analogue for) or a second
-append-only visibility ledger written after the commit — neither of which is in
-scope for a production manifest that holds three rows. So the gap is closed on
-the READ side, where it can actually do harm, and the residual is MONITORED
-rather than assumed: ``record_execution_annulment`` measures its own
-insert-to-commit latency and reports loudly if it ever reaches this margin.
+    The theorem this closes. A manifest row's own ``timestamp`` is stamped just
+    before its insert, and no supported dialect assigns a commit-time value to
+    an ordinary column, so that stamp can precede the row's durable existence by
+    an unbounded stall — and a historical read landing in the gap would fold a
+    correction the database could not have shown it. No margin fixes that: a
+    long enough stall defeats any margin, which is why the margin, its monitor,
+    and the whole heuristic were removed rather than tuned.
 
-Sixty seconds is not a measurement of that interval; it is orders of magnitude
-above it. The interval is one unfenced round trip — an INSERT and a COMMIT on a
-single small row, with no lock awaited in between — which is sub-millisecond
-locally and single-digit milliseconds across a loaded network. A margin four to
-five orders of magnitude larger absorbs a stalled writer process, a paused
-container, and a clock nudge, and still costs nothing: the only reads it
-constrains are historical ones, which by definition are not asking about the
-last minute.
-"""
+    An observation does fix it. ``execution_annulment_visibility`` rows are
+    appended by a SECOND transaction that first re-reads the correction, so
+    seeing a committed row is itself the durability proof and
 
-_ANNULMENT_KNOWLEDGE_SETTLING: Final[timedelta] = timedelta(
-    seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS
-)
-"""Interval form of :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`."""
+        ``annulment_durable_at <= observed_at``
+
+    holds by construction. Requiring ``observed_at <= as_of`` therefore PROVES
+    the correction was durable at ``as_of`` — for any stall, with no clock
+    heuristic and nothing to monitor.
+
+    A correction with no observation is simply not folded historically. That is
+    the conservative direction: certification refuses rather than fabricating
+    economics, and
+    :meth:`SQLAlchemyRepository.observe_execution_annulment_visibility` completes
+    the record afterwards. Current-truth reads do not use this predicate at all
+    — a read that requested NO horizon and can SEE the manifest row has already
+    performed the same proof.
+
+    Args:
+        as_of: The historical knowledge horizon being answered for.
+
+    Returns:
+        A predicate true for corrections provably durable at that horizon.
+    """
+    return (
+        select(1)
+        .select_from(ExecutionAnnulmentVisibility)
+        .where(
+            ExecutionAnnulmentVisibility.annulment_public_id == ExecutionAnnulment.public_id,
+            ExecutionAnnulmentVisibility.observed_at <= as_of,
+        )
+        .exists()
+    )
 
 
-def annulment_knowledge_bound(as_of: datetime, current_truth: bool) -> datetime:
-    """Return the newest correction stamp one read is entitled to fold.
+def execution_annulment_knowledge_filters(
+    as_of: datetime,
+    current_truth: bool,
+) -> list[ColumnElement[bool]]:
+    """Return the knowledge predicates one manifest read must carry.
 
-    The invariant: *a correction becomes historically knowable only after its
-    stamp has settled beyond any insert-to-commit latency; before that, history
-    refuses rather than assumes.* A historical read therefore folds only
-    corrections stamped at least :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`
-    before its horizon, so a read of the past can never be re-answered by a row
-    that was stamped before that instant but became durable after it.
+    One place decides what "already known" means, so the certification prefix,
+    the derived planes, and the reconciliation replay cannot drift apart on it.
 
-    The direction is fail-closed, and it is worth being explicit about which way
-    that cuts. Inside the settling window a correction is NOT folded, so an
-    unwitnessed phantom stays unexcluded and the scope's certification REFUSES.
-    A refusal is a visible, retryable state; the alternative — folding a
-    correction the horizon may not have been able to see — silently fabricates
-    economics for a past that has already been reported.
+    Current truth is exempt by INTENT, not by recency: the caller requested NO
+    horizon, so it is asking for whatever is durable now, and a manifest row the
+    read can SEE is committed by definition. That is the same proof the
+    observation ledger records for historical reads, performed by the read
+    itself, so demanding a stored observation as well would withhold an
+    operator's just-recorded correction from the very read they recorded it for
+    while proving nothing extra.
 
-    Current truth is exempt, and the exemption keys on the caller's INTENT, not
-    on how recent the horizon looks. Current truth is not "a recent horizon", it
-    is "NO horizon": the reader asked for whatever is durable at read time, and
-    a row it can see is committed, so there is nothing left to settle and no
-    earlier answer to contradict. An explicitly supplied ``as_of`` is a claim
-    about the past no matter how recent it is, and is always answered
-    conservatively — a caller that names an instant inside the settling window
-    is precisely the caller that must not be told a correction was knowable
-    there. Every current-truth caller is one that supplied no horizon at all:
-    the routes pass ``datetime.now(UTC)`` only when ``as_of`` is absent, the
-    trader recovery pass uses its own tick, and the reconciliation bundle uses
-    its capture instant.
+    An explicitly requested horizon is a claim about the past however recent it
+    is, and is answered from
+    :func:`execution_annulment_is_historically_visible` alone.
 
     Args:
         as_of: The read's knowledge horizon.
-        current_truth: Whether the caller requested NO horizon and is therefore
-            asking about whatever is durable now.
+        current_truth: Whether the caller requested NO horizon.
 
     Returns:
-        The newest correction stamp this read may treat as known.
+        The predicates to apply to an ``ExecutionAnnulment`` query.
     """
     if current_truth:
-        return as_of
-    return as_of - _ANNULMENT_KNOWLEDGE_SETTLING
+        return []
+    return [execution_annulment_is_historically_visible(as_of)]
 
 
 IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
-    {Execution.__tablename__, ExecutionAnnulment.__tablename__}
+    {
+        Execution.__tablename__,
+        ExecutionAnnulment.__tablename__,
+        ExecutionAnnulmentVisibility.__tablename__,
+    }
 )
 """Physical table names that are append-only immutable ledgers.
 
@@ -1631,16 +1641,23 @@ bypassable — ``aliased(Execution)`` is not ``Execution`` and
 resolution to the physical table name is.
 
 The registry holds ``executions``, the per-scope ``scope_sequence``
-counter invariant table, and ``execution_annulments``, the append-only
-manifest of uniquely targeted corrections to it. The manifest belongs
-here for the mirror-image reason the ledger does: an annulment that a
-generic SCD2 close+insert could supersede, or that ``delete_rows_by_id``
-could remove, would let a repudiated execution quietly return to
-effective accounting history. Its only sanctioned writer is
-``record_execution_annulment``, which appends with a direct fenced
-``session.add`` and therefore never routes through a guarded primitive.
-The portfolio spot reconciliation anchor table joins them in S4c-3:
-adding its physical name
+counter invariant table; ``execution_annulments``, the append-only
+manifest of uniquely targeted corrections to it; and
+``execution_annulment_visibility``, the observations proving when each
+correction became durable. The manifest belongs here for the
+mirror-image reason the ledger does: an annulment that a generic SCD2
+close+insert could supersede, or that ``delete_rows_by_id`` could
+remove, would let a repudiated execution quietly return to effective
+accounting history. The observations belong here because a mutable one
+would let a correction's proven knowledge instant be moved earlier —
+forging exactly the durability claim that ledger exists to make
+unforgeable — and a deletable one would retract a correction from a
+history that has already been reported with it. Their only sanctioned
+writers are ``record_execution_annulment`` and
+``observe_execution_annulment_visibility``, both of which append with a
+direct fenced ``session.add`` and therefore never route through a
+guarded primitive. The portfolio spot reconciliation anchor table joins
+them in S4c-3: adding its physical name
 here makes every generic primitive inherit the same refusal with no
 further changes at the primitive surfaces.
 """
@@ -3074,6 +3091,32 @@ class Repository(ABC):
                 the target, so the execution is real money.
             ExecutionAnnulmentConflictError: If the target — or its scope slot
                 — already carries a committed annulment.
+        """
+        ...
+
+    @abstractmethod
+    async def observe_execution_annulment_visibility(
+        self,
+        annulment_public_id: str,
+    ) -> ExecutionAnnulmentVisibilityRow:
+        """Prove one correction durable and append its visibility observation.
+
+        The second half of the annulment knowledge protocol, and the RESUMABLE
+        maintenance surface for it: ``record_execution_annulment`` calls this
+        itself after its own transaction commits, and an operator calls it
+        directly when that attempt failed and the correction is durable but not
+        yet historically knowable.
+
+        Implementations must re-read the correction in a transaction of their
+        own and stamp ``observed_at`` only after seeing the committed row, so
+        ``annulment_durable_at <= observed_at`` holds by construction; and must
+        be idempotent, returning the committed observation rather than minting a
+        second one, so a retry can never move a correction's proven knowledge
+        instant forward.
+
+        Raises:
+            ValueError: If the identity is not a UUID, or names a correction
+                this database does not hold.
         """
         ...
 
@@ -11858,41 +11901,185 @@ class SQLAlchemyRepository(Repository):
         )
 
     @staticmethod
-    def _report_execution_annulment_settling_breach(
-        appended: ExecutionAnnulmentRow,
-        knowledge_time: datetime,
-    ) -> None:
-        """Report a stamp-to-commit interval that outran the settling margin.
-
-        Turns the manifest's one irreducible assumption into a MONITORED
-        invariant. The settling margin historical reads narrow by is only sound
-        while a writer's own stamp-to-commit interval stays well under it; that
-        is overwhelmingly true and cannot be proven, so it is measured on every
-        write instead of assumed. When it does not hold, the operator is told
-        immediately, with the exact horizon window in which a historical read
-        could have folded this correction before it was durable.
-
-        Deliberately a report rather than a refusal: the row is already
-        committed and the manifest is append-only, so there is nothing to roll
-        back, and refusing after the fact would leave the ledger corrected while
-        telling the caller it was not.
+    def _execution_annulment_visibility_to_row(
+        observation: ExecutionAnnulmentVisibility,
+    ) -> ExecutionAnnulmentVisibilityRow:
+        """Project one observation model onto its typed read boundary.
 
         Args:
-            appended: The manifest row that was just committed.
-            knowledge_time: The instant stamped on it before the insert.
+            observation: The persisted visibility model.
+
+        Returns:
+            The typed observation row.
         """
-        elapsed = (datetime.now(UTC) - knowledge_time).total_seconds()
-        if elapsed < ANNULMENT_KNOWLEDGE_SETTLING_SECONDS:
-            return
-        logger.error(
-            "execution annulment {annulment} stamp-to-commit latency {elapsed:.3f}s reached the "
-            "{margin:.3f}s settling margin; historical reads in [{start}, {end}] may fold it early",
-            annulment=appended["public_id"],
-            elapsed=elapsed,
-            margin=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS,
-            start=knowledge_time.isoformat(),
-            end=(knowledge_time + timedelta(seconds=elapsed)).isoformat(),
+        return {
+            "public_id": observation.public_id,
+            "session_id": observation.session_id,
+            "sequence_id": observation.sequence_id,
+            "timestamp": observation.timestamp,
+            "annulment_public_id": observation.annulment_public_id,
+            "annulment_id": int(observation.annulment_id),
+            "observed_at": observation.observed_at,
+            "wallet_public_id": observation.wallet_public_id,
+            "exchange": observation.exchange,
+            "mode": observation.mode,
+        }
+
+    @staticmethod
+    async def _read_execution_annulment_by_public_id(
+        s: AsyncSession,
+        annulment_public_id: str,
+    ) -> ExecutionAnnulment | None:
+        """Re-read one committed correction, which IS the durability proof.
+
+        Args:
+            s: The session used for the read.
+            annulment_public_id: Canonical correction identity.
+
+        Returns:
+            The committed manifest model, or ``None`` when absent.
+        """
+        return (
+            (
+                await s.execute(
+                    select(ExecutionAnnulment).where(
+                        ExecutionAnnulment.public_id == annulment_public_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
         )
+
+    @staticmethod
+    async def _read_execution_annulment_visibility(
+        s: AsyncSession,
+        annulment_public_id: str,
+    ) -> ExecutionAnnulmentVisibility | None:
+        """Read the observation standing for one correction, if any.
+
+        Args:
+            s: The session used for the read.
+            annulment_public_id: Canonical correction identity.
+
+        Returns:
+            The committed observation, or ``None`` when the correction has none.
+        """
+        return (
+            (
+                await s.execute(
+                    select(ExecutionAnnulmentVisibility).where(
+                        ExecutionAnnulmentVisibility.annulment_public_id == annulment_public_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def observe_execution_annulment_visibility(
+        self,
+        annulment_public_id: str,
+    ) -> ExecutionAnnulmentVisibilityRow:
+        """Prove one correction is durable and append its visibility observation.
+
+        The second half of the two-transaction knowledge protocol, and a public
+        surface precisely so it is RESUMABLE: if the observation could not be
+        written when the correction was recorded, the correction is durable but
+        not yet historically knowable, and an operator completes it by calling
+        this with the id the failure logged.
+
+        The proof is the re-read. This runs in its OWN transaction, strictly
+        after the one that appended the correction committed, and it stamps
+        ``observed_at`` only once it has SEEN the committed row — so
+        ``annulment_durable_at <= observed_at`` holds by construction, for any
+        stall of any length. That is what lets historical folds treat
+        ``observed_at <= as_of`` as a proof of durability rather than an
+        assumption about latency.
+
+        Idempotent by collision rather than by check-then-write: a concurrent or
+        repeated completion loses the TOTAL unique index race and the committed
+        winner is returned, so a maintenance retry can never mint a second,
+        later observation for a correction that already has one — which would
+        move its proven knowledge instant forward.
+
+        Args:
+            annulment_public_id: Public identity of the correction to observe.
+
+        Returns:
+            The observation standing for that correction.
+
+        Raises:
+            ValueError: If the identity is not a UUID, or names a correction
+                this database does not hold.
+        """
+        canonical = self._canonical_execution_annulment_uuid(
+            annulment_public_id,
+            "annulment_public_id",
+        )
+        async with self.session() as s:
+            try:
+                annulment = await self._read_execution_annulment_by_public_id(s, canonical)
+                if annulment is None:
+                    raise ValueError(
+                        f"unknown execution annulment: annulment_public_id={canonical}"
+                    )
+                observed_at = datetime.now(UTC)
+                observation = ExecutionAnnulmentVisibility(
+                    annulment_public_id=annulment.public_id,
+                    annulment_id=int(annulment.id),
+                    observed_at=observed_at,
+                    wallet_public_id=annulment.wallet_public_id,
+                    exchange=annulment.exchange,
+                    mode=annulment.mode,
+                    session_id=annulment.session_id,
+                    sequence_id=annulment.sequence_id,
+                    timestamp=observed_at,
+                    known_to=KNOWN_TO_MAX,
+                )
+                s.add(observation)
+                await s.commit()
+                return self._execution_annulment_visibility_to_row(observation)
+            except IntegrityError:
+                await s.rollback()
+                winner = await self._read_execution_annulment_visibility(s, canonical)
+                if winner is None:
+                    raise
+                return self._execution_annulment_visibility_to_row(winner)
+            except Exception:
+                await s.rollback()
+                raise
+
+    async def _observe_execution_annulment_durability(
+        self,
+        appended: ExecutionAnnulmentRow,
+    ) -> None:
+        """Complete the knowledge protocol, reporting loudly if it cannot.
+
+        A failure here is not a failure of the correction: the manifest row is
+        committed and append-only, so there is nothing to roll back and refusing
+        afterwards would tell the caller a lie. What a failure DOES mean is that
+        the correction is durable but not yet historically knowable — the
+        conservative direction, in which historical certification refuses rather
+        than folding an unproven correction — until
+        :meth:`observe_execution_annulment_visibility` is called for it. The log
+        therefore names the exact id that call needs.
+
+        Args:
+            appended: The correction that was just committed.
+
+        Returns:
+            None.
+        """
+        try:
+            await self.observe_execution_annulment_visibility(appended["public_id"])
+        except Exception:
+            logger.exception(
+                "execution annulment {annulment} is durable but has NO visibility "
+                "observation; historical reads will not fold it until "
+                "observe_execution_annulment_visibility completes for it",
+                annulment=appended["public_id"],
+            )
 
     async def record_execution_annulment(
         self,
@@ -11900,43 +12087,42 @@ class SQLAlchemyRepository(Repository):
     ) -> ExecutionAnnulmentRow:
         """Prove one execution is annullable under a scope fence, then append.
 
-        The whole protocol runs in ONE transaction: open with explicit dialect
+        The proving protocol runs in ONE transaction: open with explicit dialect
         guarantees, fence the certification scope, re-read and prove the target
         (exists, same scope, same canonical digest), refuse any durable fill
-        witness, stamp the knowledge instant, then append. Nothing is
-        superseded, nothing is closed, and no generic CRUD primitive is
-        involved — the manifest's physical name is registered in
-        :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it cannot be.
+        witness, then append. Nothing is superseded, nothing is closed, and no
+        generic CRUD primitive is involved — the manifest's physical name is
+        registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it
+        cannot be.
 
-        Knowledge-stamp placement, the residual window, and how it is watched.
-        Every knowledge-horizon fold filters on the row's ``timestamp``, so a
-        stamp that precedes the row's durable existence lets a historical read
-        at an instant between the two see a correction that did not yet exist.
-        The stamp is therefore taken at the LAST possible point: after the
-        transaction's dialect guarantees, after the scope fence, after the
-        ``FOR UPDATE`` target re-read, and after the witness refusal — so no
-        lock is ever awaited afterwards. What remains is bounded and small: the
-        stamp precedes durable visibility by at most this writer's own
-        insert-to-commit latency, a single unfenced round trip, instead of by an
-        unbounded advisory-lock wait.
+        Knowledge is PROVEN by a second transaction, not assumed from a stamp.
+        A value written inside the transaction above can only ever be stamped
+        BEFORE the commit that makes the row durable, and no supported dialect
+        will assign a commit-time value to an ordinary column — so any such
+        stamp can precede the row's existence by an unbounded stall, and no
+        settling margin closes that (a long enough stall defeats any margin).
 
-        That residual cannot be eliminated here. Closing it fully would require
-        the COMMIT itself to assign the value — PostgreSQL
-        ``track_commit_timestamp``, which SQLite has no analogue for — or a
-        second append-only visibility ledger written after the commit; neither
-        is in scope for a production manifest that holds three rows. So the
-        remaining exposure is handled in two layers instead. Historical reads
-        narrow the manifest by a settling margin
-        (:func:`annulment_knowledge_bound`) that is orders of magnitude above
-        the latency, while current-truth reads are exempt BY INTENT — they asked
-        for no horizon, and a row they can see is committed. And the assumption
-        the margin rests on is MEASURED here rather than assumed: this method
-        times its own stamp-to-commit interval and logs an ERROR naming the
-        correction, the measured latency, and the exact horizon window in which
-        historical reads could have folded it early. The row is durable and the
-        manifest is append-only, so that is a report and not a rollback — but
-        the operator learns immediately instead of the assumption failing in
-        silence.
+        So after this transaction commits, a SECOND one re-reads the correction
+        by its immutable public id and, having SEEN a committed row, appends one
+        ``execution_annulment_visibility`` observation stamped at that moment.
+        The observation cannot be taken before the read that witnessed the row,
+        which gives
+
+            ``annulment_durable_at <= observed_at``
+
+        by construction. Historical folds compare ``observed_at`` — never the
+        manifest row's own ``timestamp`` — against their horizon, so they can
+        never claim a correction was knowable before it was durable, for any
+        stall of any length.
+
+        If that second transaction fails the correction is still durable, and
+        this method still returns it: the manifest is append-only, so there is
+        nothing to roll back and refusing afterwards would be a lie. What
+        changes is that historical reads will not fold it — the conservative
+        direction — until :meth:`observe_execution_annulment_visibility` is
+        called for it, which the failure logs by id and which is idempotent.
+        Current-truth reads are unaffected either way: a read that requested no
+        horizon and can see the row has performed the same proof itself.
 
         Contradictory-later-witness doctrine, and the exact guarantee it buys.
         The witness check here is NECESSARY but NOT SUFFICIENT: it proves only
@@ -11982,7 +12168,6 @@ class SQLAlchemyRepository(Repository):
                 await self._acquire_execution_annulment_fence(s, command)
                 target = await self._proven_execution_annulment_target(s, command)
                 await self._refuse_witnessed_execution_annulment(s, command, target)
-                knowledge_time = datetime.now(UTC)
                 row = ExecutionAnnulment(
                     target_execution_public_id=command.target_execution_public_id,
                     target_execution_digest=command.expected_execution_digest,
@@ -11996,14 +12181,12 @@ class SQLAlchemyRepository(Repository):
                     evidence_json=command.evidence_json,
                     session_id=command.session_id,
                     sequence_id=command.sequence_id,
-                    timestamp=knowledge_time,
+                    timestamp=datetime.now(UTC),
                     known_to=KNOWN_TO_MAX,
                 )
                 s.add(row)
                 await s.commit()
                 appended = self._execution_annulment_to_row(row)
-                self._report_execution_annulment_settling_breach(appended, knowledge_time)
-                return appended
             except IntegrityError:
                 await s.rollback()
                 winner = await self._read_execution_annulment(
@@ -12018,6 +12201,8 @@ class SQLAlchemyRepository(Repository):
             except Exception:
                 await s.rollback()
                 raise
+        await self._observe_execution_annulment_durability(appended)
+        return appended
 
     async def get_execution_annulments(
         self,
@@ -14728,14 +14913,17 @@ class SQLAlchemyRepository(Repository):
 
         The theorem, in the order it is proven. First the physical prefix: every
         raw scope sequence in ``[1, W]`` present exactly once and sentinel-current,
-        annulled rows included, hash chain untouched. Then the manifest, validated
-        against that proven prefix by coordinate, immutable id, canonical digest,
-        and read-time witness absence — any dangling, crossed, duplicated,
-        content-mismatched, or contradicted binding refuses the certification by
-        name instead of being ignored. Only then are the correctly bound targets
-        excluded, and the survivors carried through the unchanged witness
-        assignment, where an un-annulled row with no durable fill evidence still
-        raises ``missing_execution_shard_lineage`` exactly as it always has.
+        annulled rows included, hash chain untouched. Then the manifest — already
+        narrowed to the corrections this horizon can PROVE were durable, by
+        append-only visibility observation rather than by any assumption about a
+        pre-commit stamp — validated against that proven prefix by coordinate,
+        immutable id, canonical digest, and read-time witness absence; any
+        dangling, crossed, duplicated, content-mismatched, or contradicted
+        binding refuses the certification by name instead of being ignored. Only
+        then are the correctly bound targets excluded, and the survivors carried
+        through the unchanged witness assignment, where an un-annulled row with
+        no durable fill evidence still raises
+        ``missing_execution_shard_lineage`` exactly as it always has.
 
         Args:
             source: Every raw input of this certification.
@@ -14797,9 +14985,10 @@ class SQLAlchemyRepository(Repository):
         choose: an operator-supplied knowledge time could be backdated to
         rewrite an answer the system has already given.
 
-        A historical horizon additionally requires the stamp to have SETTLED —
-        see :func:`annulment_knowledge_bound` — so a correction stamped just
-        before it became durable cannot retroactively enter a past answer.
+        A historical horizon additionally requires a durability OBSERVATION —
+        see :func:`execution_annulment_is_historically_visible` — so a
+        correction stamped before it became durable cannot retroactively enter
+        a past answer no matter how long the writer stalled.
 
         ``known_to`` is deliberately not filtered. Manifest rows physically
         cannot close (CHECK at insert, UPDATE trigger afterwards), so a filter
@@ -14823,7 +15012,7 @@ class SQLAlchemyRepository(Repository):
             .where(
                 ExecutionAnnulment.wallet_public_id == wallet_public_id,
                 ExecutionAnnulment.mode == mode,
-                ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of, current_truth),
+                *execution_annulment_knowledge_filters(as_of, current_truth),
             )
             .order_by(
                 ExecutionAnnulment.exchange.asc(),
@@ -14955,9 +15144,10 @@ class SQLAlchemyRepository(Repository):
         shard it cannot certify, so failing closed here rebuilds nothing rather
         than rebuilding a lie.
 
-        The horizon is applied through :func:`annulment_knowledge_bound`, so a
-        historical read additionally requires each correction's stamp to have
-        settled beyond any insert-to-commit latency.
+        The horizon is applied through
+        :func:`execution_annulment_knowledge_filters`, so a historical read
+        additionally requires each correction to carry a durability
+        observation at or before that horizon.
 
         Args:
             s: The session running the read.
@@ -14975,9 +15165,9 @@ class SQLAlchemyRepository(Repository):
                 scope-crossed, duplicated, digest-mismatched, or contradicted by
                 a durable fill witness.
         """
-        filters: list[ColumnElement[bool]] = [
-            ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of, current_truth)
-        ]
+        filters: list[ColumnElement[bool]] = list(
+            execution_annulment_knowledge_filters(as_of, current_truth)
+        )
         if wallet_public_id:
             filters.append(ExecutionAnnulment.wallet_public_id == wallet_public_id)
         annulment_rows = list(
@@ -15200,8 +15390,9 @@ class SQLAlchemyRepository(Repository):
 
         ``current_truth`` states that NO horizon was requested, so the manifest
         fold answers for whatever is durable now; see
-        :func:`annulment_knowledge_bound`. It applies to BOTH cuts: an activation
-        instant derived from an unrequested present is itself unrequested.
+        :func:`execution_annulment_knowledge_filters`. It applies to BOTH cuts:
+        an activation instant derived from an unrequested present is itself
+        unrequested.
         """
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
@@ -21998,8 +22189,9 @@ class SQLAlchemyRepository(Repository):
         caller's projection because the fold binds ORM executions, and the
         caller's transaction is a pinned snapshot, so the second read is the
         same rows at the same instant. The manifest is narrowed through
-        :func:`annulment_knowledge_bound`, so a capture pinned to a historical
-        instant additionally requires each correction's stamp to have settled.
+        :func:`execution_annulment_knowledge_filters`, so a capture pinned to a
+        historical instant additionally requires each correction to carry a
+        durability observation at or before it.
 
         Args:
             s: The session holding the bundle's snapshot transaction.
@@ -22025,8 +22217,10 @@ class SQLAlchemyRepository(Repository):
                         ExecutionAnnulment.wallet_public_id == request.wallet_public_id,
                         ExecutionAnnulment.exchange == request.exchange,
                         ExecutionAnnulment.mode == request.mode,
-                        ExecutionAnnulment.timestamp
-                        <= annulment_knowledge_bound(request.as_of, request.current_truth),
+                        *execution_annulment_knowledge_filters(
+                            request.as_of,
+                            request.current_truth,
+                        ),
                     )
                     .order_by(ExecutionAnnulment.scope_sequence.asc())
                 )

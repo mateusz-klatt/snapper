@@ -23,8 +23,12 @@ from sqlalchemy.engine import Connection
 
 from snapper.data import models
 from snapper.data.ledger_triggers import drop_execution_annulment_immutability_triggers
+from snapper.data.ledger_triggers import drop_execution_annulment_visibility_immutability_triggers
 from snapper.data.ledger_triggers import drop_execution_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
+from snapper.data.ledger_triggers import (
+    install_execution_annulment_visibility_immutability_triggers,
+)
 from snapper.data.ledger_triggers import install_execution_immutability_triggers
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
@@ -360,4 +364,75 @@ def test_annulment_event_and_migration_share_one_install_authority() -> None:
     assert (
         migration.drop_execution_annulment_immutability_triggers
         is drop_execution_annulment_immutability_triggers
+    )
+
+
+def test_postgres_visibility_install_emits_function_row_and_truncate_triggers() -> None:
+    """The PostgreSQL observation install mirrors the same protocol exactly.
+
+    Given: A recording connection reporting the ``postgresql`` dialect.
+    When: The visibility install helper runs.
+    Then: It emits the same seven-statement protocol the other two installers
+        do — ``CREATE OR REPLACE FUNCTION`` first, then drop+create+``ENABLE
+        ALWAYS`` for the ``BEFORE UPDATE OR DELETE`` row trigger and the same
+        for the ``BEFORE TRUNCATE`` statement trigger. The observation plane
+        needs every one of them: a movable ``observed_at`` would forge a
+        correction's durability proof, and TRUNCATE or a replica-role bypass
+        would erase it wholesale.
+    """
+    connection = _RecordingConnection("postgresql")
+    install_execution_annulment_visibility_immutability_triggers(connection)
+    statements = connection.statements
+    assert len(statements) == 7
+    assert statements[0].startswith(
+        "CREATE OR REPLACE FUNCTION execution_annulment_visibility_reject_mutation()"
+    )
+    assert "append-only" in statements[0]
+    assert statements[1].startswith(
+        "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_row_mutation"
+    )
+    assert "BEFORE UPDATE OR DELETE ON execution_annulment_visibility" in statements[2]
+    assert (
+        "FOR EACH ROW EXECUTE FUNCTION execution_annulment_visibility_reject_mutation()"
+        in statements[2]
+    )
+    assert statements[3] == (
+        "ALTER TABLE execution_annulment_visibility "
+        "ENABLE ALWAYS TRIGGER execution_annulment_visibility_reject_row_mutation"
+    )
+    assert statements[4].startswith(
+        "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_truncate"
+    )
+    assert "BEFORE TRUNCATE ON execution_annulment_visibility" in statements[5]
+    assert (
+        "FOR EACH STATEMENT EXECUTE FUNCTION "
+        "execution_annulment_visibility_reject_mutation()" in statements[5]
+    )
+    assert statements[6] == (
+        "ALTER TABLE execution_annulment_visibility "
+        "ENABLE ALWAYS TRIGGER execution_annulment_visibility_reject_truncate"
+    )
+
+
+def test_postgres_visibility_drop_emits_both_trigger_drops_then_function_drop() -> None:
+    """The PostgreSQL observation drop removes both triggers then the function.
+
+    Given: A recording connection reporting the ``postgresql`` dialect.
+    When: The visibility drop helper runs.
+    Then: It emits the two ``DROP TRIGGER IF EXISTS`` statements followed by the
+        ``DROP FUNCTION IF EXISTS`` — the function last because the triggers
+        depend on it, and at all because no ``after_create`` path removes it.
+    """
+    connection = _RecordingConnection("postgresql")
+    drop_execution_annulment_visibility_immutability_triggers(connection)
+    statements = connection.statements
+    assert len(statements) == 3
+    assert statements[0].startswith(
+        "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_row_mutation"
+    )
+    assert statements[1].startswith(
+        "DROP TRIGGER IF EXISTS execution_annulment_visibility_reject_truncate"
+    )
+    assert statements[2].startswith(
+        "DROP FUNCTION IF EXISTS execution_annulment_visibility_reject_mutation()"
     )

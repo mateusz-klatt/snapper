@@ -518,17 +518,20 @@ async def test_bundle_drops_an_annulled_booking_after_counting_the_range(
     await repo.engine.dispose()
 
 
-async def test_bundle_ignores_a_correction_its_horizon_does_not_know(
+async def test_the_reconciliation_capture_folds_every_visible_correction(
     tmp_path: Path,
 ) -> None:
-    """A repudiation recorded after the capture instant cannot rewrite it.
+    """The capture instant is an unrequested horizon, so it answers for now.
 
-    Given: The same scope with the correction's SERVER knowledge stamp set one
-        second AFTER the bundle's pinned capture instant.
+    Given: The same scope, with the correction's own stamp set AFTER the
+        bundle's pinned capture instant.
     When: The bundle is read at that capture instant.
-    Then: Both bookings still replay. The capture answers for its own moment,
-        so a correction that was not yet known then must not retroactively
-        change the range it certified.
+    Then: The correction is still folded. Reconciliation never asks for a
+        horizon — it echoes its own tick — so it is a current-truth read, and a
+        correction it can SEE is committed by definition. That is the same
+        durability proof the visibility ledger records for genuinely historical
+        horizons, performed by the read itself, so requiring a stored
+        observation here would withhold a correction that is provably durable.
     """
     repo = await _anchored_replay_scope(tmp_path)
     await _annul_replay_execution(repo, 4, timestamp=_AS_OF + timedelta(seconds=1))
@@ -538,7 +541,7 @@ async def test_bundle_ignores_a_correction_its_horizon_does_not_know(
     )
 
     assert bundle.error is None
-    assert [row["scope_sequence"] for row in bundle.replay] == [3, 4]
+    assert [row["scope_sequence"] for row in bundle.replay] == [3]
     await repo.engine.dispose()
 
 
