@@ -11,6 +11,7 @@ the forward-activation-cut option, so a fixture that puts the phantom first
 would not exercise the real case at all.
 """
 
+import inspect
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -46,6 +47,7 @@ from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository_types import ExecutionAnnulmentRequest
@@ -1161,8 +1163,7 @@ async def test_current_truth_folds_a_correction_with_no_observation(
     prefix = await repository.get_pnl_timeline_execution_prefix(
         _MAIN_WALLET,
         "live",
-        datetime.now(UTC),
-        current_truth=True,
+        None,
     )
 
     assert [row["public_id"] for row in prefix["executions"]] == [_WALUTOMAT_TRADE]
@@ -1497,11 +1498,10 @@ async def test_certification_pins_one_snapshot_before_reading_evidence(
         loaded_session: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool,
+        horizon: object,
     ) -> PnlTimelineExecutionPrefix:
         """Record that evidence loading begins only after the pin is set."""
-        del loaded_session, wallet_public_id, mode, as_of, current_truth
+        del loaded_session, wallet_public_id, mode, horizon
         events.append("load")
         return {"watermarks": {}, "executions": [], "annulments": []}
 
@@ -1549,3 +1549,59 @@ async def test_raw_audit_reads_keep_showing_the_corrected_booking(
     assert _KRAKEN_PHANTOM in {row["public_id"] for row in listed}
     assert [row["public_id"] for row in for_order] == [_KRAKEN_PHANTOM]
     assert [row["public_id"] for row in manifest] == [correction["public_id"]]
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_pnl_timeline_execution_prefix",
+        "get_pnl_timeline_execution_prefix_bundle",
+        "get_executions_for_recovery",
+        "get_pnl_timeline_executions",
+        "pnl_timeline_scope_has_fill_gap",
+    ],
+)
+def test_the_repository_api_cannot_express_an_exempt_historical_horizon(
+    method_name: str,
+) -> None:
+    """The forbidden pairing has no spelling at the money boundary.
+
+    Given: Every abstract repository read whose fold consults the annulment
+        manifest.
+    When: Their signatures are inspected.
+    Then: None accepts a ``current_truth`` argument, and each carries a nullable
+        horizon instead. That is the whole point: while an instant and an
+        independent flag were separate arguments, a caller could name a PAST
+        horizon and still claim the current-truth exemption, bypassing the
+        durability proof — and a money boundary must not depend on callers
+        telling the truth about their own intent. With one nullable value,
+        ``None`` means "no horizon requested, capture the present here" and any
+        supplied instant is historical by construction; the illegal state is
+        unrepresentable rather than merely undocumented.
+    """
+    signature = inspect.signature(getattr(Repository, method_name))
+
+    assert "current_truth" not in signature.parameters
+    horizon = signature.parameters["request_as_of" if method_name.endswith("bundle") else "as_of"]
+    assert horizon.annotation == datetime | None
+
+
+async def test_a_captured_present_horizon_folds_without_any_observation(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """``None`` always means the present the repository captures for itself.
+
+    Given: A correction with NO durability observation, which no requested
+        horizon could fold.
+    When: The recovery and scope reads are called with ``as_of=None``.
+    Then: Both fold it. The repository captured the present itself, so the
+        horizon and its provenance cannot disagree — there is no way for a
+        caller to obtain this answer for an instant it named.
+    """
+    await _store_bound_manifest_row(repository)
+
+    recovered = await repository.get_executions_for_recovery(as_of=None)
+    timeline = await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", None)
+
+    assert _KRAKEN_PHANTOM not in {row["public_id"] for row in recovered}
+    assert _KRAKEN_PHANTOM not in {row["public_id"] for row in timeline}

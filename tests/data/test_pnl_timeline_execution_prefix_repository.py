@@ -696,8 +696,12 @@ async def test_bundle_sets_repeatable_read_only_as_the_first_postgresql_statemen
     assert str(statement) == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     assert session.execute.await_count == 1
     session.begin.assert_called_once_with()
-    assert loader.await_args_list[0].args == (session, _WALLET, "live", _LATER, False)
-    assert loader.await_args_list[1].args == (session, _WALLET, "live", _AS_OF, False)
+    request_horizon = loader.await_args_list[0].args[3]
+    activation_horizon = loader.await_args_list[1].args[3]
+    assert loader.await_args_list[0].args[:3] == (session, _WALLET, "live")
+    assert loader.await_args_list[1].args[:3] == (session, _WALLET, "live")
+    assert (request_horizon.as_of, request_horizon.requested) == (_LATER, True)
+    assert (activation_horizon.as_of, activation_horizon.requested) == (_AS_OF, True)
     assert bundle == {"request": request, "activation": activation}
 
 

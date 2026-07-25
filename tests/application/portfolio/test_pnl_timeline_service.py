@@ -617,12 +617,10 @@ class FakeRepo:
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         execution_prefix: PnlTimelineExecutionPrefix | None = None,
-        current_truth: bool = False,
     ) -> bool:
         """Record one scope analysis and return its canned gap status."""
-        del current_truth
         assert execution_prefix is not None
         self.fill_gap_calls.append((wallet_public_id, mode, as_of))
         self.fill_gap_prefixes.append(execution_prefix)
@@ -632,12 +630,11 @@ class FakeRepo:
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         since_scope_sequence: int | None = None,
-        current_truth: bool = False,
     ) -> list[PnlTimelineOpeningExecutionRow]:
         """Return the canned execution rows."""
-        del since_scope_sequence, current_truth
+        del since_scope_sequence
         self.execution_calls.append((wallet_public_id, mode, as_of))
         return list(self._executions)
 
@@ -645,11 +642,9 @@ class FakeRepo:
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool = False,
+        as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefix:
         """Return one canned exact bundle and record its single scope read."""
-        del current_truth
         self.execution_calls.append((wallet_public_id, mode, as_of))
         if self._execution_prefix_error is not None:
             raise self._execution_prefix_error
@@ -741,12 +736,11 @@ class FakeRepo:
         self,
         wallet_public_id: str,
         mode: str,
-        request_as_of: datetime,
+        request_as_of: datetime | None,
         activation_as_of: datetime,
-        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return independently captured request and activation snapshots."""
-        del current_truth
+        request_as_of = activation_as_of if request_as_of is None else request_as_of
         self.execution_calls.append((wallet_public_id, mode, request_as_of))
         self.execution_bundle_calls.append(
             (wallet_public_id, mode, request_as_of, activation_as_of)
@@ -4569,12 +4563,11 @@ class TestDurableActivationAnchor:
         async def load_bundle(
             wallet_public_id: str,
             mode: str,
-            request_as_of: datetime,
+            request_as_of: datetime | None,
             activation_as_of: datetime,
-            current_truth: bool = False,
         ) -> PnlTimelineExecutionPrefixBundle:
             """Return one deliberately invalid independently captured bundle."""
-            del wallet_public_id, mode, request_as_of, activation_as_of, current_truth
+            del wallet_public_id, mode, request_as_of, activation_as_of
             return bundle
 
         monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix_bundle", load_bundle)
@@ -4613,12 +4606,11 @@ class TestDurableActivationAnchor:
         async def load_bundle(
             wallet_public_id: str,
             mode: str,
-            request_as_of: datetime,
+            request_as_of: datetime | None,
             activation_as_of: datetime,
-            current_truth: bool = False,
         ) -> PnlTimelineExecutionPrefixBundle:
             """Return a monotonic bundle with one request-only exchange."""
-            del wallet_public_id, mode, request_as_of, activation_as_of, current_truth
+            del wallet_public_id, mode, request_as_of, activation_as_of
             return bundle
 
         monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix_bundle", load_bundle)

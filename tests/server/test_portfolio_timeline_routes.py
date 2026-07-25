@@ -473,7 +473,8 @@ class TestHappyPath:
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] is None
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[3] == response_as_of
         build_call = build.await_args
         assert build_call is not None
         assert build_call.kwargs["policy"].allow_anchor_creation is True
@@ -616,7 +617,8 @@ class TestMarkerTimeline:
         assert response.status_code == 200
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] is None
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[3] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         build_call = build.await_args

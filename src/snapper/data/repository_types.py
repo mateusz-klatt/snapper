@@ -567,18 +567,25 @@ class PortfolioPnlAnchorRow(TypedDict):
 class PortfolioPnlAnchorWriteEvidence(TypedDict):
     """Frozen derivation cuts revalidated by the atomic anchor writer.
 
-    ``current_truth`` records whether the derivation asked for NO horizon. The
-    writer's fenced re-read must reproduce the candidate's evidence exactly, and
-    the annulment manifest is narrowed differently for a requested horizon than
-    for the present — so re-reading under the other intent would manufacture a
-    spurious evidence mismatch out of nothing but a flag.
+    ``requested_as_of`` is the caller's ORIGINAL horizon argument: ``None`` when
+    no horizon was requested, otherwise the exact instant that was. The writer's
+    fenced re-read must reproduce the candidate's evidence exactly, and the
+    annulment manifest is narrowed differently for a requested horizon than for
+    the present — so re-reading under the other reading would manufacture a
+    spurious evidence mismatch out of nothing.
+
+    It is carried as the nullable instant rather than as a flag beside
+    ``request_as_of`` so the pair cannot disagree: the writer refuses evidence
+    whose ``requested_as_of`` is neither ``None`` nor exactly ``request_as_of``,
+    which leaves no way to claim the current-truth reading for a horizon that
+    was in fact named.
     """
 
     wallet_public_id: str
     mode: Literal["live", "paper"]
     request_as_of: datetime
     activation_as_of: datetime
-    current_truth: bool
+    requested_as_of: datetime | None
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 

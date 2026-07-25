@@ -170,7 +170,7 @@ def _empty_anchor_write_evidence(
         mode="live",
         request_as_of=request_as_of,
         activation_as_of=activation_as_of,
-        current_truth=False,
+        requested_as_of=_T0,
         execution_prefix_bundle=PnlTimelineExecutionPrefixBundle(
             request=empty,
             activation=empty,
@@ -1011,13 +1011,12 @@ async def test_sqlite_source_append_after_atomic_fence_waits_for_anchor_commit(
         session: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool,
+        horizon: object,
     ) -> PnlTimelineExecutionPrefix:
         """Hold the fenced writer immediately before its source reload."""
         fence_acquired.set()
         await asyncio.wait_for(release_reload.wait(), timeout=5.0)
-        return await original_load(session, wallet_public_id, mode, as_of, current_truth)
+        return await original_load(session, wallet_public_id, mode, horizon)
 
     async def append_relevant_source() -> None:
         """Attempt an orphan fill insert on a second connection after the fence."""
@@ -1191,13 +1190,12 @@ async def test_postgresql_source_append_after_fence_waits_for_anchor_commit(
         session: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool,
+        horizon: object,
     ) -> PnlTimelineExecutionPrefix:
         """Hold the atomic transaction after all source table locks."""
         fence_acquired.set()
         await asyncio.wait_for(release_reload.wait(), timeout=5.0)
-        return await original_load(session, wallet_public_id, mode, as_of, current_truth)
+        return await original_load(session, wallet_public_id, mode, horizon)
 
     async def append_relevant_source() -> None:
         """Try a real orphan fill insert after the source table fence is held."""
@@ -1433,7 +1431,7 @@ async def test_atomic_writer_treats_a_manifest_change_as_evidence_drift(
         mode="live",
         request_as_of=_T0,
         activation_as_of=_T0,
-        current_truth=False,
+        requested_as_of=_T0,
         execution_prefix_bundle=_manifest_drifted_evidence(current, drift),
     )
     candidate = _atomic_anchor()
@@ -1481,7 +1479,7 @@ async def test_atomic_writer_exactly_compares_every_prefix_evidence_plane(
         mode="live",
         request_as_of=_T0,
         activation_as_of=_T0,
-        current_truth=False,
+        requested_as_of=_T0,
         execution_prefix_bundle=_mutated_prefix_evidence(current, evidence_kind),
     )
     candidate = _atomic_anchor()

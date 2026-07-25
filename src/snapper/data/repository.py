@@ -525,8 +525,6 @@ class _SpotReplayEffectiveRequest:
     wallet_public_id: str
     exchange: str
     mode: str
-    as_of: datetime
-    current_truth: bool
     anchor_watermark: int
     boundary_watermark: int
     replay: list[SpotReplayExecutionSourceRow]
@@ -743,9 +741,8 @@ class _PnlTimelineScopeGapRequest:
 
     wallet_public_id: str
     mode: str
-    as_of: datetime
+    horizon: _ExecutionKnowledgeHorizon
     execution_prefix: PnlTimelineExecutionPrefix | None
-    current_truth: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1589,9 +1586,46 @@ def execution_annulment_is_historically_visible(as_of: datetime) -> ColumnElemen
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutionKnowledgeHorizon:
+    """One read's resolved knowledge horizon and how it came to be.
+
+    The illegal state this type exists to remove is the pair ``(a historical
+    instant, exempt from the durability proof)``. That pair was previously
+    expressible because the boundary took an instant and an independent
+    boolean, so a caller could name a past horizon and still claim the
+    current-truth exemption — and a money boundary must not depend on callers
+    telling the truth about their own intent.
+
+    So it is never constructed directly: :func:`_resolved_knowledge_horizon`
+    derives BOTH fields from a single nullable input. ``None`` means no horizon
+    was requested, and the repository captures the present itself, which is the
+    only way ``requested`` can be false; any supplied instant is a claim about
+    the past and carries ``requested=True``. The forbidden pairing has no
+    spelling at the boundary at all.
+    """
+
+    as_of: datetime
+    requested: bool
+
+
+def _resolved_knowledge_horizon(as_of: datetime | None) -> _ExecutionKnowledgeHorizon:
+    """Resolve one caller's nullable horizon into the value every read folds on.
+
+    Args:
+        as_of: The requested knowledge horizon, or ``None`` for current truth.
+
+    Returns:
+        The resolved horizon, with the present captured HERE when none was
+        requested so the instant and its provenance can never disagree.
+    """
+    if as_of is None:
+        return _ExecutionKnowledgeHorizon(as_of=datetime.now(UTC), requested=False)
+    return _ExecutionKnowledgeHorizon(as_of=as_of, requested=True)
+
+
 def execution_annulment_knowledge_filters(
-    as_of: datetime,
-    current_truth: bool,
+    horizon: _ExecutionKnowledgeHorizon,
 ) -> list[ColumnElement[bool]]:
     """Return the knowledge predicates one manifest read must carry.
 
@@ -1608,18 +1642,20 @@ def execution_annulment_knowledge_filters(
 
     An explicitly requested horizon is a claim about the past however recent it
     is, and is answered from
-    :func:`execution_annulment_is_historically_visible` alone.
+    :func:`execution_annulment_is_historically_visible` alone. Because the
+    horizon can only be built by :func:`_resolved_knowledge_horizon`, "requested"
+    and "historical" are the same fact rather than two a caller could pair
+    however it liked.
 
     Args:
-        as_of: The read's knowledge horizon.
-        current_truth: Whether the caller requested NO horizon.
+        horizon: The read's resolved knowledge horizon.
 
     Returns:
         The predicates to apply to an ``ExecutionAnnulment`` query.
     """
-    if current_truth:
+    if not horizon.requested:
         return []
-    return [execution_annulment_is_historically_visible(as_of)]
+    return [execution_annulment_is_historically_visible(horizon.as_of)]
 
 
 IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
@@ -2991,17 +3027,20 @@ class Repository(ABC):
     @abstractmethod
     async def get_executions_for_recovery(
         self,
-        as_of: datetime,
+        as_of: datetime | None,
         exchange: str | None = None,
         instrument: str | None = None,
         wallet_public_id: str = "",
-        current_truth: bool = False,
     ) -> list[ExecutionRow]:
         """Retrieve all effective executions for startup state reconstruction.
 
         Unlike get_executions(), this method has no limit and returns
         results in chronological order (ASC) for correct replay.
         Optional exchange/instrument filters narrow the scope.
+
+        ``as_of=None`` means no horizon was requested and the repository
+        captures the present; any supplied instant is historical and requires
+        each correction's durability observation.
 
         ECONOMIC plane: bookings repudiated by the append-only annulment
         manifest at or before ``as_of`` are excluded, so recovery never rebuilds
@@ -3019,8 +3058,6 @@ class Repository(ABC):
                 backwards compatibility with the single-wallet
                 template path.
 
-            current_truth: Whether the caller requested NO horizon, exempting
-                the manifest fold from the settling margin.
 
         Returns:
             Execution dicts ordered by timestamp ASC for replay,
@@ -3142,7 +3179,7 @@ class Repository(ABC):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefix:
         """Capture and replay an exact execution prefix for a P&L scope.
 
@@ -3161,9 +3198,8 @@ class Repository(ABC):
         self,
         wallet_public_id: str,
         mode: str,
-        request_as_of: datetime,
+        request_as_of: datetime | None,
         activation_as_of: datetime,
-        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return independently proven request and activation prefix cuts.
 
@@ -3178,7 +3214,7 @@ class Repository(ABC):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         since_scope_sequence: int | None = None,
     ) -> list[PnlTimelineExecutionRow]:
         """Retrieve a scope's executions for P&L timeline reconstruction.
@@ -3670,9 +3706,8 @@ class Repository(ABC):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         execution_prefix: PnlTimelineExecutionPrefix | None = None,
-        current_truth: bool = False,
     ) -> bool:
         """Compare sealed venue and execution prefixes for one P&L scope.
 
@@ -3682,8 +3717,6 @@ class Repository(ABC):
             as_of: Knowledge horizon for both append-only ledgers.
             execution_prefix: Optional already sealed and validated scope
                 execution evidence for the same horizon.
-            current_truth: Whether the caller requested NO horizon, exempting
-                the manifest fold from the settling margin.
 
         Returns:
             True unless every recorded and consumed shard quantity agrees.
@@ -10868,11 +10901,10 @@ class SQLAlchemyRepository(Repository):
 
     async def get_executions_for_recovery(
         self,
-        as_of: datetime,
+        as_of: datetime | None,
         exchange: str | None = None,
         instrument: str | None = None,
         wallet_public_id: str = "",
-        current_truth: bool = False,
     ) -> list[ExecutionRow]:
         """Retrieve all EFFECTIVE executions for startup state reconstruction.
 
@@ -10895,13 +10927,14 @@ class SQLAlchemyRepository(Repository):
         what recovery already does with any state it cannot certify: it
         quarantines rather than inventing.
         """
+        horizon = _resolved_knowledge_horizon(as_of)
+        as_of = horizon.as_of
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
             annulled = await self._validated_execution_annulment_exclusions(
                 s,
-                as_of,
+                horizon,
                 wallet_public_id,
-                current_truth,
             )
             query = (
                 select(Execution, Order, Instrument, Symbol)
@@ -11423,12 +11456,15 @@ class SQLAlchemyRepository(Repository):
         evidence: PortfolioPnlAnchorWriteEvidence,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Reload both derivation cuts inside an already fenced transaction."""
+        requested = evidence["requested_as_of"] is not None
         request = await self._load_pnl_timeline_execution_prefix_snapshot(
             s,
             evidence["wallet_public_id"],
             evidence["mode"],
-            evidence["request_as_of"],
-            evidence["current_truth"],
+            _ExecutionKnowledgeHorizon(
+                as_of=evidence["request_as_of"],
+                requested=requested,
+            ),
         )
         if evidence["activation_as_of"] == evidence["request_as_of"]:
             activation = request
@@ -11437,8 +11473,10 @@ class SQLAlchemyRepository(Repository):
                 s,
                 evidence["wallet_public_id"],
                 evidence["mode"],
-                evidence["activation_as_of"],
-                evidence["current_truth"],
+                _ExecutionKnowledgeHorizon(
+                    as_of=evidence["activation_as_of"],
+                    requested=requested,
+                ),
             )
         return {"request": request, "activation": activation}
 
@@ -11499,9 +11537,11 @@ class SQLAlchemyRepository(Repository):
                     _PnlTimelineScopeGapRequest(
                         wallet_public_id=evidence["wallet_public_id"],
                         mode=evidence["mode"],
-                        as_of=evidence["activation_as_of"],
+                        horizon=_ExecutionKnowledgeHorizon(
+                            as_of=evidence["activation_as_of"],
+                            requested=evidence["requested_as_of"] is not None,
+                        ),
                         execution_prefix=current_bundle["activation"],
-                        current_truth=evidence["current_truth"],
                     ),
                 ):
                     raise PnlTimelineAnchorEvidenceMismatchError(
@@ -14972,8 +15012,7 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool,
+        horizon: _ExecutionKnowledgeHorizon,
     ) -> list[ExecutionAnnulment]:
         """Read the corrections one knowledge horizon is entitled to know about.
 
@@ -15000,9 +15039,7 @@ class SQLAlchemyRepository(Repository):
             s: The session running the certification snapshot.
             wallet_public_id: Wallet identity of the certification scope.
             mode: Trading mode of the certification scope.
-            as_of: Knowledge horizon the corrections must already be known at.
-            current_truth: Whether the caller requested NO horizon, exempting
-                this fold from the settling margin.
+            horizon: The resolved knowledge horizon this read answers for.
 
         Returns:
             The known manifest rows in ``(exchange, scope_sequence)`` order.
@@ -15012,7 +15049,7 @@ class SQLAlchemyRepository(Repository):
             .where(
                 ExecutionAnnulment.wallet_public_id == wallet_public_id,
                 ExecutionAnnulment.mode == mode,
-                *execution_annulment_knowledge_filters(as_of, current_truth),
+                *execution_annulment_knowledge_filters(horizon),
             )
             .order_by(
                 ExecutionAnnulment.exchange.asc(),
@@ -15122,9 +15159,8 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     async def _validated_execution_annulment_exclusions(
         s: AsyncSession,
-        as_of: datetime,
+        horizon: _ExecutionKnowledgeHorizon,
         wallet_public_id: str,
-        current_truth: bool,
     ) -> frozenset[str]:
         """Prove the whole known manifest, then return what it repudiates.
 
@@ -15151,11 +15187,9 @@ class SQLAlchemyRepository(Repository):
 
         Args:
             s: The session running the read.
-            as_of: Knowledge horizon the corrections must already be known at.
+            horizon: The resolved knowledge horizon this read answers for.
             wallet_public_id: Wallet to narrow the manifest to, or ``""`` for
                 every wallet, mirroring the recovery read's own scoping.
-            current_truth: Whether the caller requested NO horizon, exempting
-                this fold from the settling margin.
 
         Returns:
             The immutable identities of every provably repudiated execution.
@@ -15165,9 +15199,7 @@ class SQLAlchemyRepository(Repository):
                 scope-crossed, duplicated, digest-mismatched, or contradicted by
                 a durable fill witness.
         """
-        filters: list[ColumnElement[bool]] = list(
-            execution_annulment_knowledge_filters(as_of, current_truth)
-        )
+        filters: list[ColumnElement[bool]] = list(execution_annulment_knowledge_filters(horizon))
         if wallet_public_id:
             filters.append(ExecutionAnnulment.wallet_public_id == wallet_public_id)
         annulment_rows = list(
@@ -15214,8 +15246,7 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool,
+        horizon: _ExecutionKnowledgeHorizon,
     ) -> PnlTimelineExecutionPrefix:
         """Capture, prove, and fold one exact effective execution-prefix snapshot."""
         captured_rows = (
@@ -15227,7 +15258,7 @@ class SQLAlchemyRepository(Repository):
                 .where(
                     Execution.wallet_public_id == wallet_public_id,
                     Execution.mode == mode,
-                    Execution.timestamp <= as_of,
+                    Execution.timestamp <= horizon.as_of,
                 )
                 .group_by(Execution.exchange)
                 .order_by(Execution.exchange.asc())
@@ -15254,7 +15285,7 @@ class SQLAlchemyRepository(Repository):
         fill_rows = await self._read_pnl_timeline_fill_lineage(
             s,
             client_order_ids,
-            as_of,
+            horizon.as_of,
         )
         order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
             s,
@@ -15277,8 +15308,7 @@ class SQLAlchemyRepository(Repository):
             s,
             wallet_public_id,
             mode,
-            as_of,
-            current_truth,
+            horizon,
         )
         annulment_witnesses = await self._read_execution_annulment_contradiction_witnesses(
             s,
@@ -15307,8 +15337,7 @@ class SQLAlchemyRepository(Repository):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
-        current_truth: bool = False,
+        as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefix:
         """Capture watermarks first, then certify each range's effective history.
 
@@ -15344,8 +15373,7 @@ class SQLAlchemyRepository(Repository):
                 s,
                 wallet_public_id,
                 mode,
-                as_of,
-                current_truth,
+                _resolved_knowledge_horizon(as_of),
             )
 
     async def _begin_effective_execution_snapshot(self, s: AsyncSession) -> None:
@@ -15382,36 +15410,40 @@ class SQLAlchemyRepository(Repository):
         self,
         wallet_public_id: str,
         mode: str,
-        request_as_of: datetime,
+        request_as_of: datetime | None,
         activation_as_of: datetime,
-        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return request and activation cuts with independent identity proof.
 
-        ``current_truth`` states that NO horizon was requested, so the manifest
-        fold answers for whatever is durable now; see
-        :func:`execution_annulment_knowledge_filters`. It applies to BOTH cuts:
-        an activation instant derived from an unrequested present is itself
-        unrequested.
+        ``request_as_of=None`` states that NO horizon was requested, so the
+        manifest fold answers for whatever is durable now; see
+        :func:`execution_annulment_knowledge_filters`. It governs BOTH cuts,
+        because an activation instant DERIVED from an unrequested present is
+        itself unrequested — the activation cut is never a horizon a caller
+        named, it is a minute the service computed from the same present the
+        request took. Passing an instant here instead makes both cuts
+        historical, and both then require durability observations.
         """
+        request_horizon = _resolved_knowledge_horizon(request_as_of)
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
             request = await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 wallet_public_id,
                 mode,
-                request_as_of,
-                current_truth,
+                request_horizon,
             )
-            if activation_as_of == request_as_of:
+            if activation_as_of == request_horizon.as_of:
                 activation = request
             else:
                 activation = await self._load_pnl_timeline_execution_prefix_snapshot(
                     s,
                     wallet_public_id,
                     mode,
-                    activation_as_of,
-                    current_truth,
+                    _ExecutionKnowledgeHorizon(
+                        as_of=activation_as_of,
+                        requested=request_horizon.requested,
+                    ),
                 )
         return {"request": request, "activation": activation}
 
@@ -15419,9 +15451,8 @@ class SQLAlchemyRepository(Repository):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         since_scope_sequence: int | None = None,
-        current_truth: bool = False,
     ) -> list[PnlTimelineExecutionRow]:
         """Retrieve a scope's EFFECTIVE executions for P&L timeline reconstruction.
 
@@ -15430,6 +15461,9 @@ class SQLAlchemyRepository(Repository):
         trip. A direct timestamp filter is unsound because clock skew can remove
         a lower sequence while retaining a higher one. Sentinel-active Order
         supplies immutable instrument lineage without imposing its own clock.
+
+        ``as_of=None`` means no horizon was requested and the repository
+        captures the present; any supplied instant is historical.
 
         ECONOMIC plane, and self-sufficient about it. Annulled bookings are
         excluded through :meth:`_validated_execution_annulment_exclusions` — the
@@ -15457,8 +15491,6 @@ class SQLAlchemyRepository(Repository):
                 to decide which corrections are already known.
             since_scope_sequence: Optional exclusive ``scope_sequence`` lower
                 bound applied uniformly across exchanges.
-            current_truth: Whether the caller requested NO horizon, exempting
-                the manifest fold from the settling margin.
 
         Returns:
             Effective execution rows ordered by ``(exchange, scope_sequence)``.
@@ -15467,6 +15499,7 @@ class SQLAlchemyRepository(Repository):
             ExecutionChainError: If any correction known at ``as_of`` cannot be
                 proven against the ledger it claims to correct.
         """
+        horizon = _resolved_knowledge_horizon(as_of)
         watermark_map = (
             select(
                 Execution.exchange.label("exchange"),
@@ -15476,7 +15509,7 @@ class SQLAlchemyRepository(Repository):
                 Execution.wallet_public_id == wallet_public_id,
                 Execution.mode == mode,
                 Execution.known_to == KNOWN_TO_MAX,
-                Execution.timestamp <= as_of,
+                Execution.timestamp <= horizon.as_of,
             )
             .group_by(Execution.exchange)
             .subquery()
@@ -15485,9 +15518,8 @@ class SQLAlchemyRepository(Repository):
             await self._begin_effective_execution_snapshot(s)
             annulled = await self._validated_execution_annulment_exclusions(
                 s,
-                as_of,
+                horizon,
                 wallet_public_id,
-                current_truth,
             )
             query = (
                 select(Execution, Order.instrument_public_id)
@@ -16420,7 +16452,7 @@ class SQLAlchemyRepository(Repository):
             s,
             wallet_public_id,
             request.mode,
-            request.as_of,
+            request.horizon.as_of,
         )
         try:
             recorded_totals = self._pnl_timeline_quantity_totals_by_shard(
@@ -16431,8 +16463,7 @@ class SQLAlchemyRepository(Repository):
                     s,
                     wallet_public_id,
                     request.mode,
-                    request.as_of,
-                    request.current_truth,
+                    request.horizon,
                 )
                 if request.execution_prefix is None
                 else request.execution_prefix
@@ -16453,9 +16484,8 @@ class SQLAlchemyRepository(Repository):
         self,
         wallet_public_id: str,
         mode: str,
-        as_of: datetime,
+        as_of: datetime | None,
         execution_prefix: PnlTimelineExecutionPrefix | None = None,
-        current_truth: bool = False,
     ) -> bool:
         """Compare every sealed venue shard with one exact execution prefix.
 
@@ -16472,8 +16502,6 @@ class SQLAlchemyRepository(Repository):
             as_of: Knowledge horizon for both append-only ledgers.
             execution_prefix: Optional already sealed and validated scope
                 execution evidence for the same horizon.
-            current_truth: Whether the caller requested NO horizon, exempting
-                the manifest fold from the settling margin.
 
         Returns:
             True unless every recorded and consumed shard quantity agrees
@@ -16486,9 +16514,8 @@ class SQLAlchemyRepository(Repository):
                 _PnlTimelineScopeGapRequest(
                     wallet_public_id=wallet_public_id,
                     mode=mode,
-                    as_of=as_of,
+                    horizon=_resolved_knowledge_horizon(as_of),
                     execution_prefix=execution_prefix,
-                    current_truth=current_truth,
                 ),
             )
 
@@ -22031,8 +22058,6 @@ class SQLAlchemyRepository(Repository):
                     wallet_public_id=wallet_public_id,
                     exchange=exchange,
                     mode=mode,
-                    as_of=as_of,
-                    current_truth=True,
                     anchor_watermark=anchor_watermark,
                     boundary_watermark=boundary_watermark,
                     replay=replay,
@@ -22217,10 +22242,7 @@ class SQLAlchemyRepository(Repository):
                         ExecutionAnnulment.wallet_public_id == request.wallet_public_id,
                         ExecutionAnnulment.exchange == request.exchange,
                         ExecutionAnnulment.mode == request.mode,
-                        *execution_annulment_knowledge_filters(
-                            request.as_of,
-                            request.current_truth,
-                        ),
+                        *execution_annulment_knowledge_filters(_resolved_knowledge_horizon(None)),
                     )
                     .order_by(ExecutionAnnulment.scope_sequence.asc())
                 )

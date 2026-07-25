@@ -382,10 +382,14 @@ class _ResolvedPnlAnchor:
 class _AnchorScope:
     """Canonical activation scope and the exact evidence horizons it uses.
 
-    ``current_truth`` records whether those horizons were REQUESTED or simply
-    taken as the present, which is what decides how far the annulment manifest
-    is allowed to be folded; it travels with the horizons rather than beside
-    them so no derivation can use one without the other.
+    ``requested_horizon`` is the caller's ORIGINAL horizon argument, and it is
+    the exact value handed to every repository read: ``None`` when no horizon
+    was requested, otherwise the instant that was. ``knowledge_horizon`` is the
+    resolved instant everything else (candles, FX, accruals) needs, so the
+    invariant every constructor establishes is ``requested_horizon in (None,
+    knowledge_horizon)``. Carrying the nullable instant rather than a flag
+    beside it is what keeps "a past horizon exempt from the durability proof"
+    unspellable on the way down to the repository.
     """
 
     wallet_public_id: str
@@ -393,7 +397,7 @@ class _AnchorScope:
     valuation_ccy: str
     activation_time: datetime
     knowledge_horizon: datetime
-    current_truth: bool
+    requested_horizon: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1802,7 +1806,7 @@ async def _scope_has_fill_gap(
     repo: Repository,
     wallet_public_id: str,
     mode: str,
-    as_of: datetime,
+    as_of: datetime | None,
     execution_prefix: PnlTimelineExecutionPrefix,
 ) -> PnlIncompletenessReasonEntry | None:
     """Consult one bounded durable gap analysis for the complete scope.
@@ -1817,7 +1821,11 @@ async def _scope_has_fill_gap(
         repo: Repository providing one scope-level historical gap analysis.
         wallet_public_id: Full wallet scope.
         mode: Trading mode scope.
-        as_of: Temporal anchor for consumed execution evidence.
+        as_of: Temporal anchor bounding the consumed execution evidence.
+            Both call sites ALWAYS supply the sealed prefix, so this read never
+            folds the manifest itself and the instant is used purely to bound
+            the venue-shard read — which is why the activation analysis passes
+            the activation instant rather than the request horizon.
         execution_prefix: Already sealed execution evidence reused by replay.
 
     Returns:
@@ -3451,7 +3459,7 @@ def _validated_anchor_scope(scope: _AnchorScope) -> _AnchorScope:
         valuation_ccy=valuation_ccy,
         activation_time=scope.activation_time,
         knowledge_horizon=scope.knowledge_horizon,
-        current_truth=scope.current_truth,
+        requested_horizon=scope.requested_horizon,
     )
 
 
@@ -3466,9 +3474,8 @@ class _ExecutionPrefixRequest:
 
     wallet_public_id: str
     mode: str
-    request_as_of: datetime
+    request_as_of: datetime | None
     activation_as_of: datetime
-    current_truth: bool
 
 
 async def _load_execution_prefix_bundle(
@@ -3481,7 +3488,6 @@ async def _load_execution_prefix_bundle(
         request.mode,
         request.request_as_of,
         request.activation_as_of,
-        request.current_truth,
     )
 
 
@@ -3496,9 +3502,8 @@ async def _load_anchor_execution_prefix_bundle(
             _ExecutionPrefixRequest(
                 wallet_public_id=scope.wallet_public_id,
                 mode=scope.mode,
-                request_as_of=scope.knowledge_horizon,
+                request_as_of=scope.requested_horizon,
                 activation_as_of=scope.activation_time,
-                current_truth=scope.current_truth,
             ),
         )
     except Exception as exc:
@@ -3544,7 +3549,7 @@ async def _record_anchor_candidate(
         mode=cast(Literal["live", "paper"], scope.mode),
         request_as_of=scope.knowledge_horizon,
         activation_as_of=scope.activation_time,
-        current_truth=scope.current_truth,
+        requested_as_of=scope.requested_horizon,
         execution_prefix_bundle=execution_prefix_bundle,
     )
     try:
@@ -3599,7 +3604,7 @@ async def ensure_wallet_pnl_anchor(
             valuation_ccy=valuation_ccy,
             activation_time=activation_time,
             knowledge_horizon=knowledge_horizon,
-            current_truth=False,
+            requested_horizon=knowledge_horizon,
         )
     )
     existing = await repo.get_portfolio_pnl_anchor(
@@ -3792,9 +3797,8 @@ async def _load_series_replay_inputs(
             _ExecutionPrefixRequest(
                 wallet_public_id=wallet_public_id,
                 mode=mode,
-                request_as_of=as_of,
+                request_as_of=scope.requested_horizon,
                 activation_as_of=as_of,
-                current_truth=scope.current_truth,
             ),
         )
         if execution_prefix_bundle is None
@@ -4156,7 +4160,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy=valuation_ccy,
                 activation_time=as_of.replace(second=0, microsecond=0),
                 knowledge_horizon=as_of,
-                current_truth=policy.current_truth_horizon,
+                requested_horizon=None if policy.current_truth_horizon else as_of,
             ),
             allow_anchor_creation=policy.allow_anchor_creation,
             preloaded_evidence=options.preloaded_evidence,
@@ -4529,7 +4533,7 @@ async def build_wallet_pnl_timeline(
             valuation_ccy=valuation_ccy,
             activation_time=as_of.replace(second=0, microsecond=0),
             knowledge_horizon=as_of,
-            current_truth=policy.current_truth_horizon,
+            requested_horizon=None if policy.current_truth_horizon else as_of,
         )
     )
     visible_anchor = await repo.get_portfolio_pnl_anchor(
@@ -4546,9 +4550,8 @@ async def build_wallet_pnl_timeline(
             _ExecutionPrefixRequest(
                 wallet_public_id=scope.wallet_public_id,
                 mode=scope.mode,
-                request_as_of=scope.knowledge_horizon,
+                request_as_of=scope.requested_horizon,
                 activation_as_of=scope.knowledge_horizon,
-                current_truth=scope.current_truth,
             ),
         )
     )
