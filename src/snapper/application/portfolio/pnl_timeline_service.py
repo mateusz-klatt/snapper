@@ -43,6 +43,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from types import MappingProxyType
@@ -382,14 +383,18 @@ class _ResolvedPnlAnchor:
 class _AnchorScope:
     """Canonical activation scope and the exact evidence horizons it uses.
 
-    ``requested_horizon`` is the caller's ORIGINAL horizon argument, and it is
-    the exact value handed to every repository read: ``None`` when no horizon
-    was requested, otherwise the instant that was. ``knowledge_horizon`` is the
-    resolved instant everything else (candles, FX, accruals) needs, so the
-    invariant every constructor establishes is ``requested_horizon in (None,
-    knowledge_horizon)``. Carrying the nullable instant rather than a flag
-    beside it is what keeps "a past horizon exempt from the durability proof"
-    unspellable on the way down to the repository.
+    ``requested_horizon`` and ``requested_activation_horizon`` are the caller's
+    ORIGINAL arguments for the two cuts, and they are the exact values handed to
+    every repository read: ``None`` when no horizon was requested for that cut,
+    otherwise the instant that was. ``knowledge_horizon`` and ``activation_time``
+    are the resolved instants everything else (candles, FX, accruals, the anchor
+    row's own timestamps) needs, so the invariant every constructor establishes
+    is that each requested field is either ``None`` or exactly its resolved
+    partner. Carrying nullable instants rather than flags beside them is what
+    keeps "a past horizon exempt from the durability proof" unspellable on the
+    way down to the repository — for the activation cut as much as the request
+    cut, since an anchor's activation instant is derived from the present rather
+    than named whenever the read itself was.
     """
 
     wallet_public_id: str
@@ -398,6 +403,7 @@ class _AnchorScope:
     activation_time: datetime
     knowledge_horizon: datetime
     requested_horizon: datetime | None
+    requested_activation_horizon: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3460,6 +3466,7 @@ def _validated_anchor_scope(scope: _AnchorScope) -> _AnchorScope:
         activation_time=scope.activation_time,
         knowledge_horizon=scope.knowledge_horizon,
         requested_horizon=scope.requested_horizon,
+        requested_activation_horizon=scope.requested_activation_horizon,
     )
 
 
@@ -3475,7 +3482,7 @@ class _ExecutionPrefixRequest:
     wallet_public_id: str
     mode: str
     request_as_of: datetime | None
-    activation_as_of: datetime
+    activation_as_of: datetime | None
 
 
 async def _load_execution_prefix_bundle(
@@ -3503,7 +3510,7 @@ async def _load_anchor_execution_prefix_bundle(
                 wallet_public_id=scope.wallet_public_id,
                 mode=scope.mode,
                 request_as_of=scope.requested_horizon,
-                activation_as_of=scope.activation_time,
+                activation_as_of=scope.requested_activation_horizon,
             ),
         )
     except Exception as exc:
@@ -3524,7 +3531,19 @@ async def _record_anchor_candidate(
     fails the write exactly as a late execution does. The candidate's opening
     audit records the same corrections, so the permanent anchor states which
     ones its opening folded.
+
+    The scope is re-pinned to the instants the REPOSITORY resolved before
+    anything is derived. When no horizon was requested the repository captures
+    the present and derives the activation minute from it, so those instants —
+    not the service's own clock reading — are the ones the prefixes were
+    actually cut at, and an anchor whose ``point_time`` disagreed with the cut
+    its opening folded would be describing evidence it does not have.
     """
+    scope = replace(
+        scope,
+        knowledge_horizon=execution_prefix_bundle["request_as_of"],
+        activation_time=execution_prefix_bundle["activation_as_of"],
+    )
     request_watermarks = execution_prefix_bundle["request"]["watermarks"]
     activation_prefix = execution_prefix_bundle["activation"]
     activation_watermarks = activation_prefix["watermarks"]
@@ -3547,9 +3566,8 @@ async def _record_anchor_candidate(
     evidence = PortfolioPnlAnchorWriteEvidence(
         wallet_public_id=scope.wallet_public_id,
         mode=cast(Literal["live", "paper"], scope.mode),
-        request_as_of=scope.knowledge_horizon,
-        activation_as_of=scope.activation_time,
         requested_as_of=scope.requested_horizon,
+        requested_activation_as_of=scope.requested_activation_horizon,
         execution_prefix_bundle=execution_prefix_bundle,
     )
     try:
@@ -3605,6 +3623,7 @@ async def ensure_wallet_pnl_anchor(
             activation_time=activation_time,
             knowledge_horizon=knowledge_horizon,
             requested_horizon=knowledge_horizon,
+            requested_activation_horizon=activation_time,
         )
     )
     existing = await repo.get_portfolio_pnl_anchor(
@@ -3798,7 +3817,7 @@ async def _load_series_replay_inputs(
                 wallet_public_id=wallet_public_id,
                 mode=mode,
                 request_as_of=scope.requested_horizon,
-                activation_as_of=as_of,
+                activation_as_of=scope.requested_horizon,
             ),
         )
         if execution_prefix_bundle is None
@@ -4161,6 +4180,9 @@ async def build_wallet_pnl_series(
                 activation_time=as_of.replace(second=0, microsecond=0),
                 knowledge_horizon=as_of,
                 requested_horizon=None if policy.current_truth_horizon else as_of,
+                requested_activation_horizon=(
+                    None if policy.current_truth_horizon else as_of.replace(second=0, microsecond=0)
+                ),
             ),
             allow_anchor_creation=policy.allow_anchor_creation,
             preloaded_evidence=options.preloaded_evidence,
@@ -4534,6 +4556,9 @@ async def build_wallet_pnl_timeline(
             activation_time=as_of.replace(second=0, microsecond=0),
             knowledge_horizon=as_of,
             requested_horizon=None if policy.current_truth_horizon else as_of,
+            requested_activation_horizon=(
+                None if policy.current_truth_horizon else as_of.replace(second=0, microsecond=0)
+            ),
         )
     )
     visible_anchor = await repo.get_portfolio_pnl_anchor(
@@ -4551,7 +4576,7 @@ async def build_wallet_pnl_timeline(
                 wallet_public_id=scope.wallet_public_id,
                 mode=scope.mode,
                 request_as_of=scope.requested_horizon,
-                activation_as_of=scope.knowledge_horizon,
+                activation_as_of=scope.requested_horizon,
             ),
         )
     )

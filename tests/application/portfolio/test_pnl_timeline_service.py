@@ -585,6 +585,7 @@ class FakeRepo:
         self._execution_watermarks = execution_watermarks
         self._applied_annulments: list[PnlTimelineAppliedAnnulment] = []
         self._annulments_known_from = _EMPTY_ANCHOR_T0
+        self._captured_present = _T0
         self._samples: list[PortfolioPnlSampleRow] = []
         self.sample_calls: list[tuple[PortfolioPnlSampleQuery, datetime, datetime, str | None]] = []
         self.atomic_anchor_error: Exception | None = None
@@ -737,27 +738,40 @@ class FakeRepo:
         wallet_public_id: str,
         mode: str,
         request_as_of: datetime | None,
-        activation_as_of: datetime,
+        activation_as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefixBundle:
-        """Return independently captured request and activation snapshots."""
-        request_as_of = activation_as_of if request_as_of is None else request_as_of
-        self.execution_calls.append((wallet_public_id, mode, request_as_of))
+        """Return independently captured request and activation snapshots.
+
+        Mirrors the repository's own resolution so a test that requests NO
+        horizon exercises the same derivation the production read performs:
+        ``None`` for the request cut captures a present, and ``None`` for the
+        activation cut is that present's own minute.
+        """
+        resolved_request = self._captured_present if request_as_of is None else request_as_of
+        resolved_activation = (
+            resolved_request.replace(second=0, microsecond=0)
+            if activation_as_of is None
+            else activation_as_of
+        )
+        self.execution_calls.append((wallet_public_id, mode, resolved_request))
         self.execution_bundle_calls.append(
-            (wallet_public_id, mode, request_as_of, activation_as_of)
+            (wallet_public_id, mode, resolved_request, resolved_activation)
         )
         if self._execution_prefix_error is not None:
             raise self._execution_prefix_error
         bundle = PnlTimelineExecutionPrefixBundle(
-            request=self._execution_prefix_at(request_as_of),
-            activation=self._execution_prefix_at(activation_as_of),
+            request=self._execution_prefix_at(resolved_request),
+            activation=self._execution_prefix_at(resolved_activation),
+            request_as_of=resolved_request,
+            activation_as_of=resolved_activation,
         )
         self._validate_exact_fill_witnesses(
             bundle["activation"],
-            activation_as_of,
+            resolved_activation,
         )
         self._validate_exact_fill_witnesses(
             bundle["request"],
-            request_as_of,
+            resolved_request,
         )
         self.execution_prefixes.append(bundle["request"])
         self.execution_prefix_bundles.append(bundle)
@@ -4558,6 +4572,8 @@ class TestDurableActivationAnchor:
                 executions=[],
                 annulments=[],
             ),
+            request_as_of=_T0,
+            activation_as_of=_T0,
         )
 
         async def load_bundle(
@@ -4601,6 +4617,8 @@ class TestDurableActivationAnchor:
                 executions=[],
                 annulments=[],
             ),
+            request_as_of=_T0,
+            activation_as_of=_T0,
         )
 
         async def load_bundle(
@@ -4652,8 +4670,8 @@ class TestDurableActivationAnchor:
         evidence = repo.anchor_write_evidence[0]
         assert evidence["wallet_public_id"] == _W1
         assert evidence["mode"] == "live"
-        assert evidence["request_as_of"] == _m(2)
-        assert evidence["activation_as_of"] == _m(1)
+        assert evidence["requested_as_of"] == _m(2)
+        assert evidence["requested_activation_as_of"] == _m(1)
         assert evidence["execution_prefix_bundle"] is repo.execution_prefix_bundles[0]
 
     async def test_wallet_uuid_aliases_create_and_reuse_one_anchor(self) -> None:

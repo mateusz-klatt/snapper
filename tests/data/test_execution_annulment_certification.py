@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TypedDict
 from typing import Unpack
 from typing import cast
+from typing import get_type_hints
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
@@ -53,6 +54,7 @@ from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository_types import ExecutionAnnulmentRequest
 from snapper.data.repository_types import ExecutionAnnulmentRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
 _USER = "0000face-0000-7000-8000-0000000000d1"
@@ -1580,10 +1582,85 @@ def test_the_repository_api_cannot_express_an_exempt_historical_horizon(
         unrepresentable rather than merely undocumented.
     """
     signature = inspect.signature(getattr(Repository, method_name))
+    horizons = [name for name in signature.parameters if name.endswith("as_of")]
 
     assert "current_truth" not in signature.parameters
-    horizon = signature.parameters["request_as_of" if method_name.endswith("bundle") else "as_of"]
-    assert horizon.annotation == datetime | None
+    assert horizons
+    for name in horizons:
+        assert signature.parameters[name].annotation == datetime | None, name
+
+
+def test_the_anchor_write_evidence_carries_only_nullable_horizon_intents() -> None:
+    """The evidence type cannot express an instant paired with a claimed exemption.
+
+    Given: The anchor write-evidence contract.
+    When: Its horizon-bearing fields are inspected.
+    Then: Every one is a nullable intent, and no RESOLVED instant appears at all
+        — those live solely on the bundle the repository produced. There is
+        therefore no second copy of an instant for a caller to disagree with,
+        which is what makes an inconsistent pair unrepresentable rather than
+        merely rejected.
+    """
+    annotations = get_type_hints(PortfolioPnlAnchorWriteEvidence)
+    horizons = {name for name in annotations if name.endswith("as_of")}
+
+    assert horizons == {"requested_as_of", "requested_activation_as_of"}
+    for name in horizons:
+        assert annotations[name] == datetime | None, name
+
+
+async def test_a_supplied_activation_cut_never_folds_an_unobserved_correction(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The second cut cannot be handed an exempt past either.
+
+    Given: A correction with NO durability observation targeting a
+        pre-activation execution, and a bundle read with NO requested horizon
+        but an explicitly SUPPLIED historical activation instant — the exact
+        shape that previously rebuilt the forbidden pairing on the second cut.
+    When: The bundle is loaded.
+    Then: The activation cut refuses, because a supplied instant is a past cut
+        the caller chose and requires the observation, while the request cut
+        would have folded it. Exemption and internal derivation are the same
+        act, so naming the activation instant forfeits the exemption for it.
+    """
+    await _store_bound_manifest_row(repository)
+
+    with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
+        await repository.get_pnl_timeline_execution_prefix_bundle(
+            _MAIN_WALLET,
+            "live",
+            None,
+            datetime.now(UTC) - timedelta(hours=1),
+        )
+
+
+async def test_a_derived_activation_cut_reports_the_minute_it_used(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A derived activation cut is the captured present's own minute, echoed back.
+
+    Given: A correction with no observation and a bundle read requesting NO
+        horizon for either cut.
+    When: The bundle is loaded.
+    Then: Both cuts fold the correction — both instants are the repository's own
+        — and the activation instant it reports is that captured present
+        truncated to its minute. Echoing it is what lets an anchor's frozen
+        ``point_time`` be exactly the cut its opening folded, instead of a
+        second clock reading that could straddle a minute boundary.
+    """
+    await _store_bound_manifest_row(repository)
+
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _MAIN_WALLET,
+        "live",
+        None,
+        None,
+    )
+
+    assert bundle["activation_as_of"] == bundle["request_as_of"].replace(second=0, microsecond=0)
+    assert [row["public_id"] for row in bundle["request"]["executions"]] == [_WALUTOMAT_TRADE]
+    assert [row["public_id"] for row in bundle["activation"]["executions"]] == [_WALUTOMAT_TRADE]
 
 
 async def test_a_captured_present_horizon_folds_without_any_observation(

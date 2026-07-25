@@ -436,10 +436,19 @@ class PnlTimelineExecutionPrefixBundle(TypedDict):
     at the lazy anchor cut. Keeping both snapshots explicit prevents callers
     from manufacturing an activation proof by timestamp-pruning a later
     request prefix.
+
+    ``request_as_of`` and ``activation_as_of`` are the instants the repository
+    ACTUALLY used, echoed back because either may have been derived internally
+    from a captured present rather than supplied. They are the single source of
+    those instants for everything downstream — the anchor row's timestamps, and
+    the writer's fenced re-read — so no consumer can pair a resolved instant it
+    invented with an exemption it claimed.
     """
 
     request: PnlTimelineExecutionPrefix
     activation: PnlTimelineExecutionPrefix
+    request_as_of: datetime
+    activation_as_of: datetime
 
 
 class ExecutionAnnulmentRequest(TypedDict):
@@ -567,25 +576,26 @@ class PortfolioPnlAnchorRow(TypedDict):
 class PortfolioPnlAnchorWriteEvidence(TypedDict):
     """Frozen derivation cuts revalidated by the atomic anchor writer.
 
-    ``requested_as_of`` is the caller's ORIGINAL horizon argument: ``None`` when
-    no horizon was requested, otherwise the exact instant that was. The writer's
-    fenced re-read must reproduce the candidate's evidence exactly, and the
-    annulment manifest is narrowed differently for a requested horizon than for
-    the present — so re-reading under the other reading would manufacture a
-    spurious evidence mismatch out of nothing.
+    The two horizon fields are the caller's ORIGINAL arguments — ``None`` when
+    no horizon was requested for that cut, otherwise the exact instant that was.
+    The writer's fenced re-read must reproduce the candidate's evidence exactly,
+    and the annulment manifest is narrowed differently for a requested horizon
+    than for a captured present, so re-reading under the other reading would
+    manufacture a spurious evidence mismatch out of nothing.
 
-    It is carried as the nullable instant rather than as a flag beside
-    ``request_as_of`` so the pair cannot disagree: the writer refuses evidence
-    whose ``requested_as_of`` is neither ``None`` nor exactly ``request_as_of``,
-    which leaves no way to claim the current-truth reading for a horizon that
+    The RESOLVED instants are deliberately absent: they live only on
+    ``execution_prefix_bundle``, which the repository produced. That is what
+    makes an inconsistent pair unrepresentable — there is no second copy of an
+    instant for a caller to disagree with, and the writer validates that each
+    nullable intent is either ``None`` or exactly the instant the bundle
+    reports, so the current-truth reading cannot be claimed for a horizon that
     was in fact named.
     """
 
     wallet_public_id: str
     mode: Literal["live", "paper"]
-    request_as_of: datetime
-    activation_as_of: datetime
     requested_as_of: datetime | None
+    requested_activation_as_of: datetime | None
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 

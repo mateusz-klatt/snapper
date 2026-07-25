@@ -3199,7 +3199,7 @@ class Repository(ABC):
         wallet_public_id: str,
         mode: str,
         request_as_of: datetime | None,
-        activation_as_of: datetime,
+        activation_as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return independently proven request and activation prefix cuts.
 
@@ -11353,17 +11353,36 @@ class SQLAlchemyRepository(Repository):
         anchor: PortfolioPnlAnchorRow,
         evidence: PortfolioPnlAnchorWriteEvidence,
     ) -> None:
-        """Refuse evidence whose scope, cuts, or activation relation is invalid."""
+        """Refuse evidence whose scope, cuts, intents, or activation relation is invalid.
+
+        The resolved instants come from the BUNDLE — the value the repository
+        itself produced — and the evidence's own two fields carry only the
+        caller's nullable intents. Each is checked to be either ``None`` or
+        exactly the instant the bundle reports for that cut, so evidence can
+        neither claim the current-truth reading for a horizon it in fact named
+        nor name an instant its prefix was not captured at. Without this check
+        the intent fields would be decorative, and the fenced re-read would
+        happily reproduce an exemption nothing established.
+        """
         try:
             evidence_wallet = normalize_portfolio_pnl_wallet_public_id(evidence["wallet_public_id"])
             mode = evidence["mode"]
-            request_as_of = evidence["request_as_of"]
-            activation_as_of = evidence["activation_as_of"]
             bundle = evidence["execution_prefix_bundle"]
+            request_as_of = bundle["request_as_of"]
+            activation_as_of = bundle["activation_as_of"]
+            requested_as_of = evidence["requested_as_of"]
+            requested_activation_as_of = evidence["requested_activation_as_of"]
         except (KeyError, TypeError, ValueError) as exc:
             raise PnlTimelineAnchorEvidenceMismatchError(
                 "portfolio P&L anchor write evidence is malformed"
             ) from exc
+        if requested_as_of not in (None, request_as_of) or requested_activation_as_of not in (
+            None,
+            activation_as_of,
+        ):
+            raise PnlTimelineAnchorEvidenceMismatchError(
+                "portfolio P&L anchor write evidence claims a horizon its prefix was not read at"
+            )
         bundle_is_monotonic = SQLAlchemyRepository._pnl_timeline_prefix_bundle_is_monotonic(bundle)
         activation_watermarks_json = (
             json.dumps(
@@ -11455,30 +11474,46 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         evidence: PortfolioPnlAnchorWriteEvidence,
     ) -> PnlTimelineExecutionPrefixBundle:
-        """Reload both derivation cuts inside an already fenced transaction."""
-        requested = evidence["requested_as_of"] is not None
+        """Reload both derivation cuts inside an already fenced transaction.
+
+        Each cut's horizon is reconstructed from the VALIDATED pair: the instant
+        the bundle reports, and that cut's own nullable intent, which
+        :meth:`_validate_portfolio_pnl_anchor_write_evidence` has already proven
+        is either absent or exactly that instant. Nothing else the caller
+        controls can grant the exemption, and the two cuts are reconstructed
+        independently so a derived activation minute cannot inherit an
+        exemption from a requested request horizon.
+        """
+        bundle = evidence["execution_prefix_bundle"]
+        request_horizon = _ExecutionKnowledgeHorizon(
+            as_of=bundle["request_as_of"],
+            requested=evidence["requested_as_of"] is not None,
+        )
+        activation_horizon = _ExecutionKnowledgeHorizon(
+            as_of=bundle["activation_as_of"],
+            requested=evidence["requested_activation_as_of"] is not None,
+        )
         request = await self._load_pnl_timeline_execution_prefix_snapshot(
             s,
             evidence["wallet_public_id"],
             evidence["mode"],
-            _ExecutionKnowledgeHorizon(
-                as_of=evidence["request_as_of"],
-                requested=requested,
-            ),
+            request_horizon,
         )
-        if evidence["activation_as_of"] == evidence["request_as_of"]:
+        if activation_horizon == request_horizon:
             activation = request
         else:
             activation = await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 evidence["wallet_public_id"],
                 evidence["mode"],
-                _ExecutionKnowledgeHorizon(
-                    as_of=evidence["activation_as_of"],
-                    requested=requested,
-                ),
+                activation_horizon,
             )
-        return {"request": request, "activation": activation}
+        return {
+            "request": request,
+            "activation": activation,
+            "request_as_of": request_horizon.as_of,
+            "activation_as_of": activation_horizon.as_of,
+        }
 
     async def record_portfolio_pnl_anchor_if_execution_prefix_matches(
         self,
@@ -11538,8 +11573,8 @@ class SQLAlchemyRepository(Repository):
                         wallet_public_id=evidence["wallet_public_id"],
                         mode=evidence["mode"],
                         horizon=_ExecutionKnowledgeHorizon(
-                            as_of=evidence["activation_as_of"],
-                            requested=evidence["requested_as_of"] is not None,
+                            as_of=current_bundle["activation_as_of"],
+                            requested=evidence["requested_activation_as_of"] is not None,
                         ),
                         execution_prefix=current_bundle["activation"],
                     ),
@@ -15411,20 +15446,41 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         request_as_of: datetime | None,
-        activation_as_of: datetime,
+        activation_as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return request and activation cuts with independent identity proof.
 
-        ``request_as_of=None`` states that NO horizon was requested, so the
-        manifest fold answers for whatever is durable now; see
-        :func:`execution_annulment_knowledge_filters`. It governs BOTH cuts,
-        because an activation instant DERIVED from an unrequested present is
-        itself unrequested — the activation cut is never a horizon a caller
-        named, it is a minute the service computed from the same present the
-        request took. Passing an instant here instead makes both cuts
-        historical, and both then require durability observations.
+        BOTH cuts take the same nullable discipline, and for the same reason.
+        ``None`` means no horizon was requested for that cut, so the repository
+        derives the instant itself — the request cut from the present it
+        captures, the activation cut from that same present truncated to its
+        minute — and only a horizon the repository derived is exempt from the
+        durability proof. Any SUPPLIED instant, on either cut, is by definition
+        a past cut a caller chose and always requires each correction's
+        visibility observation.
+
+        Giving the activation cut its own nullable was the closure of a real
+        hole: while it took a bare instant whose exemption followed the request
+        cut, ``(request_as_of=None, activation_as_of=<any past instant>)``
+        folded unobserved corrections into a historical activation prefix —
+        the forbidden pairing, rebuilt on the second cut. Now neither cut can
+        be handed an exempt past, because exemption and internal derivation are
+        the same act.
+
+        The resolved instants are echoed on the returned bundle, because when a
+        cut is derived the caller cannot otherwise know which instant its
+        evidence belongs to — and an anchor's ``point_time`` must be exactly
+        the activation cut its opening was folded at.
         """
         request_horizon = _resolved_knowledge_horizon(request_as_of)
+        activation_horizon = (
+            _ExecutionKnowledgeHorizon(
+                as_of=request_horizon.as_of.replace(second=0, microsecond=0),
+                requested=request_horizon.requested,
+            )
+            if activation_as_of is None
+            else _resolved_knowledge_horizon(activation_as_of)
+        )
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
             request = await self._load_pnl_timeline_execution_prefix_snapshot(
@@ -15433,19 +15489,21 @@ class SQLAlchemyRepository(Repository):
                 mode,
                 request_horizon,
             )
-            if activation_as_of == request_horizon.as_of:
+            if activation_horizon == request_horizon:
                 activation = request
             else:
                 activation = await self._load_pnl_timeline_execution_prefix_snapshot(
                     s,
                     wallet_public_id,
                     mode,
-                    _ExecutionKnowledgeHorizon(
-                        as_of=activation_as_of,
-                        requested=request_horizon.requested,
-                    ),
+                    activation_horizon,
                 )
-        return {"request": request, "activation": activation}
+        return {
+            "request": request,
+            "activation": activation,
+            "request_as_of": request_horizon.as_of,
+            "activation_as_of": activation_horizon.as_of,
+        }
 
     async def get_pnl_timeline_executions(
         self,

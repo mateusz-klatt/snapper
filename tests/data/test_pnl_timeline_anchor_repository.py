@@ -163,17 +163,22 @@ def _empty_anchor_write_evidence(
     request_as_of: datetime = _T0,
     activation_as_of: datetime = _T0,
 ) -> PortfolioPnlAnchorWriteEvidence:
-    """Build one valid empty derivation bundle for an atomic anchor write."""
+    """Build one valid empty derivation bundle for an atomic anchor write.
+
+    The RESOLVED cut instants live on the bundle the repository would have
+    produced; the evidence itself carries only the caller's nullable intents.
+    """
     empty = PnlTimelineExecutionPrefix(watermarks={}, executions=[], annulments=[])
     return PortfolioPnlAnchorWriteEvidence(
         wallet_public_id=_WALLET,
         mode="live",
-        request_as_of=request_as_of,
-        activation_as_of=activation_as_of,
-        requested_as_of=_T0,
+        requested_as_of=request_as_of,
+        requested_activation_as_of=activation_as_of,
         execution_prefix_bundle=PnlTimelineExecutionPrefixBundle(
             request=empty,
             activation=empty,
+            request_as_of=request_as_of,
+            activation_as_of=activation_as_of,
         ),
     )
 
@@ -509,6 +514,24 @@ def test_atomic_bundle_monotonicity_accepts_request_only_exchange() -> None:
     assert SQLAlchemyRepository._pnl_timeline_prefix_bundle_is_monotonic(value)
 
 
+def _atomic_bundle(runtime_evidence: dict[str, object]) -> dict[str, object]:
+    """Return the mutable bundle carrying the evidence's RESOLVED cut instants."""
+    return cast(dict[str, object], runtime_evidence["execution_prefix_bundle"])
+
+
+def _set_atomic_cut(runtime_evidence: dict[str, object], cut: str, value: object) -> None:
+    """Move one cut's resolved instant AND its matching intent together.
+
+    The intent check fires before the anchor-row comparison, so a fixture that
+    moved only the resolved instant would trip that instead of the mismatch it
+    means to exercise. Moving both keeps each case testing exactly one relation.
+    """
+    _atomic_bundle(runtime_evidence)[f"{cut}_as_of"] = value
+    runtime_evidence["requested_as_of" if cut == "request" else "requested_activation_as_of"] = (
+        value
+    )
+
+
 def _apply_atomic_scope_mismatch(
     mismatch: str,
     runtime_evidence: dict[str, object],
@@ -521,11 +544,11 @@ def _apply_atomic_scope_mismatch(
     elif mismatch == "mode":
         runtime_evidence["mode"] = "paper"
     elif mismatch == "request_type":
-        runtime_evidence["request_as_of"] = "not-a-time"
+        _set_atomic_cut(runtime_evidence, "request", "not-a-time")
     elif mismatch == "activation_type":
-        runtime_evidence["activation_as_of"] = "not-a-time"
+        _set_atomic_cut(runtime_evidence, "activation", "not-a-time")
     else:
-        runtime_evidence["request_as_of"] = _T0 + timedelta(minutes=1)
+        _set_atomic_cut(runtime_evidence, "request", _T0 + timedelta(minutes=1))
 
 
 def _apply_atomic_cut_mismatch(
@@ -535,17 +558,24 @@ def _apply_atomic_cut_mismatch(
 ) -> None:
     """Apply one activation, timezone, ordering, or bundle mismatch."""
     if mismatch == "activation_cut":
-        runtime_evidence["activation_as_of"] = _T0 - timedelta(minutes=1)
+        _set_atomic_cut(runtime_evidence, "activation", _T0 - timedelta(minutes=1))
     elif mismatch == "request_timezone":
-        runtime_evidence["request_as_of"] = _T0.astimezone(timezone(timedelta(hours=1)))
+        _set_atomic_cut(runtime_evidence, "request", _T0.astimezone(timezone(timedelta(hours=1))))
     elif mismatch == "activation_timezone":
-        runtime_evidence["activation_as_of"] = _T0.astimezone(timezone(timedelta(hours=1)))
+        _set_atomic_cut(
+            runtime_evidence, "activation", _T0.astimezone(timezone(timedelta(hours=1)))
+        )
     elif mismatch == "inverted_cuts":
         activation = _T0 + timedelta(minutes=1)
         anchor["point_time"] = activation
-        runtime_evidence["activation_as_of"] = activation
+        _set_atomic_cut(runtime_evidence, "activation", activation)
     elif mismatch == "bundle":
-        runtime_evidence["execution_prefix_bundle"] = {}
+        runtime_evidence["execution_prefix_bundle"] = {
+            "request": {},
+            "activation": [],
+            "request_as_of": _T0,
+            "activation_as_of": _T0,
+        }
     else:
         anchor["watermarks_json"] = '{"kraken":1}'
 
@@ -689,6 +719,8 @@ async def test_atomic_anchor_writer_rolls_back_changed_sqlite_bundle(
         activation=PnlTimelineExecutionPrefix(
             watermarks={"kraken": 1}, executions=[], annulments=[]
         ),
+        request_as_of=_T0,
+        activation_as_of=_T0,
     )
     with (
         patch.object(repository, "session") as session_context,
@@ -765,7 +797,12 @@ async def test_fenced_bundle_reload_reads_distinct_cuts_independently(
             evidence,
         )
 
-    assert bundle == {"request": request, "activation": activation}
+    assert bundle == {
+        "request": request,
+        "activation": activation,
+        "request_as_of": _T0 + timedelta(minutes=1),
+        "activation_as_of": _T0,
+    }
     assert loader.await_count == 2
 
 
@@ -796,6 +833,8 @@ async def test_atomic_writer_rolls_back_unprovable_or_inconsistent_current_bundl
                 executions=[],
                 annulments=[],
             ),
+            request_as_of=_T0,
+            activation_as_of=_T0,
         )
 
     monkeypatch.setattr(
@@ -1429,9 +1468,8 @@ async def test_atomic_writer_treats_a_manifest_change_as_evidence_drift(
     evidence = PortfolioPnlAnchorWriteEvidence(
         wallet_public_id=_WALLET,
         mode="live",
-        request_as_of=_T0,
-        activation_as_of=_T0,
         requested_as_of=_T0,
+        requested_activation_as_of=_T0,
         execution_prefix_bundle=_manifest_drifted_evidence(current, drift),
     )
     candidate = _atomic_anchor()
@@ -1477,9 +1515,8 @@ async def test_atomic_writer_exactly_compares_every_prefix_evidence_plane(
     evidence = PortfolioPnlAnchorWriteEvidence(
         wallet_public_id=_WALLET,
         mode="live",
-        request_as_of=_T0,
-        activation_as_of=_T0,
         requested_as_of=_T0,
+        requested_activation_as_of=_T0,
         execution_prefix_bundle=_mutated_prefix_evidence(current, evidence_kind),
     )
     candidate = _atomic_anchor()
@@ -1917,3 +1954,60 @@ async def test_anchor_writer_rejects_malformed_structure_before_insert(
     async with repository.session() as s:
         count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
     assert count == 0
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["requested_as_of", "requested_activation_as_of"],
+)
+def test_atomic_write_evidence_refuses_a_claimed_horizon_its_prefix_lacks(
+    field_name: str,
+) -> None:
+    """Evidence cannot claim a horizon the prefix it carries was not read at.
+
+    Given: Evidence whose nullable intent for one cut names an instant that is
+        neither ``None`` nor the instant the bundle reports for that cut.
+    When: The write evidence is validated.
+    Then: It is refused by name. Without this the intent fields would be
+        decorative: a caller could name a past horizon on one cut, leave the
+        intent ``None``, and have the fenced re-read reproduce a current-truth
+        exemption that nothing established.
+    """
+    evidence = _empty_anchor_write_evidence()
+    runtime_evidence = cast(dict[str, object], evidence)
+    runtime_evidence[field_name] = _T0 + timedelta(minutes=5)
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="claims a horizon its prefix was not read at",
+    ):
+        SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
+            _atomic_anchor(),
+            evidence,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["requested_as_of", "requested_activation_as_of"],
+)
+def test_atomic_write_evidence_accepts_an_absent_horizon_intent(
+    field_name: str,
+) -> None:
+    """``None`` is the one alternative to the exact instant, and it is accepted.
+
+    Given: Evidence whose intent for one cut is absent — the shape produced when
+        no horizon was requested and the repository derived the instant itself.
+    When: The write evidence is validated.
+    Then: It passes. ``None`` is not a claim about the past; it is the statement
+        that the instant beside it was the repository's own, which is exactly
+        what earns the exemption.
+    """
+    evidence = _empty_anchor_write_evidence()
+    runtime_evidence = cast(dict[str, object], evidence)
+    runtime_evidence[field_name] = None
+
+    SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
+        _atomic_anchor(),
+        evidence,
+    )

@@ -702,7 +702,12 @@ async def test_bundle_sets_repeatable_read_only_as_the_first_postgresql_statemen
     assert loader.await_args_list[1].args[:3] == (session, _WALLET, "live")
     assert (request_horizon.as_of, request_horizon.requested) == (_LATER, True)
     assert (activation_horizon.as_of, activation_horizon.requested) == (_AS_OF, True)
-    assert bundle == {"request": request, "activation": activation}
+    assert bundle == {
+        "request": request,
+        "activation": activation,
+        "request_as_of": _LATER,
+        "activation_as_of": _AS_OF,
+    }
 
 
 @pytest.mark.skipif(
