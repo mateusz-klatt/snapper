@@ -10,6 +10,13 @@ Every monetary field is ``float | None`` so an incomplete point (a missing mark,
 or untrusted cumulatives) is transported honestly as ``null`` rather than a
 fabricated zero (checklist #7 / #10). Every incomplete point also carries the
 closed causal records stamped by its withholding sites.
+
+The envelope also carries ``execution_history``, the permanent series-level
+disclosure of every operator correction folded into the reconstruction. Point
+level cannot carry it — a ``complete`` point is forbidden from carrying reasons —
+and a correction is not incompleteness: the numbers are trustworthy precisely
+because the repudiated booking was removed. So it rides the envelope instead,
+where it can never be silently dropped.
 """
 
 from datetime import datetime
@@ -30,6 +37,7 @@ from snapper.application.portfolio.pnl_timeline import (
 from snapper.application.portfolio.pnl_timeline import (
     PnlWithholdingTier as DomainPnlWithholdingTier,
 )
+from snapper.data.repository_types import ExecutionAnnulmentReason as DomainAnnulmentReason
 
 type PnlValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
@@ -48,6 +56,12 @@ type PnlAttributionOrigin = Literal["manual", "plan", "system", "unattributed"]
 
 type PnlMarkerOutcome = Literal["executed", "rejected", "no_fill"]
 """Observable execution outcome carried by a timeline decision marker."""
+
+type PnlExecutionCorrectionReason = DomainAnnulmentReason
+"""Closed transport taxonomy for why an operator repudiated one booking."""
+
+type PnlExecutionHistoryStatus = Literal["as_recorded", "operator_corrected"]
+"""Whether this scope's effective history is the raw ledger or a corrected fold."""
 
 
 class PnlIncompletenessReasonData(StrictBody):
@@ -267,6 +281,59 @@ class PnlEquityCoverageData(StrictBody):
         return self
 
 
+class PnlExecutionCorrectionData(StrictBody):
+    """One operator correction the certified fold applied to this scope (A3).
+
+    A row here is not a request or a listing: the certification fold bound it to
+    an in-prefix execution by immutable id, canonical row digest, and scope
+    coordinate, and proved no contradicting fill witness exists, before that
+    booking was excluded from the numbers this response carries.
+    ``scope_sequence`` locates the repudiated booking in its exchange's
+    contiguous sequence, so an auditor can name the exact position that was
+    corrected without re-reading the ledger. ``correction_time`` is the
+    operator's knowledge timestamp: a read whose horizon precedes it neither
+    folds nor discloses this correction.
+    """
+
+    correction_public_id: str
+    target_execution_public_id: str
+    exchange: str
+    scope_sequence: int
+    reason: PnlExecutionCorrectionReason
+    correction_time: datetime
+
+
+class PnlExecutionHistoryData(StrictBody):
+    """Envelope disclosure of every operator correction behind this series (A3).
+
+    ``as_recorded`` states that the effective history equals the raw immutable
+    ledger; ``operator_corrected`` states that an append-only annulment manifest
+    removed at least one booking from it and names each one. The two are kept
+    equivalent to the presence of ``corrections`` by a validator, so the status
+    can never be a claim the payload does not itself carry — a correction can be
+    disclosed silently in neither direction.
+
+    The list is exactly the fold applied to THESE numbers, never a wider manifest
+    read: a historical ``as_of`` request whose horizon precedes a correction's
+    ``correction_time`` reports the history it actually replayed, which is the
+    same reason such a read keeps failing rather than pretending the correction
+    was already known.
+    """
+
+    status: PnlExecutionHistoryStatus
+    corrections: list[PnlExecutionCorrectionData]
+
+    @model_validator(mode="after")
+    def _require_consistent_status(self) -> Self:
+        """Keep the disclosed status equivalent to the disclosed corrections."""
+        if (self.status == "operator_corrected") != bool(self.corrections):
+            raise ValueError(
+                "operator_corrected requires at least one correction and "
+                "as_recorded requires none"
+            )
+        return self
+
+
 class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
     """Fields shared by series-only and marker-bearing timeline payloads."""
 
@@ -281,6 +348,7 @@ class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
     rate_sources: list[PnlFxRateSourceData]
     calc_version: str
     equity_coverage: PnlEquityCoverageData
+    execution_history: PnlExecutionHistoryData
     points: list[PnlTimelinePointData]
 
 

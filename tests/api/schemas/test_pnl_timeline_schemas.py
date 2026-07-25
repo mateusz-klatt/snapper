@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlEquityCoverageData
+from snapper.api.schemas.pnl_timeline import PnlExecutionCorrectionData
+from snapper.api.schemas.pnl_timeline import PnlExecutionHistoryData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
@@ -137,6 +139,28 @@ def _sampled_coverage() -> PnlEquityCoverageData:
     )
 
 
+def _correction() -> PnlExecutionCorrectionData:
+    """Build one applied operator correction as the fold reports it."""
+    return PnlExecutionCorrectionData(
+        correction_public_id="00000000-0000-7000-8000-0000000000d9",
+        target_execution_public_id="00000000-0000-7000-8000-0000000000e1",
+        exchange="kraken",
+        scope_sequence=1,
+        reason="unwitnessed_phantom",
+        correction_time=_NOW,
+    )
+
+
+def _corrected_history() -> PnlExecutionHistoryData:
+    """Build the disclosure of a scope whose history an operator corrected."""
+    return PnlExecutionHistoryData(status="operator_corrected", corrections=[_correction()])
+
+
+def _uncorrected_history() -> PnlExecutionHistoryData:
+    """Build the disclosure of a scope whose history is the raw ledger."""
+    return PnlExecutionHistoryData(status="as_recorded", corrections=[])
+
+
 def _series_data() -> PnlSeriesData:
     """Build a valid series payload envelope."""
     return PnlSeriesData(
@@ -163,6 +187,7 @@ def _series_data() -> PnlSeriesData:
         ],
         calc_version="5A.1",
         equity_coverage=_sampled_coverage(),
+        execution_history=_corrected_history(),
         points=[_point()],
     )
 
@@ -185,6 +210,7 @@ def _timeline_data() -> PnlTimelineData:
         rate_sources=[],
         calc_version="5A.2",
         equity_coverage=_unsampled_coverage(),
+        execution_history=_uncorrected_history(),
         points=[_point()],
         marker_limit=2_000,
         markers_truncated=False,
@@ -517,3 +543,81 @@ class TestEquityCoverageContract:
         payload.pop("equity_coverage")
         with pytest.raises(ValidationError):
             PnlSeriesData.model_validate(payload)
+
+
+class TestExecutionHistoryContract:
+    """Cover the operator-correction disclosure and its honesty invariant (A3)."""
+
+    def test_corrected_history_names_every_applied_correction(self) -> None:
+        """A corrected scope transports the identity and scope of each correction."""
+        history = _corrected_history()
+        assert history.status == "operator_corrected"
+        correction = history.corrections[0]
+        assert (
+            correction.correction_public_id,
+            correction.target_execution_public_id,
+            correction.exchange,
+            correction.scope_sequence,
+            correction.reason,
+            correction.correction_time,
+        ) == (
+            "00000000-0000-7000-8000-0000000000d9",
+            "00000000-0000-7000-8000-0000000000e1",
+            "kraken",
+            1,
+            "unwitnessed_phantom",
+            _NOW,
+        )
+
+    def test_uncorrected_history_round_trips(self) -> None:
+        """An uncorrected scope transports the empty as-recorded disclosure."""
+        history = _uncorrected_history()
+        assert history.status == "as_recorded"
+        assert history.corrections == []
+
+    def test_corrected_status_requires_a_named_correction(self) -> None:
+        """A correction claim with nothing named is refused, never served empty."""
+        empty = _corrected_history().model_dump()
+        empty["corrections"] = []
+        with pytest.raises(ValidationError, match="operator_corrected requires"):
+            PnlExecutionHistoryData.model_validate(empty)
+
+    def test_as_recorded_status_cannot_hide_a_correction(self) -> None:
+        """A correction can never ride out under an as-recorded status."""
+        hidden = _uncorrected_history().model_dump()
+        hidden["corrections"] = [_correction().model_dump()]
+        with pytest.raises(ValidationError, match="as_recorded requires none"):
+            PnlExecutionHistoryData.model_validate(hidden)
+
+    def test_history_status_and_reason_taxonomies_are_closed(self) -> None:
+        """Neither the status nor the correction reason accepts an open string."""
+        unknown_status = _uncorrected_history().model_dump()
+        unknown_status["status"] = "partially_corrected"
+        with pytest.raises(ValidationError):
+            PnlExecutionHistoryData.model_validate(unknown_status)
+        unknown_reason = _correction().model_dump()
+        unknown_reason["reason"] = "operator_felt_like_it"
+        with pytest.raises(ValidationError):
+            PnlExecutionCorrectionData.model_validate(unknown_reason)
+
+    def test_correction_rejects_unknown_fields_and_missing_scope(self) -> None:
+        """A correction is strict: no extra keys and no dropped scope coordinate."""
+        extra = _correction().model_dump()
+        extra["operator_note"] = "trust me"
+        with pytest.raises(ValidationError):
+            PnlExecutionCorrectionData.model_validate(extra)
+        missing = _correction().model_dump()
+        missing.pop("scope_sequence")
+        with pytest.raises(ValidationError):
+            PnlExecutionCorrectionData.model_validate(missing)
+
+    def test_both_envelopes_require_the_execution_history(self) -> None:
+        """Neither P&L envelope may omit the correction disclosure."""
+        series_payload = _series_data().model_dump()
+        series_payload.pop("execution_history")
+        with pytest.raises(ValidationError):
+            PnlSeriesData.model_validate(series_payload)
+        timeline_payload = _timeline_data().model_dump()
+        timeline_payload.pop("execution_history")
+        with pytest.raises(ValidationError):
+            PnlTimelineData.model_validate(timeline_payload)

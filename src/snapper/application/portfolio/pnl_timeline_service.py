@@ -456,7 +456,12 @@ class _AnchorLoadResult:
 
 @dataclass(frozen=True, slots=True)
 class _SeriesReplayInputs:
-    """Bounded suffix rows, lineage, accruals, and global evidence reasons."""
+    """Bounded suffix rows, lineage, accruals, and global evidence reasons.
+
+    ``applied_annulments`` is read straight off the certified prefix this replay
+    consumed, so the series can disclose exactly the corrections its own fold
+    applied rather than a set some later read might compute differently.
+    """
 
     loaded_execution_rows: list[PnlTimelineOpeningExecutionRow]
     replayed_execution_rows: list[PnlTimelineOpeningExecutionRow]
@@ -464,6 +469,7 @@ class _SeriesReplayInputs:
     lineage: dict[str, TimelineExecutionLineage]
     fill_gap_reason: PnlIncompletenessReasonEntry | None
     late_pre_activation_reason: PnlIncompletenessReasonEntry | None
+    applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
 
 
 class PnlAnchorEvidenceError(ValueError):
@@ -1033,12 +1039,19 @@ class PnlWalletSeriesResult(PnlTimelineResult):
     (D13) and ``equity_coverage`` is the envelope disclosure. Both default to the
     unsampled shape, so a pre-activation, empty, historical, or non-USD result
     carries a null overlay without a sample read.
+
+    ``applied_annulments`` is the series-level correction disclosure (A3): the
+    exact repudiations the certified prefix behind THESE numbers folded away,
+    copied from that prefix rather than re-derived. It stays empty for a result
+    built without any execution evidence — no anchor, or a wholly pre-activation
+    window — because such a result folded nothing and must not claim otherwise.
     """
 
     rate_sources: tuple[PnlFxRateSource, ...]
     replay_metadata: PnlSeriesReplayMetadata | None = None
     equity_overlay: Mapping[datetime, PnlPointEquityOverlay] = _EMPTY_EQUITY_OVERLAY_MAP
     equity_coverage: PnlEquityCoverage = _UNSAMPLED_EQUITY_COVERAGE
+    applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
 
     def equity_overlay_at(self, point_time: datetime) -> PnlPointEquityOverlay:
         """Return the persisted equity overlay for one point, or the null overlay.
@@ -1177,6 +1190,22 @@ class PnlSeriesReplayMetadata:
 
     max_scope_sequence_by_exchange: dict[str, int]
     earliest_affected_minute: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesAssembly:
+    """Every envelope-level disclosure wrapped around one built series.
+
+    Bundled rather than passed separately so the assembly seam keeps a small
+    parameter surface as disclosures accumulate: FX provenance, the optional
+    late-fill boundary, the applied corrections, and the equity-overlay request
+    all attach to the same result and are never independently derivable from it.
+    """
+
+    rate_sources: tuple[PnlFxRateSource, ...]
+    replay_metadata: PnlSeriesReplayMetadata | None
+    applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
+    overlay_request: _EquityOverlayRequest
 
 
 def _ceil_to_minute(instant: datetime) -> datetime:
@@ -3660,6 +3689,7 @@ async def _load_series_replay_inputs(
         lineage=_build_execution_lineage(lineage_rows),
         fill_gap_reason=fill_gap_reason,
         late_pre_activation_reason=late_pre_activation_reason,
+        applied_annulments=tuple(loaded_prefix["annulments"]),
     )
 
 
@@ -3880,20 +3910,19 @@ async def _resolve_equity_overlay(
 async def _finalize_wallet_pnl_series(
     repo: Repository,
     result: PnlTimelineResult,
-    rate_sources: tuple[PnlFxRateSource, ...],
-    replay_metadata: PnlSeriesReplayMetadata | None,
-    overlay_request: _EquityOverlayRequest,
+    assembly: _SeriesAssembly,
 ) -> PnlWalletSeriesResult:
     """Resolve the equity overlay and assemble the final wallet series result."""
-    overlay = await _resolve_equity_overlay(repo, overlay_request)
+    overlay = await _resolve_equity_overlay(repo, assembly.overlay_request)
     return PnlWalletSeriesResult(
         points=result.points,
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
-        rate_sources=rate_sources,
-        replay_metadata=replay_metadata,
+        rate_sources=assembly.rate_sources,
+        replay_metadata=assembly.replay_metadata,
         equity_overlay=overlay.overlay,
         equity_coverage=overlay.coverage,
+        applied_annulments=assembly.applied_annulments,
     )
 
 
@@ -4177,17 +4206,20 @@ async def build_wallet_pnl_series(
     return await _finalize_wallet_pnl_series(
         repo,
         result,
-        rate_sources,
-        replay_metadata,
-        _EquityOverlayRequest(
-            wallet_public_id=wallet_public_id,
-            mode=mode,
-            valuation_ccy=valuation_ccy,
-            epoch_public_id=anchor.row["epoch_public_id"],
-            from_time=from_time,
-            to_time=to_time,
-            current_truth=policy.current_truth,
-            points=result.points,
+        _SeriesAssembly(
+            rate_sources=rate_sources,
+            replay_metadata=replay_metadata,
+            applied_annulments=replay.applied_annulments,
+            overlay_request=_EquityOverlayRequest(
+                wallet_public_id=wallet_public_id,
+                mode=mode,
+                valuation_ccy=valuation_ccy,
+                epoch_public_id=anchor.row["epoch_public_id"],
+                from_time=from_time,
+                to_time=to_time,
+                current_truth=policy.current_truth,
+                points=result.points,
+            ),
         ),
     )
 

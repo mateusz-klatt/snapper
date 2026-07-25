@@ -221,7 +221,7 @@ _PHANTOM_EXECUTION_ID = "00000000-0000-7000-8000-0000000000e1"
 _PHANTOM_DIGEST = "ab" * 32
 
 
-def _applied_annulment() -> PnlTimelineAppliedAnnulment:
+def _applied_annulment(correction_time: datetime = _T0) -> PnlTimelineAppliedAnnulment:
     """Build one correction as the certification fold reports it applied."""
     return {
         "public_id": _ANNULMENT_ID,
@@ -230,7 +230,7 @@ def _applied_annulment() -> PnlTimelineAppliedAnnulment:
         "exchange": "kraken",
         "scope_sequence": 1,
         "reason": "unwitnessed_phantom",
-        "correction_time": _m(0),
+        "correction_time": correction_time,
     }
 
 
@@ -647,7 +647,11 @@ class FakeRepo:
         prefix = PnlTimelineExecutionPrefix(
             watermarks=watermarks,
             executions=executions,
-            annulments=list(self._applied_annulments),
+            annulments=[
+                annulment
+                for annulment in self._applied_annulments
+                if annulment["correction_time"] <= as_of
+            ],
         )
         return prefix
 
@@ -659,7 +663,10 @@ class FakeRepo:
 
         The canned executions are supplied already effective, exactly as the
         repository returns them, so a test states the fold's OUTPUT rather than
-        re-implementing the exclusion in the fake.
+        re-implementing the exclusion in the fake. Each prefix is narrowed to
+        the corrections whose ``correction_time`` its own read horizon has
+        passed, mirroring the manifest query's knowledge-horizon filter, so a
+        historical read here cannot fold or disclose a later correction.
         """
         self._applied_annulments = list(annulments)
 
@@ -5958,6 +5965,134 @@ class TestAnchorAnnulmentAudit:
             if isinstance(marker, PnlFillMarker)
         ] == [f"execution-{_I1}-2"]
         assert result.applied_annulments == (_applied_annulment(),)
+
+
+class TestSeriesCorrectionDisclosure:
+    """The series-level channel that makes an operator correction permanent (A3)."""
+
+    async def test_series_discloses_the_corrections_its_own_fold_applied(self) -> None:
+        """The numbers and the correction that shaped them travel together.
+
+        Given: A certified prefix that has already excluded one repudiated
+            booking and names the correction that excluded it.
+        When: The plain series is built.
+        Then: The series result carries that correction. The marker endpoint is
+            not the only disclosure surface — a caller that asks only for the
+            numbers must still be told they are a corrected history, or the
+            correction becomes silent for exactly the consumer least able to
+            notice it.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _m(3))
+
+        assert result.applied_annulments == (_applied_annulment(),)
+
+    async def test_uncorrected_scope_discloses_no_correction(self) -> None:
+        """An untouched ledger names nothing, so the envelope can say as-recorded."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+        )
+
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _m(3))
+
+        assert result.applied_annulments == ()
+
+    async def test_correction_later_than_the_horizon_is_neither_folded_nor_disclosed(
+        self,
+    ) -> None:
+        """A read that predates the operator's knowledge cannot borrow it.
+
+        Given: A correction whose ``correction_time`` is later than the read's
+            knowledge horizon.
+        When: A historical series is built at that horizon.
+        Then: Nothing is disclosed, because nothing was folded. The disclosure
+            is exactly the fold — never a wider manifest read — so a historical
+            reconstruction keeps reporting the history it actually replayed
+            instead of pretending the operator already knew.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+        )
+        repo.apply_annulments([_applied_annulment(correction_time=_m(5))])
+
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(3),
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        )
+
+        assert result.applied_annulments == ()
+
+    async def test_horizon_at_the_correction_time_folds_and_discloses_it(self) -> None:
+        """The knowledge horizon is inclusive, matching the manifest filter."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+        )
+        repo.apply_annulments([_applied_annulment(correction_time=_m(3))])
+
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _m(3))
+
+        assert result.applied_annulments == (_applied_annulment(correction_time=_m(3)),)
+
+    async def test_series_built_without_execution_evidence_discloses_nothing(self) -> None:
+        """A result that folded no prefix at all must not claim a correction.
+
+        Given: A historical horizon with no visible anchor, so no certified
+            prefix is ever read.
+        When: The series is built.
+        Then: The empty result discloses no correction. Its history is vacuously
+            as-recorded: there is no fold to report, and inventing one from a
+            manifest this result never consulted would be a claim about numbers
+            that were never produced.
+        """
+        repo = FakeRepo(has_anchor=False)
+        repo.apply_annulments([_applied_annulment()])
+
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(3),
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        )
+
+        assert result.points == ()
+        assert result.applied_annulments == ()
+        assert repo.execution_calls == []
+
+    async def test_marker_timeline_series_carries_the_same_disclosure(self) -> None:
+        """Both endpoints of one corrected scope agree on what was corrected."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        result = await build_wallet_pnl_timeline(repo, _W1, "live", _T0, _T0, "1m", _m(3))
+
+        assert result.applied_annulments == (_applied_annulment(),)
+        assert result.series.applied_annulments == result.applied_annulments
 
 
 class TestSeriesReplayMetadata:

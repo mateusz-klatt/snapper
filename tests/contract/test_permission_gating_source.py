@@ -81,6 +81,24 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     AllowedFinding(
         FindingSignature(
             "backend",
+            "src/snapper/data/seed/loader.py",
+            "role-comparison",
+            "role in forbidden_roles",
+        ),
+        "seed-profile shape validation refusing read grants on trade-capable roles",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/data/seed/loader.py",
+            "role-comparison",
+            "user.role in runtime_roles",
+        ),
+        "seed-profile shape validation refusing runtime-owned roles on declared users",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
             "src/snapper/application/ai_researchers/service.py",
             "role-comparison",
             "User.role == UserRole.AI_RESEARCHER.value",

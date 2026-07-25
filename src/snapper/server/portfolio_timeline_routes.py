@@ -16,6 +16,7 @@ markers. Signals and decisions are independent reads so a rejected decision or
 one that produced no fill remains visible.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -35,6 +36,8 @@ from loguru import logger
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlEquityCoverageData
+from snapper.api.schemas.pnl_timeline import PnlExecutionCorrectionData
+from snapper.api.schemas.pnl_timeline import PnlExecutionHistoryData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
@@ -64,6 +67,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
+from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.scoping import resolve_target_wallets
@@ -350,6 +354,38 @@ def _coverage_data(coverage: PnlEquityCoverage) -> PnlEquityCoverageData:
     )
 
 
+def _execution_history_data(
+    annulments: Sequence[PnlTimelineAppliedAnnulment],
+) -> PnlExecutionHistoryData:
+    """Project the folded corrections into the permanent envelope disclosure.
+
+    The status is derived from the folded set alone, never from a separate
+    manifest read, so a corrected scope can never be transported as if its
+    history were the raw ledger.
+
+    Args:
+        annulments: Exactly the corrections the certified prefix behind this
+            response applied, in the fold's own order.
+
+    Returns:
+        The strict disclosure naming each applied correction.
+    """
+    return PnlExecutionHistoryData(
+        status="operator_corrected" if annulments else "as_recorded",
+        corrections=[
+            PnlExecutionCorrectionData(
+                correction_public_id=annulment["public_id"],
+                target_execution_public_id=annulment["target_execution_public_id"],
+                exchange=annulment["exchange"],
+                scope_sequence=annulment["scope_sequence"],
+                reason=annulment["reason"],
+                correction_time=annulment["correction_time"],
+            )
+            for annulment in annulments
+        ],
+    )
+
+
 def _marker_data(marker: PnlTimelineMarker) -> PnlTimelineMarkerData:
     """Project one service marker into its discriminated transport model."""
     if isinstance(marker, PnlFillMarker):
@@ -506,6 +542,7 @@ async def get_pnl_series(
             ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
             equity_coverage=_coverage_data(result.equity_coverage),
+            execution_history=_execution_history_data(result.applied_annulments),
             points=_point_data(result),
         )
         return PnlSeriesResponse(
@@ -643,6 +680,7 @@ async def get_pnl_timeline(
             ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
             equity_coverage=_coverage_data(result.series.equity_coverage),
+            execution_history=_execution_history_data(result.applied_annulments),
             points=_point_data(result.series),
             marker_limit=result.marker_limit,
             markers_truncated=result.markers_truncated,

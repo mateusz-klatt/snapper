@@ -266,6 +266,28 @@ def _seeded_repo() -> AsyncMock:
     return repo
 
 
+_CORRECTION_ID = "00000000-0000-7000-8000-0000000000d9"
+_PHANTOM_EXECUTION_ID = "00000000-0000-7000-8000-0000000000e1"
+
+
+def _corrected_repo() -> AsyncMock:
+    """Build a repo mock whose certified prefix folded one operator correction."""
+    repo = _seeded_repo()
+    prefix = repo.get_pnl_timeline_execution_prefix.return_value
+    prefix["annulments"] = [
+        {
+            "public_id": _CORRECTION_ID,
+            "target_execution_public_id": _PHANTOM_EXECUTION_ID,
+            "target_execution_digest": "ab" * 32,
+            "exchange": "kraken",
+            "scope_sequence": 7,
+            "reason": "unwitnessed_phantom",
+            "correction_time": datetime(2026, 7, 20, 9, 55, tzinfo=UTC),
+        }
+    ]
+    return repo
+
+
 def _create_client(mock_repo: AsyncMock, role: UserRole = UserRole.ADMIN) -> TestClient:
     """Create a test client with auth/csrf bypassed and the mock repo bound."""
     app = create_app()
@@ -1091,3 +1113,51 @@ class TestEquityOverlayResponse:
         assert payload["equity_coverage"]["complete_minutes"] == 1
         assert payload["points"][2]["equity"] == 1000.0
         assert payload["points"][0]["equity"] is None
+
+
+class TestExecutionHistoryDisclosure:
+    """Cover the permanent operator-correction channel on both endpoints (A3)."""
+
+    def test_series_response_names_every_folded_correction(self) -> None:
+        """A corrected scope transports the correction, never just the numbers."""
+        response = _create_client(_corrected_repo()).get(_url())
+        assert response.status_code == 200
+        assert response.json()["payload"]["execution_history"] == {
+            "status": "operator_corrected",
+            "corrections": [
+                {
+                    "correction_public_id": _CORRECTION_ID,
+                    "target_execution_public_id": _PHANTOM_EXECUTION_ID,
+                    "exchange": "kraken",
+                    "scope_sequence": 7,
+                    "reason": "unwitnessed_phantom",
+                    "correction_time": "2026-07-20T09:55:00Z",
+                }
+            ],
+        }
+
+    def test_timeline_response_names_every_folded_correction(self) -> None:
+        """The marker-bearing envelope carries the identical disclosure."""
+        response = _create_client(_corrected_repo()).get(_timeline_url())
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload["type"] == "pnl_timeline"
+        assert payload["execution_history"]["status"] == "operator_corrected"
+        assert payload["execution_history"]["corrections"][0]["scope_sequence"] == 7
+
+    def test_uncorrected_scope_reports_an_as_recorded_history(self) -> None:
+        """Both endpoints state the history is the raw ledger when it is."""
+        series = _create_client(_seeded_repo()).get(_url())
+        timeline = _create_client(_seeded_repo()).get(_timeline_url())
+        assert series.status_code == 200
+        assert timeline.status_code == 200
+        as_recorded = {"status": "as_recorded", "corrections": []}
+        assert series.json()["payload"]["execution_history"] == as_recorded
+        assert timeline.json()["payload"]["execution_history"] == as_recorded
+
+    def test_correction_digest_is_not_transported(self) -> None:
+        """The disclosure names what was corrected without leaking the row digest."""
+        response = _create_client(_corrected_repo()).get(_url())
+        assert response.status_code == 200
+        correction = response.json()["payload"]["execution_history"]["corrections"][0]
+        assert "target_execution_digest" not in correction
