@@ -379,11 +379,16 @@ class TestSubmitAiReviewDecisionTool:
             username="pre-versioning-delegate",
             user_public_id="pre-versioning-user-1",
             permissions=[
+                Permission.CANCEL_ORDERS.value,
                 Permission.CREATE_ORDERS.value,
+                Permission.MANAGE_POSITIONS.value,
+                Permission.READ_BACKTESTS.value,
                 Permission.READ_MARKET_DATA.value,
                 Permission.READ_ORDERS.value,
                 Permission.READ_POSITIONS.value,
                 Permission.READ_SIGNALS.value,
+                Permission.READ_STRATEGIES.value,
+                Permission.READ_SYSTEM_STATUS.value,
             ],
         )
         server = _build_server(repository=AsyncMock(), claims=claims)

@@ -194,11 +194,16 @@ def _pre_versioning_delegate_principal() -> AuthPrincipal:
         role=UserRole.AI_DELEGATE,
         user_public_id="pre-versioning-user-1",
         permissions=[
+            Permission.CANCEL_ORDERS.value,
             Permission.CREATE_ORDERS.value,
+            Permission.MANAGE_POSITIONS.value,
+            Permission.READ_BACKTESTS.value,
             Permission.READ_MARKET_DATA.value,
             Permission.READ_ORDERS.value,
             Permission.READ_POSITIONS.value,
             Permission.READ_SIGNALS.value,
+            Permission.READ_STRATEGIES.value,
+            Permission.READ_SYSTEM_STATUS.value,
         ],
         delegate_public_id="pre-versioning-del-1",
     )

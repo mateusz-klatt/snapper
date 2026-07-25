@@ -228,11 +228,16 @@ def test_ai_reviewer_permission_gates_allow_decisions_but_deny_audit_reads() -> 
         pytest.param(
             UserRole.AI_DELEGATE,
             [
+                Permission.CANCEL_ORDERS.value,
                 Permission.CREATE_ORDERS.value,
+                Permission.MANAGE_POSITIONS.value,
+                Permission.READ_BACKTESTS.value,
                 Permission.READ_MARKET_DATA.value,
                 Permission.READ_ORDERS.value,
                 Permission.READ_POSITIONS.value,
                 Permission.READ_SIGNALS.value,
+                Permission.READ_STRATEGIES.value,
+                Permission.READ_SYSTEM_STATUS.value,
             ],
             None,
             True,
