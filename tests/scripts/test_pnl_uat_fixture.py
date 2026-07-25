@@ -1580,8 +1580,11 @@ def _assert_seeded_anchors(
         assert anchor.mark_source == "finalized_1m_candle_close"
         assert anchor.mark_time == manifest.times.window_from
         assert anchor.watermarks_json == "{}"
-        assert anchor.opening_basket_json == '{"native_basket":{},"pools":[],"schema_version":2}'
-        assert anchor.contributions_json == '{"pools":[],"schema_version":2}'
+        assert (
+            anchor.opening_basket_json
+            == '{"annulments":[],"native_basket":{},"pools":[],"schema_version":3}'
+        )
+        assert anchor.contributions_json == '{"pools":[],"schema_version":3}'
 
 
 def _assert_seeded_fill_events(

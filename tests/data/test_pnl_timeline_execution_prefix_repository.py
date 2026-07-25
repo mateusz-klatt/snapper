@@ -32,12 +32,14 @@ from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import Symbol
 from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _PnlTimelineExecutionCandidate
+from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository import _PnlTimelineFillAssignmentState
 from snapper.data.repository import _PnlTimelineFillIndex
 from snapper.data.repository import _PnlTimelineFillNativeScopeKey
@@ -46,6 +48,7 @@ from snapper.data.repository import _PnlTimelineNativeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExecTradeFillKey
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
 _AS_OF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _EARLIER = _AS_OF - timedelta(minutes=1)
@@ -438,6 +441,36 @@ def _fill_event(
     )
 
 
+class _PrefixSourceOptions(TypedDict, total=False):
+    """Optional inputs of the staged effective-prefix certification."""
+
+    annulment_rows: list[ExecutionAnnulment]
+
+
+def _certified_prefix(
+    watermarks: dict[str, int],
+    source_rows: list[tuple[Execution, Order | None, Instrument | None]],
+    fill_rows: list[VenueEvent],
+    native_symbols_by_symbol_public_id: dict[str, set[str]],
+    order_instrument_ids_by_scope: dict[str, set[str]],
+    **options: Unpack[_PrefixSourceOptions],
+) -> list[PnlTimelineOpeningExecutionRow]:
+    """Certify one in-memory ``_WALLET``/``live`` prefix and return its effective rows."""
+    executions, _ = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
+        _PnlTimelineExecutionPrefixSource(
+            wallet_public_id=_WALLET,
+            mode="live",
+            watermarks=watermarks,
+            source_rows=source_rows,
+            fill_rows=fill_rows,
+            native_symbols_by_symbol_public_id=native_symbols_by_symbol_public_id,
+            order_instrument_ids_by_scope=order_instrument_ids_by_scope,
+            annulment_rows=options.get("annulment_rows", []),
+        )
+    )
+    return executions
+
+
 @pytest.fixture()
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository containing the exact replay lineage tables."""
@@ -447,6 +480,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Instrument.__table__.create(schema_engine)
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
+    ExecutionAnnulment.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
@@ -628,8 +662,8 @@ async def test_bundle_sets_repeatable_read_only_as_the_first_postgresql_statemen
     transaction_context = AsyncMock()
     session = AsyncMock(begin=MagicMock(return_value=transaction_context))
     session.execute = AsyncMock(return_value=MagicMock())
-    request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[])
-    activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[])
+    request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[], annulments=[])
+    activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[], annulments=[])
     loader = AsyncMock(side_effect=[request, activation])
     with (
         patch.object(
@@ -695,6 +729,7 @@ async def test_postgresql_bundle_keeps_both_cuts_in_one_repeatable_snapshot(
         return PnlTimelineExecutionPrefix(
             watermarks={"probe": int(count)},
             executions=[],
+            annulments=[],
         )
 
     try:
@@ -1475,9 +1510,7 @@ def test_prefix_rejects_reusing_one_exact_fill_for_two_executions() -> None:
     fill.trade_id = "shared-trade"
 
     with pytest.raises(ExecutionChainError, match="reused_execution_fill_lineage"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 2},
             [
                 (first, _order(), _instrument()),
@@ -2520,18 +2553,14 @@ def test_prefix_exact_pair_reverse_index_scales_with_shared_alias_lineage(
     )
     counters = _instrument_exact_resolver(monkeypatch)
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
         {_SYMBOL: native_symbols},
         {_CLIENT_ORDER: {_INSTRUMENT}},
     )
-    permuted = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    permuted = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         list(reversed(fill_rows)),
@@ -2567,9 +2596,7 @@ def test_prefix_exact_pair_requires_both_identity_components(
         ExecutionChainError,
         match="missing_execution_fill_identity_lineage",
     ):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 1},
             source_rows,
             fill_rows,
@@ -2591,18 +2618,14 @@ def test_prefix_exact_index_visits_shared_trade_distinct_instruments_linearly(
     ) = _shared_trade_adversarial_rows(execution_count)
     counters = _instrument_exact_resolver(monkeypatch)
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
         native_symbols_by_symbol_public_id,
         {_CLIENT_ORDER: instrument_public_ids},
     )
-    permuted = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    permuted = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         list(reversed(fill_rows)),
@@ -2646,18 +2669,14 @@ def test_prefix_exact_shared_trade_allows_unused_historical_alias_overlap(
     fill_rows.append(unrelated_fill)
     counters = _instrument_exact_resolver(monkeypatch)
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
         native_symbols_by_symbol_public_id,
         {_CLIENT_ORDER: instrument_public_ids},
     )
-    permuted = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    permuted = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         list(reversed(fill_rows)),
@@ -2697,9 +2716,7 @@ def test_prefix_exact_shared_trade_rejects_actual_alias_overlap_before_row_fanou
             ExecutionChainError,
             match="ambiguous_execution_fill_instrument_lineage",
         ):
-            SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-                _WALLET,
-                "live",
+            _certified_prefix(
                 {"kraken": execution_count},
                 source_rows,
                 rows,
@@ -2761,9 +2778,7 @@ def test_prefix_fallback_rejects_shared_order_partition_before_row_scan(
         ExecutionChainError,
         match="ambiguous_execution_order_instrument_lineage",
     ):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": execution_count},
             source_rows,
             fill_rows,
@@ -2798,9 +2813,7 @@ def test_prefix_fallback_rejects_actual_overlap_between_symbol_lineages() -> Non
         ExecutionChainError,
         match="ambiguous_execution_order_instrument_lineage",
     ):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 2},
             [
                 (
@@ -2960,9 +2973,7 @@ def test_prefix_fallback_interns_shared_alias_evidence_once(
     )
     counters = _instrument_shared_alias_resolver(monkeypatch)
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
@@ -2997,9 +3008,7 @@ def test_prefix_fallback_directly_probes_disjoint_order_partitions(
     ) = _disjoint_lineage_order_fallback_rows(execution_count)
     counters = _instrument_shared_alias_resolver(monkeypatch)
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
@@ -3016,9 +3025,7 @@ def test_prefix_fallback_directly_probes_disjoint_order_partitions(
     assert counters.prepared_partition_counts == [1] * execution_count
     assert counters.indexed_row_visits[0] == execution_count
 
-    permuted = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    permuted = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         list(reversed(fill_rows)),
@@ -3126,9 +3133,7 @@ def test_prefix_fallback_index_visits_distinct_order_buckets_linearly(
         staticmethod(counted_consume),
     )
 
-    resolved = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    resolved = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         fill_rows,
@@ -3137,9 +3142,7 @@ def test_prefix_fallback_index_visits_distinct_order_buckets_linearly(
     )
     first_consumption_order = list(consumed_identities)
     consumed_identities.clear()
-    permuted = SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-        _WALLET,
-        "live",
+    permuted = _certified_prefix(
         {"kraken": execution_count},
         source_rows,
         list(reversed(fill_rows)),
@@ -3162,9 +3165,7 @@ def test_prefix_validator_rejects_out_of_range_and_empty_resolved_shard() -> Non
     ignored_fill = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2)
     ignored_fill.client_order_id = None
     with pytest.raises(ExecutionChainError, match="out_of_range_execution_prefix_row"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 0},
             source_rows,
             [],
@@ -3175,9 +3176,7 @@ def test_prefix_validator_rejects_out_of_range_and_empty_resolved_shard() -> Non
     invalid_wallet_execution = _execution("kraken", 1)
     invalid_wallet_execution.wallet_public_id = "not-a-wallet-uuid"
     with pytest.raises(ExecutionChainError, match="invalid_execution_fill_identity"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 1},
             [(invalid_wallet_execution, _order(), _instrument())],
             [_fill_event(_CLIENT_ORDER, _KRAKEN_SHARD)],
@@ -3186,9 +3185,7 @@ def test_prefix_validator_rejects_out_of_range_and_empty_resolved_shard() -> Non
         )
 
     with pytest.raises(ExecutionChainError, match="ambiguous_execution_shard_lineage"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _WALLET,
-            "live",
+        _certified_prefix(
             {"kraken": 1},
             source_rows,
             [ignored_fill, _fill_event(_CLIENT_ORDER, "")],
@@ -3212,7 +3209,7 @@ def test_fill_stable_order_rejects_missing_fixed_width_identity() -> None:
 async def test_empty_scope_returns_an_empty_frozen_bundle(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """A scope with no qualifying execution has no watermarks or rows."""
+    """A scope with no qualifying execution has no watermarks, rows, or corrections."""
     prefix = await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _AS_OF)
 
-    assert prefix == {"watermarks": {}, "executions": []}
+    assert prefix == {"watermarks": {}, "executions": [], "annulments": []}

@@ -27,6 +27,7 @@ from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import Order
@@ -319,10 +320,10 @@ def _evaluation(
     }
 
 
-async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_seven_sets(
+async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_eight_sets(
     tmp_path: Path,
 ) -> None:
-    """One snapshot serves every evaluator input from exactly six set reads.
+    """One snapshot serves every evaluator input from exactly eight set reads.
 
     Given: An anchored scope at watermark 2 with two later ingested fills,
         an active spec, and precision evidence for anchor, replay, and
@@ -330,8 +331,12 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_seven_sets
     When: The bundle is read at boundary watermark 4,
     Then: Replay, identity, spec, precision, and confirmed collections are
         complete, the counted proof passes, the boundary tip equals the
-        independently derived genesis fold, and seven SELECTs were issued
-        (anchor, replay, state, chain fold, specs, precisions).
+        independently derived genesis fold, and eight SELECTs were issued
+        (anchor, replay, annulment manifest, state, chain fold, specs,
+        precisions). The manifest read joins the snapshot because the replay
+        the evaluator folds is the EFFECTIVE range, and evidence about which
+        bookings still count has to come from the same pinned instant as the
+        bookings themselves.
     """
     repo = await _repo(tmp_path)
     await _seed_market(repo, with_spec=True)
@@ -406,7 +411,104 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_seven_sets
     assert bundle.previously_confirmed_assets == frozenset({"BTC", "USD"})
     assert bundle.range_complete is True
     assert bundle.boundary_chain_tip == await _derived_tip(repo, 4)
-    assert len(select_statements) == 7
+    assert len(select_statements) == 8
+    await repo.engine.dispose()
+
+
+async def test_bundle_drops_an_annulled_booking_after_counting_the_range(
+    tmp_path: Path,
+) -> None:
+    """The counted proof stays physical while the fold consumes only what still counts.
+
+    Given: An anchored scope at watermark 2 with two later ingested fills, the
+        second of which an operator has repudiated through the manifest.
+    When: The bundle is read at boundary watermark 4.
+    Then: ``range_complete`` still holds — contiguity is counted over the RAW
+        range first, so a correction can never make a purged or tampered ledger
+        look complete — while the replay the evaluator folds carries only the
+        surviving booking, and the boundary chain tip is unmoved.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_market(repo)
+    await _seed_executions(repo, 2)
+    await _record_real_anchor(repo)
+    await _seed_executions(repo, 2, start_sequence_id=20)
+    async with repo.session() as session:
+        session.add(
+            ExecutionAnnulment(
+                target_execution_public_id="00000000-0000-7000-8000-0000000009e1",
+                target_execution_digest="0" * 64,
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                scope_sequence=4,
+                annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
+                correction_time=_AS_OF,
+                reason="unwitnessed_phantom",
+                evidence_json='{"diagnosis":"hand-built"}',
+                session_id=_SESSION,
+                sequence_id=1,
+                timestamp=_AS_OF,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await session.commit()
+
+    bundle = await repo.get_spot_reconciliation_bundle(
+        _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+    )
+
+    assert bundle.error is None
+    assert bundle.range_complete is True
+    assert [row["scope_sequence"] for row in bundle.replay] == [3]
+    assert bundle.boundary_chain_tip == await _derived_tip(repo, 4)
+    await repo.engine.dispose()
+
+
+async def test_bundle_ignores_a_correction_its_horizon_does_not_know(
+    tmp_path: Path,
+) -> None:
+    """A repudiation recorded after the capture instant cannot rewrite it.
+
+    Given: The same scope with the correction's ``correction_time`` set one
+        second AFTER the bundle's pinned capture instant.
+    When: The bundle is read at that capture instant.
+    Then: Both bookings still replay. The capture answers for its own moment,
+        so a correction that was not yet known then must not retroactively
+        change the range it certified.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_market(repo)
+    await _seed_executions(repo, 2)
+    await _record_real_anchor(repo)
+    await _seed_executions(repo, 2, start_sequence_id=20)
+    async with repo.session() as session:
+        session.add(
+            ExecutionAnnulment(
+                target_execution_public_id="00000000-0000-7000-8000-0000000009e1",
+                target_execution_digest="0" * 64,
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                scope_sequence=4,
+                annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
+                correction_time=_AS_OF + timedelta(seconds=1),
+                reason="unwitnessed_phantom",
+                evidence_json='{"diagnosis":"hand-built"}',
+                session_id=_SESSION,
+                sequence_id=1,
+                timestamp=_AS_OF,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await session.commit()
+
+    bundle = await repo.get_spot_reconciliation_bundle(
+        _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+    )
+
+    assert bundle.error is None
+    assert [row["scope_sequence"] for row in bundle.replay] == [3, 4]
     await repo.engine.dispose()
 
 

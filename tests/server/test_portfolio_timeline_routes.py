@@ -116,12 +116,12 @@ def _empty_anchor(
         "mark_time": _ANCHOR_TIME,
         "watermarks_json": "{}",
         "opening_basket_json": json.dumps(
-            {"native_basket": {}, "pools": [], "schema_version": 2},
+            {"annulments": [], "native_basket": {}, "pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
         "contributions_json": json.dumps(
-            {"pools": [], "schema_version": 2},
+            {"pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
@@ -166,6 +166,7 @@ def _seeded_repo() -> AsyncMock:
     execution_prefix = {
         "watermarks": {"kraken": 1},
         "executions": execution_rows,
+        "annulments": [],
     }
     repo.get_pnl_timeline_execution_prefix = AsyncMock(return_value=execution_prefix)
     repo.get_pnl_timeline_execution_prefix_bundle = AsyncMock(

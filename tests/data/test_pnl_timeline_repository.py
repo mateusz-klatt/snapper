@@ -20,6 +20,7 @@ from sqlalchemy import create_engine
 
 from snapper.data.models import AccrualLedger
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import Order
 from snapper.data.repository import SQLAlchemyRepository
 
@@ -124,6 +125,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     schema_engine = create_engine(f"sqlite:///{db_path}")
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
+    ExecutionAnnulment.__table__.create(schema_engine)
     AccrualLedger.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")

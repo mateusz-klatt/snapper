@@ -25,6 +25,7 @@ from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import PortfolioPnlPoint
@@ -232,12 +233,12 @@ def _empty_anchor(point_time: datetime) -> PortfolioPnlAnchorRow:
         "mark_time": point_time,
         "watermarks_json": "{}",
         "opening_basket_json": json.dumps(
-            {"native_basket": {}, "pools": [], "schema_version": 2},
+            {"annulments": [], "native_basket": {}, "pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
         "contributions_json": json.dumps(
-            {"pools": [], "schema_version": 2},
+            {"pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
@@ -253,6 +254,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Instrument.__table__.create(schema_engine)
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
+    ExecutionAnnulment.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     PortfolioPnlPoint.__table__.create(schema_engine)
     schema_engine.dispose()

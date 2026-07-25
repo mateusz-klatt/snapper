@@ -821,11 +821,6 @@
       "SQLAlchemyRepository._transition_execution_plan_decision_outbox": {
         "PLR0913": 8
       },
-      "SQLAlchemyRepository._validate_pnl_timeline_execution_prefix": {
-        "C901": 14,
-        "PLR0912": 13,
-        "PLR0913": 7
-      },
       "SQLAlchemyRepository._validate_portfolio_pnl_anchor": {
         "C901": 17,
         "PLR0912": 16

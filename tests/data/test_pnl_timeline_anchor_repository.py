@@ -32,10 +32,12 @@ from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import PortfolioPnlPoint
@@ -161,7 +163,7 @@ def _empty_anchor_write_evidence(
     activation_as_of: datetime = _T0,
 ) -> PortfolioPnlAnchorWriteEvidence:
     """Build one valid empty derivation bundle for an atomic anchor write."""
-    empty = PnlTimelineExecutionPrefix(watermarks={}, executions=[])
+    empty = PnlTimelineExecutionPrefix(watermarks={}, executions=[], annulments=[])
     return PortfolioPnlAnchorWriteEvidence(
         wallet_public_id=_WALLET,
         mode="live",
@@ -295,6 +297,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Instrument.__table__.create(schema_engine)
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
+    ExecutionAnnulment.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     PortfolioPnlPoint.__table__.create(schema_engine)
     schema_engine.dispose()
@@ -658,7 +661,10 @@ async def test_atomic_anchor_writer_sets_read_committed_then_locks_in_order(
     assert events == [
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
         "SELECT pg_advisory_xact_lock(hashtext('portfolio_pnl_anchor'), hashtext(:scope))",
-        "LOCK TABLE executions, instruments, orders, symbols, venue_events IN SHARE MODE",
+        (
+            "LOCK TABLE execution_annulments, executions, instruments, orders, "
+            "symbols, venue_events IN SHARE MODE"
+        ),
         "load",
     ]
     assert result == _atomic_anchor()
@@ -676,8 +682,10 @@ async def test_atomic_anchor_writer_rolls_back_changed_sqlite_bundle(
     session = AsyncMock()
     session.add = MagicMock()
     current = PnlTimelineExecutionPrefixBundle(
-        request=PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[]),
-        activation=PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[]),
+        request=PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[], annulments=[]),
+        activation=PnlTimelineExecutionPrefix(
+            watermarks={"kraken": 1}, executions=[], annulments=[]
+        ),
     )
     with (
         patch.object(repository, "session") as session_context,
@@ -737,8 +745,8 @@ async def test_fenced_bundle_reload_reads_distinct_cuts_independently(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Different request and activation cuts each invoke the proven loader."""
-    request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[])
-    activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[])
+    request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[], annulments=[])
+    activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[], annulments=[])
     loader = AsyncMock(side_effect=[request, activation])
     evidence = _empty_anchor_write_evidence(
         request_as_of=_T0 + timedelta(minutes=1),
@@ -778,10 +786,12 @@ async def test_atomic_writer_rolls_back_unprovable_or_inconsistent_current_bundl
             request=PnlTimelineExecutionPrefix(
                 watermarks={},
                 executions=[],
+                annulments=[],
             ),
             activation=PnlTimelineExecutionPrefix(
                 watermarks={"kraken": 1},
                 executions=[],
+                annulments=[],
             ),
         )
 
@@ -1270,6 +1280,144 @@ def _mutated_prefix_evidence(
         else:
             row["instrument_public_id"] = "00000000-0000-7000-8000-000000000199"
     return mutated
+
+
+_PHANTOM_ORDER_PUBLIC_ID = "00000000-0000-7000-8000-000000000186"
+_PHANTOM_CLIENT_ORDER_ID = "anchor-fence-phantom-client"
+_ANNULLING_USER = "0000face-0000-7000-8000-0000000000d1"
+
+
+def _phantom_source_order() -> Order:
+    """Build the order lineage of an unwitnessed booking in the same scope."""
+    order = _source_order()
+    order.public_id = _PHANTOM_ORDER_PUBLIC_ID
+    order.client_order_id = _PHANTOM_CLIENT_ORDER_ID
+    order.exchange_order_id = "anchor-fence-phantom-venue-order"
+    return order
+
+
+def _phantom_source_execution() -> Execution:
+    """Build one unwitnessed booking at the scope's second sequence."""
+    execution = _source_execution()
+    execution.order_public_id = _PHANTOM_ORDER_PUBLIC_ID
+    execution.scope_sequence = 2
+    execution.sequence_id = 2
+    execution.exec_id = "anchor-fence-phantom-exec"
+    execution.trade_id = "anchor-fence-phantom-trade"
+    return execution
+
+
+async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
+    """Seed one witnessed booking, one unwitnessed booking, and its correction."""
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _phantom_source_order(),
+                _source_execution(),
+                _phantom_source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+    async with repository.session() as s:
+        phantom = (
+            (
+                await s.execute(
+                    select(Execution).where(Execution.order_public_id == _PHANTOM_ORDER_PUBLIC_ID)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        digest = execution_row_digest(SQLAlchemyRepository._execution_chain_record(phantom))
+        target_public_id = phantom.public_id
+    await repository.record_execution_annulment(
+        {
+            "target_execution_public_id": target_public_id,
+            "expected_execution_digest": digest,
+            "wallet_public_id": _WALLET,
+            "exchange": "kraken",
+            "mode": "live",
+            "scope_sequence": 2,
+            "annulled_by_user_public_id": _ANNULLING_USER,
+            "correction_time": _T0 - timedelta(minutes=1),
+            "reason": "unwitnessed_phantom",
+            "evidence": {"diagnosis": "unwitnessed booking in the anchor fence fixture"},
+            "session_id": _SESSION_PUBLIC_ID,
+            "sequence_id": 9,
+            "timestamp": _T0 - timedelta(minutes=1),
+        }
+    )
+
+
+def _manifest_drifted_evidence(
+    bundle: PnlTimelineExecutionPrefixBundle,
+    drift: Literal["forgotten", "invented"],
+) -> PnlTimelineExecutionPrefixBundle:
+    """Restate one derivation bundle as if its manifest evidence had moved."""
+    mutated = deepcopy(bundle)
+    for cut in ("request", "activation"):
+        if drift == "forgotten":
+            mutated[cut]["annulments"] = []
+        else:
+            invented = deepcopy(mutated[cut]["annulments"][0])
+            invented["public_id"] = "00000000-0000-7000-8000-0000000000df"
+            invented["scope_sequence"] = 1
+            mutated[cut]["annulments"].append(invented)
+    return mutated
+
+
+@pytest.mark.parametrize("drift", ["forgotten", "invented"])
+async def test_atomic_writer_treats_a_manifest_change_as_evidence_drift(
+    repository: SQLAlchemyRepository,
+    drift: Literal["forgotten", "invented"],
+) -> None:
+    """An anchor may only persist against the exact corrections it folded.
+
+    Given: A scope whose opening prefix proves only because one unwitnessed
+        booking is repudiated by the append-only manifest.
+    When: The candidate is offered with evidence whose manifest no longer
+        matches the ledger — either derived before the correction landed
+        ("forgotten") or claiming a correction the ledger never recorded
+        ("invented").
+    Then: The atomic writer refuses. The manifest travels INSIDE the prefix
+        value, so the same equality check that catches a late execution catches
+        a late correction, and an anchor — which is permanent — can never state
+        an opening it did not actually derive.
+    """
+    await _seed_annulled_scope(repository)
+    current = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert len(current["activation"]["annulments"]) == 1
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        request_as_of=_T0,
+        activation_as_of=_T0,
+        execution_prefix_bundle=_manifest_drifted_evidence(current, drift),
+    )
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":2}'
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="changed before anchor persistence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            candidate,
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
 
 
 @pytest.mark.parametrize("evidence_kind", ["execution", "fill", "lineage"])

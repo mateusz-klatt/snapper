@@ -103,6 +103,7 @@ from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
+from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
@@ -150,8 +151,15 @@ source. The response exposes both this limit and whether older markers were
 omitted, so a busy window never looks indistinguishable from a complete one.
 """
 
-_ANCHOR_SCHEMA_VERSION: Final[Literal[2]] = 2
-"""Persisted activation payload version owned by the 5A.13 replay contract."""
+_ANCHOR_SCHEMA_VERSION: Final[Literal[3]] = 3
+"""Persisted activation payload version owned by the 5A.13 replay contract.
+
+Bumped 2 -> 3 when the opening payload gained its ``annulments`` audit: an
+anchor is permanent and its opening is derived from the EFFECTIVE prefix, so a
+payload that did not record which repudiations that derivation folded cannot be
+told apart from one derived before any correction existed. A v2 row therefore
+fails to parse rather than being read as "no corrections applied" — the shape
+change is exactly what the version exists to make loud."""
 
 _STRICT_ANCHOR_CONFIG: Final[ConfigDict] = ConfigDict(
     extra="forbid",
@@ -160,6 +168,13 @@ _STRICT_ANCHOR_CONFIG: Final[ConfigDict] = ConfigDict(
     allow_inf_nan=False,
 )
 """Strict finite configuration shared by every persisted anchor model."""
+
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
+"""Lowercase hex alphabet the persisted annulment row digests must use.
+
+Pinned locally rather than imported so the anchor payload validator states its
+own storage contract; the digest itself is produced by
+``snapper.application.portfolio.execution_chain.execution_row_digest``."""
 
 
 class _AnchorPoolPayload(BaseModel):
@@ -208,14 +223,79 @@ class _AnchorPoolPayload(BaseModel):
         return value
 
 
-class _AnchorOpeningPayload(BaseModel):
-    """Canonical v2 opening audit and aggregate native inventory basket."""
+class _AnchorAnnulmentPayload(BaseModel):
+    """One repudiation the anchor's opening derivation provably folded.
+
+    Recorded as the pair that IDENTIFIES a correction — the manifest row's own
+    public id and the target execution's immutable id — plus the canonical row
+    digest that says which row CONTENT was repudiated. Together they let an
+    auditor reconstruct, from the anchor alone, exactly why its opening differs
+    from a naive replay of the raw ledger, without trusting the manifest to
+    still say the same thing later.
+    """
 
     model_config = _STRICT_ANCHOR_CONFIG
 
-    schema_version: Literal[2]
+    public_id: str
+    target_execution_public_id: str
+    target_execution_digest: str
+    exchange: str
+    scope_sequence: int
+
+    @field_validator("public_id", "target_execution_public_id")
+    @classmethod
+    def _canonical_uuid(cls, value: str) -> str:
+        """Require canonical UUID identities for both correction endpoints."""
+        try:
+            canonical = str(UUID(value))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("anchor annulment identities must be UUIDs") from exc
+        if value != canonical:
+            raise ValueError("anchor annulment identities must be canonical")
+        return value
+
+    @field_validator("target_execution_digest")
+    @classmethod
+    def _canonical_digest(cls, value: str) -> str:
+        """Require the manifest's lowercase 64-hex canonical row digest."""
+        if len(value) != 64 or value != value.lower() or not set(value) <= _HEX_DIGITS:
+            raise ValueError("anchor annulment digest must be 64 lowercase hex characters")
+        return value
+
+    @field_validator("exchange")
+    @classmethod
+    def _canonical_exchange(cls, value: str) -> str:
+        """Require the repository's canonical lowercase exchange identity."""
+        if not value or value != value.strip().lower():
+            raise ValueError("anchor annulment exchange must be canonical lowercase")
+        return value
+
+    @field_validator("scope_sequence")
+    @classmethod
+    def _positive_sequence(cls, value: int) -> int:
+        """Require a real per-scope commit-order coordinate."""
+        if isinstance(value, bool) or value < 1:
+            raise ValueError("anchor annulment scope_sequence must be positive")
+        return value
+
+
+class _AnchorOpeningPayload(BaseModel):
+    """Canonical v3 opening audit, inventory basket, and folded corrections.
+
+    ``annulments`` is empty for the overwhelmingly common case of an opening
+    derived from an uncorrected ledger, and non-empty exactly when the sealed
+    prefix excluded a repudiated booking. It is part of the OPENING payload
+    rather than a sibling because it is a property of this derivation: the same
+    scope certified at a horizon that did not yet know the correction derives a
+    different opening, and the anchor must be able to say which one it is.
+    """
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    schema_version: Literal[3]
     pools: tuple[_AnchorPoolPayload, ...]
     native_basket: dict[str, float]
+    annulments: tuple[_AnchorAnnulmentPayload, ...]
 
 
 class _AnchorWeightPayload(BaseModel):
@@ -264,11 +344,11 @@ class _AnchorContributionPoolPayload(BaseModel):
 
 
 class _AnchorContributionsPayload(BaseModel):
-    """Canonical v2 legacy attribution seeds for every opening shard."""
+    """Canonical v3 legacy attribution seeds for every opening shard."""
 
     model_config = _STRICT_ANCHOR_CONFIG
 
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     pools: tuple[_AnchorContributionPoolPayload, ...]
 
 
@@ -421,10 +501,50 @@ def _watermarks_are_valid(watermarks: Mapping[str, int]) -> bool:
     )
 
 
+def _anchor_annulment_payloads(
+    annulments: Sequence[PnlTimelineAppliedAnnulment],
+) -> tuple[_AnchorAnnulmentPayload, ...]:
+    """Project the sealed prefix's applied corrections into the anchor audit.
+
+    Stably ordered by scope coordinate so the persisted canonical JSON is a
+    function of WHICH corrections applied and never of the order a read
+    happened to return them in.
+
+    Args:
+        annulments: The corrections the certified prefix proved and applied.
+
+    Returns:
+        The canonical anchor annulment audit entries.
+    """
+    return tuple(
+        _AnchorAnnulmentPayload(
+            public_id=annulment["public_id"],
+            target_execution_public_id=annulment["target_execution_public_id"],
+            target_execution_digest=annulment["target_execution_digest"],
+            exchange=annulment["exchange"],
+            scope_sequence=annulment["scope_sequence"],
+        )
+        for annulment in sorted(
+            annulments,
+            key=lambda row: (row["exchange"], row["scope_sequence"]),
+        )
+    )
+
+
 def _anchor_payloads(
     derivation: TimelineOpeningDerivation,
+    annulments: Sequence[PnlTimelineAppliedAnnulment],
 ) -> tuple[_AnchorOpeningPayload, _AnchorContributionsPayload]:
-    """Build canonical v2 persisted payloads from a pure opening derivation."""
+    """Build canonical v3 persisted payloads from a pure opening derivation.
+
+    Args:
+        derivation: The pure opening derivation this anchor seeds from.
+        annulments: The corrections the sealed activation prefix applied, so
+            the permanent anchor records what its opening actually folded.
+
+    Returns:
+        The canonical opening and contribution payloads.
+    """
     pools = tuple(
         _AnchorPoolPayload(
             instrument_public_id=valuation.instrument_public_id,
@@ -448,6 +568,7 @@ def _anchor_payloads(
         schema_version=_ANCHOR_SCHEMA_VERSION,
         pools=pools,
         native_basket=native_basket,
+        annulments=_anchor_annulment_payloads(annulments),
     )
     contributions = _AnchorContributionsPayload(
         schema_version=_ANCHOR_SCHEMA_VERSION,
@@ -564,11 +685,36 @@ def _decode_anchor_payloads(
     return opening_payload, contributions_payload, watermarks
 
 
+def _validate_anchor_annulment_topology(opening_payload: _AnchorOpeningPayload) -> None:
+    """Require stably ordered, uniquely targeted corrections in one anchor audit.
+
+    Mirrors the manifest's own TOTAL uniqueness on both the target execution
+    and its scope slot, so a persisted anchor that claims to have folded two
+    corrections of one booking is refused rather than believed.
+
+    Args:
+        opening_payload: The decoded v3 opening audit.
+
+    Raises:
+        PnlAnchorEvidenceError: If the audit is unordered or not uniquely
+            targeted.
+    """
+    annulments = opening_payload.annulments
+    expected_order = tuple(sorted(annulments, key=lambda row: (row.exchange, row.scope_sequence)))
+    if annulments != expected_order:
+        raise PnlAnchorEvidenceError("anchor annulments are not stably ordered")
+    targets = [row.target_execution_public_id for row in annulments]
+    coordinates = [(row.exchange, row.scope_sequence) for row in annulments]
+    if len(set(targets)) != len(targets) or len(set(coordinates)) != len(coordinates):
+        raise PnlAnchorEvidenceError("anchor annulments are not uniquely targeted")
+
+
 def _validate_anchor_payload_topology(
     opening_payload: _AnchorOpeningPayload,
     contributions_payload: _AnchorContributionsPayload,
 ) -> None:
     """Require stable unique opening pools and matching contribution identities."""
+    _validate_anchor_annulment_topology(opening_payload)
     expected_pool_order = tuple(
         sorted(
             opening_payload.pools,
@@ -909,12 +1055,23 @@ class PnlWalletSeriesResult(PnlTimelineResult):
 
 @dataclass(frozen=True, slots=True)
 class PnlWalletTimelineResult:
-    """One reconstructed series with a bounded marker overlay."""
+    """One reconstructed series with a bounded marker overlay.
+
+    ``applied_annulments`` is the disclosure seam for the series-level
+    correction channel: it names, without any re-derivation, exactly which
+    repudiations the certified prefix behind THIS result folded. It is carried
+    here rather than recomputed downstream because only the fold that excluded
+    a booking can honestly say it did — a later independent read could see a
+    different manifest and disagree with the numbers already returned. The
+    transport-level disclosure that consumes it is a separate slice; an empty
+    tuple means the scope's history is uncorrected.
+    """
 
     series: PnlWalletSeriesResult
     markers: tuple[PnlTimelineMarker, ...]
     marker_limit: int
     markers_truncated: bool
+    applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
 
 
 class PnlTimelineWorkBudgetError(ValueError):
@@ -3168,7 +3325,10 @@ async def _derive_anchor_candidate(
         )
     except ValueError as exc:
         raise PnlAnchorEvidenceError("opening replay or valuation cannot be proven") from exc
-    opening_payload, contributions_payload = _anchor_payloads(derivation)
+    opening_payload, contributions_payload = _anchor_payloads(
+        derivation,
+        prefix["annulments"],
+    )
     public_id = portfolio_pnl_anchor_public_id(
         wallet_public_id,
         mode,
@@ -3267,7 +3427,16 @@ async def _record_anchor_candidate(
     scope: _AnchorScope,
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle,
 ) -> _ResolvedPnlAnchor:
-    """Derive, record, and fully validate one canonical activation candidate."""
+    """Derive, record, and fully validate one canonical activation candidate.
+
+    The bundle handed to the writer carries each cut's applied annulment
+    manifest as well as its effective rows, so the atomic equality check the
+    writer performs under its fence covers correction drift with no separate
+    comparison: a repudiation appended between this derivation and the insert
+    fails the write exactly as a late execution does. The candidate's opening
+    audit records the same corrections, so the permanent anchor states which
+    ones its opening folded.
+    """
     request_watermarks = execution_prefix_bundle["request"]["watermarks"]
     activation_prefix = execution_prefix_bundle["activation"]
     activation_watermarks = activation_prefix["watermarks"]
@@ -4269,4 +4438,5 @@ async def build_wallet_pnl_timeline(
         markers=tuple(markers),
         marker_limit=PNL_TIMELINE_MARKER_LIMIT,
         markers_truncated=markers_truncated,
+        applied_annulments=tuple(execution_prefix_bundle["request"]["annulments"]),
     )

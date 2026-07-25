@@ -370,18 +370,62 @@ class PnlTimelineOpeningExecutionRow(PnlTimelineExecutionRow):
     shard_key: str
 
 
+type ExecutionAnnulmentReason = Literal["unwitnessed_phantom", "unwitnessed_legacy_lineage"]
+"""Closed vocabulary of execution-annulment reasons.
+
+Must stay identical to ``snapper.data.models.EXECUTION_ANNULMENT_REASONS`` and
+the ``ck_execution_annulments_reason`` CHECK; a regression test pins all three
+against each other so a new reason cannot be typed without also being storable.
+Each value is documented on ``snapper.data.models.ExecutionAnnulment.reason``."""
+
+
+class PnlTimelineAppliedAnnulment(TypedDict):
+    """One annulment the certification fold PROVED and then applied.
+
+    Emitted only after the manifest row has been bound to an in-prefix
+    execution by immutable id, canonical row digest, and scope coordinate, and
+    only after the read-time contradictory-witness refusal has passed — so a
+    row here is evidence that exactly one raw execution was excluded from
+    witness assignment and from economic replay, never a mere manifest listing.
+
+    ``target_execution_digest`` is repeated from the manifest even though the
+    fold has just recomputed and compared it: an audit consumer (the anchor
+    payload, and the A3 series-level disclosure) must be able to state WHICH
+    row content was repudiated without re-reading the ledger. ``correction_time``
+    travels with it because a knowledge-horizon read is only allowed to see
+    corrections whose ``correction_time`` it has already passed.
+    """
+
+    public_id: str
+    target_execution_public_id: str
+    target_execution_digest: str
+    exchange: str
+    scope_sequence: int
+    reason: ExecutionAnnulmentReason
+    correction_time: datetime
+
+
 class PnlTimelineExecutionPrefix(TypedDict):
-    """Frozen per-exchange watermarks and their exact execution prefixes.
+    """Frozen per-exchange watermarks and their EFFECTIVE execution prefixes.
 
     ``watermarks`` is captured before ``executions`` is read. Each exchange
-    watermark ``W`` therefore certifies that the returned rows contain exactly
-    that exchange's immutable scope-sequence range ``[1, W]``. Every row also
-    carries its exact durable fill shard so independent strategy pools remain
-    distinct during opening replay.
+    watermark ``W`` therefore certifies that the raw immutable scope-sequence
+    range ``[1, W]`` was fully present and contiguous — the physical prefix
+    proof is taken over every raw row, annulled or not, and is unchanged by
+    this manifest. Every returned row also carries its exact durable fill shard
+    so independent strategy pools remain distinct during opening replay.
+
+    ``executions`` is then the EFFECTIVE fold input: the proven raw prefix minus
+    the rows a correctly bound annulment repudiates. ``annulments`` names
+    exactly which repudiations were applied, so the difference between the raw
+    ledger and the accounting history is disclosed by the same value that
+    caused it and no consumer has to re-derive it. An empty ``annulments`` list
+    means ``executions`` IS the raw proven prefix.
     """
 
     watermarks: dict[str, int]
     executions: list[PnlTimelineOpeningExecutionRow]
+    annulments: list[PnlTimelineAppliedAnnulment]
 
 
 class PnlTimelineExecutionPrefixBundle(TypedDict):
@@ -396,15 +440,6 @@ class PnlTimelineExecutionPrefixBundle(TypedDict):
 
     request: PnlTimelineExecutionPrefix
     activation: PnlTimelineExecutionPrefix
-
-
-type ExecutionAnnulmentReason = Literal["unwitnessed_phantom", "unwitnessed_legacy_lineage"]
-"""Closed vocabulary of execution-annulment reasons.
-
-Must stay identical to ``snapper.data.models.EXECUTION_ANNULMENT_REASONS`` and
-the ``ck_execution_annulments_reason`` CHECK; a regression test pins all three
-against each other so a new reason cannot be typed without also being storable.
-Each value is documented on ``snapper.data.models.ExecutionAnnulment.reason``."""
 
 
 class ExecutionAnnulmentRequest(TypedDict):
@@ -1752,6 +1787,13 @@ class SpotReconciliationBundle:
     ``None`` for an unanchored account (the evaluator classifies that itself);
     ``error`` names the exact fail-closed reason when the bundle cannot be
     certified, in which case every collection is empty.
+
+    ``replay`` is the EFFECTIVE range: contiguity is counted over the raw rows
+    first — so a correction can never make a gap look like a complete range —
+    and only then are the bookings the annulment manifest repudiates at
+    ``as_of`` dropped from the fold. ``range_complete`` therefore stays a
+    statement about the physical ledger, and ``len(replay)`` may legitimately
+    be smaller than the counted range.
     """
 
     anchor: SpotReconciliationAnchorRow | None

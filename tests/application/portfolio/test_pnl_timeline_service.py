@@ -82,6 +82,7 @@ from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
+from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
@@ -154,12 +155,12 @@ def _empty_anchor(
             sort_keys=True,
         ),
         "opening_basket_json": json.dumps(
-            {"native_basket": {}, "pools": [], "schema_version": 2},
+            {"annulments": [], "native_basket": {}, "pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
         "contributions_json": json.dumps(
-            {"pools": [], "schema_version": 2},
+            {"pools": [], "schema_version": 3},
             separators=(",", ":"),
             sort_keys=True,
         ),
@@ -215,20 +216,56 @@ def _test_anchor_contribution(
     }
 
 
+_ANNULMENT_ID = "00000000-0000-7000-8000-0000000000d9"
+_PHANTOM_EXECUTION_ID = "00000000-0000-7000-8000-0000000000e1"
+_PHANTOM_DIGEST = "ab" * 32
+
+
+def _applied_annulment() -> PnlTimelineAppliedAnnulment:
+    """Build one correction as the certification fold reports it applied."""
+    return {
+        "public_id": _ANNULMENT_ID,
+        "target_execution_public_id": _PHANTOM_EXECUTION_ID,
+        "target_execution_digest": _PHANTOM_DIGEST,
+        "exchange": "kraken",
+        "scope_sequence": 1,
+        "reason": "unwitnessed_phantom",
+        "correction_time": _m(0),
+    }
+
+
+def _test_anchor_annulment(
+    *,
+    public_id: str = _ANNULMENT_ID,
+    target_execution_digest: str = _PHANTOM_DIGEST,
+    exchange: str = "kraken",
+    scope_sequence: int = 1,
+) -> dict[str, object]:
+    """Build one canonical persisted correction-audit payload for parser tests."""
+    return {
+        "public_id": public_id,
+        "target_execution_public_id": _PHANTOM_EXECUTION_ID,
+        "target_execution_digest": target_execution_digest,
+        "exchange": exchange,
+        "scope_sequence": scope_sequence,
+    }
+
+
 def _one_pool_anchor() -> PortfolioPnlAnchorRow:
     """Build one valid non-flat anchor for persisted-payload poison tests."""
     row = _empty_anchor(_W1, "live", "USD", point_time=_m(1))
     row["unrealized_pnl"] = 10.0
     row["opening_basket_json"] = _canonical_test_json(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "pools": [_test_anchor_pool()],
+            "annulments": [],
             "native_basket": {_I1: 1.0},
         }
     )
     row["contributions_json"] = _canonical_test_json(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "pools": [_test_anchor_contribution()],
         }
     )
@@ -525,6 +562,7 @@ class FakeRepo:
         self._record_winner = record_winner
         self._execution_prefix_error = execution_prefix_error
         self._execution_watermarks = execution_watermarks
+        self._applied_annulments: list[PnlTimelineAppliedAnnulment] = []
         self._samples: list[PortfolioPnlSampleRow] = []
         self.sample_calls: list[tuple[PortfolioPnlSampleQuery, datetime, datetime, str | None]] = []
         self.atomic_anchor_error: Exception | None = None
@@ -609,8 +647,21 @@ class FakeRepo:
         prefix = PnlTimelineExecutionPrefix(
             watermarks=watermarks,
             executions=executions,
+            annulments=list(self._applied_annulments),
         )
         return prefix
+
+    def apply_annulments(
+        self,
+        annulments: Sequence[PnlTimelineAppliedAnnulment],
+    ) -> None:
+        """Make every certified prefix report these applied corrections.
+
+        The canned executions are supplied already effective, exactly as the
+        repository returns them, so a test states the fold's OUTPUT rather than
+        re-implementing the exclusion in the fake.
+        """
+        self._applied_annulments = list(annulments)
 
     def require_exact_fill_witnesses(
         self,
@@ -4461,10 +4512,12 @@ class TestDurableActivationAnchor:
             request=PnlTimelineExecutionPrefix(
                 watermarks=request_watermarks,
                 executions=[],
+                annulments=[],
             ),
             activation=PnlTimelineExecutionPrefix(
                 watermarks=activation_watermarks,
                 executions=[],
+                annulments=[],
             ),
         )
 
@@ -4502,10 +4555,12 @@ class TestDurableActivationAnchor:
             request=PnlTimelineExecutionPrefix(
                 watermarks={"zonda": 1},
                 executions=[],
+                annulments=[],
             ),
             activation=PnlTimelineExecutionPrefix(
                 watermarks={},
                 executions=[],
+                annulments=[],
             ),
         )
 
@@ -5162,6 +5217,7 @@ class TestDurableActivationAnchor:
                     {
                         "schema_version": 1,
                         "pools": [_test_anchor_pool()],
+                        "annulments": [],
                         "native_basket": {_I1: 1.0},
                     }
                 ),
@@ -5172,8 +5228,9 @@ class TestDurableActivationAnchor:
                 "opening_basket_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_pool(shard_key=" shard-a")],
+                        "annulments": [],
                         "native_basket": {_I1: 1.0},
                     }
                 ),
@@ -5184,8 +5241,9 @@ class TestDurableActivationAnchor:
                 "opening_basket_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_pool(t0_mark=0.0)],
+                        "annulments": [],
                         "native_basket": {_I1: 1.0},
                     }
                 ),
@@ -5196,8 +5254,9 @@ class TestDurableActivationAnchor:
                 "opening_basket_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_pool(exchange="Kraken")],
+                        "annulments": [],
                         "native_basket": {_I1: 1.0},
                     }
                 ),
@@ -5208,8 +5267,9 @@ class TestDurableActivationAnchor:
                 "opening_basket_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_pool(position_qty=0.0)],
+                        "annulments": [],
                         "native_basket": {_I1: 0.0},
                     }
                 ),
@@ -5220,8 +5280,9 @@ class TestDurableActivationAnchor:
                 "opening_basket_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_pool()],
+                        "annulments": [],
                         "native_basket": {_I1: 2.0},
                     }
                 ),
@@ -5230,7 +5291,7 @@ class TestDurableActivationAnchor:
             ),
             pytest.param(
                 "contributions_json",
-                _canonical_test_json({"schema_version": 2, "pools": []}),
+                _canonical_test_json({"schema_version": 3, "pools": []}),
                 "do not match",
                 id="missing-contribution",
             ),
@@ -5238,7 +5299,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_contribution(shard_key="")],
                     }
                 ),
@@ -5249,7 +5310,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_contribution(exchange="Kraken")],
                     }
                 ),
@@ -5260,7 +5321,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_contribution(quantity=0.0)],
                     }
                 ),
@@ -5271,7 +5332,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_contribution(exchange="coinbase")],
                     }
                 ),
@@ -5282,7 +5343,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [_test_anchor_contribution(quantity=2.0)],
                     }
                 ),
@@ -5293,7 +5354,7 @@ class TestDurableActivationAnchor:
                 "contributions_json",
                 _canonical_test_json(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "pools": [
                             {
                                 **_test_anchor_contribution(),
@@ -5337,11 +5398,12 @@ class TestDurableActivationAnchor:
             pytest.param(
                 "opening_basket_json",
                 (
-                    '{"native_basket":{"' + _I1 + '":1.0},"pools":[{"exchange":"kraken",'
+                    '{"annulments":[],"native_basket":{"' + _I1 + '":1.0},'
+                    '"pools":[{"exchange":"kraken",'
                     '"historical_entry_price":100.0,"instrument_public_id":"'
                     + _I1
                     + '","opening_unrealized_value":NaN,"position_qty":1.0,'
-                    '"shard_key":"shard-a","t0_mark":110.0}],"schema_version":2}'
+                    '"shard_key":"shard-a","t0_mark":110.0}],"schema_version":3}'
                 ),
                 "payload validation",
                 id="nonfinite-json",
@@ -5740,19 +5802,162 @@ class TestAnchorEvidenceDefenses:
         row["unrealized_pnl"] = raw
         row["opening_basket_json"] = _canonical_test_json(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "pools": opening_pools,
+                "annulments": [],
                 "native_basket": native_basket,
             }
         )
         row["contributions_json"] = _canonical_test_json(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "pools": contribution_pools,
             }
         )
         with pytest.raises(PnlAnchorEvidenceError, match=message):
             _parse_anchor(row)
+
+
+class TestAnchorAnnulmentAudit:
+    """The permanent anchor's record of the corrections its opening folded."""
+
+    async def test_anchor_records_the_corrections_its_opening_folded(self) -> None:
+        """A v3 opening audit states which repudiations produced it.
+
+        Given: A certified prefix whose effective rows are the survivors of one
+            applied correction.
+        When: The activation anchor is derived and persisted.
+        Then: The opening payload carries the correction's manifest id, target
+            id, canonical row digest, and scope coordinate under schema version
+            3, and the anchor parses back cleanly. Without this an anchor
+            derived from a corrected ledger would be indistinguishable from one
+            derived before any correction existed — and an anchor is permanent.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 2, 0, "buy", 2.0, 100.0, 0.0, "USD", shard_key="shard-a")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+            has_anchor=False,
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        row = await ensure_wallet_pnl_anchor(repo, _W1, "live", "USD", _m(1), _m(2))
+
+        opening_payload = json.loads(row["opening_basket_json"] or "")
+        assert opening_payload["schema_version"] == 3
+        assert opening_payload["annulments"] == [
+            {
+                "public_id": _ANNULMENT_ID,
+                "target_execution_public_id": _PHANTOM_EXECUTION_ID,
+                "target_execution_digest": _PHANTOM_DIGEST,
+                "exchange": "kraken",
+                "scope_sequence": 1,
+            }
+        ]
+        assert _parse_anchor(row).watermarks == {"kraken": 2}
+
+    @pytest.mark.parametrize(
+        ("annulments", "message"),
+        [
+            pytest.param(
+                [
+                    _test_anchor_annulment(scope_sequence=2),
+                    _test_anchor_annulment(),
+                ],
+                "not stably ordered",
+                id="unordered",
+            ),
+            pytest.param(
+                [
+                    _test_anchor_annulment(),
+                    _test_anchor_annulment(
+                        public_id="00000000-0000-7000-8000-0000000000da",
+                    ),
+                ],
+                "not uniquely targeted",
+                id="duplicate-target",
+            ),
+            pytest.param(
+                [_test_anchor_annulment(public_id="not-a-uuid")],
+                "payload validation",
+                id="unparseable-identity",
+            ),
+            pytest.param(
+                [_test_anchor_annulment(public_id=_ANNULMENT_ID.upper())],
+                "payload validation",
+                id="noncanonical-identity",
+            ),
+            pytest.param(
+                [_test_anchor_annulment(target_execution_digest="AB" * 32)],
+                "payload validation",
+                id="noncanonical-digest",
+            ),
+            pytest.param(
+                [_test_anchor_annulment(exchange="Kraken")],
+                "payload validation",
+                id="noncanonical-exchange",
+            ),
+            pytest.param(
+                [_test_anchor_annulment(scope_sequence=0)],
+                "payload validation",
+                id="nonpositive-sequence",
+            ),
+        ],
+    )
+    def test_parser_rejects_poisoned_correction_audits(
+        self,
+        annulments: list[dict[str, object]],
+        message: str,
+    ) -> None:
+        """The correction audit is held to the manifest's own guarantees.
+
+        Unordered entries would make the persisted canonical JSON depend on read
+        order rather than on which corrections applied; a repeated target would
+        claim a forked correction history the manifest's TOTAL unique indexes
+        make impossible; and a non-canonical identity, digest, exchange, or
+        coordinate is not something the certification fold could ever have
+        produced.
+        """
+        row = _one_pool_anchor()
+        row["opening_basket_json"] = _canonical_test_json(
+            {
+                "schema_version": 3,
+                "pools": [_test_anchor_pool()],
+                "annulments": annulments,
+                "native_basket": {_I1: 1.0},
+            }
+        )
+        with pytest.raises(PnlAnchorEvidenceError, match=message):
+            _parse_anchor(row)
+
+    async def test_markers_omit_the_repudiated_booking_and_disclose_it(self) -> None:
+        """A correction is not activity, and the result says a correction applied.
+
+        Given: A certified prefix that has already excluded one repudiated
+            booking and names the correction that excluded it.
+        When: The marker timeline is built.
+        Then: No fill marker is emitted for the repudiated booking — it never
+            happened economically, so showing it as executed activity would
+            contradict the series it no longer contributes to — while the
+            surviving fill still marks, and the applied correction rides out on
+            the result so the series-level disclosure channel can surface it
+            without re-deriving the fold.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            anchor=_empty_anchor(_W1, "live", "USD", point_time=_m(2), watermarks={"kraken": 2}),
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        result = await build_wallet_pnl_timeline(repo, _W1, "live", _T0, _T0, "1m", _m(3))
+
+        assert [
+            marker.execution_public_id
+            for marker in result.markers
+            if isinstance(marker, PnlFillMarker)
+        ] == [f"execution-{_I1}-2"]
+        assert result.applied_annulments == (_applied_annulment(),)
 
 
 class TestSeriesReplayMetadata:
