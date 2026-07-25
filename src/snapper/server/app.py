@@ -930,7 +930,7 @@ async def _start_retention_scheduler(app: FastAPI, *, db_url: str) -> None:
         logger.info("RetentionScheduler started in disabled mode (RETENTION_DISABLED=true)")
     else:
         logger.info(
-            "RetentionScheduler started (eager run buffered, interval=%.1fs)",
+            "RetentionScheduler started (eager run buffered, interval={:.1f}s)",
             scheduler.interval_seconds,
         )
 
@@ -979,7 +979,7 @@ async def _start_db_stats_snapshotter(app: FastAPI, *, db_url: str) -> None:
     if snapshotter.disabled:
         logger.info("DbStatsSnapshotter started in disabled mode (DB_METRICS_DISABLED=true)")
     else:
-        logger.info("DbStatsSnapshotter started (interval=%.1fs)", snapshotter.interval_seconds)
+        logger.info("DbStatsSnapshotter started (interval={:.1f}s)", snapshotter.interval_seconds)
 
 
 async def _stop_db_stats_snapshotter(app: FastAPI) -> None:
@@ -1015,7 +1015,7 @@ async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSett
     """
     if settings.coordinator_instance_count != 1 and settings.coordinator_instance_id != 0:
         logger.info(
-            "Skipping PortfolioPnlSnapshotter on coordinator instance %s/%s; instance 0 owns it",
+            "Skipping PortfolioPnlSnapshotter on coordinator instance {}/{}; instance 0 owns it",
             settings.coordinator_instance_id,
             settings.coordinator_instance_count,
         )
@@ -1034,7 +1034,7 @@ async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSett
             "PortfolioPnlSnapshotter attached in disabled mode (PNL_SNAPSHOTTER_ENABLED unset)"
         )
     else:
-        logger.info("PortfolioPnlSnapshotter started (interval=%ss)", snapshotter.interval_seconds)
+        logger.info("PortfolioPnlSnapshotter started (interval={}s)", snapshotter.interval_seconds)
 
 
 async def _stop_pnl_snapshotter(app: FastAPI) -> None:
