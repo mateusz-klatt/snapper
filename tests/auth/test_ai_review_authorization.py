@@ -224,6 +224,26 @@ def test_ai_reviewer_permission_gates_allow_decisions_but_deny_audit_reads() -> 
         ),
         pytest.param(
             UserRole.AI_DELEGATE,
+            [
+                Permission.CREATE_ORDERS.value,
+                Permission.READ_MARKET_DATA.value,
+                Permission.READ_ORDERS.value,
+                Permission.READ_POSITIONS.value,
+                Permission.READ_SIGNALS.value,
+            ],
+            None,
+            True,
+            id="pre-versioning-delegate-token",
+        ),
+        pytest.param(
+            UserRole.AI_DELEGATE,
+            [Permission.READ_MARKET_DATA.value],
+            None,
+            False,
+            id="pre-versioning-without-create",
+        ),
+        pytest.param(
+            UserRole.AI_DELEGATE,
             [Permission.CREATE_ORDERS.value],
             2,
             False,

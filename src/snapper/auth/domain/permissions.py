@@ -368,11 +368,15 @@ def is_ai_review_decision_capable(
 ) -> bool:
     """Return whether one token can submit an AI review decision.
 
-    The compatibility branch is deliberately limited to legacy v1
+    The compatibility branch is deliberately limited to legacy
     non-user-administration permission sets that grant decision submission
-    and whose token retained CREATE_ORDERS. It does not add CREATE_ORDERS
-    to effective permissions or alias that permission for any authorization
-    surface outside AI review decisions.
+    and whose token retained CREATE_ORDERS. A token minted BEFORE
+    permission-scope versioning carries no ``permission_scope_version``
+    claim at all, so an absent version is treated exactly like v1 — the
+    production delegate token predates versioning, and requiring a literal
+    ``1`` silently hid decision submission from it. The branch does not add
+    CREATE_ORDERS to effective permissions or alias that permission for any
+    authorization surface outside AI review decisions.
 
     Args:
         role: Authenticated principal's role.
@@ -393,7 +397,7 @@ def is_ai_review_decision_capable(
     if Permission.SUBMIT_AI_REVIEW_DECISION in effective_permissions:
         return True
     return (
-        permission_scope_version == 1
+        permission_scope_version in (None, 1)
         and role_grants_permission(role, Permission.SUBMIT_AI_REVIEW_DECISION)
         and not role_grants_permission(role, Permission.MANAGE_USERS)
         and Permission.CREATE_ORDERS in effective_permissions
