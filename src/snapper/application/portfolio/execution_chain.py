@@ -31,6 +31,12 @@ collide. The lossy ``price``/``size``/``fee`` float mirrors are excluded: the
 fold consumes the exact ``*_decimal`` text, and floats carry a signed-zero /
 non-finite dual-dialect hazard. Malformed input fails closed with
 ``ExecutionChainError`` rather than producing a tip.
+
+The same canonical serialization also backs :func:`execution_row_digest`, the
+standalone per-row digest the append-only ``execution_annulments`` manifest
+binds a target with. It is a separate hash DOMAIN over the identical bytes, so
+the manifest's binding proof and the chain's tamper evidence can never disagree
+about what one execution row IS, and neither value can be replayed as the other.
 """
 
 import hashlib
@@ -42,6 +48,7 @@ from datetime import datetime
 from uuid import UUID
 
 EXECUTION_CHAIN_DOMAIN = b"snapper:spot-execution-chain:v2"
+EXECUTION_ROW_DIGEST_DOMAIN = b"snapper:spot-execution-row-digest:v1"
 _GENESIS_TAG = b"\x00"
 _LINK_TAG = b"\x01"
 _ABSENT = b"\x00"
@@ -199,6 +206,38 @@ def canonical_execution_record(record: ExecutionChainRecord) -> bytes:
             _optional_datetime_field(record.executed_at),
         )
     )
+
+
+def execution_row_digest(record: ExecutionChainRecord) -> str:
+    """Return the standalone canonical digest binding one execution row.
+
+    The annulment manifest targets an execution by its immutable public id AND
+    this digest, so a manifest row can only ever bind the exact row an operator
+    inspected. It reuses :func:`canonical_execution_record` verbatim — there is
+    no second canonicalization to drift from the hash chain's — and hashes it
+    under its OWN domain tag so a row digest can never be mistaken for a chain
+    tip, nor a chain tip replayed as a row digest.
+
+    Three properties follow from the shared canonical record and matter to the
+    manifest. The digest is INDEPENDENT of ``known_to``, ``id``, ``session_id``,
+    ``sequence_id``, and the lossy float mirrors, all of which
+    :class:`ExecutionChainRecord` excludes: a target's binding therefore cannot
+    be invalidated by a bitemporal sentinel spelling or a surrogate-key change.
+    It is SENSITIVE to every economic field the fold consumes (side, status,
+    exact decimals, fee asset, instants, scope coordinates and lineage ids), so
+    a different fill cannot present the same digest. And it is dual-dialect
+    stable, so a digest computed against SQLite equals the one computed against
+    PostgreSQL for the same logical row.
+
+    Args:
+        record: The execution row projected onto its canonical fold identity.
+
+    Returns:
+        The 64-character lowercase hex digest of the row's canonical bytes.
+    """
+    return hashlib.sha256(
+        EXECUTION_ROW_DIGEST_DOMAIN + canonical_execution_record(record)
+    ).hexdigest()
 
 
 def execution_chain_genesis(wallet_public_id: str, exchange: str, mode: str) -> str:

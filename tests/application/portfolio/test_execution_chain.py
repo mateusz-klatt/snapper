@@ -1,5 +1,6 @@
 """Unit tests for the pure per-scope execution tamper-evidence hash chain."""
 
+import dataclasses
 import hashlib
 import struct
 from datetime import UTC
@@ -11,10 +12,12 @@ from uuid import UUID
 import pytest
 
 from snapper.application.portfolio.execution_chain import EXECUTION_CHAIN_DOMAIN
+from snapper.application.portfolio.execution_chain import EXECUTION_ROW_DIGEST_DOMAIN
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import canonical_execution_record
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
+from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.application.portfolio.execution_chain import extend_execution_chain
 
 _WALLET = "00000000-0000-7000-8000-000000000101"
@@ -349,3 +352,96 @@ def test_malformed_base_tip_fails_closed() -> None:
         extend_execution_chain("g" * 64, [_record()])
     with pytest.raises(ExecutionChainError):
         extend_execution_chain(_genesis().upper(), [_record()])
+
+
+def _digest_field_variants() -> dict[str, object]:
+    """Return one changed value for every field the canonical record carries."""
+    return {
+        "scope_sequence": 2,
+        "public_id": "00000000-0000-7000-8000-0000000003ff",
+        "order_public_id": "00000000-0000-7000-8000-0000000002ff",
+        "wallet_public_id": "00000000-0000-7000-8000-0000000001ff",
+        "operator_public_id": None,
+        "exchange": "kraken",
+        "mode": "paper",
+        "exec_id": "E-2",
+        "trade_id": None,
+        "side": "sell",
+        "status": "partially_filled",
+        "fee_asset": "USD",
+        "price_decimal": "1.26",
+        "size_decimal": "2.1",
+        "fee_decimal": "0.2",
+        "counter_amount_decimal": "2.6",
+        "numeric_provenance": "legacy_float",
+        "liquidity_role": "taker",
+        "timestamp": _TS + timedelta(microseconds=1),
+        "executed_at": None,
+    }
+
+
+def test_execution_row_digest_is_deterministic_and_domain_separated() -> None:
+    """The row digest is stable, well-formed, and never collides with a chain tip.
+
+    Given one execution record,
+    When its row digest is computed twice and compared with the chain values
+        derived from the same canonical bytes,
+    Then both computations agree on one 64-character lowercase hex string that
+        equals the explicit domain-tagged SHA-256, and differs from both the
+        scope genesis tip and the single-record chain extension — so a digest
+        can never be replayed as a tip, nor a tip accepted as a digest.
+    """
+    record = _record()
+    digest = execution_row_digest(record)
+    assert digest == execution_row_digest(record)
+    assert len(digest) == 64
+    assert digest == digest.lower()
+    assert (
+        digest
+        == hashlib.sha256(
+            EXECUTION_ROW_DIGEST_DOMAIN + canonical_execution_record(record)
+        ).hexdigest()
+    )
+    assert digest != _genesis()
+    assert digest != extend_execution_chain(_genesis(), [record])
+
+
+def test_execution_row_digest_ignores_a_hypothetical_bitemporal_close() -> None:
+    """A close of the target row cannot move its binding digest.
+
+    Given the canonical field mapping of one execution record, extended with the
+        ``known_to``, ``id``, ``session_id``, and ``sequence_id`` keys a stored
+        row also carries — a hypothetical close constructed by dict manipulation
+        rather than by mutating an append-only row,
+    When the record is rebuilt from only the fields the canonical form declares
+        and its digest is compared with the original,
+    Then the digests are equal and none of the added keys were ever declared
+        fields, so the annulment's binding proof cannot be invalidated — nor
+        silently satisfied — by a bitemporal sentinel or a surrogate key.
+    """
+    record = _record()
+    declared = {field.name for field in dataclasses.fields(record)}
+    closed = dataclasses.asdict(record)
+    closed["known_to"] = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+    closed["id"] = 4242
+    closed["session_id"] = "00000000-0000-7000-8000-0000000009ff"
+    closed["sequence_id"] = 77
+    assert declared.isdisjoint({"known_to", "id", "session_id", "sequence_id"})
+    rebuilt = ExecutionChainRecord(**{key: closed[key] for key in declared})
+    assert execution_row_digest(rebuilt) == execution_row_digest(record)
+
+
+@pytest.mark.parametrize("field_name", sorted(_digest_field_variants()))
+def test_execution_row_digest_is_sensitive_to_every_canonical_field(field_name: str) -> None:
+    """Changing any single canonical field changes the binding digest.
+
+    Given one baseline execution record and one altered value for the named
+        canonical field,
+    When the digest of the altered record is compared with the baseline,
+    Then they differ, so no economic value, identity, or instant of a target
+        row can be changed while still satisfying a committed annulment's
+        binding proof.
+    """
+    baseline = _record()
+    altered = dataclasses.replace(baseline, **{field_name: _digest_field_variants()[field_name]})
+    assert execution_row_digest(altered) != execution_row_digest(baseline)

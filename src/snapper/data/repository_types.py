@@ -398,6 +398,74 @@ class PnlTimelineExecutionPrefixBundle(TypedDict):
     activation: PnlTimelineExecutionPrefix
 
 
+type ExecutionAnnulmentReason = Literal["unwitnessed_phantom", "unwitnessed_legacy_lineage"]
+"""Closed vocabulary of execution-annulment reasons.
+
+Must stay identical to ``snapper.data.models.EXECUTION_ANNULMENT_REASONS`` and
+the ``ck_execution_annulments_reason`` CHECK; a regression test pins all three
+against each other so a new reason cannot be typed without also being storable.
+Each value is documented on ``snapper.data.models.ExecutionAnnulment.reason``."""
+
+
+class ExecutionAnnulmentRequest(TypedDict):
+    """One operator-authored request to repudiate exactly one execution.
+
+    Every scope field is an ASSERTION about the target that the writer proves
+    against the stored row before anything is inserted, never a value copied
+    into the manifest on trust. ``expected_execution_digest`` is the canonical
+    row digest the operator inspected: it binds the request to one exact row
+    CONTENT, so a request prepared against a row that has since been re-read
+    differently is refused rather than recorded.
+
+    ``correction_time`` is the knowledge instant the correction takes effect
+    from; ``evidence`` is the free-form diagnosis envelope (a JSON object, no
+    duplicate keys, finite numbers) canonicalized before storage. The temporal
+    provenance trio (``session_id`` / ``sequence_id`` / ``timestamp``) is
+    supplied by the caller exactly as it is for every other appended event.
+    """
+
+    target_execution_public_id: str
+    expected_execution_digest: str
+    wallet_public_id: str
+    exchange: str
+    mode: Literal["live", "paper"]
+    scope_sequence: int
+    annulled_by_user_public_id: str
+    correction_time: datetime
+    reason: ExecutionAnnulmentReason
+    evidence: JsonObject
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class ExecutionAnnulmentRow(TypedDict):
+    """One persisted annulment-manifest row, as read back.
+
+    ``known_to`` is deliberately absent: manifest rows never close (a CHECK
+    pins the open sentinel at insert and the table's own UPDATE trigger makes a
+    later close physically impossible), so exposing it would invite a filter
+    that implies a lifecycle this plane does not have. ``evidence_json`` is the
+    canonical stored text rather than a parsed object so a consumer that
+    re-hashes or forwards an audit payload sees the exact persisted bytes.
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    target_execution_public_id: str
+    target_execution_digest: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    scope_sequence: int
+    annulled_by_user_public_id: str
+    correction_time: datetime
+    reason: ExecutionAnnulmentReason
+    evidence_json: str
+
+
 class PortfolioPnlAnchorRow(TypedDict):
     """Persisted activation seed whose unrealized field is raw audit metadata."""
 

@@ -351,6 +351,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "backtest_comparisons",
         "backtest_runs",
         "device_alert_prefs",
+        "execution_annulments",
         "execution_plans",
         "executions",
         "orders",
@@ -413,6 +414,13 @@ silently going unproven.
 ``wallet_operator_scope_grants`` and ``ai_reviews`` are reachable only when
 CLM6-NYMEX exists, so the alias test must seed the optional commodity pair —
 without it both tables stay empty and their wallet spelling is never asserted.
+
+``execution_annulments`` is deliberately EXCLUDED. Its only writer is the
+guarded ``record_execution_annulment`` maintenance surface, which exists to
+repudiate a production booking defect after an operator diagnosed it; a demo
+seed that manufactured corrections would be inventing evidence of a defect that
+never happened. The table therefore stays empty in every seeded database, and
+its wallet spelling is proven by the repository writer's own tests instead.
 """
 
 

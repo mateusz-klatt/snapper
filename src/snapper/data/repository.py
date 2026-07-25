@@ -139,6 +139,7 @@ from sqlalchemy.pool import StaticPool
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
+from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.application.portfolio.execution_chain import extend_execution_chain
 from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
 from snapper.application.portfolio.pnl_anchor_identity import (
@@ -198,6 +199,7 @@ from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import DeviceAlertPref
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
@@ -274,6 +276,9 @@ from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
+from snapper.data.repository_types import ExecutionAnnulmentReason
+from snapper.data.repository_types import ExecutionAnnulmentRequest
+from snapper.data.repository_types import ExecutionAnnulmentRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -394,6 +399,9 @@ __all__ = [
     "ScopeGrantNotFoundError",
     "ScopeGrantValidationError",
     "PnlTimelineAnchorEvidenceMismatchError",
+    "ExecutionAnnulmentTargetError",
+    "ExecutionAnnulmentWitnessedError",
+    "ExecutionAnnulmentConflictError",
     "WalletConflictError",
     "CredentialConflictError",
     "CredentialNotFoundError",
@@ -646,6 +654,31 @@ class _PnlTimelineScopeGapRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class _ExecutionAnnulmentCommand:
+    """One validated, canonicalized annulment write command.
+
+    Every identity is already canonical here and ``evidence_json`` is already
+    the exact bytes that will be stored, so the fenced transaction body does
+    nothing but PROVE and APPEND — no parsing, no normalization, and therefore
+    no way for a validation decision to depend on state read under the fence.
+    """
+
+    target_execution_public_id: str
+    expected_execution_digest: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    scope_sequence: int
+    annulled_by_user_public_id: str
+    correction_time: datetime
+    reason: ExecutionAnnulmentReason
+    evidence_json: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class _FuturesPositionProjection:
     """Validated futures projection and its native-symbol lineage."""
 
@@ -753,6 +786,56 @@ class ExecutionPhysicalMutationError(RuntimeError):
 
 class PnlTimelineAnchorEvidenceMismatchError(RuntimeError):
     """Raised when an anchor's frozen execution evidence changed before write."""
+
+
+class ExecutionAnnulmentTargetError(RuntimeError):
+    """Raised when an annulment request does not provably describe its target.
+
+    The message is one of the stable reasons ``unknown_execution_target`` (no
+    execution carries the stated public id), ``crossed_execution_annulment_scope``
+    (the target exists but its wallet, exchange, mode, or scope_sequence differs
+    from the request), or ``execution_digest_mismatch`` (the stored row's
+    canonical digest differs from the operator-supplied expected digest, so the
+    request was prepared against different content). All three mean the same
+    thing operationally: the correction was authorized for a row that is not the
+    row about to be repudiated, so nothing is written.
+    """
+
+
+class ExecutionAnnulmentWitnessedError(RuntimeError):
+    """Raised when a ``fill_observed`` witness matches the annulment target.
+
+    Fail-closed by construction: an execution the venue actually witnessed is
+    real money and may never be repudiated by manifest — a genuine but wrong
+    booking is corrected by appending new execution events. The check mirrors
+    the prefix proof's own execution-to-witness binding (the target's active
+    Order ``client_order_id`` inside the target's exact wallet, exchange, and
+    mode) and deliberately ignores ``known_to``, so even a superseded witness
+    row blocks the annulment.
+    """
+
+
+class ExecutionAnnulmentConflictError(RuntimeError):
+    """Raised when an execution or scope slot already carries an annulment.
+
+    The manifest's TOTAL unique indexes make a second annulment a write-time
+    ``IntegrityError``; the writer re-reads the committed winner and raises this
+    instead, so the caller learns WHICH correction already stands rather than
+    seeing a raw driver error. One execution has exactly one annulment, forever.
+    """
+
+    def __init__(self, winner: ExecutionAnnulmentRow) -> None:
+        """Capture the annulment that already stands for the target.
+
+        Args:
+            winner: The committed manifest row that won the race.
+        """
+        super().__init__(
+            "execution is already annulled: "
+            f"target_execution_public_id={winner['target_execution_public_id']} "
+            f"annulment_public_id={winner['public_id']}"
+        )
+        self.winner = winner
 
 
 class PortfolioPnlSampleScopeError(RuntimeError):
@@ -1329,7 +1412,9 @@ def venue_event_fill_identity() -> ColumnElement[str]:
     )
 
 
-IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset({Execution.__tablename__})
+IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
+    {Execution.__tablename__, ExecutionAnnulment.__tablename__}
+)
 """Physical table names that are append-only immutable ledgers.
 
 Membership is by PHYSICAL TABLE NAME, not ORM class identity, so the
@@ -1341,9 +1426,17 @@ bypassable — ``aliased(Execution)`` is not ``Execution`` and
 ``Execution.__table__`` is not ``Execution`` — so it is not a theorem;
 resolution to the physical table name is.
 
-For this slice the registry holds only ``executions``, the per-scope
-``scope_sequence`` counter invariant table. The portfolio spot
-reconciliation anchor table joins it in S4c-3: adding its physical name
+The registry holds ``executions``, the per-scope ``scope_sequence``
+counter invariant table, and ``execution_annulments``, the append-only
+manifest of uniquely targeted corrections to it. The manifest belongs
+here for the mirror-image reason the ledger does: an annulment that a
+generic SCD2 close+insert could supersede, or that ``delete_rows_by_id``
+could remove, would let a repudiated execution quietly return to
+effective accounting history. Its only sanctioned writer is
+``record_execution_annulment``, which appends with a direct fenced
+``session.add`` and therefore never routes through a guarded primitive.
+The portfolio spot reconciliation anchor table joins them in S4c-3:
+adding its physical name
 here makes every generic primitive inherit the same refusal with no
 further changes at the primitive surfaces.
 """
@@ -2729,6 +2822,47 @@ class Repository(ABC):
         fill, or active lineage evidence, reloads both cuts under that fence,
         and inserts only when they exactly equal the caller's derivation
         bundle. A concurrent canonical anchor winner is returned unchanged.
+        """
+        ...
+
+    @abstractmethod
+    async def record_execution_annulment(
+        self,
+        request: ExecutionAnnulmentRequest,
+    ) -> ExecutionAnnulmentRow:
+        """Append one uniquely targeted repudiation of one execution.
+
+        The sole sanctioned writer of the ``execution_annulments`` manifest,
+        and a maintenance surface rather than a runtime one: it is never
+        reachable through generic CRUD, an API route, or SCD2 supersede. The
+        implementation proves the target exists, sits in the stated
+        certification scope, matches the operator-supplied canonical digest,
+        and carries NO ``fill_observed`` witness before it appends.
+
+        Raises:
+            ExecutionAnnulmentTargetError: If the target is unknown, sits in a
+                different scope, or does not match the expected digest.
+            ExecutionAnnulmentWitnessedError: If a durable fill witness matches
+                the target, so the execution is real money.
+            ExecutionAnnulmentConflictError: If the target — or its scope slot
+                — already carries a committed annulment.
+        """
+        ...
+
+    @abstractmethod
+    async def get_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str | None = None,
+    ) -> list[ExecutionAnnulmentRow]:
+        """Return one scope's annulment manifest in scope-sequence order.
+
+        Reads the whole manifest for ``(wallet, mode)``, optionally narrowed to
+        a single ``exchange``. Rows are returned unfiltered by
+        ``correction_time`` on purpose: a knowledge-horizon read must decide
+        for itself which corrections were already known, and the row carries
+        the instant it needs to do so.
         """
         ...
 
@@ -10976,6 +11110,490 @@ class SQLAlchemyRepository(Repository):
             except Exception:
                 await s.rollback()
                 raise
+
+    @staticmethod
+    def _canonical_execution_annulment_uuid(value: str, field_name: str) -> str:
+        """Canonicalize one identity component of an annulment request.
+
+        Args:
+            value: The caller-supplied UUID spelling.
+            field_name: Request field name used in the refusal message.
+
+        Returns:
+            The canonical lowercase hyphenated UUID spelling.
+
+        Raises:
+            ValueError: If the value is not a UUID.
+        """
+        try:
+            return str(UUID(value))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"execution annulment {field_name} is not a valid uuid") from exc
+
+    @staticmethod
+    def _canonical_execution_annulment_evidence(evidence: JsonObject) -> str:
+        """Serialize one diagnosis envelope to the exact bytes to be stored.
+
+        Sorted keys and compact separators make the stored form canonical, so
+        two operators recording the same facts store the same bytes; a Python
+        mapping cannot carry duplicate keys, and ``allow_nan=False`` rejects the
+        non-standard numeric constants no JSON reader agrees on.
+
+        Args:
+            evidence: The free-form diagnosis envelope from the request.
+
+        Returns:
+            The canonical JSON text for the ``evidence_json`` column.
+
+        Raises:
+            ValueError: If the envelope is empty, non-finite, or not
+                serializable as JSON.
+        """
+        if not evidence:
+            raise ValueError("execution annulment evidence must be a non-empty JSON object")
+        try:
+            return json.dumps(evidence, allow_nan=False, separators=(",", ":"), sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "execution annulment evidence must be finite, serializable JSON"
+            ) from exc
+
+    @staticmethod
+    def _normalized_execution_annulment_command(
+        request: ExecutionAnnulmentRequest,
+    ) -> _ExecutionAnnulmentCommand:
+        """Validate and canonicalize one annulment request before any database work.
+
+        Args:
+            request: The operator-authored annulment request.
+
+        Returns:
+            The canonicalized write command.
+
+        Raises:
+            ValueError: If an identity is not a UUID or the evidence envelope
+                is empty, non-finite, or not serializable.
+        """
+        canonical_uuid = SQLAlchemyRepository._canonical_execution_annulment_uuid
+        return _ExecutionAnnulmentCommand(
+            target_execution_public_id=canonical_uuid(
+                request["target_execution_public_id"],
+                "target_execution_public_id",
+            ),
+            expected_execution_digest=request["expected_execution_digest"],
+            wallet_public_id=canonical_uuid(request["wallet_public_id"], "wallet_public_id"),
+            exchange=request["exchange"].strip().lower(),
+            mode=request["mode"],
+            scope_sequence=request["scope_sequence"],
+            annulled_by_user_public_id=canonical_uuid(
+                request["annulled_by_user_public_id"],
+                "annulled_by_user_public_id",
+            ),
+            correction_time=request["correction_time"],
+            reason=request["reason"],
+            evidence_json=SQLAlchemyRepository._canonical_execution_annulment_evidence(
+                request["evidence"]
+            ),
+            session_id=canonical_uuid(request["session_id"], "session_id"),
+            sequence_id=request["sequence_id"],
+            timestamp=request["timestamp"],
+        )
+
+    @staticmethod
+    def _execution_annulment_to_row(annulment: ExecutionAnnulment) -> ExecutionAnnulmentRow:
+        """Project one manifest model onto its typed read boundary.
+
+        Args:
+            annulment: The persisted manifest model.
+
+        Returns:
+            The typed manifest row.
+        """
+        return {
+            "public_id": annulment.public_id,
+            "session_id": annulment.session_id,
+            "sequence_id": annulment.sequence_id,
+            "timestamp": annulment.timestamp,
+            "target_execution_public_id": annulment.target_execution_public_id,
+            "target_execution_digest": annulment.target_execution_digest,
+            "wallet_public_id": annulment.wallet_public_id,
+            "exchange": annulment.exchange,
+            "mode": annulment.mode,
+            "scope_sequence": int(annulment.scope_sequence),
+            "annulled_by_user_public_id": annulment.annulled_by_user_public_id,
+            "correction_time": annulment.correction_time,
+            "reason": cast(ExecutionAnnulmentReason, annulment.reason),
+            "evidence_json": annulment.evidence_json,
+        }
+
+    async def _begin_execution_annulment_transaction(self, s: AsyncSession) -> None:
+        """Open the manifest write transaction with explicit dialect guarantees.
+
+        Must be the transaction's FIRST statement, for the same reasons the
+        execution ingest fence documents: PostgreSQL's inherited isolation level
+        can only be set before any query, and SQLite cannot upgrade an already
+        open deferred transaction, so ``BEGIN IMMEDIATE`` has to take the write
+        reservation up front. Any other dialect fails closed rather than
+        appending a money-truth correction under unknown guarantees.
+
+        Args:
+            s: The session whose transaction is being opened.
+
+        Raises:
+            NotImplementedError: If the dialect has no explicit protocol here.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        elif dialect == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                f"execution annulment write transaction is not implemented for dialect={dialect}"
+            )
+
+    async def _acquire_execution_annulment_fence(
+        self,
+        s: AsyncSession,
+        command: _ExecutionAnnulmentCommand,
+    ) -> None:
+        """Serialize annulment writers for one certification scope.
+
+        Uses the two-argument ``pg_advisory_xact_lock(hashtext('execution_annulment'),
+        hashtext(scope))`` form so the manifest's keyspace is disjoint from the
+        execution ingest fence and the reconciliation wallet locks — annulling a
+        historical row must never contend with live fill ingest. The lock is
+        transaction scoped, so it releases on commit, rollback, and crash.
+        SQLite needs no analogue: the write reservation taken by ``BEGIN
+        IMMEDIATE`` already serializes writers across connections.
+
+        Args:
+            s: The session holding the open write transaction.
+            command: The canonicalized command whose scope is fenced.
+
+        Raises:
+            NotImplementedError: If the dialect has no explicit fence here.
+        """
+        dialect = self.dialect_name
+        if dialect == "sqlite":
+            return
+        if dialect != "postgresql":
+            raise NotImplementedError(
+                f"execution annulment fence is not implemented for dialect={dialect}"
+            )
+        scope = "|".join((command.wallet_public_id, command.exchange, command.mode))
+        await s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('execution_annulment'), hashtext(:scope))"),
+            {"scope": scope},
+        )
+
+    @staticmethod
+    def _execution_annulment_scope_matches(
+        target: Execution,
+        command: _ExecutionAnnulmentCommand,
+    ) -> bool:
+        """Report whether one stored execution sits in the requested scope.
+
+        Total and fail-closed: a stored wallet identity that does not parse as a
+        UUID cannot be proven equal to the canonical requested one, so it counts
+        as a scope mismatch rather than crashing the writer.
+
+        Args:
+            target: The stored execution row being annulled.
+            command: The canonicalized annulment command.
+
+        Returns:
+            Whether every certification coordinate matches.
+        """
+        try:
+            wallet_public_id = str(UUID(target.wallet_public_id))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return (
+            wallet_public_id == command.wallet_public_id
+            and target.exchange == command.exchange
+            and target.mode == command.mode
+            and int(target.scope_sequence) == command.scope_sequence
+        )
+
+    @staticmethod
+    async def _proven_execution_annulment_target(
+        s: AsyncSession,
+        command: _ExecutionAnnulmentCommand,
+    ) -> Execution:
+        """Re-read the target under the fence and prove the request describes it.
+
+        The row is re-read by immutable public id with a ``FOR UPDATE``-equivalent
+        lock (a no-op on SQLite, whose write reservation is already held) so the
+        proof runs against committed state inside the same transaction that
+        appends, never against whatever the operator saw minutes earlier.
+
+        Args:
+            s: The session holding the open write transaction.
+            command: The canonicalized annulment command.
+
+        Returns:
+            The proven target execution row.
+
+        Raises:
+            ExecutionAnnulmentTargetError: If the target is unknown, sits in a
+                different certification scope, cannot be canonically serialized,
+                or does not match the expected digest.
+        """
+        target = (
+            (
+                await s.execute(
+                    select(Execution)
+                    .where(Execution.public_id == command.target_execution_public_id)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if target is None:
+            raise ExecutionAnnulmentTargetError(
+                "unknown_execution_target: "
+                f"execution_public_id={command.target_execution_public_id}"
+            )
+        if not SQLAlchemyRepository._execution_annulment_scope_matches(target, command):
+            raise ExecutionAnnulmentTargetError(
+                "crossed_execution_annulment_scope: "
+                f"execution_public_id={command.target_execution_public_id}"
+            )
+        try:
+            digest = execution_row_digest(SQLAlchemyRepository._execution_chain_record(target))
+        except ExecutionChainError as exc:
+            raise ExecutionAnnulmentTargetError(
+                "uncanonicalizable_execution_target: "
+                f"execution_public_id={command.target_execution_public_id}"
+            ) from exc
+        if digest != command.expected_execution_digest:
+            raise ExecutionAnnulmentTargetError(
+                "execution_digest_mismatch: "
+                f"execution_public_id={command.target_execution_public_id}"
+            )
+        return target
+
+    @staticmethod
+    async def _refuse_witnessed_execution_annulment(
+        s: AsyncSession,
+        command: _ExecutionAnnulmentCommand,
+        target: Execution,
+    ) -> None:
+        """Refuse the annulment when any durable fill witness matches the target.
+
+        Mirrors :meth:`_read_pnl_timeline_fill_lineage`, the binding the prefix
+        proof itself uses between an execution and its evidence: append-only
+        ``fill_observed`` rows carrying the execution's order ``client_order_id``.
+        Three deliberate widenings all point the same way — fail closed. Every
+        Order VERSION contributes its client id, not just the active one, so a
+        witness bound to a superseded spelling still counts. ``known_to`` is not
+        filtered, so a closed witness still counts. No knowledge-horizon cut is
+        applied, because the writer corrects CURRENT truth and a witness from any
+        instant proves the fill was real. Scope is not re-filtered either: the
+        proof answers a scope-crossed witness with its own refusal
+        (``crossed_execution_shard_lineage``), so such a row is still evidence
+        that this execution is not annullable.
+
+        Args:
+            s: The session holding the open write transaction.
+            command: The canonicalized annulment command.
+            target: The proven target execution row.
+
+        Raises:
+            ExecutionAnnulmentWitnessedError: If any matching witness exists.
+        """
+        client_order_ids = list(
+            (
+                await s.execute(
+                    select(Order.client_order_id)
+                    .where(
+                        Order.public_id == target.order_public_id,
+                        Order.client_order_id.is_not(None),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not client_order_ids:
+            return
+        witness = (
+            (
+                await s.execute(
+                    select(VenueEvent.public_id)
+                    .where(
+                        VenueEvent.event_type == "fill_observed",
+                        VenueEvent.client_order_id.in_(client_order_ids),
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if witness is not None:
+            raise ExecutionAnnulmentWitnessedError(
+                "witnessed_execution_target: "
+                f"execution_public_id={command.target_execution_public_id} "
+                f"fill_event_public_id={witness}"
+            )
+
+    @staticmethod
+    async def _read_execution_annulment(
+        s: AsyncSession,
+        target_execution_public_id: str,
+    ) -> ExecutionAnnulment | None:
+        """Read the committed annulment standing for one execution, if any.
+
+        Args:
+            s: The session used for the read.
+            target_execution_public_id: The canonical target execution identity.
+
+        Returns:
+            The committed manifest model, or ``None`` when the target is
+            not annulled.
+        """
+        return (
+            (
+                await s.execute(
+                    select(ExecutionAnnulment).where(
+                        ExecutionAnnulment.target_execution_public_id == target_execution_public_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def record_execution_annulment(
+        self,
+        request: ExecutionAnnulmentRequest,
+    ) -> ExecutionAnnulmentRow:
+        """Prove one execution is annullable under a scope fence, then append.
+
+        The whole protocol runs in ONE transaction: open with explicit dialect
+        guarantees, fence the certification scope, re-read and prove the target
+        (exists, same scope, same canonical digest), refuse any durable fill
+        witness, then append. Nothing is superseded, nothing is closed, and no
+        generic CRUD primitive is involved — the manifest's physical name is
+        registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it
+        cannot be.
+
+        Contradictory-later-witness doctrine, stated honestly. The witness check
+        here is NECESSARY but NOT SUFFICIENT: it proves only that no
+        ``fill_observed`` row existed at write time. A late venue event can
+        still arrive afterwards and contradict a committed annulment, and this
+        writer cannot prevent that — the manifest is append-only, so the
+        correction cannot be withdrawn once a contradiction appears. Closing
+        that half is the READ side's duty (slice A2): every certification
+        boundary that folds the manifest must re-check witness absence at its
+        own horizon and fail closed on a contradicted annulment rather than
+        keep excluding a now-witnessed execution. The split is deliberate — the
+        write side refuses what it can see, the read side refuses what arrived
+        later.
+
+        Args:
+            request: The operator-authored annulment request.
+
+        Returns:
+            The appended manifest row.
+
+        Raises:
+            ValueError: If the request identities or evidence envelope are
+                malformed.
+            ExecutionAnnulmentTargetError: If the request does not provably
+                describe its target.
+            ExecutionAnnulmentWitnessedError: If a durable fill witness matches
+                the target.
+            ExecutionAnnulmentConflictError: If the target or its scope slot is
+                already annulled.
+        """
+        command = self._normalized_execution_annulment_command(request)
+        async with self.session() as s:
+            try:
+                await self._begin_execution_annulment_transaction(s)
+                await self._acquire_execution_annulment_fence(s, command)
+                target = await self._proven_execution_annulment_target(s, command)
+                await self._refuse_witnessed_execution_annulment(s, command, target)
+                row = ExecutionAnnulment(
+                    target_execution_public_id=command.target_execution_public_id,
+                    target_execution_digest=command.expected_execution_digest,
+                    wallet_public_id=command.wallet_public_id,
+                    exchange=command.exchange,
+                    mode=command.mode,
+                    scope_sequence=command.scope_sequence,
+                    annulled_by_user_public_id=command.annulled_by_user_public_id,
+                    correction_time=command.correction_time,
+                    reason=command.reason,
+                    evidence_json=command.evidence_json,
+                    session_id=command.session_id,
+                    sequence_id=command.sequence_id,
+                    timestamp=command.timestamp,
+                    known_to=KNOWN_TO_MAX,
+                )
+                s.add(row)
+                await s.commit()
+                return self._execution_annulment_to_row(row)
+            except IntegrityError:
+                await s.rollback()
+                winner = await self._read_execution_annulment(
+                    s,
+                    command.target_execution_public_id,
+                )
+                if winner is None:
+                    raise
+                raise ExecutionAnnulmentConflictError(
+                    self._execution_annulment_to_row(winner)
+                ) from None
+            except Exception:
+                await s.rollback()
+                raise
+
+    async def get_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str | None = None,
+    ) -> list[ExecutionAnnulmentRow]:
+        """Return one scope's annulment manifest in scope-sequence order.
+
+        Args:
+            wallet_public_id: Wallet identity whose manifest is read.
+            mode: Trading mode of the certification scope.
+            exchange: Optional single venue to narrow the manifest to.
+
+        Returns:
+            The manifest rows ordered by ``(exchange, scope_sequence)``.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+        """
+        filters: list[ColumnElement[bool]] = [
+            ExecutionAnnulment.wallet_public_id
+            == self._canonical_execution_annulment_uuid(wallet_public_id, "wallet_public_id"),
+            ExecutionAnnulment.mode == mode,
+        ]
+        if exchange is not None:
+            filters.append(ExecutionAnnulment.exchange == exchange.strip().lower())
+        async with self.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(ExecutionAnnulment)
+                        .where(*filters)
+                        .order_by(
+                            ExecutionAnnulment.exchange.asc(),
+                            ExecutionAnnulment.scope_sequence.asc(),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [self._execution_annulment_to_row(row) for row in rows]
 
     @staticmethod
     def _parse_portfolio_pnl_sample_audit(raw: object) -> JsonObject:

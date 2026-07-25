@@ -37,6 +37,7 @@ from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
+from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_immutability_triggers
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
@@ -582,6 +583,20 @@ _CK_DRIFT_EPISODE_REBASED = (
 )
 
 
+EXECUTION_ANNULMENT_REASONS: tuple[str, ...] = (
+    "unwitnessed_phantom",
+    "unwitnessed_legacy_lineage",
+)
+"""Closed vocabulary of ``execution_annulments.reason`` values.
+
+Exported so migration 0037 and the repository's typed ``Literal`` can be pinned
+against the SAME source rather than three hand-copied spellings drifting apart.
+Each value is documented on ``ExecutionAnnulment.reason``."""
+
+_CK_EXECUTION_ANNULMENT_REASON = "reason IN ('unwitnessed_phantom', 'unwitnessed_legacy_lineage')"
+_CK_EXECUTION_ANNULMENT_KNOWN_TO_OPEN = "known_to >= '9999-12-31 00:00:00+00'"
+
+
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
 
@@ -1041,6 +1056,178 @@ def _install_executions_immutability_triggers(
     ``create_all``, so this never fires during a migration run.
     """
     install_execution_immutability_triggers(connection)
+
+
+class ExecutionAnnulment(TemporalMixin, Base):
+    """Append-only manifest of uniquely targeted execution repudiations.
+
+    Doctrine. ``executions`` is an event ledger, not an SCD2 entity: no code
+    path may close (``known_to``) or revise a committed row, the TOTAL
+    ``uq_executions_scope_sequence`` index turns any close+supersede into a
+    write-time ``IntegrityError``, and dual-dialect triggers reject UPDATE and
+    DELETE physically. That is deliberate, and it is also why a fill booked by a
+    DEFECT — a phantom the venue never executed — can never be taken back in
+    place. The ledger's own answer is the one it states in its refusal message:
+    corrections enter as NEW appended events. This table is that appended
+    correction, kept in a plane of its own so the sealed prefix, its contiguity
+    proof, and its hash chain are all untouched.
+
+    New theorem: *effective accounting history is the deterministic fold of a
+    physically immutable contiguous execution prefix and a uniquely targeted,
+    physically immutable annulment manifest.*
+
+    Binding. One row targets exactly ONE execution by
+    ``target_execution_public_id`` (its immutable public identity) AND
+    ``target_execution_digest`` (the canonical row digest from
+    :func:`snapper.application.portfolio.execution_chain.execution_row_digest`,
+    over the identical bytes the tamper-evidence chain folds). The id says WHICH
+    row; the digest says which row CONTENT. An operator supplies the digest they
+    inspected and the writer refuses when the stored row disagrees, so a
+    manifest row can never silently acquire a different meaning than the one
+    authorized. The denormalized ``wallet_public_id`` / ``exchange`` / ``mode``
+    / ``scope_sequence`` restate the target's certification coordinates so a
+    scope's manifest is readable without joining the ledger, and the writer
+    proves they equal the target's own.
+
+    Uniqueness is TOTAL, exactly like the executions doctrine it mirrors: both
+    ``uq_execution_annulments_target`` and ``uq_execution_annulments_scope``
+    carry NO ``known_to`` predicate. A second annulment of one execution — or of
+    one scope slot — is a write-time ``IntegrityError`` rather than a silently
+    tolerated second opinion, and no SCD2 successor can ever be inserted.
+
+    Rows always keep ``known_to`` open. ``ck_execution_annulments_known_to_open``
+    enforces it at insert time (the only time it can be set, since the table's
+    own ``execution_annulments_reject_update`` trigger makes a later close
+    physically impossible). One CHECK text holds on BOTH dialects because the
+    bound is the explicitly UTC-qualified start of the sentinel day: SQLite
+    compares the stored ``'9999-12-31 23:59:59.000000'`` against it as text
+    (NUMERIC affinity cannot reduce either side to a number, so the comparison
+    stays lexicographic and orders correctly), while PostgreSQL folds it to an
+    unambiguous ``timestamptz`` constant with no session-timezone dependence.
+    Any real close instant is centuries below the bound.
+
+    Not an SCD2 entity and not CRUD. The only writer is
+    ``SQLAlchemyRepository.record_execution_annulment``; the physical table name
+    is registered in ``IMMUTABLE_LEDGER_TABLE_NAMES`` so every generic mutation
+    primitive refuses it by name, and no API or public CRUD surface exposes it.
+    """
+
+    __tablename__ = "execution_annulments"
+    __table_args__ = (
+        Index(
+            "uq_execution_annulments_target",
+            "target_execution_public_id",
+            unique=True,
+        ),
+        Index(
+            "uq_execution_annulments_scope",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "scope_sequence",
+            unique=True,
+        ),
+        Index(
+            "ix_execution_annulments_public_id",
+            "public_id",
+            unique=True,
+        ),
+        Index(
+            "ix_execution_annulments_manifest",
+            "wallet_public_id",
+            "mode",
+            "correction_time",
+        ),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            name="ck_execution_annulments_exchange_lower",
+        ),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_execution_annulments_mode"),
+        CheckConstraint("scope_sequence >= 1", name="ck_execution_annulments_scope_sequence"),
+        CheckConstraint(_CK_EXECUTION_ANNULMENT_REASON, name="ck_execution_annulments_reason"),
+        CheckConstraint(
+            "LENGTH(target_execution_digest) = 64 AND "
+            "target_execution_digest = LOWER(target_execution_digest)",
+            name="ck_execution_annulments_digest",
+        ),
+        CheckConstraint(
+            "LENGTH(TRIM(evidence_json)) > 0",
+            name="ck_execution_annulments_evidence",
+        ),
+        CheckConstraint(
+            _CK_EXECUTION_ANNULMENT_KNOWN_TO_OPEN,
+            name="ck_execution_annulments_known_to_open",
+        ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    target_execution_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    target_execution_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    scope_sequence: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
+    annulled_by_user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    """The authenticated human who authorized this correction.
+
+    Stamped as the acting USER, mirroring
+    ``WalletOperatorScopeGrant.granted_by_user_public_id``: an administrative
+    act over someone else's money truth is attributed to the person who took it,
+    while an ``operator_public_id`` names the SUBJECT of an act, not its author.
+    NOT NULL by design — there is no automation that may annul an execution, so
+    an unattributed correction is not a thing this table can hold."""
+    correction_time: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    """The instant from which this correction counts as KNOWN.
+
+    Distinct from ``TemporalMixin.timestamp`` (bus provenance). A read whose
+    knowledge horizon predates ``correction_time`` must keep failing exactly as
+    it did before the correction rather than pretend the annulment was already
+    known, so historical answers stay reproducible."""
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    """Why the target may be repudiated, from a CHECK-constrained closed set.
+
+    ``unwitnessed_phantom`` — a booking defect recorded a fill the venue never
+    executed (the resting-order open/closed mismap that booked a size-0 price-0
+    row, and the paper pricing bug). ``unwitnessed_legacy_lineage`` — the
+    booking predates durable ``fill_observed`` lineage, so no witness can ever
+    be produced for it and economic replay can never prove it either way.
+
+    The set is closed to UNWITNESSED causes on purpose: the writer refuses any
+    target that a ``fill_observed`` witness matches, so a reason implying a real
+    venue fill (a duplicate booking, a mispriced but genuine trade) could never
+    be recorded here honestly. Such cases are corrected by appending new
+    execution events, not by annulment."""
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    """Canonical JSON envelope recording HOW the target was diagnosed.
+
+    Free-form object validated at the writer boundary (a non-empty JSON object,
+    no duplicate keys, finite numbers only) and stored with sorted keys and
+    compact separators so two operators recording the same facts store the same
+    bytes. Deliberately not a fixed schema: the diagnosis of the next booking
+    defect is not knowable now, and an under-specified envelope that gets filled
+    with the truth beats a rigid one that gets filled with a placeholder."""
+
+
+@event.listens_for(ExecutionAnnulment.__table__, "after_create")
+def _install_execution_annulment_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install the append-only triggers when ``execution_annulments`` is created.
+
+    Fires on ``Base.metadata.create_all`` and any other fresh creation of the
+    table with the connection's true dialect, so every ``create_all``-built
+    database physically rejects UPDATE/DELETE on the correction manifest just
+    like the migration-built production table. ``create_all`` defaults to
+    ``checkfirst=True`` so this fires only on actual creation, and migrations
+    use ``op.*`` rather than ``create_all`` so it never fires during a migration
+    run (migration 0037 calls the same installer explicitly).
+    """
+    install_execution_annulment_immutability_triggers(connection)
 
 
 class Position(TemporalMixin, Base):

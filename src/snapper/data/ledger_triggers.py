@@ -1,4 +1,11 @@
-"""Canonical DDL for the ``executions`` append-only immutability triggers.
+"""Canonical DDL for the append-only execution-ledger immutability triggers.
+
+Two tables share this module because they share one doctrine: ``executions``
+(the ledger of committed fills) and ``execution_annulments`` (the manifest of
+uniquely targeted operator corrections to that ledger). Each gets its own
+installer emitting its own bespoke refusal messages; neither is a generic
+"immutable table" helper, because the harm each refusal prevents is different
+and the message is the operator's first diagnostic.
 
 The ``executions`` ledger is append-only at runtime: the fenced ingest
 persists a fill with a single ``INSERT`` and no code path may UPDATE or
@@ -38,7 +45,18 @@ single migration.
 The PostgreSQL function ``executions_reject_mutation()`` persists after a
 ``Base.metadata.drop_all`` (which drops the table and its triggers but not
 the standalone function); this is harmless on throwaway databases and
-migration 0030's downgrade drops it explicitly.
+migration 0030's downgrade drops it explicitly. The same holds for
+``execution_annulments_reject_mutation()`` and migration 0037.
+
+The annulment installer is the exact mirror of the executions one: same
+``after_create``-plus-migration dual install through a single function, same
+SQLite ``BEFORE UPDATE`` / ``BEFORE DELETE`` pair, same PostgreSQL function plus
+row trigger plus statement TRUNCATE trigger, and the same ``ENABLE ALWAYS``
+promotion so ``session_replication_role = replica`` cannot disable it. The
+SQLite ``REPLACE``-bypass vector is closed for both tables by the connect-time
+``PRAGMA recursive_triggers=ON`` in
+:data:`snapper.data.repository._SQLITE_CONNECT_PRAGMAS`, which makes the delete
+that ``INSERT OR REPLACE`` performs fire the ``BEFORE DELETE`` trigger.
 """
 
 from sqlalchemy import text
@@ -94,6 +112,62 @@ _PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER: TextClause = text(
 )
 _PG_DROP_FUNCTION: TextClause = text("DROP FUNCTION IF EXISTS executions_reject_mutation()")
 
+_ANNULMENT_SQLITE_REJECT_UPDATE: TextClause = text(
+    "CREATE TRIGGER IF NOT EXISTS execution_annulments_reject_update "
+    "BEFORE UPDATE ON execution_annulments BEGIN "
+    "SELECT RAISE(ABORT, 'execution_annulments is append-only: UPDATE is "
+    "physically forbidden; a correction manifest that could be re-pointed, "
+    "re-reasoned, or silently un-annulled would not be evidence'); END"
+)
+_ANNULMENT_SQLITE_REJECT_DELETE: TextClause = text(
+    "CREATE TRIGGER IF NOT EXISTS execution_annulments_reject_delete "
+    "BEFORE DELETE ON execution_annulments BEGIN "
+    "SELECT RAISE(ABORT, 'execution_annulments is append-only: DELETE is "
+    "physically forbidden; removing a correction would restore a repudiated "
+    "execution to effective accounting history with no trace'); END"
+)
+_ANNULMENT_SQLITE_DROP_UPDATE: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulments_reject_update"
+)
+_ANNULMENT_SQLITE_DROP_DELETE: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulments_reject_delete"
+)
+
+_ANNULMENT_PG_FUNCTION: TextClause = text(
+    "CREATE OR REPLACE FUNCTION execution_annulments_reject_mutation() "
+    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+    "RAISE EXCEPTION 'execution_annulments is append-only: % is physically "
+    "forbidden; the correction manifest is evidence and a revisable manifest "
+    "proves nothing', TG_OP USING ERRCODE = 'raise_exception', "
+    "TABLE = 'execution_annulments'; RETURN NULL; END; $$"
+)
+_ANNULMENT_PG_DROP_ROW_TRIGGER: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulments_reject_row_mutation ON execution_annulments"
+)
+_ANNULMENT_PG_CREATE_ROW_TRIGGER: TextClause = text(
+    "CREATE TRIGGER execution_annulments_reject_row_mutation "
+    "BEFORE UPDATE OR DELETE ON execution_annulments "
+    "FOR EACH ROW EXECUTE FUNCTION execution_annulments_reject_mutation()"
+)
+_ANNULMENT_PG_ENABLE_ALWAYS_ROW_TRIGGER: TextClause = text(
+    "ALTER TABLE execution_annulments "
+    "ENABLE ALWAYS TRIGGER execution_annulments_reject_row_mutation"
+)
+_ANNULMENT_PG_DROP_TRUNCATE_TRIGGER: TextClause = text(
+    "DROP TRIGGER IF EXISTS execution_annulments_reject_truncate ON execution_annulments"
+)
+_ANNULMENT_PG_CREATE_TRUNCATE_TRIGGER: TextClause = text(
+    "CREATE TRIGGER execution_annulments_reject_truncate "
+    "BEFORE TRUNCATE ON execution_annulments "
+    "FOR EACH STATEMENT EXECUTE FUNCTION execution_annulments_reject_mutation()"
+)
+_ANNULMENT_PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER: TextClause = text(
+    "ALTER TABLE execution_annulments ENABLE ALWAYS TRIGGER execution_annulments_reject_truncate"
+)
+_ANNULMENT_PG_DROP_FUNCTION: TextClause = text(
+    "DROP FUNCTION IF EXISTS execution_annulments_reject_mutation()"
+)
+
 
 def install_execution_immutability_triggers(connection: Connection) -> None:
     """Emit the dialect's ``executions`` append-only triggers on ``connection``.
@@ -145,3 +219,65 @@ def drop_execution_immutability_triggers(connection: Connection) -> None:
     connection.execute(_PG_DROP_ROW_TRIGGER)
     connection.execute(_PG_DROP_TRUNCATE_TRIGGER)
     connection.execute(_PG_DROP_FUNCTION)
+
+
+def install_execution_annulment_immutability_triggers(connection: Connection) -> None:
+    """Emit the dialect's ``execution_annulments`` append-only triggers.
+
+    The exact mirror of :func:`install_execution_immutability_triggers` for the
+    correction manifest, and the single source of truth shared by the
+    ``after_create`` DDL event on ``ExecutionAnnulment.__table__`` (every
+    ``create_all``-built database, including test fixtures Alembic never
+    touches) and migration 0037 (the Alembic-built production table), so both
+    installs are byte-identical by construction rather than by convention.
+
+    The manifest needs the same physical refusal as the ledger it corrects, for
+    the same reason: an operator correction that could later be UPDATEd to point
+    at a different execution, re-reasoned, or DELETEd to silently restore a
+    repudiated fill to effective accounting history is not evidence. Because the
+    manifest also has no lifecycle at all — its rows are inserted once and never
+    close — the refusal is total rather than a bitemporal close guard.
+
+    Idempotent on both dialects (SQLite ``IF NOT EXISTS``; PostgreSQL ``CREATE OR
+    REPLACE FUNCTION`` plus ``DROP TRIGGER IF EXISTS`` then ``CREATE TRIGGER``).
+    SQLite installs one ``BEFORE UPDATE`` and one ``BEFORE DELETE`` trigger;
+    PostgreSQL installs the shared plpgsql function, a ``BEFORE UPDATE OR
+    DELETE`` row trigger, and a ``BEFORE TRUNCATE`` statement trigger (a
+    ``BEFORE DELETE`` row trigger does not fire on TRUNCATE), each promoted to
+    ``ENABLE ALWAYS`` so it still fires under ``session_replication_role =
+    replica``.
+
+    Args:
+        connection: Live SQLAlchemy connection used for DDL execution.
+    """
+    if connection.dialect.name == "sqlite":
+        connection.execute(_ANNULMENT_SQLITE_REJECT_UPDATE)
+        connection.execute(_ANNULMENT_SQLITE_REJECT_DELETE)
+        return
+    connection.execute(_ANNULMENT_PG_FUNCTION)
+    connection.execute(_ANNULMENT_PG_DROP_ROW_TRIGGER)
+    connection.execute(_ANNULMENT_PG_CREATE_ROW_TRIGGER)
+    connection.execute(_ANNULMENT_PG_ENABLE_ALWAYS_ROW_TRIGGER)
+    connection.execute(_ANNULMENT_PG_DROP_TRUNCATE_TRIGGER)
+    connection.execute(_ANNULMENT_PG_CREATE_TRUNCATE_TRIGGER)
+    connection.execute(_ANNULMENT_PG_ENABLE_ALWAYS_TRUNCATE_TRIGGER)
+
+
+def drop_execution_annulment_immutability_triggers(connection: Connection) -> None:
+    """Remove the ``execution_annulments`` append-only triggers.
+
+    Idempotent on both dialects (every statement is ``IF EXISTS``). SQLite drops
+    the two per-operation triggers; PostgreSQL drops both triggers and then the
+    shared function, which no ``after_create`` path removes and which survives a
+    ``Base.metadata.drop_all``.
+
+    Args:
+        connection: Live SQLAlchemy connection used for DDL execution.
+    """
+    if connection.dialect.name == "sqlite":
+        connection.execute(_ANNULMENT_SQLITE_DROP_UPDATE)
+        connection.execute(_ANNULMENT_SQLITE_DROP_DELETE)
+        return
+    connection.execute(_ANNULMENT_PG_DROP_ROW_TRIGGER)
+    connection.execute(_ANNULMENT_PG_DROP_TRUNCATE_TRIGGER)
+    connection.execute(_ANNULMENT_PG_DROP_FUNCTION)
