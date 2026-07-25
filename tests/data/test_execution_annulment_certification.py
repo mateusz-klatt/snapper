@@ -751,7 +751,7 @@ async def test_a_witness_beyond_the_read_horizon_still_contradicts(
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            correction["timestamp"] + timedelta(seconds=1),
+            correction["timestamp"] + timedelta(seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS * 2),
         )
 
 
@@ -1055,10 +1055,11 @@ async def test_current_truth_folds_a_correction_the_settling_margin_would_withho
 ) -> None:
     """A read that can SEE the row needs nothing settled — it is already durable.
 
-    Given: The same correction stamped seconds ago, which no historical horizon
-        within the settling margin would yet fold.
-    When: The scope is certified at current truth — the horizon every route
-        derives when no explicit ``as_of`` is given.
+    Given: A correction stamped seconds ago, which no requested horizon would
+        yet fold.
+    When: The scope is certified with NO horizon requested — what every route
+        does when ``as_of`` is absent, and what the trader tick and the
+        reconciliation capture do by construction.
     Then: It folds immediately and the scope proves. A row a reader can see is
         committed, so there is nothing left to settle and no earlier answer to
         contradict; withholding it here would make an operator's just-recorded
@@ -1070,10 +1071,37 @@ async def test_current_truth_folds_a_correction_the_settling_margin_would_withho
         _MAIN_WALLET,
         "live",
         datetime.now(UTC),
+        current_truth=True,
     )
 
     assert [row["public_id"] for row in prefix["executions"]] == [_WALUTOMAT_TRADE]
     assert [row["public_id"] for row in prefix["annulments"]] == [_ANNULMENT_PUBLIC_ID]
+
+
+async def test_an_explicitly_requested_present_horizon_gets_no_exemption(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The exemption keys on INTENT, never on how recent the horizon looks.
+
+    Given: A correction stamped seconds ago, and a caller that names an instant
+        of its own — one that happens to be the present.
+    When: The scope is certified at that REQUESTED horizon.
+    Then: The correction is withheld and certification refuses, exactly as for
+        any other past instant. Current truth is not "a recent horizon", it is
+        "no horizon": a caller that names an instant is making a claim about the
+        past, and a caller naming one inside the settling window is precisely
+        the caller that must not be told a correction was already knowable
+        there. Keying the exemption on proximity to the reader's clock would
+        hand that caller the answer only an unrequested read has earned.
+    """
+    await _store_bound_manifest_row(repository, datetime.now(UTC) - timedelta(seconds=5))
+
+    with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
+        await repository.get_pnl_timeline_execution_prefix(
+            _MAIN_WALLET,
+            "live",
+            datetime.now(UTC),
+        )
 
 
 async def test_the_derived_planes_withhold_an_unsettled_correction_too(
@@ -1381,9 +1409,10 @@ async def test_certification_pins_one_snapshot_before_reading_evidence(
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        current_truth: bool,
     ) -> PnlTimelineExecutionPrefix:
         """Record that evidence loading begins only after the pin is set."""
-        del loaded_session, wallet_public_id, mode, as_of
+        del loaded_session, wallet_public_id, mode, as_of, current_truth
         events.append("load")
         return {"watermarks": {}, "executions": [], "annulments": []}
 

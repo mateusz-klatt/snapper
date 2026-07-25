@@ -375,6 +375,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "venue_events",
         "wallet_credentials",
         "wallet_operator_scope_grants",
+        "wallet_user_read_grants",
     }
 )
 """EVERY ``wallet_public_id``-bearing table in the migrated schema.
@@ -421,6 +422,12 @@ repudiate a production booking defect after an operator diagnosed it; a demo
 seed that manufactured corrections would be inventing evidence of a defect that
 never happened. The table therefore stays empty in every seeded database, and
 its wallet spelling is proven by the repository writer's own tests instead.
+
+``wallet_user_read_grants`` is deliberately EXCLUDED. The demo seed already
+gives its viewer wallet visibility through the operator plane, so a read grant
+would add a second, redundant route to the same wallet and blur which plane a
+demo visibility result came from. The read plane's own tests cover the grant
+surface and its spelling.
 """
 
 

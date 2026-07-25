@@ -524,6 +524,7 @@ class _SpotReplayEffectiveRequest:
     exchange: str
     mode: str
     as_of: datetime
+    current_truth: bool
     anchor_watermark: int
     boundary_watermark: int
     replay: list[SpotReplayExecutionSourceRow]
@@ -742,6 +743,7 @@ class _PnlTimelineScopeGapRequest:
     mode: str
     as_of: datetime
     execution_prefix: PnlTimelineExecutionPrefix | None
+    current_truth: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1546,8 +1548,14 @@ The writer stamps a correction's knowledge instant at the last point before its
 insert, but the row only becomes visible to other readers at COMMIT — so for a
 brief interval a committed row carries a stamp fractionally older than its own
 durability. No supported dialect can close that on the write side: neither
-PostgreSQL nor SQLite will assign a commit-time value to an ordinary column.
-It is closed on the READ side instead, and only where it can actually do harm.
+PostgreSQL nor SQLite will assign a commit-time value to an ordinary column. A
+proof-grade knowledge instant would need commit-timestamp tracking (PostgreSQL
+``track_commit_timestamp``, which SQLite has no analogue for) or a second
+append-only visibility ledger written after the commit — neither of which is in
+scope for a production manifest that holds three rows. So the gap is closed on
+the READ side, where it can actually do harm, and the residual is MONITORED
+rather than assumed: ``record_execution_annulment`` measures its own
+insert-to-commit latency and reports loudly if it ever reaches this margin.
 
 Sixty seconds is not a measurement of that interval; it is orders of magnitude
 above it. The interval is one unfenced round trip — an INSERT and a COMMIT on a
@@ -1565,15 +1573,15 @@ _ANNULMENT_KNOWLEDGE_SETTLING: Final[timedelta] = timedelta(
 """Interval form of :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`."""
 
 
-def annulment_knowledge_bound(as_of: datetime) -> datetime:
-    """Return the newest correction stamp one read horizon is entitled to fold.
+def annulment_knowledge_bound(as_of: datetime, current_truth: bool) -> datetime:
+    """Return the newest correction stamp one read is entitled to fold.
 
     The invariant: *a correction becomes historically knowable only after its
     stamp has settled beyond any insert-to-commit latency; before that, history
-    refuses rather than assumes.* A historical horizon therefore folds only
+    refuses rather than assumes.* A historical read therefore folds only
     corrections stamped at least :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`
-    before it, so a read of the past can never be re-answered by a row that was
-    stamped before that instant but became durable after it.
+    before its horizon, so a read of the past can never be re-answered by a row
+    that was stamped before that instant but became durable after it.
 
     The direction is fail-closed, and it is worth being explicit about which way
     that cuts. Inside the settling window a correction is NOT folded, so an
@@ -1582,29 +1590,28 @@ def annulment_knowledge_bound(as_of: datetime) -> datetime:
     correction the horizon may not have been able to see — silently fabricates
     economics for a past that has already been reported.
 
-    Current truth is exempt, and the exemption is a proof rather than a
-    convenience: a read whose horizon reaches the present SAW the row, and a row
-    a reader can see is committed. There is nothing left to settle, and no
-    earlier answer to contradict, because the present has not been answered
-    before. A horizon is treated as the present when it lies within one settling
-    margin of the read's own clock, which is what every current-truth caller
-    produces — the routes pass ``datetime.now(UTC)`` when no explicit ``as_of``
-    is given, and recovery and reconciliation pass their tick instant.
-
-    That makes the rule deliberately discontinuous at the margin rather than
-    monotone in ``as_of``: horizons inside the margin are the present and fold
-    everything visible; horizons outside it are history and must wait. Trying to
-    smooth the step would mean applying settling to current truth, which would
-    make an operator's just-recorded correction invisible to the very read they
-    recorded it for.
+    Current truth is exempt, and the exemption keys on the caller's INTENT, not
+    on how recent the horizon looks. Current truth is not "a recent horizon", it
+    is "NO horizon": the reader asked for whatever is durable at read time, and
+    a row it can see is committed, so there is nothing left to settle and no
+    earlier answer to contradict. An explicitly supplied ``as_of`` is a claim
+    about the past no matter how recent it is, and is always answered
+    conservatively — a caller that names an instant inside the settling window
+    is precisely the caller that must not be told a correction was knowable
+    there. Every current-truth caller is one that supplied no horizon at all:
+    the routes pass ``datetime.now(UTC)`` only when ``as_of`` is absent, the
+    trader recovery pass uses its own tick, and the reconciliation bundle uses
+    its capture instant.
 
     Args:
         as_of: The read's knowledge horizon.
+        current_truth: Whether the caller requested NO horizon and is therefore
+            asking about whatever is durable now.
 
     Returns:
-        The newest correction stamp this horizon may treat as known.
+        The newest correction stamp this read may treat as known.
     """
-    if as_of >= datetime.now(UTC) - _ANNULMENT_KNOWLEDGE_SETTLING:
+    if current_truth:
         return as_of
     return as_of - _ANNULMENT_KNOWLEDGE_SETTLING
 
@@ -2971,6 +2978,7 @@ class Repository(ABC):
         exchange: str | None = None,
         instrument: str | None = None,
         wallet_public_id: str = "",
+        current_truth: bool = False,
     ) -> list[ExecutionRow]:
         """Retrieve all effective executions for startup state reconstruction.
 
@@ -2993,6 +3001,9 @@ class Repository(ABC):
                 The legacy default ``""`` skips the filter for
                 backwards compatibility with the single-wallet
                 template path.
+
+            current_truth: Whether the caller requested NO horizon, exempting
+                the manifest fold from the settling margin.
 
         Returns:
             Execution dicts ordered by timestamp ASC for replay,
@@ -3109,6 +3120,7 @@ class Repository(ABC):
         mode: str,
         request_as_of: datetime,
         activation_as_of: datetime,
+        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return independently proven request and activation prefix cuts.
 
@@ -3617,6 +3629,7 @@ class Repository(ABC):
         mode: str,
         as_of: datetime,
         execution_prefix: PnlTimelineExecutionPrefix | None = None,
+        current_truth: bool = False,
     ) -> bool:
         """Compare sealed venue and execution prefixes for one P&L scope.
 
@@ -3626,6 +3639,8 @@ class Repository(ABC):
             as_of: Knowledge horizon for both append-only ledgers.
             execution_prefix: Optional already sealed and validated scope
                 execution evidence for the same horizon.
+            current_truth: Whether the caller requested NO horizon, exempting
+                the manifest fold from the settling margin.
 
         Returns:
             True unless every recorded and consumed shard quantity agrees.
@@ -10814,6 +10829,7 @@ class SQLAlchemyRepository(Repository):
         exchange: str | None = None,
         instrument: str | None = None,
         wallet_public_id: str = "",
+        current_truth: bool = False,
     ) -> list[ExecutionRow]:
         """Retrieve all EFFECTIVE executions for startup state reconstruction.
 
@@ -10842,6 +10858,7 @@ class SQLAlchemyRepository(Repository):
                 s,
                 as_of,
                 wallet_public_id,
+                current_truth,
             )
             query = (
                 select(Execution, Order, Instrument, Symbol)
@@ -11368,6 +11385,7 @@ class SQLAlchemyRepository(Repository):
             evidence["wallet_public_id"],
             evidence["mode"],
             evidence["request_as_of"],
+            evidence["current_truth"],
         )
         if evidence["activation_as_of"] == evidence["request_as_of"]:
             activation = request
@@ -11377,6 +11395,7 @@ class SQLAlchemyRepository(Repository):
                 evidence["wallet_public_id"],
                 evidence["mode"],
                 evidence["activation_as_of"],
+                evidence["current_truth"],
             )
         return {"request": request, "activation": activation}
 
@@ -11439,6 +11458,7 @@ class SQLAlchemyRepository(Repository):
                         mode=evidence["mode"],
                         as_of=evidence["activation_as_of"],
                         execution_prefix=current_bundle["activation"],
+                        current_truth=evidence["current_truth"],
                     ),
                 ):
                     raise PnlTimelineAnchorEvidenceMismatchError(
@@ -11837,6 +11857,43 @@ class SQLAlchemyRepository(Repository):
             .first()
         )
 
+    @staticmethod
+    def _report_execution_annulment_settling_breach(
+        appended: ExecutionAnnulmentRow,
+        knowledge_time: datetime,
+    ) -> None:
+        """Report a stamp-to-commit interval that outran the settling margin.
+
+        Turns the manifest's one irreducible assumption into a MONITORED
+        invariant. The settling margin historical reads narrow by is only sound
+        while a writer's own stamp-to-commit interval stays well under it; that
+        is overwhelmingly true and cannot be proven, so it is measured on every
+        write instead of assumed. When it does not hold, the operator is told
+        immediately, with the exact horizon window in which a historical read
+        could have folded this correction before it was durable.
+
+        Deliberately a report rather than a refusal: the row is already
+        committed and the manifest is append-only, so there is nothing to roll
+        back, and refusing after the fact would leave the ledger corrected while
+        telling the caller it was not.
+
+        Args:
+            appended: The manifest row that was just committed.
+            knowledge_time: The instant stamped on it before the insert.
+        """
+        elapsed = (datetime.now(UTC) - knowledge_time).total_seconds()
+        if elapsed < ANNULMENT_KNOWLEDGE_SETTLING_SECONDS:
+            return
+        logger.error(
+            "execution annulment {annulment} stamp-to-commit latency {elapsed:.3f}s reached the "
+            "{margin:.3f}s settling margin; historical reads in [{start}, {end}] may fold it early",
+            annulment=appended["public_id"],
+            elapsed=elapsed,
+            margin=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS,
+            start=knowledge_time.isoformat(),
+            end=(knowledge_time + timedelta(seconds=elapsed)).isoformat(),
+        )
+
     async def record_execution_annulment(
         self,
         request: ExecutionAnnulmentRequest,
@@ -11851,19 +11908,35 @@ class SQLAlchemyRepository(Repository):
         involved — the manifest's physical name is registered in
         :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it cannot be.
 
-        Knowledge-stamp placement, and the residual window it leaves. Every
-        knowledge-horizon fold filters on the row's ``timestamp``, so a stamp
-        that precedes the row's durable existence lets a historical read at an
-        instant between the two see a correction that did not yet exist. The
-        stamp is therefore taken at the LAST possible point: after the
+        Knowledge-stamp placement, the residual window, and how it is watched.
+        Every knowledge-horizon fold filters on the row's ``timestamp``, so a
+        stamp that precedes the row's durable existence lets a historical read
+        at an instant between the two see a correction that did not yet exist.
+        The stamp is therefore taken at the LAST possible point: after the
         transaction's dialect guarantees, after the scope fence, after the
         ``FOR UPDATE`` target re-read, and after the witness refusal — so no
         lock is ever awaited afterwards. What remains is bounded and small: the
         stamp precedes durable visibility by at most this writer's own
-        insert-to-commit latency, a single unfenced round trip, instead of by
-        an unbounded advisory-lock wait. The window cannot be closed entirely
-        without the commit itself assigning the value, which no supported
-        dialect offers for an ordinary column.
+        insert-to-commit latency, a single unfenced round trip, instead of by an
+        unbounded advisory-lock wait.
+
+        That residual cannot be eliminated here. Closing it fully would require
+        the COMMIT itself to assign the value — PostgreSQL
+        ``track_commit_timestamp``, which SQLite has no analogue for — or a
+        second append-only visibility ledger written after the commit; neither
+        is in scope for a production manifest that holds three rows. So the
+        remaining exposure is handled in two layers instead. Historical reads
+        narrow the manifest by a settling margin
+        (:func:`annulment_knowledge_bound`) that is orders of magnitude above
+        the latency, while current-truth reads are exempt BY INTENT — they asked
+        for no horizon, and a row they can see is committed. And the assumption
+        the margin rests on is MEASURED here rather than assumed: this method
+        times its own stamp-to-commit interval and logs an ERROR naming the
+        correction, the measured latency, and the exact horizon window in which
+        historical reads could have folded it early. The row is durable and the
+        manifest is append-only, so that is a report and not a rollback — but
+        the operator learns immediately instead of the assumption failing in
+        silence.
 
         Contradictory-later-witness doctrine, and the exact guarantee it buys.
         The witness check here is NECESSARY but NOT SUFFICIENT: it proves only
@@ -11928,7 +12001,9 @@ class SQLAlchemyRepository(Repository):
                 )
                 s.add(row)
                 await s.commit()
-                return self._execution_annulment_to_row(row)
+                appended = self._execution_annulment_to_row(row)
+                self._report_execution_annulment_settling_breach(appended, knowledge_time)
+                return appended
             except IntegrityError:
                 await s.rollback()
                 winner = await self._read_execution_annulment(
@@ -14710,6 +14785,7 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        current_truth: bool,
     ) -> list[ExecutionAnnulment]:
         """Read the corrections one knowledge horizon is entitled to know about.
 
@@ -14736,6 +14812,8 @@ class SQLAlchemyRepository(Repository):
             wallet_public_id: Wallet identity of the certification scope.
             mode: Trading mode of the certification scope.
             as_of: Knowledge horizon the corrections must already be known at.
+            current_truth: Whether the caller requested NO horizon, exempting
+                this fold from the settling margin.
 
         Returns:
             The known manifest rows in ``(exchange, scope_sequence)`` order.
@@ -14745,7 +14823,7 @@ class SQLAlchemyRepository(Repository):
             .where(
                 ExecutionAnnulment.wallet_public_id == wallet_public_id,
                 ExecutionAnnulment.mode == mode,
-                ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of),
+                ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of, current_truth),
             )
             .order_by(
                 ExecutionAnnulment.exchange.asc(),
@@ -14857,6 +14935,7 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         as_of: datetime,
         wallet_public_id: str,
+        current_truth: bool,
     ) -> frozenset[str]:
         """Prove the whole known manifest, then return what it repudiates.
 
@@ -14885,6 +14964,8 @@ class SQLAlchemyRepository(Repository):
             as_of: Knowledge horizon the corrections must already be known at.
             wallet_public_id: Wallet to narrow the manifest to, or ``""`` for
                 every wallet, mirroring the recovery read's own scoping.
+            current_truth: Whether the caller requested NO horizon, exempting
+                this fold from the settling margin.
 
         Returns:
             The immutable identities of every provably repudiated execution.
@@ -14895,7 +14976,7 @@ class SQLAlchemyRepository(Repository):
                 a durable fill witness.
         """
         filters: list[ColumnElement[bool]] = [
-            ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of)
+            ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of, current_truth)
         ]
         if wallet_public_id:
             filters.append(ExecutionAnnulment.wallet_public_id == wallet_public_id)
@@ -14944,6 +15025,7 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        current_truth: bool,
     ) -> PnlTimelineExecutionPrefix:
         """Capture, prove, and fold one exact effective execution-prefix snapshot."""
         captured_rows = (
@@ -15006,6 +15088,7 @@ class SQLAlchemyRepository(Repository):
             wallet_public_id,
             mode,
             as_of,
+            current_truth,
         )
         annulment_witnesses = await self._read_execution_annulment_contradiction_witnesses(
             s,
@@ -15035,6 +15118,7 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Capture watermarks first, then certify each range's effective history.
 
@@ -15071,6 +15155,7 @@ class SQLAlchemyRepository(Repository):
                 wallet_public_id,
                 mode,
                 as_of,
+                current_truth,
             )
 
     async def _begin_effective_execution_snapshot(self, s: AsyncSession) -> None:
@@ -15109,8 +15194,15 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         request_as_of: datetime,
         activation_as_of: datetime,
+        current_truth: bool = False,
     ) -> PnlTimelineExecutionPrefixBundle:
-        """Return request and activation cuts with independent identity proof."""
+        """Return request and activation cuts with independent identity proof.
+
+        ``current_truth`` states that NO horizon was requested, so the manifest
+        fold answers for whatever is durable now; see
+        :func:`annulment_knowledge_bound`. It applies to BOTH cuts: an activation
+        instant derived from an unrequested present is itself unrequested.
+        """
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
             request = await self._load_pnl_timeline_execution_prefix_snapshot(
@@ -15118,6 +15210,7 @@ class SQLAlchemyRepository(Repository):
                 wallet_public_id,
                 mode,
                 request_as_of,
+                current_truth,
             )
             if activation_as_of == request_as_of:
                 activation = request
@@ -15127,6 +15220,7 @@ class SQLAlchemyRepository(Repository):
                     wallet_public_id,
                     mode,
                     activation_as_of,
+                    current_truth,
                 )
         return {"request": request, "activation": activation}
 
@@ -15136,6 +15230,7 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         as_of: datetime,
         since_scope_sequence: int | None = None,
+        current_truth: bool = False,
     ) -> list[PnlTimelineExecutionRow]:
         """Retrieve a scope's EFFECTIVE executions for P&L timeline reconstruction.
 
@@ -15171,6 +15266,8 @@ class SQLAlchemyRepository(Repository):
                 to decide which corrections are already known.
             since_scope_sequence: Optional exclusive ``scope_sequence`` lower
                 bound applied uniformly across exchanges.
+            current_truth: Whether the caller requested NO horizon, exempting
+                the manifest fold from the settling margin.
 
         Returns:
             Effective execution rows ordered by ``(exchange, scope_sequence)``.
@@ -15199,6 +15296,7 @@ class SQLAlchemyRepository(Repository):
                 s,
                 as_of,
                 wallet_public_id,
+                current_truth,
             )
             query = (
                 select(Execution, Order.instrument_public_id)
@@ -16143,6 +16241,7 @@ class SQLAlchemyRepository(Repository):
                     wallet_public_id,
                     request.mode,
                     request.as_of,
+                    request.current_truth,
                 )
                 if request.execution_prefix is None
                 else request.execution_prefix
@@ -16165,6 +16264,7 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         as_of: datetime,
         execution_prefix: PnlTimelineExecutionPrefix | None = None,
+        current_truth: bool = False,
     ) -> bool:
         """Compare every sealed venue shard with one exact execution prefix.
 
@@ -16181,6 +16281,8 @@ class SQLAlchemyRepository(Repository):
             as_of: Knowledge horizon for both append-only ledgers.
             execution_prefix: Optional already sealed and validated scope
                 execution evidence for the same horizon.
+            current_truth: Whether the caller requested NO horizon, exempting
+                the manifest fold from the settling margin.
 
         Returns:
             True unless every recorded and consumed shard quantity agrees
@@ -16195,6 +16297,7 @@ class SQLAlchemyRepository(Repository):
                     mode=mode,
                     as_of=as_of,
                     execution_prefix=execution_prefix,
+                    current_truth=current_truth,
                 ),
             )
 
@@ -21738,6 +21841,7 @@ class SQLAlchemyRepository(Repository):
                     exchange=exchange,
                     mode=mode,
                     as_of=as_of,
+                    current_truth=True,
                     anchor_watermark=anchor_watermark,
                     boundary_watermark=boundary_watermark,
                     replay=replay,
@@ -21921,7 +22025,8 @@ class SQLAlchemyRepository(Repository):
                         ExecutionAnnulment.wallet_public_id == request.wallet_public_id,
                         ExecutionAnnulment.exchange == request.exchange,
                         ExecutionAnnulment.mode == request.mode,
-                        ExecutionAnnulment.timestamp <= annulment_knowledge_bound(request.as_of),
+                        ExecutionAnnulment.timestamp
+                        <= annulment_knowledge_bound(request.as_of, request.current_truth),
                     )
                     .order_by(ExecutionAnnulment.scope_sequence.asc())
                 )

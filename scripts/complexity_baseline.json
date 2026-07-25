@@ -324,9 +324,6 @@
       "_load_request_fx_rates": {
         "PLR0913": 6
       },
-      "_load_series_replay_inputs": {
-        "PLR0913": 7
-      },
       "_mark_fx_minutes": {
         "PLR0913": 8
       },

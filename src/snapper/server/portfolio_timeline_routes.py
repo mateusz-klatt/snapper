@@ -511,6 +511,7 @@ async def get_pnl_series(
             policy=PnlSeriesReadPolicy(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
+                current_truth_horizon=validated.current_truth,
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
@@ -649,6 +650,7 @@ async def get_pnl_timeline(
             policy=PnlSeriesReadPolicy(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
+                current_truth_horizon=validated.current_truth,
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker

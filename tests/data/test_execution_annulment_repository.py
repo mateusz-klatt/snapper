@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.core.json_types import JsonObject
+from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
@@ -414,6 +415,79 @@ async def test_the_knowledge_stamp_postdates_every_lock_the_writer_waits_on(
 
     assert fence_released
     assert row["timestamp"] >= fence_released[0]
+
+
+async def test_a_slow_commit_reports_the_horizon_window_it_left_open(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest's one irreducible assumption is measured, not assumed.
+
+    Given: A writer whose stamp-to-commit interval outruns the settling margin —
+        the single condition under which a historical read could fold a
+        correction before it was durable.
+    When: The correction is recorded.
+    Then: The row still commits, and an ERROR names the correction, the measured
+        latency, and the exact horizon window in which the early fold was
+        possible. The manifest is append-only so there is nothing to roll back;
+        what matters is that the operator learns immediately instead of the
+        assumption failing in silence.
+    """
+    monkeypatch.setattr(repository_module, "ANNULMENT_KNOWLEDGE_SETTLING_SECONDS", 0.05)
+    reported: list[tuple[str, dict[str, object]]] = []
+
+    def capture(message: str, **values: object) -> None:
+        """Capture the reported breach instead of emitting it."""
+        reported.append((message, values))
+
+    real_commit = AsyncSession.commit
+
+    async def slow_commit(self: AsyncSession) -> None:
+        """Stall the durability boundary past the patched-down margin."""
+        await asyncio.sleep(0.2)
+        await real_commit(self)
+
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    monkeypatch.setattr(repository_module.logger, "error", capture)
+    monkeypatch.setattr(AsyncSession, "commit", slow_commit)
+
+    row = await repository.record_execution_annulment(_request(digest))
+
+    assert len(reported) == 1
+    message, values = reported[0]
+    assert "stamp-to-commit latency" in message
+    assert values["annulment"] == row["public_id"]
+    assert cast(float, values["elapsed"]) >= 0.2
+    assert values["start"] == row["timestamp"].isoformat()
+    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == [row]
+
+
+async def test_a_prompt_commit_reports_nothing(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The monitor is silent on the path that always holds.
+
+    Given: The ordinary writer, whose stamp-to-commit interval is a single
+        unfenced round trip.
+    When: A correction is recorded.
+    Then: No breach is reported. The margin is orders of magnitude above the
+        real interval, so an ERROR here would mean the assumption itself has
+        broken — which is exactly why it must never fire routinely.
+    """
+    reported: list[str] = []
+
+    def capture(message: str, **values: object) -> None:
+        """Capture any reported breach."""
+        del values
+        reported.append(message)
+
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    monkeypatch.setattr(repository_module.logger, "error", capture)
+
+    await repository.record_execution_annulment(_request(digest))
+
+    assert reported == []
 
 
 async def test_annulling_the_kraken_phantom_leaves_the_real_trade_untouched(

@@ -2525,7 +2525,10 @@ class TraderCoordinator(RegisterableProcess):
     ) -> list[ExecutionRow]:
         """Load execution rows, failing certification when the query fails."""
         try:
-            executions = await self.repository.get_executions_for_recovery(as_of=now)
+            executions = await self.repository.get_executions_for_recovery(
+                as_of=now,
+                current_truth=True,
+            )
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
             self._recovery_certification_failed = True
