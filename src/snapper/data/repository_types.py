@@ -2038,6 +2038,30 @@ class ScopeGrantRow(TypedDict):
     sequence_id: int
 
 
+class WalletUserReadGrantRow(TypedDict):
+    """Row dict returned by wallet user read-grant queries.
+
+    One row per ``wallet_user_read_grants`` SCD2 version. The read plane is
+    keyed on the USER, not on an operator, so several distinct users may hold
+    an active grant on the same wallet at once — something the
+    instrument-exclusive operator scope-grant plane can never express.
+
+    ``granted_by_user_public_id`` is None for a seed-provisioned grant (no
+    human granter). ``known_to`` is carried so a revoked row's projection can
+    report the close time it was written with.
+    """
+
+    public_id: str
+    user_public_id: str
+    wallet_public_id: str
+    granted_by_user_public_id: str | None
+    note: str | None
+    timestamp: datetime
+    known_to: datetime
+    session_id: str
+    sequence_id: int
+
+
 class WalletCredentialRow(TypedDict):
     """Row dict returned by wallet credential queries.
 
@@ -2276,6 +2300,24 @@ class CreateScopeGrantRequest(TypedDict):
     scope_kind: str
     underlying_public_id: str | None
     instrument_public_id: str | None
+    note: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class CreateWalletUserReadGrantRequest(TypedDict):
+    """Insert params for ``grant_wallet_user_read_access``.
+
+    See ``WalletUserReadGrant`` for the per-field semantics. The
+    ``(user_public_id, wallet_public_id)`` pair is active-unique, so a second
+    live grant on the same pair is rejected rather than stored.
+    ``granted_by_user_public_id`` is None only for seed-provisioned grants.
+    """
+
+    user_public_id: str
+    wallet_public_id: str
+    granted_by_user_public_id: str | None
     note: str | None
     session_id: str
     sequence_id: int

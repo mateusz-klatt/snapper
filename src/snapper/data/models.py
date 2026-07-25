@@ -228,6 +228,7 @@ __all__ = [
     "Operator",
     "UserOperatorMembership",
     "WalletOperatorScopeGrant",
+    "WalletUserReadGrant",
     "InstrumentOrderCapability",
     "VenueFeeSchedule",
     "ExecutionPlan",
@@ -3544,6 +3545,57 @@ class WalletOperatorScopeGrant(TemporalMixin, Base):
     scope_kind: Mapped[str] = mapped_column(String(16))
     underlying_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class WalletUserReadGrant(TemporalMixin, Base):
+    """Grant: user X may READ wallet Z. The READ plane, not the TRADE plane.
+
+    WalletOperatorScopeGrant cannot express this. Every scope grant is
+    instrument-exclusive on its wallet — both partial unique indexes
+    (``ix_scope_grants_instrument_exclusive_active`` /
+    ``ix_scope_grants_underlying_exclusive_active``) omit
+    ``operator_public_id`` entirely, so an instrument or underlying on a
+    wallet may be covered by exactly ONE operator's grant globally. Two
+    people who must both see one wallet would therefore have to share a
+    single operator, which makes them indistinguishable to every audit and
+    authorization decision downstream.
+
+    So read visibility gets its own plane, and the USER is in the key. The
+    active-unique index is over ``(user_public_id, wallet_public_id)``, which
+    lets any number of distinct users hold a read grant on the same wallet
+    concurrently while still admitting at most one live grant per pair.
+
+    ``granted_by_user_public_id`` is NULLABLE: NULL means the row was
+    provisioned by the seed profile rather than granted by a human, so
+    provenance stays honest instead of naming an arbitrary bootstrap admin.
+    The grant conveys READ ONLY — it never widens what its holder may trade,
+    which remains entirely a function of the operator scope-grant plane.
+    """
+
+    __tablename__ = "wallet_user_read_grants"
+    __table_args__ = (
+        Index(
+            "ix_wallet_user_read_grants_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_wallet_user_read_grants_unique_active",
+            "user_public_id",
+            "wallet_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_wallet_user_read_grants_user", "user_public_id"),
+        Index("ix_wallet_user_read_grants_wallet", "wallet_public_id"),
+    )
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    granted_by_user_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     note: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 

@@ -251,6 +251,7 @@ from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
+from snapper.data.models import WalletUserReadGrant
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
@@ -274,6 +275,7 @@ from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
+from snapper.data.repository_types import CreateWalletUserReadGrantRequest
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionAnnulmentReason
@@ -390,6 +392,7 @@ from snapper.data.repository_types import VenueEventRow
 from snapper.data.repository_types import VenueFeeScheduleRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
+from snapper.data.repository_types import WalletUserReadGrantRow
 
 __all__ = [
     "Repository",
@@ -404,6 +407,8 @@ __all__ = [
     "ExecutionAnnulmentWitnessedError",
     "ExecutionAnnulmentConflictError",
     "WalletConflictError",
+    "WalletUserReadGrantConflictError",
+    "WalletUserReadGrantNotFoundError",
     "CredentialConflictError",
     "CredentialNotFoundError",
     "close_and_insert",
@@ -970,6 +975,35 @@ class ScopeGrantValidationError(Exception):
     Maps to HTTP 400 at the API layer. Examples: scope_kind/public_id
     XOR violation, self-handover (source operator equals target
     operator), or unknown scope_kind.
+    """
+
+
+class WalletUserReadGrantConflictError(Exception):
+    """Raised when a wallet_user_read_grants insert repeats an active pair.
+
+    Maps to HTTP 409 at the API layer. The read plane is keyed on the USER:
+    many users may hold live grants on one wallet, but a single
+    ``(user_public_id, wallet_public_id)`` pair admits at most one active row,
+    enforced by ``ix_wallet_user_read_grants_unique_active``.
+    """
+
+    def __init__(self, user_public_id: str, wallet_public_id: str, reason: str) -> None:
+        """Capture the conflicting (user, wallet) pair for the caller."""
+        super().__init__(
+            f"Wallet read grant insert failed for user={user_public_id} "
+            f"wallet={wallet_public_id}: {reason}"
+        )
+        self.user_public_id = user_public_id
+        self.wallet_public_id = wallet_public_id
+        self.reason = reason
+
+
+class WalletUserReadGrantNotFoundError(Exception):
+    """Raised when no active wallet read grant exists for a (user, wallet) pair.
+
+    Maps to HTTP 404 at the API layer. Raised by
+    ``revoke_wallet_user_read_grant`` when the pair was never granted, was
+    already revoked, or lost a concurrent revoke race.
     """
 
 
@@ -5768,6 +5802,104 @@ class Repository(ABC):
         Returns:
             Active wallet rows, deduplicated, ordered by
             ``(is_paper, label)``. Empty list when no grants match.
+        """
+        ...
+
+    @abstractmethod
+    async def list_readable_wallets_for_user(
+        self,
+        user_public_id: str,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Wallets a user may SEE — operator scope grants UNION read grants.
+
+        The read-visibility superset of
+        ``list_accessible_wallets_for_operators``: a wallet is visible when
+        ANY of the principal's operators holds an active
+        ``wallet_operator_scope_grants`` row on it (the trade plane), OR when
+        the user personally holds an active ``wallet_user_read_grants`` row on
+        it (the read plane). The two planes are independent — a read grant
+        never widens what may be traded.
+
+        Unlike ``list_accessible_wallets_for_operators`` this does NOT
+        short-circuit on an empty operator list: a user with zero
+        memberships and one read grant must still see that one wallet, which
+        is precisely the principal shape the read plane exists to serve.
+
+        Args:
+            user_public_id: Public ID of the principal's user identity, used
+                to match the read-grant plane.
+            operator_public_ids: Principal's full operator ID set, used to
+                match the trade plane. May be empty.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Active wallet rows, deduplicated across the two planes (a wallet
+            reachable through BOTH appears exactly once), ordered by
+            ``(is_paper, label)``. Empty list when neither plane matches.
+        """
+        ...
+
+    @abstractmethod
+    async def grant_wallet_user_read_access(
+        self,
+        request: CreateWalletUserReadGrantRequest,
+    ) -> WalletUserReadGrantRow:
+        """Insert one active ``wallet_user_read_grants`` row.
+
+        The duplicate-active check is performed explicitly before the insert
+        so callers receive a typed ``WalletUserReadGrantConflictError`` naming
+        the offending pair rather than a raw dialect-specific
+        ``IntegrityError``. The active partial unique index remains the
+        physical backstop for a concurrent racing writer, and that raise is
+        translated to the same typed error.
+
+        Args:
+            request: Insert payload — see
+                ``CreateWalletUserReadGrantRequest``.
+
+        Returns:
+            The newly inserted read-grant row.
+
+        Raises:
+            WalletUserReadGrantConflictError: An active grant already exists
+                for the same ``(user_public_id, wallet_public_id)`` pair.
+        """
+        ...
+
+    @abstractmethod
+    async def revoke_wallet_user_read_grant(
+        self,
+        user_public_id: str,
+        wallet_public_id: str,
+        revoked_at: datetime,
+    ) -> WalletUserReadGrantRow:
+        """SCD2-close the active read grant for one (user, wallet) pair.
+
+        A terminal close, never a physical DELETE: ``known_to`` is set to
+        ``revoked_at`` while ``timestamp`` and every business column are
+        preserved, so an audit query can still reconstruct exactly when the
+        user could see the wallet. Closing frees the pair under the active
+        partial unique index, so a later re-grant is accepted.
+
+        The pair — not the row's ``public_id`` — is the address, mirroring
+        ``grant_wallet_user_read_access``: the pair is the natural key the
+        active index enforces, and a caller that can name the grant to revoke
+        can always name the user and the wallet.
+
+        Args:
+            user_public_id: Public ID of the user losing read access.
+            wallet_public_id: Public ID of the wallet being withdrawn.
+            revoked_at: Bus time for the SCD2 close.
+
+        Returns:
+            ``WalletUserReadGrantRow`` projection of the row as it exists
+            immediately after the close (``known_to == revoked_at``).
+
+        Raises:
+            WalletUserReadGrantNotFoundError: No active grant exists for the
+                pair at ``revoked_at`` (never granted, or already revoked).
         """
         ...
 
@@ -26487,6 +26619,63 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._wallet_row_from(row) for row in result.scalars().all()]
 
+    @staticmethod
+    def _operator_scope_grant_wallet_predicate(
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> ColumnElement[bool]:
+        """Predicate matching wallets covered by an active operator scope grant.
+
+        Sole definition of the trade-plane accessibility rule. Both
+        ``list_accessible_wallets_for_operators`` and the read-plane union in
+        ``list_readable_wallets_for_user`` compose this, so the two can never
+        drift into disagreeing about what an operator grant makes visible.
+        """
+        return Wallet.public_id.in_(
+            select(WalletOperatorScopeGrant.wallet_public_id)
+            .where(
+                WalletOperatorScopeGrant.operator_public_id.in_(operator_public_ids),
+                *where_active(WalletOperatorScopeGrant, as_of),
+            )
+            .distinct()
+        )
+
+    @staticmethod
+    def _user_read_grant_wallet_predicate(
+        user_public_id: str,
+        as_of: datetime,
+    ) -> ColumnElement[bool]:
+        """Predicate matching wallets the user holds an active read grant on."""
+        return Wallet.public_id.in_(
+            select(WalletUserReadGrant.wallet_public_id)
+            .where(
+                WalletUserReadGrant.user_public_id == user_public_id,
+                *where_active(WalletUserReadGrant, as_of),
+            )
+            .distinct()
+        )
+
+    async def _list_wallets_matching(
+        self,
+        wallet_predicate: ColumnElement[bool],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Return active wallets matching a predicate in the picker's order.
+
+        Selecting FROM ``wallets`` with an ``IN`` predicate (rather than
+        joining the grant tables) is what makes the result inherently
+        de-duplicated: the active-unique ``ix_wallets_public_id`` admits one
+        active row per logical wallet, so a wallet reachable through several
+        grants — or through both visibility planes at once — is still one row.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(Wallet)
+                .where(wallet_predicate, *where_active(Wallet, as_of))
+                .order_by(Wallet.is_paper.asc(), Wallet.label.asc())
+            )
+            return [self._wallet_row_from(row) for row in result.scalars().all()]
+
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
@@ -26495,24 +26684,145 @@ class SQLAlchemyRepository(Repository):
         """Wallets covered by at least one active grant from the given operators."""
         if not operator_public_ids:
             return []
+        return await self._list_wallets_matching(
+            self._operator_scope_grant_wallet_predicate(operator_public_ids, as_of), as_of
+        )
+
+    async def list_readable_wallets_for_user(
+        self,
+        user_public_id: str,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Union of the user's operator-scoped wallets and their read grants.
+
+        Deliberately does NOT short-circuit on an empty operator list: the
+        read-grant disjunct always participates, so a user with zero
+        memberships still sees every wallet they were granted read access to.
+        """
+        predicates = [self._user_read_grant_wallet_predicate(user_public_id, as_of)]
+        if operator_public_ids:
+            predicates.append(
+                self._operator_scope_grant_wallet_predicate(operator_public_ids, as_of)
+            )
+        return await self._list_wallets_matching(or_(*predicates), as_of)
+
+    @staticmethod
+    def _wallet_user_read_grant_row_from(
+        grant: WalletUserReadGrant,
+        known_to: datetime,
+    ) -> WalletUserReadGrantRow:
+        """Project a ``WalletUserReadGrant`` ORM row to its TypedDict.
+
+        ``known_to`` is passed in rather than read off the instance so a
+        just-closed row can be reported with the close time the UPDATE wrote,
+        without re-reading the row or mutating the ORM object.
+        """
+        return WalletUserReadGrantRow(
+            public_id=grant.public_id,
+            user_public_id=grant.user_public_id,
+            wallet_public_id=grant.wallet_public_id,
+            granted_by_user_public_id=grant.granted_by_user_public_id,
+            note=grant.note,
+            timestamp=grant.timestamp,
+            known_to=known_to,
+            session_id=grant.session_id,
+            sequence_id=grant.sequence_id,
+        )
+
+    async def grant_wallet_user_read_access(
+        self,
+        request: CreateWalletUserReadGrantRequest,
+    ) -> WalletUserReadGrantRow:
+        """Insert one active read grant, rejecting a duplicate active pair."""
+        user_public_id = request["user_public_id"]
+        wallet_public_id = request["wallet_public_id"]
         async with self.session() as s:
-            subquery = (
-                select(WalletOperatorScopeGrant.wallet_public_id)
-                .where(
-                    WalletOperatorScopeGrant.operator_public_id.in_(operator_public_ids),
-                    *where_active(WalletOperatorScopeGrant, as_of),
+            existing = (
+                (
+                    await s.execute(
+                        select(WalletUserReadGrant.public_id).where(
+                            WalletUserReadGrant.user_public_id == user_public_id,
+                            WalletUserReadGrant.wallet_public_id == wallet_public_id,
+                            *where_active(WalletUserReadGrant, request["timestamp"]),
+                        )
+                    )
                 )
-                .distinct()
+                .scalars()
+                .first()
             )
+            if existing is not None:
+                raise WalletUserReadGrantConflictError(
+                    user_public_id=user_public_id,
+                    wallet_public_id=wallet_public_id,
+                    reason=f"active read grant {existing} already covers this pair",
+                )
+            grant = WalletUserReadGrant(
+                user_public_id=user_public_id,
+                wallet_public_id=wallet_public_id,
+                granted_by_user_public_id=request["granted_by_user_public_id"],
+                note=request["note"],
+                session_id=request["session_id"],
+                sequence_id=request["sequence_id"],
+                timestamp=request["timestamp"],
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(grant)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
+                raise WalletUserReadGrantConflictError(
+                    user_public_id=user_public_id,
+                    wallet_public_id=wallet_public_id,
+                    reason="a concurrent writer holds an active read grant for this pair",
+                ) from exc
+            await s.refresh(grant)
+            return self._wallet_user_read_grant_row_from(grant, grant.known_to)
+
+    async def revoke_wallet_user_read_grant(
+        self,
+        user_public_id: str,
+        wallet_public_id: str,
+        revoked_at: datetime,
+    ) -> WalletUserReadGrantRow:
+        """SCD2-close the active read grant for one (user, wallet) pair."""
+        async with self.session() as s:
+            grant = (
+                (
+                    await s.execute(
+                        select(WalletUserReadGrant).where(
+                            WalletUserReadGrant.user_public_id == user_public_id,
+                            WalletUserReadGrant.wallet_public_id == wallet_public_id,
+                            *where_active(WalletUserReadGrant, revoked_at),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if grant is None:
+                raise WalletUserReadGrantNotFoundError(
+                    f"no active wallet read grant for user={user_public_id} "
+                    f"wallet={wallet_public_id} at {revoked_at.isoformat()}"
+                )
             result = await s.execute(
-                select(Wallet)
+                update(WalletUserReadGrant)
                 .where(
-                    Wallet.public_id.in_(subquery),
-                    *where_active(Wallet, as_of),
+                    WalletUserReadGrant.id == grant.id,
+                    *where_active(WalletUserReadGrant, revoked_at),
                 )
-                .order_by(Wallet.is_paper.asc(), Wallet.label.asc())
+                .values(known_to=revoked_at)
             )
-            return [self._wallet_row_from(row) for row in result.scalars().all()]
+            if int(cast(Any, result).rowcount or 0) == 0:
+                raise WalletUserReadGrantNotFoundError(
+                    f"wallet read grant {grant.public_id} no longer active at "
+                    f"{revoked_at.isoformat()} (concurrent mutation)"
+                )
+            await s.commit()
+            return self._wallet_user_read_grant_row_from(grant, revoked_at)
 
     async def get_user_operator_memberships(
         self,
