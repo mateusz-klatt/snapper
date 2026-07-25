@@ -16,6 +16,7 @@ from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_snapshot_planner import FINAL_REASONS
 from snapper.application.portfolio.pnl_snapshot_planner import RETRYABLE_REASONS
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -924,8 +925,6 @@ class TestPlannerOutputAcceptedByValidator:
 
 def _anchor_orm() -> PortfolioPnlPoint:
     """Build the durable USD activation anchor the writer verifies against."""
-    from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
-
     return PortfolioPnlPoint(
         public_id=portfolio_pnl_anchor_public_id(_WALLET, "live", "USD"),
         session_id=_SESSION,

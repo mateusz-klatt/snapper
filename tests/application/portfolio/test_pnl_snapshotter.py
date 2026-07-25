@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import unittest.mock as mock
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
@@ -459,7 +460,6 @@ def _position_version(
 
 def _patched_series(seq: int | None = 7) -> Any:
     """Return a context patching the module series function with a canned one."""
-    import unittest.mock as mock
 
     def fake(*args: Any, **kwargs: Any) -> Any:
         del kwargs

@@ -278,6 +278,15 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     ),
     AllowedFinding(
         FindingSignature(
+            "ios",
+            "Snapper/ViewModels/ProcessesViewModel.swift",
+            "role-comparison",
+            'if configured.role == "strategy" || configured.role == "backtest" {',
+        ),
+        "process topology uses the unrelated process role domain",
+    ),
+    AllowedFinding(
+        FindingSignature(
             "mcp",
             "src/check.ts",
             "role-comparison",
