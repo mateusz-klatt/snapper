@@ -521,7 +521,7 @@ async def get_pnl_series(
             detail=str(exc),
         ) from exc
     except Exception as exc:
-        logger.error(f"Failed to build P&L series: {exc}")
+        logger.exception("Failed to build P&L series: {}", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=_INTERNAL_ERROR_DETAIL,
@@ -661,7 +661,7 @@ async def get_pnl_timeline(
             detail=str(exc),
         ) from exc
     except Exception as exc:
-        logger.error(f"Failed to build P&L timeline: {exc}")
+        logger.exception("Failed to build P&L timeline: {}", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=_INTERNAL_TIMELINE_ERROR_DETAIL,
