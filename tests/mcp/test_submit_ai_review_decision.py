@@ -21,9 +21,11 @@ dispatch path matches a real MCP client invocation.
 import json
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import jwt
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -37,6 +39,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.tokens import TokenManager
 from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.mcp.error_envelope import to_call_tool_result
@@ -65,6 +68,60 @@ def _make_claims(
         operator_public_ids=["op-1"],
         primary_operator_public_id="op-1",
     )
+
+
+def _decode_pre_versioning_claims(
+    *,
+    role: UserRole,
+    username: str,
+    user_public_id: str,
+    permissions: list[str],
+) -> TokenClaims:
+    """Decode claims from a signed JWT that genuinely OMITS the scope claim.
+
+    A pre-versioning token does not carry ``permission_scope_version`` set to
+    null, it carries no such key at all. Encoding a payload without the key and
+    decoding it through :meth:`TokenManager.verify_token` exercises the real
+    claim-extraction path — ``jwt.decode`` then
+    :meth:`TokenClaims.model_validate_json` — so the ``None`` reaching the
+    projector comes from the schema default for an absent claim rather than
+    from a test assignment. MCP tools consume :class:`TokenClaims` directly,
+    so this is the production shape end to end.
+
+    Args:
+        role: Role claim for the minted token.
+        username: Username claim for the minted token.
+        user_public_id: Stable user identifier claim.
+        permissions: Explicit legacy permission strings carried by the token.
+
+    Returns:
+        Claims decoded from a token with no permission-scope-version key.
+    """
+    token_manager = TokenManager()
+    now = datetime.now(UTC)
+    payload: dict[str, str | int | list[str]] = {
+        "sub": user_public_id,
+        "username": username,
+        "role": role.value,
+        "permissions": permissions,
+        "sid": f"{username}-session",
+        "exp": int((now + timedelta(hours=1)).timestamp()),
+        "iat": int(now.timestamp()),
+        "jti": f"{username}-jti",
+        "user_public_id": user_public_id,
+        "operator_public_ids": ["op-1"],
+        "primary_operator_public_id": "op-1",
+    }
+    assert "permission_scope_version" not in payload
+    token = jwt.encode(
+        payload,
+        token_manager.settings.auth_secret_key,
+        algorithm=token_manager.settings.auth_algorithm,
+    )
+    claims = token_manager.verify_token(token)
+    assert claims is not None
+    assert claims.permission_scope_version is None
+    return claims
 
 
 def _build_server(
@@ -289,6 +346,116 @@ class TestSubmitAiReviewDecisionTool:
         assert envelope["error_code"] is None
         assert envelope["details"]["status"] == "resolved_approved"
         stub.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pre_versioning_delegate_token_sees_and_calls_the_decision_tool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production pre-versioning delegate token keeps MCP decision access.
+
+        Given: AI_DELEGATE claims decoded from a signed JWT that OMITS the
+            permission-scope-version claim entirely — the shape of the
+            production delegate token, which predates scope versioning — whose
+            explicit legacy permission list carries create:orders but not the
+            dedicated decision permission.
+        When: The token lists tools and submits an approve decision through MCP.
+        Then: The tool is both listed and callable, pinning on this transport
+            the absent-version compatibility whose absence previously hid the
+            tool from the delegate and let consults expire unsubmittable.
+        """
+        stub = self._stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="Decision recorded.",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={"previous_status": "pending"},
+            ),
+        )
+        claims = _decode_pre_versioning_claims(
+            role=UserRole.AI_DELEGATE,
+            username="pre-versioning-delegate",
+            user_public_id="pre-versioning-user-1",
+            permissions=[
+                Permission.CREATE_ORDERS.value,
+                Permission.READ_MARKET_DATA.value,
+                Permission.READ_ORDERS.value,
+                Permission.READ_POSITIONS.value,
+                Permission.READ_SIGNALS.value,
+            ],
+        )
+        server = _build_server(repository=AsyncMock(), claims=claims)
+
+        context_token = TOKEN_CLAIMS_CTX.set(claims)
+        try:
+            visible_names = {tool.name for tool in await server.list_tools()}
+        finally:
+            TOKEN_CLAIMS_CTX.reset(context_token)
+
+        result = await server._tool_manager.call_tool(
+            "submit_ai_review_decision",
+            {"review_id": "rev-pre-versioning", "decision": "approve"},
+        )
+
+        assert claims.permission_scope_version is None
+        assert Permission.SUBMIT_AI_REVIEW_DECISION.value not in (claims.permissions or [])
+        assert "submit_ai_review_decision" in visible_names
+        envelope = _decode_call_tool_result(result)
+        assert envelope["success"] is True
+        assert envelope["error_code"] is None
+        stub.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "username", "user_public_id"),
+        [
+            pytest.param(UserRole.OPERATOR, "pre-versioning-operator", "pv-op-1", id="operator"),
+            pytest.param(UserRole.ADMIN, "pre-versioning-admin", "pv-admin-1", id="admin"),
+        ],
+    )
+    async def test_pre_versioning_create_only_token_is_denied_for_non_legacy_roles(
+        self,
+        role: UserRole,
+        username: str,
+        user_public_id: str,
+    ) -> None:
+        """An absent version claim does not open the tool to every create-only token.
+
+        Given: Create-only claims decoded from a signed JWT with no
+            permission-scope-version claim, on a role outside the legacy
+            window — OPERATOR, whose ceiling never grants the decision
+            permission, and ADMIN, which is excluded by the branch's
+            no-user-administration conjunct despite holding it.
+        When: Each lists tools and invokes the decision tool.
+        Then: The tool is hidden from both catalogs and the call gate raises
+            ToolError, so visibility and execution agree on the denial and the
+            absent-version widening stays bounded to the intended ceilings.
+        """
+        claims = _decode_pre_versioning_claims(
+            role=role,
+            username=username,
+            user_public_id=user_public_id,
+            permissions=[Permission.CREATE_ORDERS.value],
+        )
+        server = _build_server(repository=AsyncMock(), claims=claims)
+
+        context_token = TOKEN_CLAIMS_CTX.set(claims)
+        try:
+            visible_names = {tool.name for tool in await server.list_tools()}
+        finally:
+            TOKEN_CLAIMS_CTX.reset(context_token)
+
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_ai_review_decision",
+                {"review_id": f"rev-{username}", "decision": "approve"},
+            )
+
+        assert claims.permission_scope_version is None
+        assert "submit_ai_review_decision" not in visible_names
+        assert Permission.SUBMIT_AI_REVIEW_DECISION.value in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_idempotent_retry_keeps_iserror_false(

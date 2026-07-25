@@ -279,12 +279,21 @@ def require_ai_review_decision_access(
 
     A bare ``require_permission(Permission.SUBMIT_AI_REVIEW_DECISION)``
     check would not be equivalent: the projector carries a deliberate,
-    narrow compatibility branch for permission-scope-version-one tokens
-    whose role grants the decision permission and whose grant retained
-    ``CREATE_ORDERS``. Enforcing the bare permission would strand those
-    legacy tokens on REST while MCP still admitted them. This dependency
-    is nonetheless strictly narrower than the historical ``CREATE_ORDERS``
-    gate it replaced, which admitted every order-creating principal.
+    narrow compatibility branch for tokens inside the legacy
+    permission-scope window (an absent version claim, as on tokens minted
+    before versioning existed, or a literal ``1``) whose role ceiling
+    grants the decision permission, whose ceiling carries no
+    user-administration grant, and whose grant retained ``CREATE_ORDERS``.
+    Enforcing the bare permission would strand those legacy tokens on REST
+    while MCP still admitted them.
+
+    Relative to the historical ``CREATE_ORDERS`` gate this dependency is an
+    admit-set REPLACEMENT, not a strict narrowing. It ADMITS principals the
+    old gate refused — a scoped AI_REVIEWER holds the decision permission
+    but never ``CREATE_ORDERS`` — and REFUSES principals the old gate
+    allowed, namely every plain order-creating principal outside the legacy
+    window, such as OPERATOR. The two admit sets overlap; neither contains
+    the other.
 
     The capability is necessary but never sufficient: the service still
     requires an active delegate lifecycle identity and a live scope grant

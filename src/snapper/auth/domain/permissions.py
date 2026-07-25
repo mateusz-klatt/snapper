@@ -386,8 +386,13 @@ def is_ai_review_decision_capable(
             or ``None`` when the claim was absent.
 
     Returns:
-        True when the effective grant contains the decision permission,
-        or when the narrow v1 permission-set compatibility rule applies.
+        True when the effective grant contains the decision permission, or
+        when every conjunct of the narrow compatibility rule holds: a
+        permission-scope version inside the legacy window (``None`` for
+        pre-versioning tokens or ``1``), a role ceiling that grants the
+        decision permission, no user-administration grant on that ceiling,
+        and a retained effective ``CREATE_ORDERS``. Any other version —
+        ``2``, ``3``, or later — is decided by the effective grant alone.
     """
     effective_permissions = get_effective_permissions(
         role,

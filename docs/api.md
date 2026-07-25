@@ -3928,11 +3928,25 @@ text, ≤ 4096 chars per the `ai_reviews.rationale` column
 constraint. Requires `submit:ai_review_decision`, resolved through the same
 capability projection the `submit_ai_review_decision` MCP tool uses for both
 visibility and execution, so one delegate token behaves identically on either
-transport (legacy version-one decision-capable tokens that retained
-`create:orders` stay admitted on both). The capability is not sufficient by
-itself: the caller must resolve to a registered `ai_delegates` row and have a
-live scope grant for the review wallet and instrument. Principals whose grant
-projects only `create:orders` are rejected at the route gate. The dispatch fans out on `bus.ai_review_decision` and emits
+transport.
+
+A legacy compatibility branch also admits tokens inside the pre-versioning
+window. It applies only when every one of these holds:
+
+- the token's permission-scope version is absent (minted before scope
+    versioning existed) or is a literal `1`;
+- the caller's role ceiling grants `submit:ai_review_decision`
+    (`ai_delegate`, `ai_reviewer`);
+- that ceiling carries no `manage:users` grant, which excludes `admin`;
+- the token's effective grant retained `create:orders`.
+
+Tokens on scope version `2` or later are decided purely by their effective
+grant, with no compatibility path. So a create-only `operator` token is
+rejected at the route gate regardless of version, and a create-only `admin`
+token is rejected even with an absent version, while the pre-versioning
+`ai_delegate` production token is admitted. The capability is not sufficient
+by itself: the caller must still resolve to a registered `ai_delegates` row and
+have a live scope grant for the review wallet and instrument. The dispatch fans out on `bus.ai_review_decision` and emits
 `ai_reviews.{user}.{strategy}.decision_ack` on the WS surface.
 
 Responses use `AiReviewDecisionResponse` — the canonical envelope

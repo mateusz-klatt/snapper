@@ -503,10 +503,15 @@ to `caps_enforcer_getter` at registration.
     the `ai_reviews` row. Requires `submit:ai_review_decision`. Tool-catalog
     visibility, the tool's call gate, and the REST route all answer to one
     shared capability projection, so a token that can see the tool can also
-    call it and behaves identically on either transport; legacy version-one
-    decision-capable tokens remain admitted when they retained `create:orders`.
-    Order-creation authority alone no longer reaches the decision write on
-    either surface. The review service also
+    call it and behaves identically on either transport. A legacy branch also
+    admits decision-capable tokens inside the pre-versioning window — a
+    permission-scope version that is absent (the production delegate token
+    predates scope versioning entirely) or a literal `1` — provided the role
+    ceiling grants the decision permission, carries no `manage:users`, and the
+    token retained `create:orders`. Order-creation authority alone reaches the
+    decision write on neither surface: a create-only `operator` token is denied
+    at any version, and a create-only `admin` token is denied even with an
+    absent version. The review service also
     verifies the caller has an active operational delegate lifecycle identity
     and scope grant for the review wallet and instrument. Any such delegate
     may decide — the selected delegate is who was consulted, not an exclusive

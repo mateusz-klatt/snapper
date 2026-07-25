@@ -22,6 +22,7 @@ from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
 
+import jwt
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -34,6 +35,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.tokens import TokenManager
 from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.data.repository_types import PendingReviewSummary
@@ -109,6 +111,96 @@ def _legacy_v1_delegate_principal() -> AuthPrincipal:
         delegate_public_id="legacy-del-1",
         permissions=[Permission.CREATE_ORDERS.value],
         permission_scope_version=1,
+    )
+
+
+def _principal_from_pre_versioning_jwt(
+    *,
+    username: str,
+    role: UserRole,
+    user_public_id: str,
+    permissions: list[str],
+    delegate_public_id: str | None = None,
+) -> AuthPrincipal:
+    """Build a principal from a signed JWT that genuinely OMITS the scope claim.
+
+    The distinction matters: a pre-versioning token does not carry
+    ``permission_scope_version`` set to null, it carries no such key at all.
+    Encoding a payload without the key and decoding it through
+    :meth:`TokenManager.verify_token` exercises the real claim-extraction path
+    — ``jwt.decode`` then :meth:`TokenClaims.model_validate_json` — so the
+    ``None`` reaching the projector is produced by the schema default for an
+    absent claim rather than assigned by the test.
+
+    The principal is then assembled exactly as :func:`get_current_user`
+    assembles it from decoded claims. The full request-path chain is not used
+    because it runs :meth:`TokenManager.verify_token_with_db`, which needs a
+    live ``user_active_tokens`` inventory; these route tests override
+    ``require_authentication`` and drive an ``AsyncMock`` repository, so
+    decoding is the most faithful mechanism reachable in this harness.
+
+    Args:
+        username: Username claim for the minted token.
+        role: Role claim for the minted token.
+        user_public_id: Stable user identifier claim.
+        permissions: Explicit legacy permission strings carried by the token.
+        delegate_public_id: Delegate lifecycle identity resolved by the
+            repository lookup inside :func:`get_current_user`.
+
+    Returns:
+        The principal a pre-versioning token of this shape produces.
+    """
+    token_manager = TokenManager()
+    now = datetime.now(UTC)
+    payload: dict[str, str | int | list[str]] = {
+        "sub": user_public_id,
+        "username": username,
+        "role": role.value,
+        "permissions": permissions,
+        "sid": f"{username}-session",
+        "exp": int((now + timedelta(hours=1)).timestamp()),
+        "iat": int(now.timestamp()),
+        "jti": f"{username}-jti",
+        "user_public_id": user_public_id,
+        "operator_public_ids": ["op-1"],
+        "primary_operator_public_id": "op-1",
+    }
+    assert "permission_scope_version" not in payload
+    token = jwt.encode(
+        payload,
+        token_manager.settings.auth_secret_key,
+        algorithm=token_manager.settings.auth_algorithm,
+    )
+    claims = token_manager.verify_token(token)
+    assert claims is not None
+    assert claims.permission_scope_version is None
+    return AuthPrincipal(
+        username=claims.username,
+        role=claims.role,
+        user_public_id=claims.user_public_id,
+        operator_public_ids=claims.operator_public_ids,
+        primary_operator_public_id=claims.primary_operator_public_id,
+        active_wallet_public_id=claims.active_wallet_public_id,
+        permissions=claims.permissions,
+        permission_scope_version=claims.permission_scope_version,
+        delegate_public_id=delegate_public_id,
+    )
+
+
+def _pre_versioning_delegate_principal() -> AuthPrincipal:
+    """AI_DELEGATE principal on the exact pre-versioning production token shape."""
+    return _principal_from_pre_versioning_jwt(
+        username="pre-versioning-delegate",
+        role=UserRole.AI_DELEGATE,
+        user_public_id="pre-versioning-user-1",
+        permissions=[
+            Permission.CREATE_ORDERS.value,
+            Permission.READ_MARKET_DATA.value,
+            Permission.READ_ORDERS.value,
+            Permission.READ_POSITIONS.value,
+            Permission.READ_SIGNALS.value,
+        ],
+        delegate_public_id="pre-versioning-del-1",
     )
 
 
@@ -442,6 +534,104 @@ class TestSubmitDecisionRoute:
         assert response.status_code == 200
         assert response.json()["success"] is True
         stub.assert_awaited_once()
+
+    def test_pre_versioning_delegate_token_keeps_rest_decision_access(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production pre-versioning delegate token clears the REST gate.
+
+        Given: An AI_DELEGATE principal decoded from a signed JWT that OMITS
+            the permission-scope-version claim entirely — the shape of the
+            production delegate token, which predates scope versioning — whose
+            explicit legacy permission list carries create:orders but not the
+            dedicated decision permission.
+        When: It submits an approval through the REST decision route.
+        Then: The shared projector's legacy window admits it and the service
+            records the decision, so the absent-version compatibility that
+            motivated the projector widening is pinned on this transport and
+            not only at the projector's own unit boundary.
+        """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="Decision recorded.",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={"previous_status": "pending"},
+            ),
+        )
+        principal = _pre_versioning_delegate_principal()
+        client = _create_client(repo=AsyncMock(), principal=principal)
+
+        response = client.post(
+            "/api/ai-reviews/rev-pre-versioning/decision",
+            json=_decision_envelope(decision="approve"),
+        )
+
+        assert principal.permission_scope_version is None
+        assert Permission.SUBMIT_AI_REVIEW_DECISION.value not in (principal.permissions or [])
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        stub.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("role", "username", "user_public_id"),
+        [
+            pytest.param(UserRole.OPERATOR, "pre-versioning-operator", "pv-op-1", id="operator"),
+            pytest.param(UserRole.ADMIN, "pre-versioning-admin", "pv-admin-1", id="admin"),
+        ],
+    )
+    def test_pre_versioning_create_only_token_is_denied_for_non_legacy_roles(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        role: UserRole,
+        username: str,
+        user_public_id: str,
+    ) -> None:
+        """An absent version claim does not open the gate for every create-only token.
+
+        Given: A create-only principal decoded from a signed JWT with no
+            permission-scope-version claim, on a role outside the legacy
+            window — OPERATOR, whose ceiling never grants the decision
+            permission, and ADMIN, which is excluded by the branch's
+            no-user-administration conjunct despite holding it.
+        When: Each submits an approval through the REST decision route.
+        Then: Both are refused at the route gate and the service is never
+            awaited, bounding the absent-version widening to exactly the
+            delegate and reviewer ceilings it was introduced for.
+        """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="should never be called",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={},
+            ),
+        )
+        principal = _principal_from_pre_versioning_jwt(
+            username=username,
+            role=role,
+            user_public_id=user_public_id,
+            permissions=[Permission.CREATE_ORDERS.value],
+        )
+        client = _create_client(repo=AsyncMock(), principal=principal)
+
+        response = client.post(
+            f"/api/ai-reviews/rev-{username}/decision",
+            json=_decision_envelope(decision="approve"),
+        )
+
+        assert principal.permission_scope_version is None
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            f"Permission '{Permission.SUBMIT_AI_REVIEW_DECISION.value}' required"
+        )
+        stub.assert_not_called()
 
     def test_ai_reviewer_passes_the_route_gate_and_is_denied_by_the_service(
         self, monkeypatch: pytest.MonkeyPatch
