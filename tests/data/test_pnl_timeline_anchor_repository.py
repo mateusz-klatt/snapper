@@ -46,6 +46,9 @@ from snapper.data.models import Symbol
 from snapper.data.models import VenueEvent
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _ExecutionKnowledgeHorizon
+from snapper.data.repository import _PortfolioPnlAnchorFencedCuts
+from snapper.data.repository import _resolved_execution_prefix_cut_horizons
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PortfolioPnlAnchorRow
@@ -180,6 +183,29 @@ def _empty_anchor_write_evidence(
             request_as_of=request_as_of,
             activation_as_of=activation_as_of,
         ),
+    )
+
+
+def _fenced_cuts(
+    bundle: PnlTimelineExecutionPrefixBundle,
+    request_as_of: datetime | None = _T0,
+    activation_as_of: datetime | None = _T0,
+) -> _PortfolioPnlAnchorFencedCuts:
+    """Build one fenced re-read result at the horizons those intents resolve to.
+
+    The horizons are produced by the repository's own resolver rather than
+    copied off the bundle, which is the property the fenced loader now has and
+    the reason a stub for it must not be free to pair any instant with any
+    provenance.
+    """
+    request_horizon, activation_horizon = _resolved_execution_prefix_cut_horizons(
+        request_as_of,
+        activation_as_of,
+    )
+    return _PortfolioPnlAnchorFencedCuts(
+        request_horizon=request_horizon,
+        activation_horizon=activation_horizon,
+        bundle=bundle,
     )
 
 
@@ -652,11 +678,11 @@ async def test_atomic_anchor_writer_sets_read_committed_then_locks_in_order(
     async def load(
         loaded_session: AsyncSession,
         evidence: PortfolioPnlAnchorWriteEvidence,
-    ) -> PnlTimelineExecutionPrefixBundle:
+    ) -> _PortfolioPnlAnchorFencedCuts:
         """Record that source reload begins only after every PostgreSQL lock."""
         assert loaded_session is session
         events.append("load")
-        return evidence["execution_prefix_bundle"]
+        return _fenced_cuts(evidence["execution_prefix_bundle"])
 
     session.execute = AsyncMock(side_effect=execute)
     current_anchor = AsyncMock(return_value=None)
@@ -670,7 +696,7 @@ async def test_atomic_anchor_writer_sets_read_committed_then_locks_in_order(
         patch.object(repository, "session") as session_context,
         patch.object(
             repository,
-            "_load_pnl_timeline_execution_prefix_bundle_in_session",
+            "_load_portfolio_pnl_anchor_fenced_cuts",
             side_effect=load,
         ),
         patch.object(
@@ -726,8 +752,8 @@ async def test_atomic_anchor_writer_rolls_back_changed_sqlite_bundle(
         patch.object(repository, "session") as session_context,
         patch.object(
             repository,
-            "_load_pnl_timeline_execution_prefix_bundle_in_session",
-            new=AsyncMock(return_value=current),
+            "_load_portfolio_pnl_anchor_fenced_cuts",
+            new=AsyncMock(return_value=_fenced_cuts(current)),
         ),
         patch.object(
             repository,
@@ -779,7 +805,14 @@ async def test_atomic_transaction_and_fence_refuse_unknown_dialect(
 async def test_fenced_bundle_reload_reads_distinct_cuts_independently(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Different request and activation cuts each invoke the proven loader."""
+    """Two named horizons are each re-read historically at the instant named.
+
+    Given: Evidence whose two cuts name different past instants outright.
+    When: The fence re-derives them.
+    Then: Each cut is loaded separately, at exactly the instant its own intent
+        named, and both carry ``requested=True`` — so both still owe every
+        correction the visibility observation a historical read demands.
+    """
     request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[], annulments=[])
     activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[], annulments=[])
     loader = AsyncMock(side_effect=[request, activation])
@@ -792,18 +825,77 @@ async def test_fenced_bundle_reload_reads_distinct_cuts_independently(
         "_load_pnl_timeline_execution_prefix_snapshot",
         new=loader,
     ):
-        bundle = await repository._load_pnl_timeline_execution_prefix_bundle_in_session(
+        cuts = await repository._load_portfolio_pnl_anchor_fenced_cuts(
             AsyncMock(),
             evidence,
         )
 
-    assert bundle == {
+    assert cuts.request_horizon == _ExecutionKnowledgeHorizon(
+        as_of=_T0 + timedelta(minutes=1),
+        requested=True,
+    )
+    assert cuts.activation_horizon == _ExecutionKnowledgeHorizon(as_of=_T0, requested=True)
+    assert cuts.bundle == {
         "request": request,
         "activation": activation,
         "request_as_of": _T0 + timedelta(minutes=1),
         "activation_as_of": _T0,
     }
-    assert loader.await_count == 2
+    assert [call.args[3] for call in loader.await_args_list] == [
+        cuts.request_horizon,
+        cuts.activation_horizon,
+    ]
+
+
+async def test_fenced_bundle_reload_captures_its_own_present_for_absent_intents(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An absent intent is re-read at the FENCE's present, never at the echo.
+
+    Given: Evidence whose two intents are absent — the shape of a current-truth
+        derivation — while the bundle travelling with it echoes instants from
+        deep in the past, which a caller of this public writer is free to write
+        into a plain mutable mapping.
+    When: The fence re-derives both cuts.
+    Then: Both horizons are the fence's OWN freshly captured present (the
+        activation cut being that present truncated to its minute), and both are
+        unrequested. The echoed instants are not read at, so the exemption from
+        the durability proof is earned by this read having captured the instant
+        itself — the only thing that ever earns it — and a backdated horizon can
+        no longer be smuggled in wearing the current-truth exemption.
+    """
+    empty = PnlTimelineExecutionPrefix(watermarks={}, executions=[], annulments=[])
+    loader = AsyncMock(return_value=empty)
+    evidence = _empty_anchor_write_evidence()
+    evidence["requested_as_of"] = None
+    evidence["requested_activation_as_of"] = None
+
+    before = datetime.now(UTC)
+    with patch.object(
+        repository,
+        "_load_pnl_timeline_execution_prefix_snapshot",
+        new=loader,
+    ):
+        cuts = await repository._load_portfolio_pnl_anchor_fenced_cuts(
+            AsyncMock(),
+            evidence,
+        )
+    after = datetime.now(UTC)
+
+    assert cuts.request_horizon.requested is False
+    assert cuts.activation_horizon.requested is False
+    assert before <= cuts.request_horizon.as_of <= after
+    assert cuts.activation_horizon.as_of == cuts.request_horizon.as_of.replace(
+        second=0,
+        microsecond=0,
+    )
+    assert cuts.bundle["request_as_of"] == cuts.request_horizon.as_of
+    assert cuts.bundle["activation_as_of"] == cuts.activation_horizon.as_of
+    assert _T0 not in (cuts.request_horizon.as_of, cuts.activation_horizon.as_of)
+    assert [call.args[3] for call in loader.await_args_list] == [
+        cuts.request_horizon,
+        cuts.activation_horizon,
+    ]
 
 
 @pytest.mark.parametrize("failure", ["unproven", "inconsistent"])
@@ -817,29 +909,31 @@ async def test_atomic_writer_rolls_back_unprovable_or_inconsistent_current_bundl
     async def fail_reload(
         session: AsyncSession,
         evidence: PortfolioPnlAnchorWriteEvidence,
-    ) -> PnlTimelineExecutionPrefixBundle:
+    ) -> _PortfolioPnlAnchorFencedCuts:
         """Raise or return the requested invalid current evidence."""
         del session, evidence
         if failure == "unproven":
             raise ExecutionChainError("backfilled lineage")
-        return PnlTimelineExecutionPrefixBundle(
-            request=PnlTimelineExecutionPrefix(
-                watermarks={},
-                executions=[],
-                annulments=[],
-            ),
-            activation=PnlTimelineExecutionPrefix(
-                watermarks={"kraken": 1},
-                executions=[],
-                annulments=[],
-            ),
-            request_as_of=_T0,
-            activation_as_of=_T0,
+        return _fenced_cuts(
+            PnlTimelineExecutionPrefixBundle(
+                request=PnlTimelineExecutionPrefix(
+                    watermarks={},
+                    executions=[],
+                    annulments=[],
+                ),
+                activation=PnlTimelineExecutionPrefix(
+                    watermarks={"kraken": 1},
+                    executions=[],
+                    annulments=[],
+                ),
+                request_as_of=_T0,
+                activation_as_of=_T0,
+            )
         )
 
     monkeypatch.setattr(
         repository,
-        "_load_pnl_timeline_execution_prefix_bundle_in_session",
+        "_load_portfolio_pnl_anchor_fenced_cuts",
         fail_reload,
     )
     message = "cannot be proven" if failure == "unproven" else "inconsistent"
@@ -1350,7 +1444,25 @@ def _phantom_source_execution() -> Execution:
     return execution
 
 
-async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
+async def _seed_witnessed_scope(repository: SQLAlchemyRepository) -> None:
+    """Seed one fully witnessed booking and its complete lineage."""
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+
+
+async def _seed_annulled_scope(
+    repository: SQLAlchemyRepository,
+    observed_at: datetime = _T0 - timedelta(minutes=5),
+) -> None:
     """Seed one witnessed booking, one unwitnessed booking, and its correction.
 
     The manifest row is appended directly rather than through the guarded
@@ -1359,6 +1471,9 @@ async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
     writer stamped with the real ``now`` would fall outside every one of them.
     Its binding is still the real one — the stored target's own public id and
     freshly recomputed canonical digest — so read-time validation is exercised.
+
+    ``observed_at`` is the instant the correction was proven durable, which is
+    the only thing that makes it foldable by a read at a named past.
     """
     async with repository.session() as s:
         s.add_all(
@@ -1409,13 +1524,13 @@ async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
             ExecutionAnnulmentVisibility(
                 annulment_public_id=_ANNULMENT_PUBLIC_ID,
                 annulment_id=1,
-                observed_at=_T0 - timedelta(minutes=5),
+                observed_at=observed_at,
                 wallet_public_id=_WALLET,
                 exchange="kraken",
                 mode="live",
                 session_id=_SESSION_PUBLIC_ID,
                 sequence_id=9,
-                timestamp=_T0 - timedelta(minutes=5),
+                timestamp=observed_at,
                 known_to=KNOWN_TO_MAX,
             )
         )
@@ -1525,6 +1640,201 @@ async def test_atomic_writer_exactly_compares_every_prefix_evidence_plane(
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="changed before anchor persistence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            candidate,
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_atomic_writer_refuses_a_backdated_bundle_offered_as_current_truth(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A caller cannot buy a past cut by declaring it the repository's present.
+
+    Given: A scope holding one real, fully witnessed booking, and evidence whose
+        bundle was cut before that booking existed — an empty opening — but
+        whose two horizon intents are absent, the shape that says "no horizon
+        was requested, this instant is the repository's own".
+    When: The candidate anchor is offered against that evidence.
+    Then: The write refuses and nothing is persisted. The bundle is
+        caller-supplied data, so the fence resolves its horizons from the
+        intents alone and re-reads at its OWN present, where the booking is
+        plainly there. An anchor is permanent, and this is precisely the anchor
+        that would have declared an opening of nothing while real money sat in
+        the ledger.
+    """
+    await _seed_witnessed_scope(repository)
+    backdated = _T0 - timedelta(minutes=5)
+    forged = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        backdated,
+        backdated,
+    )
+    assert forged["request"] == {"watermarks": {}, "executions": [], "annulments": []}
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        requested_as_of=None,
+        requested_activation_as_of=None,
+        execution_prefix_bundle=forged,
+    )
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="changed before anchor persistence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(point_time=backdated, timestamp=backdated),
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+    current = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        None,
+        None,
+    )
+    assert [row["scope_sequence"] for row in current["request"]["executions"]] == [1]
+
+
+async def test_atomic_writer_persists_a_current_truth_anchor_it_recaptured_itself(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The honest current-truth path still writes, at instants nobody can repeat.
+
+    Given: A scope holding one real, fully witnessed booking, and evidence
+        derived with both intents absent, so both cut instants were captured by
+        the repository and the anchor is pinned to them.
+    When: The candidate anchor is offered against that evidence.
+    Then: It persists unchanged. The fence captures its own, strictly later
+        present and cannot reproduce the candidate's — a captured present never
+        repeats — so what it compares is the two PROVEN cuts, and those are
+        still identical. Comparing the echoed instants instead would refuse
+        every honest anchor this repository is asked to create.
+    """
+    await _seed_witnessed_scope(repository)
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        None,
+        None,
+    )
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        requested_as_of=None,
+        requested_activation_as_of=None,
+        execution_prefix_bundle=bundle,
+    )
+    candidate = _atomic_anchor(
+        point_time=bundle["activation_as_of"],
+        timestamp=bundle["request_as_of"],
+    )
+    candidate["watermarks_json"] = '{"kraken":1}'
+
+    recorded = await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        candidate,
+        evidence,
+    )
+
+    assert recorded == candidate
+    assert bundle["request_as_of"] < datetime.now(UTC)
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 1
+
+
+async def test_atomic_writer_persists_a_named_past_whose_correction_is_observed(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A named past still folds a correction once its durability is proven.
+
+    Given: A scope whose opening proves only because one unwitnessed booking is
+        repudiated, whose correction carries a visibility observation before the
+        named instant, and evidence naming that instant on both cuts.
+    When: The candidate anchor is offered against that evidence.
+    Then: It persists. Resolving from the intents did not make the historical
+        path stricter than the doctrine says it is — a past a caller names is
+        answerable exactly when every correction it folds was already proven
+        durable at it.
+    """
+    await _seed_annulled_scope(repository)
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert len(bundle["activation"]["annulments"]) == 1
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        requested_as_of=_T0,
+        requested_activation_as_of=_T0,
+        execution_prefix_bundle=bundle,
+    )
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":2}'
+
+    recorded = await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        candidate,
+        evidence,
+    )
+
+    assert recorded == candidate
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 1
+
+
+async def test_atomic_writer_refuses_a_named_past_whose_correction_is_unobserved(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A named past may not fold a correction nothing had yet proven durable.
+
+    Given: The same scope, but with the correction's visibility observation
+        landing AFTER the named instant, and evidence forged to carry the folded
+        prefix while its echoed instants and both intents name that earlier past.
+    When: The candidate anchor is offered against that evidence.
+    Then: The fenced re-read refuses, because at a named past the correction is
+        not yet visible and the booking it repudiates is back and unwitnessed —
+        the prefix cannot be proven at all. The visibility requirement is
+        untouched by resolving horizons from the intents; it is what a named
+        past has owed since the observation ledger replaced the settling margin.
+    """
+    await _seed_annulled_scope(repository, observed_at=_T0 + timedelta(minutes=5))
+    visible = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0 + timedelta(minutes=10),
+        _T0 + timedelta(minutes=10),
+    )
+    assert len(visible["activation"]["annulments"]) == 1
+    forged = deepcopy(visible)
+    forged["request_as_of"] = _T0
+    forged["activation_as_of"] = _T0
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        requested_as_of=_T0,
+        requested_activation_as_of=_T0,
+        execution_prefix_bundle=forged,
+    )
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":2}'
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="cannot be proven",
     ):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
             candidate,
@@ -1994,14 +2304,21 @@ def test_atomic_write_evidence_refuses_a_claimed_horizon_its_prefix_lacks(
 def test_atomic_write_evidence_accepts_an_absent_horizon_intent(
     field_name: str,
 ) -> None:
-    """``None`` is the one alternative to the exact instant, and it is accepted.
+    """``None`` passes validation and buys the instant beside it nothing.
 
     Given: Evidence whose intent for one cut is absent — the shape produced when
-        no horizon was requested and the repository derived the instant itself.
-    When: The write evidence is validated.
-    Then: It passes. ``None`` is not a claim about the past; it is the statement
-        that the instant beside it was the repository's own, which is exactly
-        what earns the exemption.
+        no horizon was requested and the repository derived the instant itself —
+        while the bundle still echoes a fixed past instant on that cut.
+    When: The write evidence is validated, and then the fence re-derives the
+        cuts from that same evidence.
+    Then: Validation passes, because ``None`` is not a claim about the past and
+        there is nothing to contradict. It does NOT certify the echoed instant:
+        no horizon the fence goes on to resolve is both exempt and dated at that
+        echo. An absent request intent captures a fresh present instead, and an
+        absent ACTIVATION intent is not an exemption at all — it is the request
+        cut's own minute, inheriting that cut's provenance, historical here
+        because the request cut was named. The echoed instant survives only as
+        the anchor timestamp the rest of this validator pins it to.
     """
     evidence = _empty_anchor_write_evidence()
     runtime_evidence = cast(dict[str, object], evidence)
@@ -2011,3 +2328,9 @@ def test_atomic_write_evidence_accepts_an_absent_horizon_intent(
         _atomic_anchor(),
         evidence,
     )
+
+    horizons = _resolved_execution_prefix_cut_horizons(
+        evidence["requested_as_of"],
+        evidence["requested_activation_as_of"],
+    )
+    assert all(horizon.requested or horizon.as_of > _T0 for horizon in horizons)

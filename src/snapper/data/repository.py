@@ -746,6 +746,23 @@ class _PnlTimelineScopeGapRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class _PortfolioPnlAnchorFencedCuts:
+    """What the anchor fence itself proved, and the horizons it proved it at.
+
+    The horizons travel WITH the bundle they produced so that every later step
+    of the write — the evidence comparison and the scope-gap read — uses the
+    fence's own resolution instead of rebuilding a horizon out of an instant and
+    a separately carried boolean. That rebuilding is the exact shape
+    :class:`_ExecutionKnowledgeHorizon` exists to forbid, and the fence is the
+    last place it could still have been done.
+    """
+
+    request_horizon: _ExecutionKnowledgeHorizon
+    activation_horizon: _ExecutionKnowledgeHorizon
+    bundle: PnlTimelineExecutionPrefixBundle
+
+
+@dataclass(frozen=True, slots=True)
 class _ExecutionAnnulmentCommand:
     """One validated, canonicalized annulment write command.
 
@@ -1603,6 +1620,12 @@ class _ExecutionKnowledgeHorizon:
     only way ``requested`` can be false; any supplied instant is a claim about
     the past and carries ``requested=True``. The forbidden pairing has no
     spelling at the boundary at all.
+
+    :func:`_resolved_execution_prefix_cut_horizons` is the one sibling
+    constructor, and it does not widen that rule: it only truncates an ALREADY
+    RESOLVED horizon to its minute and carries that horizon's own provenance
+    across unchanged. No instant that reached the repository from outside can
+    become the ``as_of`` of an exempt horizon by either route.
     """
 
     as_of: datetime
@@ -1622,6 +1645,43 @@ def _resolved_knowledge_horizon(as_of: datetime | None) -> _ExecutionKnowledgeHo
     if as_of is None:
         return _ExecutionKnowledgeHorizon(as_of=datetime.now(UTC), requested=False)
     return _ExecutionKnowledgeHorizon(as_of=as_of, requested=True)
+
+
+def _resolved_execution_prefix_cut_horizons(
+    request_as_of: datetime | None,
+    activation_as_of: datetime | None,
+) -> tuple[_ExecutionKnowledgeHorizon, _ExecutionKnowledgeHorizon]:
+    """Resolve one prefix bundle's two cuts from their nullable INTENTS alone.
+
+    Two readers perform this derivation — the public bundle read, and the anchor
+    writer's fenced re-read, which exists precisely to reproduce the bundle read
+    under a lock. Written twice they could drift, and drift here is a silent
+    change to which bookings a permanent anchor opening folded, so it is written
+    once and shared.
+
+    An absent activation intent does not name a horizon; it says the activation
+    cut is the request cut's own instant truncated to its minute. So it inherits
+    the request cut's provenance rather than acquiring one of its own: derived
+    from a captured present it is exempt like the present it came from, derived
+    from an instant a caller named it is historical like that instant and still
+    owes every correction its visibility observation.
+
+    Args:
+        request_as_of: The requested request horizon, or ``None`` for current
+            truth.
+        activation_as_of: The requested activation horizon, or ``None`` to
+            derive the activation minute from the resolved request cut.
+
+    Returns:
+        The resolved ``(request, activation)`` horizons.
+    """
+    request_horizon = _resolved_knowledge_horizon(request_as_of)
+    if activation_as_of is None:
+        return request_horizon, _ExecutionKnowledgeHorizon(
+            as_of=request_horizon.as_of.replace(second=0, microsecond=0),
+            requested=request_horizon.requested,
+        )
+    return request_horizon, _resolved_knowledge_horizon(activation_as_of)
 
 
 def execution_annulment_knowledge_filters(
@@ -11355,14 +11415,20 @@ class SQLAlchemyRepository(Repository):
     ) -> None:
         """Refuse evidence whose scope, cuts, intents, or activation relation is invalid.
 
-        The resolved instants come from the BUNDLE — the value the repository
-        itself produced — and the evidence's own two fields carry only the
-        caller's nullable intents. Each is checked to be either ``None`` or
-        exactly the instant the bundle reports for that cut, so evidence can
-        neither claim the current-truth reading for a horizon it in fact named
-        nor name an instant its prefix was not captured at. Without this check
-        the intent fields would be decorative, and the fenced re-read would
-        happily reproduce an exemption nothing established.
+        The resolved instants come from the BUNDLE, which is caller-supplied
+        data — a plain mutable mapping the repository shaped once and never
+        attested — while the evidence's own two fields carry the caller's
+        nullable intents. So the instants are CHECKED here and obeyed nowhere:
+        each must be either ``None`` or exactly the instant the bundle reports
+        for its cut, and each must equal the anchor timestamp it pins, so
+        evidence can neither claim the current-truth reading for a horizon it in
+        fact named nor stamp an anchor at an instant its prefix was not captured
+        at. Without this check the intent fields would be decorative.
+
+        The exemption itself is decided nowhere near here.
+        :meth:`_load_portfolio_pnl_anchor_fenced_cuts` resolves its horizons
+        from the nullable intents alone, so no instant that arrived inside the
+        bundle can ever become the horizon a fold is performed at.
         """
         try:
             evidence_wallet = normalize_portfolio_pnl_wallet_public_id(evidence["wallet_public_id"])
@@ -11469,29 +11535,47 @@ class SQLAlchemyRepository(Repository):
             )
         )
 
-    async def _load_pnl_timeline_execution_prefix_bundle_in_session(
+    async def _load_portfolio_pnl_anchor_fenced_cuts(
         self,
         s: AsyncSession,
         evidence: PortfolioPnlAnchorWriteEvidence,
-    ) -> PnlTimelineExecutionPrefixBundle:
-        """Reload both derivation cuts inside an already fenced transaction.
+    ) -> _PortfolioPnlAnchorFencedCuts:
+        """Re-derive both cuts inside the fence from the INTENTS alone.
 
-        Each cut's horizon is reconstructed from the VALIDATED pair: the instant
-        the bundle reports, and that cut's own nullable intent, which
-        :meth:`_validate_portfolio_pnl_anchor_write_evidence` has already proven
-        is either absent or exactly that instant. Nothing else the caller
-        controls can grant the exemption, and the two cuts are reconstructed
-        independently so a derived activation minute cannot inherit an
-        exemption from a requested request horizon.
+        The trust boundary runs straight through the evidence. Its two nullable
+        intents are the only part the fence obeys, and it obeys them by handing
+        them to :func:`_resolved_execution_prefix_cut_horizons` — the very
+        function the public bundle read uses — so an absent intent captures a
+        FRESH present here and is exempt because THIS read derived it, and a
+        named instant is historical and still owes every correction its
+        visibility observation. The bundle travelling alongside is caller data
+        and contributes nothing to the horizons.
+
+        Resolving a horizon from that bundle's echoed instant was the hole this
+        closes. A caller could hand a historically dated bundle with both
+        intents absent; the fence would re-read at that past under the
+        current-truth exemption, fold a correction no observation had made
+        historically visible, match the bundle it had just been told to trust,
+        and persist a permanent opening that excluded a booking which may be
+        economically real and merely unwitnessed. The echoed instants are
+        checked by :meth:`_validate_portfolio_pnl_anchor_write_evidence` and
+        never obeyed.
+
+        The two cuts are still resolved and read independently, so a derived
+        activation minute cannot acquire an exemption the request cut did not
+        already carry.
+
+        Args:
+            s: The session whose fence and snapshot are already established.
+            evidence: The candidate's write evidence, trusted only for its
+                scope and its two nullable horizon intents.
+
+        Returns:
+            The horizons the fence resolved, and the bundle it read at them.
         """
-        bundle = evidence["execution_prefix_bundle"]
-        request_horizon = _ExecutionKnowledgeHorizon(
-            as_of=bundle["request_as_of"],
-            requested=evidence["requested_as_of"] is not None,
-        )
-        activation_horizon = _ExecutionKnowledgeHorizon(
-            as_of=bundle["activation_as_of"],
-            requested=evidence["requested_activation_as_of"] is not None,
+        request_horizon, activation_horizon = _resolved_execution_prefix_cut_horizons(
+            evidence["requested_as_of"],
+            evidence["requested_activation_as_of"],
         )
         request = await self._load_pnl_timeline_execution_prefix_snapshot(
             s,
@@ -11508,12 +11592,49 @@ class SQLAlchemyRepository(Repository):
                 evidence["mode"],
                 activation_horizon,
             )
-        return {
-            "request": request,
-            "activation": activation,
-            "request_as_of": request_horizon.as_of,
-            "activation_as_of": activation_horizon.as_of,
-        }
+        return _PortfolioPnlAnchorFencedCuts(
+            request_horizon=request_horizon,
+            activation_horizon=activation_horizon,
+            bundle={
+                "request": request,
+                "activation": activation,
+                "request_as_of": request_horizon.as_of,
+                "activation_as_of": activation_horizon.as_of,
+            },
+        )
+
+    @staticmethod
+    def _pnl_timeline_prefix_cuts_match(
+        current: PnlTimelineExecutionPrefixBundle,
+        candidate: PnlTimelineExecutionPrefixBundle,
+    ) -> bool:
+        """Compare what the fence PROVED against what the candidate claims.
+
+        Each cut is compared whole — watermarks, effective rows, and the applied
+        annulment manifest — so any drift in any plane refuses the write, which
+        is why the manifest was put inside the prefix value in the first place.
+
+        The two echoed instants are deliberately excluded, and their exclusion
+        is what makes the fence's own resolution affordable. A derived cut is a
+        captured present: the fence's is necessarily later than the candidate's
+        and can never be reproduced, so comparing those instants would refuse
+        every honest current-truth anchor while proving nothing — a candidate
+        can only pass by carrying the prefix the fence just proved. They are not
+        unchecked either; :meth:`_validate_portfolio_pnl_anchor_write_evidence`
+        has already pinned each one to its cut's intent and to the anchor
+        timestamp it fixes, before the fence was even taken.
+
+        Args:
+            current: The bundle read under the fence at its own horizons.
+            candidate: The bundle the offered anchor was derived from.
+
+        Returns:
+            Whether both proven cuts are identical.
+        """
+        return (
+            current["request"] == candidate["request"]
+            and current["activation"] == candidate["activation"]
+        )
 
     async def record_portfolio_pnl_anchor_if_execution_prefix_matches(
         self,
@@ -11522,13 +11643,22 @@ class SQLAlchemyRepository(Repository):
     ) -> PortfolioPnlAnchorRow:
         """Fence prefix writers, revalidate both cuts, then insert atomically.
 
-        The equality check is over the WHOLE bundle, and the bundle now carries
-        each cut's applied annulment manifest alongside its effective rows. A
+        The equality check is over both PROVEN cuts, and each cut now carries
+        its applied annulment manifest alongside its effective rows. A
         correction appended between derivation and write therefore fails the
         comparison as evidence drift — the same refusal a late execution gets —
         rather than being silently absent from an anchor that claims to have
         folded it. There is no separate manifest comparison to keep in sync,
         which is exactly why the manifest lives inside the prefix value.
+
+        This method is PUBLIC, so the evidence is caller data all the way down
+        and is treated as an assertion to be disproved rather than a description
+        to be followed. The fence never reads at an instant the evidence
+        supplies: it resolves its own horizons from the two nullable intents
+        (see :meth:`_load_portfolio_pnl_anchor_fenced_cuts`) and then requires
+        the candidate to reproduce what that read proved. A stale or forged
+        bundle simply fails to, and the write refuses — which is the whole
+        purpose of comparing at all.
         """
         normalized_anchor = cast(
             PortfolioPnlAnchorRow,
@@ -11549,21 +11679,19 @@ class SQLAlchemyRepository(Repository):
                     normalized_anchor,
                 )
                 try:
-                    current_bundle = (
-                        await self._load_pnl_timeline_execution_prefix_bundle_in_session(
-                            s,
-                            evidence,
-                        )
-                    )
+                    cuts = await self._load_portfolio_pnl_anchor_fenced_cuts(s, evidence)
                 except ExecutionChainError as exc:
                     raise PnlTimelineAnchorEvidenceMismatchError(
                         "current portfolio P&L execution prefix cannot be proven"
                     ) from exc
-                if not self._pnl_timeline_prefix_bundle_is_monotonic(current_bundle):
+                if not self._pnl_timeline_prefix_bundle_is_monotonic(cuts.bundle):
                     raise PnlTimelineAnchorEvidenceMismatchError(
                         "current portfolio P&L execution prefix cuts are inconsistent"
                     )
-                if current_bundle != evidence["execution_prefix_bundle"]:
+                if not self._pnl_timeline_prefix_cuts_match(
+                    cuts.bundle,
+                    evidence["execution_prefix_bundle"],
+                ):
                     raise PnlTimelineAnchorEvidenceMismatchError(
                         "portfolio P&L execution prefix changed before anchor persistence"
                     )
@@ -11572,11 +11700,8 @@ class SQLAlchemyRepository(Repository):
                     _PnlTimelineScopeGapRequest(
                         wallet_public_id=evidence["wallet_public_id"],
                         mode=evidence["mode"],
-                        horizon=_ExecutionKnowledgeHorizon(
-                            as_of=current_bundle["activation_as_of"],
-                            requested=evidence["requested_activation_as_of"] is not None,
-                        ),
-                        execution_prefix=current_bundle["activation"],
+                        horizon=cuts.activation_horizon,
+                        execution_prefix=cuts.bundle["activation"],
                     ),
                 ):
                     raise PnlTimelineAnchorEvidenceMismatchError(
@@ -15470,16 +15595,15 @@ class SQLAlchemyRepository(Repository):
         The resolved instants are echoed on the returned bundle, because when a
         cut is derived the caller cannot otherwise know which instant its
         evidence belongs to — and an anchor's ``point_time`` must be exactly
-        the activation cut its opening was folded at.
+        the activation cut its opening was folded at. The echo is a REPORT of
+        what this read did, never an instruction: the anchor writer's fenced
+        re-read resolves its horizons from the same nullable intents through the
+        same :func:`_resolved_execution_prefix_cut_horizons`, so the two reads
+        agree by construction instead of by one copying the other.
         """
-        request_horizon = _resolved_knowledge_horizon(request_as_of)
-        activation_horizon = (
-            _ExecutionKnowledgeHorizon(
-                as_of=request_horizon.as_of.replace(second=0, microsecond=0),
-                requested=request_horizon.requested,
-            )
-            if activation_as_of is None
-            else _resolved_knowledge_horizon(activation_as_of)
+        request_horizon, activation_horizon = _resolved_execution_prefix_cut_horizons(
+            request_as_of,
+            activation_as_of,
         )
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
