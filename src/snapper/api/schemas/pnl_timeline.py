@@ -290,9 +290,12 @@ class PnlExecutionCorrectionData(StrictBody):
     booking was excluded from the numbers this response carries.
     ``scope_sequence`` locates the repudiated booking in its exchange's
     contiguous sequence, so an auditor can name the exact position that was
-    corrected without re-reading the ledger. ``correction_time`` is the
-    operator's knowledge timestamp: a read whose horizon precedes it neither
-    folds nor discloses this correction.
+    corrected without re-reading the ledger. ``correction_time`` is the instant
+    the OPERATOR declared the booking repudiated from — human-facing context for
+    the banner, and deliberately not the instant that decides whether a read
+    sees this correction. That decision belongs to the server-stamped knowledge
+    time on the manifest row, which no caller can set and which is therefore
+    never exposed as something an operator chose.
     """
 
     correction_public_id: str
@@ -315,9 +318,9 @@ class PnlExecutionHistoryData(StrictBody):
 
     The list is exactly the fold applied to THESE numbers, never a wider manifest
     read: a historical ``as_of`` request whose horizon precedes a correction's
-    ``correction_time`` reports the history it actually replayed, which is the
-    same reason such a read keeps failing rather than pretending the correction
-    was already known.
+    server-stamped knowledge time reports the history it actually replayed,
+    which is the same reason such a read keeps failing rather than pretending
+    the correction was already known.
     """
 
     status: PnlExecutionHistoryStatus

@@ -445,6 +445,7 @@ class _PrefixSourceOptions(TypedDict, total=False):
     """Optional inputs of the staged effective-prefix certification."""
 
     annulment_rows: list[ExecutionAnnulment]
+    annulment_witnesses: dict[str, str]
 
 
 def _certified_prefix(
@@ -466,6 +467,7 @@ def _certified_prefix(
             native_symbols_by_symbol_public_id=native_symbols_by_symbol_public_id,
             order_instrument_ids_by_scope=order_instrument_ids_by_scope,
             annulment_rows=options.get("annulment_rows", []),
+            annulment_witnesses=options.get("annulment_witnesses", {}),
         )
     )
     return executions

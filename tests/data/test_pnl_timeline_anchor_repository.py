@@ -1308,7 +1308,15 @@ def _phantom_source_execution() -> Execution:
 
 
 async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
-    """Seed one witnessed booking, one unwitnessed booking, and its correction."""
+    """Seed one witnessed booking, one unwitnessed booking, and its correction.
+
+    The manifest row is appended directly rather than through the guarded
+    writer so its SERVER knowledge stamp can be a fixture instant instead of the
+    wall clock: these fences are asserted at fixed horizons, and a row the
+    writer stamped with the real ``now`` would fall outside every one of them.
+    Its binding is still the real one — the stored target's own public id and
+    freshly recomputed canonical digest — so read-time validation is exercised.
+    """
     async with repository.session() as s:
         s.add_all(
             [
@@ -1332,25 +1340,27 @@ async def _seed_annulled_scope(repository: SQLAlchemyRepository) -> None:
             .scalars()
             .one()
         )
-        digest = execution_row_digest(SQLAlchemyRepository._execution_chain_record(phantom))
-        target_public_id = phantom.public_id
-    await repository.record_execution_annulment(
-        {
-            "target_execution_public_id": target_public_id,
-            "expected_execution_digest": digest,
-            "wallet_public_id": _WALLET,
-            "exchange": "kraken",
-            "mode": "live",
-            "scope_sequence": 2,
-            "annulled_by_user_public_id": _ANNULLING_USER,
-            "correction_time": _T0 - timedelta(minutes=1),
-            "reason": "unwitnessed_phantom",
-            "evidence": {"diagnosis": "unwitnessed booking in the anchor fence fixture"},
-            "session_id": _SESSION_PUBLIC_ID,
-            "sequence_id": 9,
-            "timestamp": _T0 - timedelta(minutes=1),
-        }
-    )
+        s.add(
+            ExecutionAnnulment(
+                target_execution_public_id=phantom.public_id,
+                target_execution_digest=execution_row_digest(
+                    SQLAlchemyRepository._execution_chain_record(phantom)
+                ),
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                scope_sequence=2,
+                annulled_by_user_public_id=_ANNULLING_USER,
+                correction_time=_T0 - timedelta(minutes=1),
+                reason="unwitnessed_phantom",
+                evidence_json='{"diagnosis":"unwitnessed booking in the anchor fence fixture"}',
+                session_id=_SESSION_PUBLIC_ID,
+                sequence_id=9,
+                timestamp=_T0 - timedelta(minutes=5),
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await s.commit()
 
 
 def _manifest_drifted_evidence(

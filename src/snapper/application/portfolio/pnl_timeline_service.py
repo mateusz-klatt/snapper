@@ -62,6 +62,7 @@ from pydantic import field_validator
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.basket_valuation import CandleVersionIdentity
 from snapper.application.portfolio.basket_valuation import FiatVersionMap
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fill_booking import booked_signed_quantity
 from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_rates import FxPairKey
@@ -361,12 +362,20 @@ _WATERMARKS_ADAPTER: Final[TypeAdapter[dict[str, int]]] = TypeAdapter(
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedPnlAnchor:
-    """Validated rebased opening, frozen t0 marks, and replay watermarks."""
+    """Validated rebased opening, frozen t0 marks, and replay watermarks.
+
+    ``annulments`` carries the corrections the persisted opening audit says this
+    anchor's derivation folded. It travels with the anchor rather than being
+    re-read because it is the only surviving statement of WHICH effective
+    history produced these frozen numbers, and every later read has to be able
+    to check that the ledger still agrees with it.
+    """
 
     row: PortfolioPnlAnchorRow
     opening: TimelineOpening
     marks: dict[tuple[str, datetime], float]
     watermarks: dict[str, int]
+    annulments: tuple[_AnchorAnnulmentPayload, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -828,6 +837,7 @@ def _parse_anchor(row: PortfolioPnlAnchorRow) -> _ResolvedPnlAnchor:
         opening=opening,
         marks=frozen_marks,
         watermarks=dict(watermarks),
+        annulments=opening_payload.annulments,
     )
 
 
@@ -3620,6 +3630,96 @@ async def _load_or_create_anchor(
     )
 
 
+def _anchor_covered_annulment_identities(
+    anchor: _ResolvedPnlAnchor,
+    applied: Sequence[PnlTimelineAppliedAnnulment],
+) -> tuple[tuple[str, str, str, str, int], ...]:
+    """Project the corrections falling inside one anchor's frozen coverage.
+
+    An anchor's opening is derived from the effective history up to its
+    per-exchange watermark; everything above it is replayed live. Only the
+    corrections at or below that watermark could have changed the frozen
+    numbers, so only those are compared. An exchange the anchor never covered
+    contributes a watermark of zero and therefore nothing.
+
+    Args:
+        anchor: The persisted anchor whose coverage bounds the comparison.
+        applied: The corrections the current certified prefix folded.
+
+    Returns:
+        Sorted ``(correction id, target id, digest, exchange, sequence)``
+        identities inside the anchor's coverage.
+    """
+    return tuple(
+        sorted(
+            (
+                row["public_id"],
+                row["target_execution_public_id"],
+                row["target_execution_digest"],
+                row["exchange"],
+                row["scope_sequence"],
+            )
+            for row in applied
+            if row["scope_sequence"] <= anchor.watermarks.get(row["exchange"], 0)
+        )
+    )
+
+
+def _require_anchor_manifest_unchanged(
+    anchor: _ResolvedPnlAnchor,
+    applied: Sequence[PnlTimelineAppliedAnnulment],
+) -> None:
+    """Refuse a series whose anchor no longer matches the manifest it froze.
+
+    The blocker this closes. An anchor's opening economics are computed ONCE,
+    from the effective history below its watermark, and then frozen forever;
+    the series only ever replays the suffix ABOVE that watermark. So a
+    correction that lands later and targets a booking BELOW the watermark
+    changes the true opening and nothing in the replay path can notice — the
+    suffix is untouched, the watermarks still agree, and the series keeps
+    reporting an opening derived from a history the ledger no longer has.
+
+    The anchor already records exactly which corrections its derivation folded
+    (v3 opening audit), so the check is a direct equality: the corrections the
+    CURRENT certified prefix applies within the anchor's coverage must be the
+    same set, by correction id, target id, and canonical row digest. Comparing
+    digests as well as ids means a correction re-bound to different row content
+    is drift too.
+
+    Resolution is deliberately an operator RE-ACTIVATION, not an automatic
+    re-derivation: the anchor is the permanent activation seed for a money
+    series, and silently recomputing it would erase the very evidence that the
+    numbers changed. Failing closed keeps the divergence visible.
+
+    Args:
+        anchor: The persisted anchor backing this series.
+        applied: The corrections the current certified prefix folded.
+
+    Raises:
+        ExecutionChainError: If the anchor's recorded corrections differ from
+            the ones the current manifest applies inside its coverage.
+    """
+    recorded = tuple(
+        sorted(
+            (
+                payload.public_id,
+                payload.target_execution_public_id,
+                payload.target_execution_digest,
+                payload.exchange,
+                payload.scope_sequence,
+            )
+            for payload in anchor.annulments
+        )
+    )
+    current = _anchor_covered_annulment_identities(anchor, applied)
+    if recorded != current:
+        raise ExecutionChainError(
+            "anchor_manifest_drift: "
+            f"anchor_public_id={anchor.row['public_id']} "
+            f"recorded={len(recorded)} current={len(current)}"
+        )
+
+
 async def _load_series_replay_inputs(
     repo: Repository,
     wallet_public_id: str,
@@ -3654,6 +3754,7 @@ async def _load_series_replay_inputs(
             raise PnlAnchorEvidenceError(
                 "current execution prefix regressed below the activation watermark"
             )
+    _require_anchor_manifest_unchanged(anchor, loaded_prefix["annulments"])
     loaded_execution_rows = [
         row
         for row in loaded_prefix["executions"]

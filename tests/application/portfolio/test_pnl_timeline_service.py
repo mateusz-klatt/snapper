@@ -25,6 +25,7 @@ from sqlalchemy import create_engine
 from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import value_currency
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
@@ -221,17 +222,37 @@ _PHANTOM_EXECUTION_ID = "00000000-0000-7000-8000-0000000000e1"
 _PHANTOM_DIGEST = "ab" * 32
 
 
-def _applied_annulment(correction_time: datetime = _T0) -> PnlTimelineAppliedAnnulment:
+def _applied_annulment(
+    correction_time: datetime = _T0,
+    scope_sequence: int = 1,
+) -> PnlTimelineAppliedAnnulment:
     """Build one correction as the certification fold reports it applied."""
     return {
         "public_id": _ANNULMENT_ID,
         "target_execution_public_id": _PHANTOM_EXECUTION_ID,
         "target_execution_digest": _PHANTOM_DIGEST,
         "exchange": "kraken",
-        "scope_sequence": 1,
+        "scope_sequence": scope_sequence,
         "reason": "unwitnessed_phantom",
         "correction_time": correction_time,
     }
+
+
+def _anchor_recording(
+    watermarks: dict[str, int],
+    corrections: list[dict[str, object]],
+) -> PortfolioPnlAnchorRow:
+    """Build one flat anchor whose v3 opening audit records exactly these corrections."""
+    row = _empty_anchor(_W1, "live", "USD", point_time=_m(1), watermarks=watermarks)
+    row["opening_basket_json"] = _canonical_test_json(
+        {
+            "schema_version": 3,
+            "pools": [],
+            "annulments": corrections,
+            "native_basket": {},
+        }
+    )
+    return row
 
 
 def _test_anchor_annulment(
@@ -563,6 +584,7 @@ class FakeRepo:
         self._execution_prefix_error = execution_prefix_error
         self._execution_watermarks = execution_watermarks
         self._applied_annulments: list[PnlTimelineAppliedAnnulment] = []
+        self._annulments_known_from = _EMPTY_ANCHOR_T0
         self._samples: list[PortfolioPnlSampleRow] = []
         self.sample_calls: list[tuple[PortfolioPnlSampleQuery, datetime, datetime, str | None]] = []
         self.atomic_anchor_error: Exception | None = None
@@ -647,28 +669,32 @@ class FakeRepo:
         prefix = PnlTimelineExecutionPrefix(
             watermarks=watermarks,
             executions=executions,
-            annulments=[
-                annulment
-                for annulment in self._applied_annulments
-                if annulment["correction_time"] <= as_of
-            ],
+            annulments=(
+                list(self._applied_annulments) if self._annulments_known_from <= as_of else []
+            ),
         )
         return prefix
 
     def apply_annulments(
         self,
         annulments: Sequence[PnlTimelineAppliedAnnulment],
+        known_from: datetime = _EMPTY_ANCHOR_T0,
     ) -> None:
         """Make every certified prefix report these applied corrections.
 
         The canned executions are supplied already effective, exactly as the
         repository returns them, so a test states the fold's OUTPUT rather than
-        re-implementing the exclusion in the fake. Each prefix is narrowed to
-        the corrections whose ``correction_time`` its own read horizon has
-        passed, mirroring the manifest query's knowledge-horizon filter, so a
-        historical read here cannot fold or disclose a later correction.
+        re-implementing the exclusion in the fake.
+
+        ``known_from`` mirrors the real filter exactly: the manifest query keys
+        on the row's SERVER-stamped knowledge instant, never on the operator's
+        declared ``correction_time``. Modelling it as a separate value is the
+        whole point — a fake that filtered on ``correction_time`` would let a
+        backdated correction look foldable here while the repository refuses it,
+        and the disclosure tests would then be pinning the wrong doctrine.
         """
         self._applied_annulments = list(annulments)
+        self._annulments_known_from = known_from
 
     def require_exact_fill_witnesses(
         self,
@@ -6008,22 +6034,24 @@ class TestSeriesCorrectionDisclosure:
     async def test_correction_later_than_the_horizon_is_neither_folded_nor_disclosed(
         self,
     ) -> None:
-        """A read that predates the operator's knowledge cannot borrow it.
+        """A read that predates the correction's knowledge stamp cannot borrow it.
 
-        Given: A correction whose ``correction_time`` is later than the read's
-            knowledge horizon.
+        Given: A correction WRITTEN after the read's knowledge horizon whose
+            operator-declared ``correction_time`` is backdated well before it —
+            the exact shape of a request that would like an already-answered
+            historical read to be re-answered.
         When: A historical series is built at that horizon.
-        Then: Nothing is disclosed, because nothing was folded. The disclosure
-            is exactly the fold — never a wider manifest read — so a historical
-            reconstruction keeps reporting the history it actually replayed
-            instead of pretending the operator already knew.
+        Then: Nothing is disclosed, because nothing was folded. The fold keys on
+            the instant the correction became KNOWN, which no caller sets, so a
+            backdated declaration cannot reach back into a reconstruction the
+            system has already produced.
         """
         repo = FakeRepo(
             executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(0), 110.0)],
         )
-        repo.apply_annulments([_applied_annulment(correction_time=_m(5))])
+        repo.apply_annulments([_applied_annulment(correction_time=_T0)], known_from=_m(5))
 
         result = await build_wallet_pnl_series(
             repo,
@@ -6038,18 +6066,18 @@ class TestSeriesCorrectionDisclosure:
 
         assert result.applied_annulments == ()
 
-    async def test_horizon_at_the_correction_time_folds_and_discloses_it(self) -> None:
+    async def test_horizon_at_the_knowledge_stamp_folds_and_discloses_it(self) -> None:
         """The knowledge horizon is inclusive, matching the manifest filter."""
         repo = FakeRepo(
             executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(0), 110.0)],
         )
-        repo.apply_annulments([_applied_annulment(correction_time=_m(3))])
+        repo.apply_annulments([_applied_annulment()], known_from=_m(3))
 
         result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _m(3))
 
-        assert result.applied_annulments == (_applied_annulment(correction_time=_m(3)),)
+        assert result.applied_annulments == (_applied_annulment(),)
 
     async def test_series_built_without_execution_evidence_discloses_nothing(self) -> None:
         """A result that folded no prefix at all must not claim a correction.
@@ -6093,6 +6121,98 @@ class TestSeriesCorrectionDisclosure:
 
         assert result.applied_annulments == (_applied_annulment(),)
         assert result.series.applied_annulments == result.applied_annulments
+
+
+class TestAnchorManifestDrift:
+    """The post-anchor drift fence over an anchor's frozen coverage."""
+
+    @staticmethod
+    def _repo_with_two_bookings(anchor: PortfolioPnlAnchorRow) -> FakeRepo:
+        """Build one two-execution scope behind a caller-supplied anchor."""
+        return FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+                _exec_row(_I1, 2, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(1), 100.0), _candle(_m(2), 100.0)],
+            anchor=anchor,
+        )
+
+    async def test_a_correction_inside_the_anchor_coverage_refuses_the_series(self) -> None:
+        """A repudiation below the watermark can never be silently absorbed.
+
+        Given: An anchor whose opening was derived with NO corrections, and a
+            manifest that now repudiates a booking at or below that anchor's
+            per-exchange watermark.
+        When: The series is built.
+        Then: It fails closed by name. The anchor's opening economics are frozen
+            and the replay only ever covers the suffix ABOVE the watermark, so
+            nothing else in the pipeline can notice that the opening was derived
+            from a history the ledger no longer has — the series would keep
+            reporting a wrong opening forever, silently.
+        """
+        repo = self._repo_with_two_bookings(_anchor_recording({"kraken": 1}, []))
+        repo.apply_annulments([_applied_annulment()])
+
+        with pytest.raises(ExecutionChainError, match="anchor_manifest_drift"):
+            await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
+
+    async def test_a_correction_above_the_watermark_replays_as_today(self) -> None:
+        """A repudiation in the replayed suffix needs no anchor agreement.
+
+        Given: The same anchor, and a correction targeting a booking ABOVE its
+            watermark.
+        When: The series is built.
+        Then: It builds. That correction never touched the frozen opening — the
+            suffix is re-derived on every read — so demanding the anchor record
+            it would refuse a scope that is in fact perfectly consistent.
+        """
+        repo = self._repo_with_two_bookings(_anchor_recording({"kraken": 1}, []))
+        repo.apply_annulments([_applied_annulment(scope_sequence=2)])
+
+        result = await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
+
+        assert result.applied_annulments == (_applied_annulment(scope_sequence=2),)
+
+    async def test_an_anchor_that_recorded_the_correction_still_certifies(self) -> None:
+        """Agreement between the anchor's audit and the live manifest is the pass case.
+
+        Given: An anchor whose opening audit records exactly the correction the
+            current manifest applies inside its coverage.
+        When: The series is built.
+        Then: It builds and discloses that correction — the fence refuses
+            divergence, not correction itself.
+        """
+        repo = self._repo_with_two_bookings(
+            _anchor_recording({"kraken": 1}, [_test_anchor_annulment()])
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        result = await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
+
+        assert result.applied_annulments == (_applied_annulment(),)
+
+    async def test_a_rebound_correction_is_drift_even_at_the_same_coordinate(self) -> None:
+        """Same correction id, different row content, is still a changed history.
+
+        Given: An anchor recording a correction whose target digest differs from
+            the one the current manifest carries for the same coordinate.
+        When: The series is built.
+        Then: It fails closed. The digest is what says WHICH row content was
+            repudiated, so a comparison on ids alone would accept an opening
+            derived from different economics.
+        """
+        repo = self._repo_with_two_bookings(
+            _anchor_recording(
+                {"kraken": 1},
+                [_test_anchor_annulment(target_execution_digest="cd" * 32)],
+            )
+        )
+        repo.apply_annulments([_applied_annulment()])
+
+        with pytest.raises(ExecutionChainError, match="anchor_manifest_drift"):
+            await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
 
 
 class TestSeriesReplayMetadata:

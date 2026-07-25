@@ -13,6 +13,8 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import TypedDict
+from typing import Unpack
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
@@ -20,11 +22,13 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import update
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
+from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
@@ -36,6 +40,7 @@ from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import PortfolioSpotReconciliationAnchor
 from snapper.data.models import SpotAssetPrecisionEvidence
 from snapper.data.models import Symbol
+from snapper.data.models import VenueEvent
 from snapper.data.models import Wallet
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
@@ -53,6 +58,7 @@ _SECOND_SYMBOL_ID = "00000000-0000-7000-8000-000000000702"
 _INSTRUMENT = "00000000-0000-7000-8000-000000000731"
 _ORDER = "00000000-0000-7000-8000-000000000631"
 _WRONG_TIP = "ab" * 32
+_LATE_WITNESS_CLIENT_ORDER_ID = "spot-bundle-late-witness"
 _CONFIRMED_ACTUAL = (
     '{"assets":{"DOGE":{"absent_as_zero":false,"total":"1"},'
     '"ETH":{"absent_as_zero":true,"total":"0"}}}'
@@ -415,44 +421,91 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_eight_sets
     await repo.engine.dispose()
 
 
-async def test_bundle_drops_an_annulled_booking_after_counting_the_range(
-    tmp_path: Path,
-) -> None:
-    """The counted proof stays physical while the fold consumes only what still counts.
+class _AnnulmentOptions(TypedDict, total=False):
+    """Optional fields accepted by the replay-range manifest-row builder."""
 
-    Given: An anchored scope at watermark 2 with two later ingested fills, the
-        second of which an operator has repudiated through the manifest.
-    When: The bundle is read at boundary watermark 4.
-    Then: ``range_complete`` still holds — contiguity is counted over the RAW
-        range first, so a correction can never make a purged or tampered ledger
-        look complete — while the replay the evaluator folds carries only the
-        surviving booking, and the boundary chain tip is unmoved.
+    target_execution_public_id: str
+    target_execution_digest: str
+    scope_sequence: int
+    timestamp: datetime
+
+
+async def _annul_replay_execution(
+    repo: SQLAlchemyRepository,
+    scope_sequence: int,
+    **options: Unpack[_AnnulmentOptions],
+) -> None:
+    """Append one manifest row bound to a real execution in the replay range.
+
+    Built directly rather than through the guarded writer so its SERVER
+    knowledge stamp can be a fixture instant: this suite asserts at a fixed
+    historical ``as_of``, and a row the writer stamped with the wall clock
+    would fall outside it. The default stamp sits well behind that horizon so
+    the correction has SETTLED for it; the settling rule itself is pinned in
+    the certification suite. The binding defaults to the stored target's own public id and
+    freshly recomputed canonical digest, so the fold's real proof runs; the
+    overrides exist to poison exactly one component at a time.
     """
-    repo = await _repo(tmp_path)
-    await _seed_market(repo)
-    await _seed_executions(repo, 2)
-    await _record_real_anchor(repo)
-    await _seed_executions(repo, 2, start_sequence_id=20)
     async with repo.session() as session:
+        target = (
+            (
+                await session.execute(
+                    select(Execution).where(Execution.scope_sequence == scope_sequence)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        digest = execution_row_digest(SQLAlchemyRepository._execution_chain_record(target))
         session.add(
             ExecutionAnnulment(
-                target_execution_public_id="00000000-0000-7000-8000-0000000009e1",
-                target_execution_digest="0" * 64,
+                target_execution_public_id=options.get(
+                    "target_execution_public_id", target.public_id
+                ),
+                target_execution_digest=options.get("target_execution_digest", digest),
                 wallet_public_id=_WALLET,
                 exchange="kraken",
                 mode="live",
-                scope_sequence=4,
+                scope_sequence=options.get("scope_sequence", scope_sequence),
                 annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
                 correction_time=_AS_OF,
                 reason="unwitnessed_phantom",
                 evidence_json='{"diagnosis":"hand-built"}',
                 session_id=_SESSION,
                 sequence_id=1,
-                timestamp=_AS_OF,
+                timestamp=options.get("timestamp", _AS_OF - timedelta(minutes=5)),
                 known_to=KNOWN_TO_MAX,
             )
         )
         await session.commit()
+
+
+async def _anchored_replay_scope(tmp_path: Path) -> SQLAlchemyRepository:
+    """Seed one anchored scope at watermark 2 with two later ingested fills."""
+    repo = await _repo(tmp_path)
+    await _seed_market(repo)
+    await _seed_executions(repo, 2)
+    await _record_real_anchor(repo)
+    await _seed_executions(repo, 2, start_sequence_id=20)
+    return repo
+
+
+async def test_bundle_drops_an_annulled_booking_after_counting_the_range(
+    tmp_path: Path,
+) -> None:
+    """The counted proof stays physical while the fold consumes only what still counts.
+
+    Given: An anchored scope at watermark 2 with two later ingested fills, the
+        second of which an operator has repudiated through a fully bound
+        manifest row.
+    When: The bundle is read at boundary watermark 4.
+    Then: ``range_complete`` still holds — contiguity is counted over the RAW
+        range first, so a correction can never make a purged or tampered ledger
+        look complete — while the replay the evaluator folds carries only the
+        surviving booking, and the boundary chain tip is unmoved.
+    """
+    repo = await _anchored_replay_scope(tmp_path)
+    await _annul_replay_execution(repo, 4)
 
     bundle = await repo.get_spot_reconciliation_bundle(
         _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
@@ -470,38 +523,15 @@ async def test_bundle_ignores_a_correction_its_horizon_does_not_know(
 ) -> None:
     """A repudiation recorded after the capture instant cannot rewrite it.
 
-    Given: The same scope with the correction's ``correction_time`` set one
+    Given: The same scope with the correction's SERVER knowledge stamp set one
         second AFTER the bundle's pinned capture instant.
     When: The bundle is read at that capture instant.
     Then: Both bookings still replay. The capture answers for its own moment,
         so a correction that was not yet known then must not retroactively
         change the range it certified.
     """
-    repo = await _repo(tmp_path)
-    await _seed_market(repo)
-    await _seed_executions(repo, 2)
-    await _record_real_anchor(repo)
-    await _seed_executions(repo, 2, start_sequence_id=20)
-    async with repo.session() as session:
-        session.add(
-            ExecutionAnnulment(
-                target_execution_public_id="00000000-0000-7000-8000-0000000009e1",
-                target_execution_digest="0" * 64,
-                wallet_public_id=_WALLET,
-                exchange="kraken",
-                mode="live",
-                scope_sequence=4,
-                annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
-                correction_time=_AS_OF + timedelta(seconds=1),
-                reason="unwitnessed_phantom",
-                evidence_json='{"diagnosis":"hand-built"}',
-                session_id=_SESSION,
-                sequence_id=1,
-                timestamp=_AS_OF,
-                known_to=KNOWN_TO_MAX,
-            )
-        )
-        await session.commit()
+    repo = await _anchored_replay_scope(tmp_path)
+    await _annul_replay_execution(repo, 4, timestamp=_AS_OF + timedelta(seconds=1))
 
     bundle = await repo.get_spot_reconciliation_bundle(
         _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
@@ -509,6 +539,110 @@ async def test_bundle_ignores_a_correction_its_horizon_does_not_know(
 
     assert bundle.error is None
     assert [row["scope_sequence"] for row in bundle.replay] == [3, 4]
+    await repo.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        pytest.param(
+            {"target_execution_public_id": "00000000-0000-7000-8000-0000000009e1"},
+            "dangling_annulment_binding",
+            id="dangling-binding",
+        ),
+        pytest.param(
+            {"target_execution_digest": "0" * 64},
+            "annulment_digest_mismatch",
+            id="digest-mismatch",
+        ),
+    ],
+)
+async def test_bundle_refuses_an_unprovable_manifest_binding(
+    tmp_path: Path,
+    options: _AnnulmentOptions,
+    reason: str,
+) -> None:
+    """The replay may only suppress a booking on the SAME proof certification demands.
+
+    Given: A manifest row covering the replay range whose binding is not
+        provable — it names a row this range does not hold, or authorizes
+        content the stored row does not have.
+    When: The bundle is read.
+    Then: It raises by name instead of dropping the coordinate. A scope-sequence
+        match alone would let reconciliation certify balances against a
+        repudiation the P&L certification plane would have refused, which is the
+        exact divergence one shared validated fold exists to prevent.
+    """
+    repo = await _anchored_replay_scope(tmp_path)
+    await _annul_replay_execution(repo, 4, **options)
+
+    with pytest.raises(ExecutionChainError, match=reason):
+        await repo.get_spot_reconciliation_bundle(
+            _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+        )
+    await repo.engine.dispose()
+
+
+async def test_bundle_refuses_a_contradicted_annulment(
+    tmp_path: Path,
+) -> None:
+    """A fill that arrives after the correction refuses the whole replay.
+
+    Given: A correctly bound repudiation of a replay-range booking, and a
+        durable ``fill_observed`` witness for that booking's order delivered
+        afterwards — the case the append-only writer could not have refused.
+    When: The bundle is read.
+    Then: It raises by name. The reconciliation plane re-asks the writer's own
+        question at its own instant, so money the venue confirmed can never stay
+        suppressed just because the suppression was already committed.
+    """
+    repo = await _anchored_replay_scope(tmp_path)
+    await _annul_replay_execution(repo, 4)
+    async with repo.session() as session:
+        await session.execute(
+            update(Order)
+            .where(Order.public_id == _ORDER)
+            .values(client_order_id=_LATE_WITNESS_CLIENT_ORDER_ID)
+        )
+        session.add(
+            VenueEvent(
+                event_type="fill_observed",
+                shard_key="kraken.BTC-USD.live",
+                wallet_public_id=_WALLET,
+                command_public_id=None,
+                exchange="kraken",
+                instrument="BTC/USD",
+                mode="live",
+                exchange_order_id=None,
+                client_order_id=_LATE_WITNESS_CLIENT_ORDER_ID,
+                venue_client_id=_LATE_WITNESS_CLIENT_ORDER_ID,
+                side="buy",
+                status="filled",
+                fill_price=0.1,
+                fill_size=1.0,
+                cum_fill_size=1.0,
+                fee=0.0,
+                fee_asset="BTC",
+                exec_id="late-witness",
+                trade_id=None,
+                error=None,
+                venue_timestamp=_AS_OF,
+                received_at=_AS_OF,
+                payload_json=None,
+                liquidity_role="unknown",
+                paired_group_id=None,
+                timestamp=_AS_OF,
+                known_to=KNOWN_TO_MAX,
+                session_id=_SESSION,
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
+        await repo.get_spot_reconciliation_bundle(
+            _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+        )
     await repo.engine.dispose()
 
 

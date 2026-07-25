@@ -1183,12 +1183,16 @@ class ExecutionAnnulment(TemporalMixin, Base):
     NOT NULL by design — there is no automation that may annul an execution, so
     an unattributed correction is not a thing this table can hold."""
     correction_time: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
-    """The instant from which this correction counts as KNOWN.
+    """The instant the OPERATOR declares the booking repudiated from.
 
-    Distinct from ``TemporalMixin.timestamp`` (bus provenance). A read whose
-    knowledge horizon predates ``correction_time`` must keep failing exactly as
-    it did before the correction rather than pretend the annulment was already
-    known, so historical answers stay reproducible."""
+    Audit metadata, disclosed to humans and never load-bearing. The instant a
+    correction counts as KNOWN is ``TemporalMixin.timestamp``, which the writer
+    stamps from the server clock: every knowledge-horizon fold filters on that,
+    so a read whose horizon predates the correction keeps failing exactly as it
+    did before the operator acted and historical answers stay reproducible.
+    Keying the fold on this column instead would make the guarantee a claim —
+    a caller could set it into the past and silently rewrite an answer the
+    system has already given."""
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
     """Why the target may be repudiated, from a CHECK-constrained closed set.
 

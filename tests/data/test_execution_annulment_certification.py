@@ -14,14 +14,20 @@ would not exercise the real case at all.
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import TypedDict
 from typing import Unpack
 from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import PropertyMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
@@ -31,13 +37,20 @@ from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
+from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import Instrument
 from snapper.data.models import Order
+from snapper.data.models import PortfolioPnlPoint
+from snapper.data.models import Position
 from snapper.data.models import Symbol
+from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
+from snapper.data.repository import ANNULMENT_KNOWLEDGE_SETTLING_SECONDS
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository_types import ExecutionAnnulmentRequest
+from snapper.data.repository_types import ExecutionAnnulmentRow
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
 _USER = "0000face-0000-7000-8000-0000000000d1"
@@ -48,8 +61,15 @@ _WALUTOMAT_TRADE_AT = datetime(2026, 7, 19, 21, 22, tzinfo=UTC)
 _KRAKEN_PHANTOM_AT = datetime(2026, 7, 19, 21, 54, tzinfo=UTC)
 _PAPER_AT = datetime(2026, 7, 10, 9, 0, tzinfo=UTC)
 _CORRECTION_AT = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-_BEFORE_CORRECTION = datetime(2026, 7, 25, 11, 59, tzinfo=UTC)
-_AS_OF = datetime(2026, 7, 25, 13, 0, tzinfo=UTC)
+"""The instant the OPERATOR declares a correction from — audit metadata only."""
+
+_AS_OF = datetime.now(UTC) + timedelta(hours=1)
+"""A horizon later than any knowledge stamp the writer can assign in this run.
+
+The fold keys on the manifest row's SERVER timestamp, which the writer takes
+from the real clock, so a fixed literal horizon would silently stop covering
+the corrections these tests record as soon as the wall clock passed it. Every
+"before the correction" horizon is derived from the recorded row instead."""
 
 _EURPLN_SYMBOL = "00000000-0000-7000-8000-000000000a01"
 _BTCUSD_SYMBOL = "00000000-0000-7000-8000-000000000a02"
@@ -365,6 +385,10 @@ async def _build_repository(
     Order.__table__.create(schema_engine)
     Execution.__table__.create(schema_engine)
     ExecutionAnnulment.__table__.create(schema_engine)
+    ExecutionPlanCheckpoint.__table__.create(schema_engine)
+    PortfolioPnlPoint.__table__.create(schema_engine)
+    Position.__table__.create(schema_engine)
+    TradeProjectionCheckpoint.__table__.create(schema_engine)
     VenueEvent.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
@@ -443,17 +467,21 @@ def _request(digest: str, **overrides: object) -> ExecutionAnnulmentRequest:
         "evidence": dict(_EVIDENCE),
         "session_id": _SESSION,
         "sequence_id": 1,
-        "timestamp": _CORRECTION_AT,
     }
     base.update(overrides)
     return cast(ExecutionAnnulmentRequest, base)
 
 
-async def _annul_kraken_phantom(repository: SQLAlchemyRepository) -> str:
-    """Record the one production correction and return its manifest public id."""
+async def _annul_kraken_phantom(
+    repository: SQLAlchemyRepository,
+) -> ExecutionAnnulmentRow:
+    """Record the one production correction and return its persisted row.
+
+    The row carries the SERVER-stamped knowledge instant, which is the only
+    honest way for a test to name a horizon before or after the correction.
+    """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
-    row = await repository.record_execution_annulment(_request(digest))
-    return row["public_id"]
+    return await repository.record_execution_annulment(_request(digest))
 
 
 class _ManifestOptions(TypedDict, total=False):
@@ -466,6 +494,7 @@ class _ManifestOptions(TypedDict, total=False):
     scope_sequence: int
     wallet_public_id: str
     correction_time: datetime
+    timestamp: datetime
 
 
 def _manifest_row(**options: Unpack[_ManifestOptions]) -> ExecutionAnnulment:
@@ -489,7 +518,7 @@ def _manifest_row(**options: Unpack[_ManifestOptions]) -> ExecutionAnnulment:
         evidence_json='{"diagnosis":"hand-built"}',
         session_id=_SESSION,
         sequence_id=1,
-        timestamp=_CORRECTION_AT,
+        timestamp=options.get("timestamp", _CORRECTION_AT),
         known_to=KNOWN_TO_MAX,
     )
 
@@ -537,7 +566,7 @@ async def test_kraken_annulment_certifies_the_real_trade_unchanged(
         never booked into. The raw physical proof is untouched — the Kraken
         watermark still stands at 1 because the phantom is still there.
     """
-    annulment_public_id = await _annul_kraken_phantom(repository)
+    correction = await _annul_kraken_phantom(repository)
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
     prefix = await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
@@ -555,7 +584,7 @@ async def test_kraken_annulment_certifies_the_real_trade_unchanged(
     assert prefix["executions"][0]["price"] == 4.3836
     assert prefix["annulments"] == [
         {
-            "public_id": annulment_public_id,
+            "public_id": correction["public_id"],
             "target_execution_public_id": _KRAKEN_PHANTOM,
             "target_execution_digest": digest,
             "exchange": "kraken",
@@ -572,19 +601,26 @@ async def test_a_horizon_before_the_correction_keeps_failing(
 ) -> None:
     """A correction the past did not know about cannot retroactively unblock it.
 
-    Given: The Kraken phantom annulled at a known correction time.
-    When: The scope is certified at a horizon one minute BEFORE that instant.
-    Then: The certification fails exactly as it did before the operator acted,
-        because a historical answer must stay reproducible; the same scope at a
-        horizon past the correction proves.
+    Given: The Kraken phantom annulled, with the operator's declared
+        ``correction_time`` BACKDATED years before the write — the shape of a
+        request that would like an already-answered historical read redone.
+    When: The scope is certified at a horizon before the SERVER knowledge stamp
+        but long after the backdated declaration.
+    Then: The certification fails exactly as it did before the operator acted.
+        The fold keys on the instant the writer recorded, which no caller can
+        set, so the past cannot silently acquire a correction; the same scope at
+        a horizon past that stamp proves.
     """
-    await _annul_kraken_phantom(repository)
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    correction = await repository.record_execution_annulment(
+        _request(digest, correction_time=datetime(2020, 1, 1, tzinfo=UTC))
+    )
 
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            _BEFORE_CORRECTION,
+            correction["timestamp"] - timedelta(seconds=1),
         )
 
     proven = await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
@@ -632,6 +668,91 @@ async def test_both_paper_phantoms_annulled_leave_the_witnessed_fill(
         "unwitnessed_phantom",
         "unwitnessed_legacy_lineage",
     ]
+
+
+async def test_a_witness_under_a_superseded_client_id_still_contradicts(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The read side asks the writer's question with the writer's exact width.
+
+    Given: The Kraken phantom annulled, then its order RE-VERSIONED under a new
+        client id — the SCD2 shape a re-ACK or a client-id rotation leaves — and
+        a durable fill delivered under the now-superseded spelling.
+    When: The scope is certified.
+    Then: The contradiction still fails closed. The writer counts every
+        historical Order version's client id as witness-binding evidence, so a
+        reader that only knew the sentinel-current spelling would let exactly
+        this fill slip past the refusal the writer's symmetric check exists to
+        guarantee.
+    """
+    await _annul_kraken_phantom(repository)
+    async with repository.session() as s:
+        superseded = (
+            (await s.execute(select(Order).where(Order.public_id == _KRAKEN_ORDER))).scalars().one()
+        )
+        superseded.known_to = _AS_OF
+        s.add(
+            _order(
+                _KRAKEN_ORDER,
+                "client-kraken-rotated",
+                _MAIN_WALLET,
+                _KRAKEN_INSTRUMENT,
+            )
+        )
+        s.add(
+            _fill_event(
+                "00000000-0000-7000-8000-000000000f04",
+                _KRAKEN_CID,
+                _MAIN_WALLET,
+                "kraken",
+                "BTC-USD",
+                fill_size=1.0,
+                fill_price=100.0,
+                timestamp=_AS_OF,
+            )
+        )
+        await s.commit()
+
+    with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
+        await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
+
+
+async def test_a_witness_beyond_the_read_horizon_still_contradicts(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Contradiction evidence takes no horizon cut, exactly as the writer takes none.
+
+    Given: The Kraken phantom annulled, and a durable fill for its order
+        delivered LATER than the horizon being certified.
+    When: The scope is certified at that earlier horizon.
+    Then: It still fails closed. A fill from any instant proves the booking was
+        real, and narrowing this probe to the read's horizon would let a
+        certification keep suppressing a booking the venue has already
+        confirmed — the economic assignment read is horizon-bounded, this one
+        deliberately is not.
+    """
+    correction = await _annul_kraken_phantom(repository)
+    async with repository.session() as s:
+        s.add(
+            _fill_event(
+                "00000000-0000-7000-8000-000000000f05",
+                _KRAKEN_CID,
+                _MAIN_WALLET,
+                "kraken",
+                "BTC-USD",
+                fill_size=1.0,
+                fill_price=100.0,
+                timestamp=_AS_OF + timedelta(days=1),
+            )
+        )
+        await s.commit()
+
+    with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
+        await repository.get_pnl_timeline_execution_prefix(
+            _MAIN_WALLET,
+            "live",
+            correction["timestamp"] + timedelta(seconds=1),
+        )
 
 
 async def test_a_later_witness_contradicting_an_annulment_fails_closed(
@@ -781,6 +902,7 @@ def test_two_manifest_rows_for_one_target_refuse_defensively() -> None:
                 native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
                 order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
                 annulment_rows=manifest,
+                annulment_witnesses={},
             )
         )
 
@@ -815,6 +937,7 @@ def test_an_uncanonicalizable_target_refuses_instead_of_crashing() -> None:
                 native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
                 order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
                 annulment_rows=[_manifest_row()],
+                annulment_witnesses={},
             )
         )
 
@@ -882,6 +1005,180 @@ async def test_the_hash_chain_tip_is_untouched_by_the_correction(
     )
 
 
+async def _store_bound_manifest_row(
+    repository: SQLAlchemyRepository,
+    timestamp: datetime,
+) -> None:
+    """Store one correctly bound Kraken-phantom correction at a chosen stamp."""
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    async with repository.session() as s:
+        s.add(_manifest_row(target_execution_digest=digest, timestamp=timestamp))
+        await s.commit()
+
+
+async def test_a_correction_inside_the_settling_window_is_not_historically_knowable(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """History refuses rather than assumes while a correction is still settling.
+
+    Given: A correctly bound correction stamped only 30 seconds before a
+        historical horizon — inside the settling margin, so this horizon cannot
+        prove the row was already DURABLE when it passed, only that the stamp
+        it carries is older.
+    When: The scope is certified at that horizon, and again once the horizon has
+        cleared the margin.
+    Then: Inside the window the correction is not folded and certification
+        REFUSES, because the phantom stays unexcluded; past the margin the same
+        row folds and the scope proves. The direction matters: refusing is a
+        visible, retryable state, while folding a correction the horizon may not
+        have been able to see would silently fabricate economics for a past that
+        has already been reported.
+    """
+    historical = datetime.now(UTC) - timedelta(hours=1)
+    await _store_bound_manifest_row(repository, historical - timedelta(seconds=30))
+
+    with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
+        await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", historical)
+
+    settled = await repository.get_pnl_timeline_execution_prefix(
+        _MAIN_WALLET,
+        "live",
+        historical + timedelta(seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS * 2),
+    )
+
+    assert [row["public_id"] for row in settled["executions"]] == [_WALUTOMAT_TRADE]
+    assert [row["public_id"] for row in settled["annulments"]] == [_ANNULMENT_PUBLIC_ID]
+
+
+async def test_current_truth_folds_a_correction_the_settling_margin_would_withhold(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A read that can SEE the row needs nothing settled — it is already durable.
+
+    Given: The same correction stamped seconds ago, which no historical horizon
+        within the settling margin would yet fold.
+    When: The scope is certified at current truth — the horizon every route
+        derives when no explicit ``as_of`` is given.
+    Then: It folds immediately and the scope proves. A row a reader can see is
+        committed, so there is nothing left to settle and no earlier answer to
+        contradict; withholding it here would make an operator's just-recorded
+        correction invisible to the very read they recorded it for.
+    """
+    await _store_bound_manifest_row(repository, datetime.now(UTC) - timedelta(seconds=5))
+
+    prefix = await repository.get_pnl_timeline_execution_prefix(
+        _MAIN_WALLET,
+        "live",
+        datetime.now(UTC),
+    )
+
+    assert [row["public_id"] for row in prefix["executions"]] == [_WALUTOMAT_TRADE]
+    assert [row["public_id"] for row in prefix["annulments"]] == [_ANNULMENT_PUBLIC_ID]
+
+
+async def test_the_derived_planes_withhold_an_unsettled_correction_too(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Recovery and the scope listing apply the same settling margin.
+
+    Given: A correctly bound correction stamped inside the settling margin of a
+        historical horizon.
+    When: The recovery read and the timeline scope read run at that horizon.
+    Then: Neither excludes the repudiated booking. A derived plane that folded
+        earlier than certification would rebuild state from a history the
+        certified path refuses to agree with.
+    """
+    historical = datetime.now(UTC) - timedelta(hours=1)
+    await _store_bound_manifest_row(repository, historical - timedelta(seconds=30))
+
+    recovered = await repository.get_executions_for_recovery(as_of=historical)
+    timeline = await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", historical)
+
+    assert _KRAKEN_PHANTOM in {row["public_id"] for row in recovered}
+    assert _KRAKEN_PHANTOM in {row["public_id"] for row in timeline}
+
+
+async def _add_kraken_witness(repository: SQLAlchemyRepository) -> None:
+    """Deliver one durable fill for the phantom's order after its annulment."""
+    async with repository.session() as s:
+        s.add(
+            _fill_event(
+                "00000000-0000-7000-8000-000000000f06",
+                _KRAKEN_CID,
+                _MAIN_WALLET,
+                "kraken",
+                "BTC-USD",
+                fill_size=1.0,
+                fill_price=100.0,
+                timestamp=_AS_OF,
+            )
+        )
+        await s.commit()
+
+
+async def test_recovery_refuses_a_contradicted_annulment_instead_of_omitting_it(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A rebuild never silently drops money the venue has confirmed.
+
+    Given: The Kraken phantom annulled, then a durable ``fill_observed`` witness
+        for its order delivered afterwards — so the repudiation is now
+        contradicted by real evidence.
+    When: The startup recovery read runs.
+    Then: It fails closed by name. A bare existence test on the target id would
+        have quietly omitted a witnessed booking from the projection rebuild,
+        which is a silent money loss with nothing said; refusing matches what
+        recovery already does with any state it cannot certify — it quarantines
+        rather than inventing.
+    """
+    await _annul_kraken_phantom(repository)
+    await _add_kraken_witness(repository)
+
+    with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
+        await repository.get_executions_for_recovery(as_of=_AS_OF)
+
+
+async def test_the_timeline_read_refuses_without_any_prior_certification(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The scope listing proves the manifest itself, with no ordering precondition.
+
+    Given: A contradicted repudiation, and NO certification performed first —
+        this read is reached directly, which is exactly what a future consumer
+        would do.
+    When: The scope's timeline execution read runs.
+    Then: It fails closed by name. The read carries the same bind, digest, and
+        witness proof the certification prefix does, so its safety does not
+        depend on an unenforced call ordering that a later caller could break
+        without noticing.
+    """
+    await _annul_kraken_phantom(repository)
+    await _add_kraken_witness(repository)
+
+    with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
+        await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", _AS_OF)
+
+
+async def test_the_derived_planes_refuse_an_unprovable_manifest_binding(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A repudiation the ledger cannot confirm suppresses nothing anywhere.
+
+    Given: A manifest row bound to a real in-scope execution by id and
+        coordinate but authorizing content the stored row does not have.
+    When: The recovery read runs.
+    Then: It fails closed by name rather than excluding the coordinate. The
+        derived planes get the same theorem as certification, so no plane can
+        drop a booking on weaker evidence than another would demand.
+    """
+    async with repository.session() as s:
+        s.add(_manifest_row(timestamp=_AS_OF - timedelta(minutes=1)))
+        await s.commit()
+
+    with pytest.raises(ExecutionChainError, match="annulment_digest_mismatch"):
+        await repository.get_executions_for_recovery(as_of=_AS_OF)
+
+
 async def test_recovery_and_timeline_reads_drop_the_repudiated_booking(
     repository: SQLAlchemyRepository,
 ) -> None:
@@ -896,15 +1193,17 @@ async def test_recovery_and_timeline_reads_drop_the_repudiated_booking(
         planes still return it, because the past does not silently acquire a
         correction it did not know about.
     """
-    await _annul_kraken_phantom(repository)
+    correction = await _annul_kraken_phantom(repository)
 
     recovered = await repository.get_executions_for_recovery(as_of=_AS_OF)
     timeline = await repository.get_pnl_timeline_executions(_MAIN_WALLET, "live", _AS_OF)
-    historical_recovered = await repository.get_executions_for_recovery(as_of=_BEFORE_CORRECTION)
+    historical_recovered = await repository.get_executions_for_recovery(
+        as_of=correction["timestamp"] - timedelta(seconds=1)
+    )
     historical_timeline = await repository.get_pnl_timeline_executions(
         _MAIN_WALLET,
         "live",
-        _BEFORE_CORRECTION,
+        correction["timestamp"] - timedelta(seconds=1),
     )
 
     assert [row["public_id"] for row in recovered] == [
@@ -925,6 +1224,192 @@ async def test_recovery_and_timeline_reads_drop_the_repudiated_booking(
     assert _KRAKEN_PHANTOM in {row["public_id"] for row in historical_timeline}
 
 
+def _derived_plane_rows() -> (
+    list[TradeProjectionCheckpoint | Position | ExecutionPlanCheckpoint | PortfolioPnlPoint]
+):
+    """Build the MEASURED production derived plane behind the same five bookings.
+
+    Two ``trade_projection_checkpoints`` — one keyed on the genuine Walutomat
+    ``recon-`` execution id, one on a paper fallback — one ``positions`` row,
+    three ``execution_plan_checkpoints``, and no ``portfolio_pnl_points`` at all.
+    The Kraken phantom has NO checkpoint of its own, which is exactly why the
+    plan calls the production correction safe: nothing durable depends on it.
+    """
+    return [
+        _projection_checkpoint("walutomat.EUR-PLN.live", _MAIN_WALLET, f"recon-{_WALUTOMAT_CID}"),
+        _projection_checkpoint("paper.BTC-USD.live", _PAPER_WALLET, "paper-3"),
+        Position(
+            public_id="00000000-0000-7000-8000-000000000d01",
+            instrument_public_id=_WALUTOMAT_INSTRUMENT,
+            mode="live",
+            wallet_public_id=_MAIN_WALLET,
+            quantity=20.04,
+            average_price=4.3836,
+            unrealized_pnl=None,
+            realized_pnl=0.0,
+            mark_price=None,
+            marked_at=None,
+            source_venue_event_id=None,
+            timestamp=_WALUTOMAT_TRADE_AT,
+            known_to=KNOWN_TO_MAX,
+            session_id=_SESSION,
+            sequence_id=1,
+        ),
+        *(
+            ExecutionPlanCheckpoint(
+                public_id=f"00000000-0000-7000-8000-00000000d1{index:02d}",
+                plan_public_id=f"00000000-0000-7000-8000-00000000d2{index:02d}",
+                state={"phase": "terminal"},
+                last_venue_event_id=index,
+                last_tick_timestamp=_WALUTOMAT_TRADE_AT,
+                checkpoint_at=_WALUTOMAT_TRADE_AT,
+                timestamp=_WALUTOMAT_TRADE_AT,
+                known_to=KNOWN_TO_MAX,
+                session_id=_SESSION,
+                sequence_id=index,
+            )
+            for index in (1, 2, 3)
+        ),
+    ]
+
+
+def _projection_checkpoint(
+    shard_key: str,
+    wallet_public_id: str,
+    seen_exec_id: str,
+) -> TradeProjectionCheckpoint:
+    """Build one durable shard projection keyed on a witnessed execution id."""
+    return TradeProjectionCheckpoint(
+        shard_key=shard_key,
+        wallet_public_id=wallet_public_id,
+        operator_public_id=None,
+        position_qty=1.0,
+        entry_price=100.0,
+        position_opened_at=_WALUTOMAT_TRADE_AT,
+        cash=0.0,
+        peak_equity=0.0,
+        realized_pnl=0.0,
+        turnover=0.0,
+        last_venue_event_id=1,
+        last_venue_event_at=_WALUTOMAT_TRADE_AT,
+        open_command_ids=None,
+        seen_exec_ids=f'["{seen_exec_id}"]',
+        checkpoint_at=_WALUTOMAT_TRADE_AT,
+        timestamp=_WALUTOMAT_TRADE_AT,
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION,
+        sequence_id=1,
+    )
+
+
+async def test_the_derived_planes_rebuild_only_the_real_shards(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The measured derived plane survives the correction with nothing invented.
+
+    Given: The measured production derived plane behind the same five bookings —
+        two trade projection checkpoints (the Walutomat ``recon-`` execution id
+        and a paper fallback), one positions row, three execution-plan
+        checkpoints, and an empty ``portfolio_pnl_points`` — with the Kraken
+        phantom annulled.
+    When: The annulment-aware recovery read runs.
+    Then: It replays exactly the shards backed by real witnessed data, and the
+        phantom-only ``kraken.BTC-USD`` shard does not reappear — a rebuild
+        seeded from this read cannot recreate state that only ever existed
+        because of the defect. The plan checkpoints are untouched: they are
+        CONTROL state, not economic projection, so a money correction must not
+        move them; the P&L point table stays empty because no anchor has been
+        activated; and the raw ledger still holds all five bookings.
+    """
+    async with repository.session() as s:
+        s.add_all(_derived_plane_rows())
+        await s.commit()
+    await _annul_kraken_phantom(repository)
+
+    recovered = await repository.get_executions_for_recovery(as_of=_AS_OF)
+
+    assert {(row["exchange"], row["instrument"]) for row in recovered} == {
+        ("walutomat", "EUR-PLN"),
+        ("paper", "BTC-USD"),
+    }
+    assert _KRAKEN_PHANTOM not in {row["public_id"] for row in recovered}
+    async with repository.session() as s:
+        plan_checkpoints = (await s.execute(select(ExecutionPlanCheckpoint))).scalars().all()
+        projections = (await s.execute(select(TradeProjectionCheckpoint))).scalars().all()
+        positions = (await s.execute(select(Position))).scalars().all()
+        pnl_points = (await s.execute(select(PortfolioPnlPoint))).scalars().all()
+        executions = (await s.execute(select(Execution))).scalars().all()
+    assert len(plan_checkpoints) == 3
+    assert all(row.known_to == KNOWN_TO_MAX for row in plan_checkpoints)
+    assert {row.shard_key for row in projections} == {
+        "walutomat.EUR-PLN.live",
+        "paper.BTC-USD.live",
+    }
+    assert len(positions) == 1
+    assert list(pnl_points) == []
+    assert len(executions) == 5
+
+
+async def test_certification_pins_one_snapshot_before_reading_evidence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Every read behind the proof answers for the same instant.
+
+    Given: A PostgreSQL certification read.
+    When: The effective prefix is loaded.
+    Then: The transaction is pinned to REPEATABLE READ READ ONLY BEFORE any
+        evidence statement runs. The proof reads the prefix, its fill lineage,
+        the manifest, and the manifest's contradiction witnesses separately and
+        concludes from how they AGREE; under READ COMMITTED each statement takes
+        a fresh snapshot, so a fill committed mid-proof yields a torn view in
+        which the manifest is read before the witness that already contradicts
+        it. SQLite serializes one connection against any writer, which is why
+        every other test in this file pins the BEHAVIOUR and this one pins the
+        PostgreSQL-only property that produces it.
+    """
+    events: list[str] = []
+    session = AsyncMock()
+
+    async def execute(statement: object, parameters: object = None) -> MagicMock:
+        """Record every statement the pinned transaction issues."""
+        del parameters
+        events.append(str(statement))
+        return MagicMock()
+
+    async def load(
+        loaded_session: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Record that evidence loading begins only after the pin is set."""
+        del loaded_session, wallet_public_id, mode, as_of
+        events.append("load")
+        return {"watermarks": {}, "executions": [], "annulments": []}
+
+    session.execute = AsyncMock(side_effect=execute)
+    session.begin = MagicMock(return_value=AsyncMock())
+    with (
+        patch.object(
+            SQLAlchemyRepository,
+            "dialect_name",
+            new_callable=PropertyMock,
+            return_value="postgresql",
+        ),
+        patch.object(repository, "session") as session_context,
+        patch.object(
+            repository,
+            "_load_pnl_timeline_execution_prefix_snapshot",
+            side_effect=load,
+        ),
+    ):
+        session_context.return_value.__aenter__.return_value = session
+        session_context.return_value.__aexit__.return_value = None
+        await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
+
+    assert events == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", "load"]
+
+
 async def test_raw_audit_reads_keep_showing_the_corrected_booking(
     repository: SQLAlchemyRepository,
 ) -> None:
@@ -937,7 +1422,7 @@ async def test_raw_audit_reads_keep_showing_the_corrected_booking(
         correction beside it — the exclusion belongs to the economic and
         certification planes alone.
     """
-    annulment_public_id = await _annul_kraken_phantom(repository)
+    correction = await _annul_kraken_phantom(repository)
 
     listed = await repository.get_executions(limit=10, as_of=_AS_OF)
     for_order = await repository.get_executions_for_order(_KRAKEN_ORDER, _AS_OF)
@@ -945,4 +1430,4 @@ async def test_raw_audit_reads_keep_showing_the_corrected_booking(
 
     assert _KRAKEN_PHANTOM in {row["public_id"] for row in listed}
     assert [row["public_id"] for row in for_order] == [_KRAKEN_PHANTOM]
-    assert [row["public_id"] for row in manifest] == [annulment_public_id]
+    assert [row["public_id"] for row in manifest] == [correction["public_id"]]

@@ -9,6 +9,7 @@ forward-activation-cut option, so a fixture that puts the phantom first would
 not exercise the real case at all.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -24,6 +25,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import execution_row_digest
@@ -37,6 +39,7 @@ from snapper.data.repository import ExecutionAnnulmentConflictError
 from snapper.data.repository import ExecutionAnnulmentTargetError
 from snapper.data.repository import ExecutionAnnulmentWitnessedError
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _ExecutionAnnulmentCommand
 from snapper.data.repository_types import ExecutionAnnulmentRequest
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
@@ -316,7 +319,6 @@ def _request(digest: str, **overrides: object) -> ExecutionAnnulmentRequest:
         "evidence": dict(_EVIDENCE),
         "session_id": _SESSION,
         "sequence_id": 1,
-        "timestamp": _CORRECTION_AT,
     }
     base.update(overrides)
     return cast(ExecutionAnnulmentRequest, base)
@@ -350,6 +352,68 @@ async def _execution_snapshot(
             )
             for row in rows
         ]
+
+
+async def test_the_knowledge_instant_is_stamped_by_the_server_not_the_operator(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A correction cannot claim to have been known before it was written.
+
+    Given: An operator whose declared ``correction_time`` is backdated far into
+        the past — the shape of a request that would like a historical read to
+        be re-answered.
+    When: The correction is recorded.
+    Then: The manifest row's ``timestamp`` — the value every knowledge-horizon
+        fold filters on — is the SERVER's own instant, bracketed by this test's
+        clock readings, while the backdated declaration is preserved verbatim as
+        audit metadata. Only an instant no caller can choose can turn "was this
+        already known?" from a claim into a fact.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    backdated = datetime(2020, 1, 1, tzinfo=UTC)
+    before = datetime.now(UTC)
+
+    row = await repository.record_execution_annulment(_request(digest, correction_time=backdated))
+
+    after = datetime.now(UTC)
+    assert row["correction_time"] == backdated
+    assert before <= row["timestamp"] <= after
+
+
+async def test_the_knowledge_stamp_postdates_every_lock_the_writer_waits_on(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A correction cannot be dated from before the wait that delayed it.
+
+    Given: A scope fence that takes measurable time to acquire — the shape of a
+        real advisory-lock wait behind a concurrent writer.
+    When: The correction is recorded.
+    Then: The knowledge stamp postdates the fence's release. Stamping before the
+        wait would date the row from an instant at which it did not yet durably
+        exist, so a historical read landing in that gap would fold a correction
+        the database could not have shown it. What remains after this is bounded
+        by the writer's own insert-to-commit latency, with no lock awaited in
+        between.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    fence_released: list[datetime] = []
+    real_fence = SQLAlchemyRepository._acquire_execution_annulment_fence
+
+    async def slow_fence(
+        self: SQLAlchemyRepository,
+        session: AsyncSession,
+        command: _ExecutionAnnulmentCommand,
+    ) -> None:
+        """Hold the fence briefly, then record the instant it was acquired."""
+        await real_fence(self, session, command)
+        await asyncio.sleep(0.05)
+        fence_released.append(datetime.now(UTC))
+
+    with patch.object(SQLAlchemyRepository, "_acquire_execution_annulment_fence", slow_fence):
+        row = await repository.record_execution_annulment(_request(digest))
+
+    assert fence_released
+    assert row["timestamp"] >= fence_released[0]
 
 
 async def test_annulling_the_kraken_phantom_leaves_the_real_trade_untouched(

@@ -515,15 +515,41 @@ class _SpotReplayEffectiveRequest:
     """One counted spot replay range and the horizon its corrections are known at.
 
     Bundled so the effective-row filter stays a small named boundary instead of
-    a six-argument helper, and so the scope it matches the manifest on is the
-    scope the range was actually read for rather than one re-derived from rows.
+    a seven-argument helper, and so the scope and bounds it matches the manifest
+    on are the ones the range was actually read for rather than any re-derived
+    from the projected rows.
     """
 
     wallet_public_id: str
     exchange: str
     mode: str
     as_of: datetime
+    anchor_watermark: int
+    boundary_watermark: int
     replay: list[SpotReplayExecutionSourceRow]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionAnnulmentFoldRequest:
+    """One manifest, the proven range it binds against, and its witness evidence.
+
+    The shared input of :meth:`SQLAlchemyRepository._validated_execution_annulment_fold`,
+    which the P&L certification prefix and the spot reconciliation replay both
+    consume. Keying the range by scope coordinate rather than by whatever row
+    shape a caller happens to load is what lets one validated fold serve two
+    planes with different joins and different range bounds.
+
+    ``annulment_rows`` is already narrowed to the corrections whose SERVER
+    knowledge stamp the read's horizon has passed. ``witnesses_by_execution_public_id``
+    is the WRITER-symmetric contradiction evidence — every historical client-id
+    spelling, no ``known_to`` filter, no horizon cut — kept separate from the
+    economic fill rows precisely because the two questions need different
+    widths.
+    """
+
+    annulment_rows: list[ExecutionAnnulment]
+    executions_by_coordinate: dict[tuple[str, int], Execution]
+    witnesses_by_execution_public_id: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,10 +561,12 @@ class _PnlTimelineExecutionPrefixSource:
     each take the WHOLE evidence set without either growing an argument list or
     silently reading a narrower slice than the stage before it.
 
-    ``annulment_rows`` is already narrowed to the corrections whose
-    ``correction_time`` the read's knowledge horizon has passed; a correction
-    the horizon does not yet know is simply not part of this fold's evidence,
-    which is what makes a historical answer reproducible.
+    ``annulment_rows`` is already narrowed to the corrections whose SERVER
+    knowledge stamp the read's horizon has passed; a correction the horizon does
+    not yet know is simply not part of this fold's evidence, which is what makes
+    a historical answer reproducible. ``annulment_witnesses`` is the separate,
+    deliberately wider contradiction evidence described on
+    :meth:`SQLAlchemyRepository._refuse_witnessed_execution_annulment_at_read`.
     """
 
     wallet_public_id: str
@@ -549,6 +577,7 @@ class _PnlTimelineExecutionPrefixSource:
     native_symbols_by_symbol_public_id: dict[str, set[str]]
     order_instrument_ids_by_scope: dict[str, set[str]]
     annulment_rows: list[ExecutionAnnulment]
+    annulment_witnesses: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,8 +750,16 @@ class _ExecutionAnnulmentCommand:
 
     Every identity is already canonical here and ``evidence_json`` is already
     the exact bytes that will be stored, so the fenced transaction body does
-    nothing but PROVE and APPEND — no parsing, no normalization, and therefore
-    no way for a validation decision to depend on state read under the fence.
+    nothing but PROVE, STAMP, and APPEND — no parsing, no normalization, and
+    therefore no way for a validation decision to depend on state read under
+    the fence.
+
+    It deliberately carries NO knowledge instant. That stamp is taken inside
+    the fence, after every wait, immediately before the insert; taking it here
+    would date the correction from before an unbounded advisory-lock wait, so a
+    row could commit long after the instant it claims to have become known.
+    ``correction_time`` is the unrelated operator-declared instant and is audit
+    metadata a caller may set freely.
     """
 
     target_execution_public_id: str
@@ -737,7 +774,6 @@ class _ExecutionAnnulmentCommand:
     evidence_json: str
     session_id: str
     sequence_id: int
-    timestamp: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1503,41 +1539,74 @@ def venue_event_fill_identity() -> ColumnElement[str]:
     )
 
 
-def effective_execution_predicate(as_of: datetime) -> ColumnElement[bool]:
-    """Return the SQL predicate an ECONOMIC execution read must carry.
+ANNULMENT_KNOWLEDGE_SETTLING_SECONDS: Final[float] = 60.0
+"""How long a correction's knowledge stamp must age before HISTORY may fold it.
 
-    One expression, shared by every derived plane, so a booking repudiated by
-    the append-only manifest can neither seed a startup projection nor enter a
-    reconciliation replay nor reappear as timeline activity — and so no plane
-    can drift into using a slightly different notion of "still counts".
+The writer stamps a correction's knowledge instant at the last point before its
+insert, but the row only becomes visible to other readers at COMMIT — so for a
+brief interval a committed row carries a stamp fractionally older than its own
+durability. No supported dialect can close that on the write side: neither
+PostgreSQL nor SQLite will assign a commit-time value to an ordinary column.
+It is closed on the READ side instead, and only where it can actually do harm.
 
-    The horizon is load-bearing: only corrections whose ``correction_time`` the
-    read has passed are honoured, exactly as the certification prefix does, so
-    a read of the past keeps returning the past's answer. ``known_to`` is not
-    filtered on the manifest side because a manifest row physically cannot
-    close.
+Sixty seconds is not a measurement of that interval; it is orders of magnitude
+above it. The interval is one unfenced round trip — an INSERT and a COMMIT on a
+single small row, with no lock awaited in between — which is sub-millisecond
+locally and single-digit milliseconds across a loaded network. A margin four to
+five orders of magnitude larger absorbs a stalled writer process, a paused
+container, and a clock nudge, and still costs nothing: the only reads it
+constrains are historical ones, which by definition are not asking about the
+last minute.
+"""
 
-    This predicate is deliberately NOT applied to raw audit reads. Correcting
-    a ledger means the correction is visible beside what it corrects: audit
-    surfaces keep showing the annulled execution, and the manifest is read
-    separately through ``get_execution_annulments``. Only the economic and
-    certification planes exclude.
+_ANNULMENT_KNOWLEDGE_SETTLING: Final[timedelta] = timedelta(
+    seconds=ANNULMENT_KNOWLEDGE_SETTLING_SECONDS
+)
+"""Interval form of :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`."""
+
+
+def annulment_knowledge_bound(as_of: datetime) -> datetime:
+    """Return the newest correction stamp one read horizon is entitled to fold.
+
+    The invariant: *a correction becomes historically knowable only after its
+    stamp has settled beyond any insert-to-commit latency; before that, history
+    refuses rather than assumes.* A historical horizon therefore folds only
+    corrections stamped at least :data:`ANNULMENT_KNOWLEDGE_SETTLING_SECONDS`
+    before it, so a read of the past can never be re-answered by a row that was
+    stamped before that instant but became durable after it.
+
+    The direction is fail-closed, and it is worth being explicit about which way
+    that cuts. Inside the settling window a correction is NOT folded, so an
+    unwitnessed phantom stays unexcluded and the scope's certification REFUSES.
+    A refusal is a visible, retryable state; the alternative — folding a
+    correction the horizon may not have been able to see — silently fabricates
+    economics for a past that has already been reported.
+
+    Current truth is exempt, and the exemption is a proof rather than a
+    convenience: a read whose horizon reaches the present SAW the row, and a row
+    a reader can see is committed. There is nothing left to settle, and no
+    earlier answer to contradict, because the present has not been answered
+    before. A horizon is treated as the present when it lies within one settling
+    margin of the read's own clock, which is what every current-truth caller
+    produces — the routes pass ``datetime.now(UTC)`` when no explicit ``as_of``
+    is given, and recovery and reconciliation pass their tick instant.
+
+    That makes the rule deliberately discontinuous at the margin rather than
+    monotone in ``as_of``: horizons inside the margin are the present and fold
+    everything visible; horizons outside it are history and must wait. Trying to
+    smooth the step would mean applying settling to current truth, which would
+    make an operator's just-recorded correction invisible to the very read they
+    recorded it for.
 
     Args:
-        as_of: Knowledge horizon the corrections must already be known at.
+        as_of: The read's knowledge horizon.
 
     Returns:
-        A predicate true for executions that are still economically effective.
+        The newest correction stamp this horizon may treat as known.
     """
-    return ~(
-        select(1)
-        .select_from(ExecutionAnnulment)
-        .where(
-            ExecutionAnnulment.target_execution_public_id == Execution.public_id,
-            ExecutionAnnulment.correction_time <= as_of,
-        )
-        .exists()
-    )
+    if as_of >= datetime.now(UTC) - _ANNULMENT_KNOWLEDGE_SETTLING:
+        return as_of
+    return as_of - _ANNULMENT_KNOWLEDGE_SETTLING
 
 
 IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
@@ -10750,13 +10819,30 @@ class SQLAlchemyRepository(Repository):
 
         ECONOMIC plane. Recovery shadow-replays these rows through the trade
         service to rebuild engine, portfolio, and projection state, so it is a
-        fold over accounting history and carries
-        :func:`effective_execution_predicate`: an annulled booking neither
-        seeds a position projection nor recreates a shard that exists only
-        because of it. Rows the manifest does not repudiate replay unchanged,
-        and the raw ledger stays fully visible to the audit reads.
+        fold over accounting history: an annulled booking must neither seed a
+        position projection nor recreate a shard that exists only because of
+        it. Rows the manifest does not repudiate replay unchanged, and the raw
+        ledger stays fully visible to the audit reads.
+
+        The exclusion comes from :meth:`_validated_execution_annulment_exclusions`,
+        the same proof the certification prefix and the reconciliation replay
+        apply, and NOT from a bare existence test on the target id. A rebuild
+        that trusted the manifest unproven would silently omit a repudiated
+        booking that a later fill has since witnessed — real money, dropped
+        from the projection with nothing said. Validation and consumption share
+        ONE pinned snapshot (:meth:`_begin_effective_execution_snapshot`), so a
+        witness committing between them cannot make the exclusion set and the
+        rows it filters disagree. Failing closed instead matches
+        what recovery already does with any state it cannot certify: it
+        quarantines rather than inventing.
         """
-        async with self.session() as s:
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
+            annulled = await self._validated_execution_annulment_exclusions(
+                s,
+                as_of,
+                wallet_public_id,
+            )
             query = (
                 select(Execution, Order, Instrument, Symbol)
                 .join(
@@ -10780,7 +10866,7 @@ class SQLAlchemyRepository(Repository):
                         *where_active(Symbol, as_of),
                     ),
                 )
-                .where(*where_active(Execution, as_of), effective_execution_predicate(as_of))
+                .where(*where_active(Execution, as_of))
                 .order_by(Execution.timestamp)
             )
             if exchange:
@@ -10825,6 +10911,7 @@ class SQLAlchemyRepository(Repository):
                     "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
+                if exe.public_id not in annulled
             ]
 
     @staticmethod
@@ -11439,6 +11526,14 @@ class SQLAlchemyRepository(Repository):
     ) -> _ExecutionAnnulmentCommand:
         """Validate and canonicalize one annulment request before any database work.
 
+        Deliberately produces NO knowledge instant. Every fold that asks "was
+        this correction already known?" keys on that stamp, so it must be a
+        value the operator cannot supply AND cannot precede the row's durable
+        existence; it is therefore taken inside the fenced transaction, after
+        every wait, immediately before the insert. The operator's own
+        ``correction_time`` is carried through unchanged as declared audit
+        metadata and is never compared against a read horizon.
+
         Args:
             request: The operator-authored annulment request.
 
@@ -11471,7 +11566,6 @@ class SQLAlchemyRepository(Repository):
             ),
             session_id=canonical_uuid(request["session_id"], "session_id"),
             sequence_id=request["sequence_id"],
-            timestamp=request["timestamp"],
         )
 
     @staticmethod
@@ -11752,23 +11846,45 @@ class SQLAlchemyRepository(Repository):
         The whole protocol runs in ONE transaction: open with explicit dialect
         guarantees, fence the certification scope, re-read and prove the target
         (exists, same scope, same canonical digest), refuse any durable fill
-        witness, then append. Nothing is superseded, nothing is closed, and no
-        generic CRUD primitive is involved — the manifest's physical name is
-        registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it
-        cannot be.
+        witness, stamp the knowledge instant, then append. Nothing is
+        superseded, nothing is closed, and no generic CRUD primitive is
+        involved — the manifest's physical name is registered in
+        :data:`IMMUTABLE_LEDGER_TABLE_NAMES` precisely so it cannot be.
 
-        Contradictory-later-witness doctrine, stated honestly. The witness check
-        here is NECESSARY but NOT SUFFICIENT: it proves only that no
-        ``fill_observed`` row existed at write time. A late venue event can
-        still arrive afterwards and contradict a committed annulment, and this
-        writer cannot prevent that — the manifest is append-only, so the
-        correction cannot be withdrawn once a contradiction appears. Closing
-        that half is the READ side's duty (slice A2): every certification
-        boundary that folds the manifest must re-check witness absence at its
-        own horizon and fail closed on a contradicted annulment rather than
-        keep excluding a now-witnessed execution. The split is deliberate — the
-        write side refuses what it can see, the read side refuses what arrived
-        later.
+        Knowledge-stamp placement, and the residual window it leaves. Every
+        knowledge-horizon fold filters on the row's ``timestamp``, so a stamp
+        that precedes the row's durable existence lets a historical read at an
+        instant between the two see a correction that did not yet exist. The
+        stamp is therefore taken at the LAST possible point: after the
+        transaction's dialect guarantees, after the scope fence, after the
+        ``FOR UPDATE`` target re-read, and after the witness refusal — so no
+        lock is ever awaited afterwards. What remains is bounded and small: the
+        stamp precedes durable visibility by at most this writer's own
+        insert-to-commit latency, a single unfenced round trip, instead of by
+        an unbounded advisory-lock wait. The window cannot be closed entirely
+        without the commit itself assigning the value, which no supported
+        dialect offers for an ordinary column.
+
+        Contradictory-later-witness doctrine, and the exact guarantee it buys.
+        The witness check here is NECESSARY but NOT SUFFICIENT: it proves only
+        that no ``fill_observed`` row existed at write time. A late venue event
+        can still arrive afterwards and contradict a committed annulment, and
+        this writer cannot prevent that — the manifest is append-only, so the
+        correction cannot be withdrawn once a contradiction appears.
+
+        The read side closes it, and closes it completely. Every economic fold
+        of this manifest re-asks the question through
+        :meth:`_read_execution_annulment_contradiction_witnesses`, which
+        reproduces THIS check's binding exactly — every historical client-id
+        spelling, no ``known_to`` filter, no horizon cut — inside a pinned
+        certification snapshot. Because the two sides ask the identical question
+        and the read side cannot see a torn view, a witness that arrives at any
+        instant after this write is caught by the next certification or
+        reconciliation rather than silently suppressed: the guarantee is not
+        "the writer saw no witness" but "no fold ever excludes a witnessed
+        booking". What remains the writer's alone is refusing the obviously
+        witnessed target up front, so an operator learns immediately instead of
+        after the correction has been appended and become unwithdrawable.
 
         Args:
             request: The operator-authored annulment request.
@@ -11793,6 +11909,7 @@ class SQLAlchemyRepository(Repository):
                 await self._acquire_execution_annulment_fence(s, command)
                 target = await self._proven_execution_annulment_target(s, command)
                 await self._refuse_witnessed_execution_annulment(s, command, target)
+                knowledge_time = datetime.now(UTC)
                 row = ExecutionAnnulment(
                     target_execution_public_id=command.target_execution_public_id,
                     target_execution_digest=command.expected_execution_digest,
@@ -11806,7 +11923,7 @@ class SQLAlchemyRepository(Repository):
                     evidence_json=command.evidence_json,
                     session_id=command.session_id,
                     sequence_id=command.sequence_id,
-                    timestamp=command.timestamp,
+                    timestamp=knowledge_time,
                     known_to=KNOWN_TO_MAX,
                 )
                 s.add(row)
@@ -14246,54 +14363,53 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _bound_pnl_timeline_annulment_target(
         annulment: ExecutionAnnulment,
-        rows_by_coordinate: dict[
-            tuple[str, int], tuple[Execution, Order | None, Instrument | None]
-        ],
-        public_ids_in_prefix: frozenset[str],
-    ) -> tuple[Execution, Order | None, Instrument | None] | None:
-        """Bind one manifest row to the proven prefix, or prove it is out of this cut.
+        executions_by_coordinate: dict[tuple[str, int], Execution],
+        public_ids_in_range: frozenset[str],
+    ) -> Execution | None:
+        """Bind one manifest row to the proven range, or prove it is out of this cut.
 
         A manifest row carries the certification coordinate its writer proved
         equal to the target's own, so the coordinate decides membership: a
-        coordinate inside a proven ``[1, W]`` range MUST be occupied, and the
-        occupant must be the very row the manifest names. Anything else is a
-        binding this fold refuses to honour rather than quietly ignore.
+        coordinate the caller's proven range occupies MUST hold the very row
+        the manifest names. Anything else is a binding this fold refuses to
+        honour rather than quietly ignore.
 
-        A row whose coordinate lies beyond every proven watermark is NOT an
-        error: its target simply is not part of this cut, and a later horizon
-        will fold it. The public-id index catches the inverse hazard — a
-        manifest row that is out of coordinate range yet names a row this
-        prefix does contain, which would silently fail to exclude it.
+        A row whose coordinate the range does not occupy is NOT an error: its
+        target simply is not part of this cut — a sequence above the P&L
+        watermark, or below a reconciliation anchor's — and the cut that does
+        contain it will fold it. The public-id index catches the inverse hazard:
+        a manifest row that is out of coordinate range yet names a row this
+        range does contain, which would silently fail to exclude it.
 
         Args:
             annulment: One manifest row already known at the read's horizon.
-            rows_by_coordinate: The proven prefix indexed by scope coordinate.
-            public_ids_in_prefix: Every proven row's immutable identity.
+            executions_by_coordinate: The proven range by scope coordinate.
+            public_ids_in_range: Every proven row's immutable identity.
 
         Returns:
-            The bound target row with its sentinel-active lineage, or ``None``
-            when the manifest row targets a row outside this cut.
+            The bound target execution, or ``None`` when the manifest row
+            targets a row outside this cut.
 
         Raises:
             ExecutionChainError: If the binding is dangling or scope-crossed.
         """
         coordinate = (annulment.exchange, int(annulment.scope_sequence))
-        bound = rows_by_coordinate.get(coordinate)
-        if bound is None:
-            if annulment.target_execution_public_id in public_ids_in_prefix:
+        target = executions_by_coordinate.get(coordinate)
+        if target is None:
+            if annulment.target_execution_public_id in public_ids_in_range:
                 raise ExecutionChainError(
                     "crossed_annulment_scope: "
                     f"annulment_public_id={annulment.public_id} "
                     f"execution_public_id={annulment.target_execution_public_id}"
                 )
             return None
-        if bound[0].public_id != annulment.target_execution_public_id:
+        if target.public_id != annulment.target_execution_public_id:
             raise ExecutionChainError(
                 "dangling_annulment_binding: "
                 f"annulment_public_id={annulment.public_id} "
                 f"execution_public_id={annulment.target_execution_public_id}"
             )
-        return bound
+        return target
 
     @staticmethod
     def _proven_pnl_timeline_annulment_digest(
@@ -14330,10 +14446,10 @@ class SQLAlchemyRepository(Repository):
             )
 
     @staticmethod
-    def _refuse_witnessed_pnl_timeline_annulment(
-        witnesses_by_client_order_id: dict[str, VenueEvent],
+    def _refuse_witnessed_execution_annulment_at_read(
+        request: _ExecutionAnnulmentFoldRequest,
         annulment: ExecutionAnnulment,
-        bound: tuple[Execution, Order | None, Instrument | None],
+        target: Execution,
     ) -> None:
         """Fail closed when a durable witness NOW contradicts a committed annulment.
 
@@ -14345,57 +14461,57 @@ class SQLAlchemyRepository(Repository):
         annulment that a real fill contradicts refuses the whole certification
         by name rather than continuing to suppress money the venue confirmed.
 
-        The witness binding mirrors the writer's: the target order's
-        ``client_order_id`` against the horizon's sealed ``fill_observed``
-        prefix, with no scope narrowing, because a scope-crossed witness is
-        still evidence the booking was real. A target with no order lineage at
-        all has no client id to match on, which is exactly the ``legacy
-        lineage`` case — there is no witness to find, and the fold must not
-        manufacture one either way.
+        The witness evidence is
+        :meth:`_read_execution_annulment_contradiction_witnesses`, which
+        reproduces the WRITER's binding exactly — every historical Order version's
+        client id, no ``known_to`` filter, no horizon cut. That is deliberately
+        WIDER than the economic witness-assignment read the same certification
+        performs: assignment answers "which fill does this booking consume?" and
+        must stay bound to sentinel-current lineage inside the sealed horizon,
+        while contradiction answers "does a fill for this booking exist at all?"
+        and must see every spelling and every instant, or a witness delivered
+        under a superseded client id would slip past the refusal the writer's
+        symmetric check was designed to guarantee.
 
         Args:
-            witnesses_by_client_order_id: The horizon's sealed fill witnesses,
-                indexed once for the whole manifest.
+            request: The fold's evidence, including the contradiction witnesses.
             annulment: The bound manifest row.
-            bound: The annulled execution with its sentinel-active lineage.
+            target: The annulled execution.
 
         Raises:
-            ExecutionChainError: If any sealed fill witness matches the target.
+            ExecutionChainError: If any fill witness matches the target.
         """
-        target, order, _ = bound
-        client_order_id = None if order is None else order.client_order_id
-        witness = (
-            None if client_order_id is None else witnesses_by_client_order_id.get(client_order_id)
-        )
+        witness = request.witnesses_by_execution_public_id.get(target.public_id)
         if witness is not None:
             raise ExecutionChainError(
                 "annulled_execution_witnessed: "
                 f"annulment_public_id={annulment.public_id} "
                 f"execution_public_id={target.public_id} "
-                f"fill_event_public_id={witness.public_id}"
+                f"fill_event_public_id={witness}"
             )
 
     @staticmethod
-    def _validated_pnl_timeline_annulment_manifest(
-        source: _PnlTimelineExecutionPrefixSource,
-        rows_by_coordinate: dict[
-            tuple[str, int], tuple[Execution, Order | None, Instrument | None]
-        ],
+    def _validated_execution_annulment_fold(
+        request: _ExecutionAnnulmentFoldRequest,
     ) -> _PnlTimelineAnnulmentFold:
-        """Prove the whole manifest against the proven prefix, then project it.
+        """Prove one manifest against one proven execution range, then project it.
 
-        Runs strictly AFTER the physical proof, so every binding is checked
-        against rows whose presence and contiguity are already established.
-        Each manifest row must bind to an in-prefix execution by scope
-        coordinate AND immutable id AND canonical digest, and must survive the
-        read-time contradictory-witness refusal, before it may exclude
-        anything. Duplicates are refused defensively: the manifest's TOTAL
-        unique indexes make them impossible to write, and a read that met one
-        anyway would be reading a ledger whose guarantees no longer hold.
+        The single validated fold every economic plane consumes — the P&L
+        certification prefix and the spot reconciliation replay both call THIS,
+        so a repudiation can never be honoured by one plane under weaker proof
+        than the other. It runs strictly AFTER its caller's physical proof, so
+        every binding is checked against rows whose presence the caller has
+        already established.
+
+        Each manifest row must bind to an in-range execution by scope coordinate
+        AND immutable id AND canonical digest, and must survive the read-time
+        contradictory-witness refusal, before it may exclude anything.
+        Duplicates are refused defensively: the manifest's TOTAL unique indexes
+        make them impossible to write, and a read that met one anyway would be
+        reading a ledger whose guarantees no longer hold.
 
         Args:
-            source: Every raw input of this certification.
-            rows_by_coordinate: The proven prefix indexed by scope coordinate.
+            request: The manifest, the proven range, and the witness evidence.
 
         Returns:
             The exclusion predicate and its disclosure projection.
@@ -14404,34 +14520,28 @@ class SQLAlchemyRepository(Repository):
             ExecutionChainError: If any binding is dangling, scope-crossed,
                 duplicated, digest-mismatched, or contradicted by a witness.
         """
-        public_ids_in_prefix = frozenset(
-            execution.public_id for execution, _, _ in rows_by_coordinate.values()
+        public_ids_in_range = frozenset(
+            execution.public_id for execution in request.executions_by_coordinate.values()
         )
-        witnesses_by_client_order_id = {
-            fill_row.client_order_id: fill_row
-            for fill_row in source.fill_rows
-            if fill_row.client_order_id is not None
-        }
         annulled_public_ids: set[str] = set()
         applied: list[PnlTimelineAppliedAnnulment] = []
-        for annulment in source.annulment_rows:
-            bound = SQLAlchemyRepository._bound_pnl_timeline_annulment_target(
+        for annulment in request.annulment_rows:
+            target = SQLAlchemyRepository._bound_pnl_timeline_annulment_target(
                 annulment,
-                rows_by_coordinate,
-                public_ids_in_prefix,
+                request.executions_by_coordinate,
+                public_ids_in_range,
             )
-            if bound is None:
+            if target is None:
                 continue
-            target = bound[0]
             if target.public_id in annulled_public_ids:
                 raise ExecutionChainError(
                     f"duplicate_annulment_binding: execution_public_id={target.public_id}"
                 )
             SQLAlchemyRepository._proven_pnl_timeline_annulment_digest(annulment, target)
-            SQLAlchemyRepository._refuse_witnessed_pnl_timeline_annulment(
-                witnesses_by_client_order_id,
+            SQLAlchemyRepository._refuse_witnessed_execution_annulment_at_read(
+                request,
                 annulment,
-                bound,
+                target,
             )
             annulled_public_ids.add(target.public_id)
             applied.append(
@@ -14563,9 +14673,15 @@ class SQLAlchemyRepository(Repository):
                 or the effective rows' fill lineage cannot be proven.
         """
         rows_by_coordinate = SQLAlchemyRepository._proven_pnl_timeline_execution_prefix_rows(source)
-        fold = SQLAlchemyRepository._validated_pnl_timeline_annulment_manifest(
-            source,
-            rows_by_coordinate,
+        fold = SQLAlchemyRepository._validated_execution_annulment_fold(
+            _ExecutionAnnulmentFoldRequest(
+                annulment_rows=source.annulment_rows,
+                executions_by_coordinate={
+                    coordinate: execution
+                    for coordinate, (execution, _, _) in rows_by_coordinate.items()
+                },
+                witnesses_by_execution_public_id=source.annulment_witnesses,
+            )
         )
         candidates = SQLAlchemyRepository._pnl_timeline_execution_candidates(
             source,
@@ -14597,11 +14713,17 @@ class SQLAlchemyRepository(Repository):
     ) -> list[ExecutionAnnulment]:
         """Read the corrections one knowledge horizon is entitled to know about.
 
-        ``correction_time`` — not the manifest row's bus ``timestamp`` — is the
-        instant a repudiation becomes KNOWN, so a read at an earlier horizon
-        must not see it and must keep failing exactly as it did before the
-        operator acted. That is what makes a historical answer reproducible
-        after a correction lands: the past does not silently acquire it.
+        The filter keys on the manifest row's SERVER-stamped ``timestamp`` — the
+        instant the writer recorded the correction — and never on the
+        operator-declared ``correction_time``. A read at an earlier horizon must
+        keep failing exactly as it did before the operator acted, and that is
+        only a guarantee if the instant deciding it is one no caller can
+        choose: an operator-supplied knowledge time could be backdated to
+        rewrite an answer the system has already given.
+
+        A historical horizon additionally requires the stamp to have SETTLED —
+        see :func:`annulment_knowledge_bound` — so a correction stamped just
+        before it became durable cannot retroactively enter a past answer.
 
         ``known_to`` is deliberately not filtered. Manifest rows physically
         cannot close (CHECK at insert, UPDATE trigger afterwards), so a filter
@@ -14623,7 +14745,7 @@ class SQLAlchemyRepository(Repository):
             .where(
                 ExecutionAnnulment.wallet_public_id == wallet_public_id,
                 ExecutionAnnulment.mode == mode,
-                ExecutionAnnulment.correction_time <= as_of,
+                ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of),
             )
             .order_by(
                 ExecutionAnnulment.exchange.asc(),
@@ -14631,6 +14753,190 @@ class SQLAlchemyRepository(Repository):
             )
         )
         return list(result.scalars().all())
+
+    @staticmethod
+    async def _read_execution_annulment_contradiction_witnesses(
+        s: AsyncSession,
+        target_execution_public_ids: list[str],
+    ) -> dict[str, str]:
+        """Read the WRITER-symmetric fill evidence for one manifest's targets.
+
+        This read exists to answer exactly the question
+        :meth:`_refuse_witnessed_execution_annulment` asked at write time, at a
+        later instant — so it must ask it the SAME way or the guarantee has a
+        seam. Every widening is therefore reproduced verbatim and each one fails
+        closed. Every Order VERSION of the target's order contributes its client
+        id, so a witness delivered under a superseded spelling still counts;
+        ``known_to`` is not filtered on either side, so a closed witness or a
+        closed order version still counts; no knowledge-horizon cut is applied,
+        because a fill from any instant proves the booking was real; and scope
+        is not re-filtered, because a scope-crossed witness is still evidence.
+
+        It is deliberately NOT the economic ``_read_pnl_timeline_fill_lineage``
+        read. That one answers "which sealed fill does this booking consume?"
+        and must stay bound to the sentinel-current lineage inside the horizon,
+        because changing it would change 5A witness assignment. These two
+        questions have different correct widths, and conflating them is what let
+        a superseded-client-id witness slip past the contradiction refusal.
+
+        Args:
+            s: The session running the certification snapshot.
+            target_execution_public_ids: Every execution the manifest targets.
+
+        Returns:
+            One witnessing ``fill_observed`` event public id per contradicted
+            target execution; targets with no witness are absent.
+        """
+        witnesses: dict[str, str] = {}
+        for start in range(
+            0,
+            len(target_execution_public_ids),
+            _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE,
+        ):
+            chunk = target_execution_public_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+            result = await s.execute(
+                select(Execution.public_id, VenueEvent.public_id)
+                .join(Order, Order.public_id == Execution.order_public_id)
+                .join(VenueEvent, VenueEvent.client_order_id == Order.client_order_id)
+                .where(
+                    Execution.public_id.in_(chunk),
+                    Order.client_order_id.is_not(None),
+                    VenueEvent.event_type == "fill_observed",
+                )
+            )
+            for execution_public_id, fill_event_public_id in result.all():
+                witnesses.setdefault(str(execution_public_id), str(fill_event_public_id))
+        return witnesses
+
+    @staticmethod
+    async def _scoped_execution_annulment_coordinates(
+        s: AsyncSession,
+        scope: tuple[str, str, str],
+        annulments: list[ExecutionAnnulment],
+    ) -> dict[tuple[str, int], Execution]:
+        """Load the executions one scope's manifest rows could possibly bind to.
+
+        Two shapes are needed and exactly two are read: the rows OCCUPYING the
+        coordinates the manifest claims (so a binding can be proven or refused
+        as dangling), and the rows CARRYING the identities it names (so a
+        manifest row whose coordinate has drifted away from its own target is
+        caught as scope-crossed rather than silently ignored). Anything else in
+        the scope is irrelevant to the fold and is not read.
+
+        Args:
+            s: The session running the validation.
+            scope: The ``(wallet, exchange, mode)`` the manifest rows share.
+            annulments: That scope's manifest rows.
+
+        Returns:
+            The candidate executions keyed by immutable scope coordinate.
+        """
+        wallet_public_id, exchange, mode = scope
+        result = await s.execute(
+            select(Execution).where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.exchange == exchange,
+                Execution.mode == mode,
+                or_(
+                    Execution.scope_sequence.in_(
+                        [int(annulment.scope_sequence) for annulment in annulments]
+                    ),
+                    Execution.public_id.in_(
+                        [annulment.target_execution_public_id for annulment in annulments]
+                    ),
+                ),
+            )
+        )
+        return {
+            (execution.exchange, int(execution.scope_sequence)): execution
+            for execution in result.scalars().all()
+        }
+
+    @staticmethod
+    async def _validated_execution_annulment_exclusions(
+        s: AsyncSession,
+        as_of: datetime,
+        wallet_public_id: str,
+    ) -> frozenset[str]:
+        """Prove the whole known manifest, then return what it repudiates.
+
+        The derived planes need the same answer the certification prefix and the
+        reconciliation replay compute, but they read across a whole scope rather
+        than a bounded range, so they cannot reuse either caller's proven row
+        set. They get the identical THEOREM instead: every manifest row known at
+        the horizon is bound by scope coordinate AND immutable id AND canonical
+        digest, and refused if a durable fill witness contradicts it, before any
+        exclusion is honoured.
+
+        A bare ``NOT EXISTS`` on the target id would suppress a booking on the
+        manifest's own say-so — including one a later fill has already proven
+        real — which is exactly how a repudiated-then-witnessed trade would
+        vanish from a projection rebuild without anyone being told. Refusing is
+        the correct posture for these planes: recovery already quarantines every
+        shard it cannot certify, so failing closed here rebuilds nothing rather
+        than rebuilding a lie.
+
+        The horizon is applied through :func:`annulment_knowledge_bound`, so a
+        historical read additionally requires each correction's stamp to have
+        settled beyond any insert-to-commit latency.
+
+        Args:
+            s: The session running the read.
+            as_of: Knowledge horizon the corrections must already be known at.
+            wallet_public_id: Wallet to narrow the manifest to, or ``""`` for
+                every wallet, mirroring the recovery read's own scoping.
+
+        Returns:
+            The immutable identities of every provably repudiated execution.
+
+        Raises:
+            ExecutionChainError: If any known manifest row is dangling,
+                scope-crossed, duplicated, digest-mismatched, or contradicted by
+                a durable fill witness.
+        """
+        filters: list[ColumnElement[bool]] = [
+            ExecutionAnnulment.timestamp <= annulment_knowledge_bound(as_of)
+        ]
+        if wallet_public_id:
+            filters.append(ExecutionAnnulment.wallet_public_id == wallet_public_id)
+        annulment_rows = list(
+            (
+                await s.execute(
+                    select(ExecutionAnnulment)
+                    .where(*filters)
+                    .order_by(ExecutionAnnulment.scope_sequence.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not annulment_rows:
+            return frozenset()
+        witnesses = await SQLAlchemyRepository._read_execution_annulment_contradiction_witnesses(
+            s,
+            [annulment.target_execution_public_id for annulment in annulment_rows],
+        )
+        by_scope: dict[tuple[str, str, str], list[ExecutionAnnulment]] = {}
+        for annulment in annulment_rows:
+            scope = (annulment.wallet_public_id, annulment.exchange, annulment.mode)
+            by_scope.setdefault(scope, []).append(annulment)
+        excluded: set[str] = set()
+        for scope, scoped_annulments in by_scope.items():
+            fold = SQLAlchemyRepository._validated_execution_annulment_fold(
+                _ExecutionAnnulmentFoldRequest(
+                    annulment_rows=scoped_annulments,
+                    executions_by_coordinate=(
+                        await SQLAlchemyRepository._scoped_execution_annulment_coordinates(
+                            s,
+                            scope,
+                            scoped_annulments,
+                        )
+                    ),
+                    witnesses_by_execution_public_id=witnesses,
+                )
+            )
+            excluded.update(fold.annulled_public_ids)
+        return frozenset(excluded)
 
     async def _load_pnl_timeline_execution_prefix_snapshot(
         self,
@@ -14701,6 +15007,10 @@ class SQLAlchemyRepository(Repository):
             mode,
             as_of,
         )
+        annulment_witnesses = await self._read_execution_annulment_contradiction_witnesses(
+            s,
+            [annulment.target_execution_public_id for annulment in annulment_rows],
+        )
         executions, annulments = self._validate_pnl_timeline_execution_prefix(
             _PnlTimelineExecutionPrefixSource(
                 wallet_public_id=wallet_public_id,
@@ -14711,6 +15021,7 @@ class SQLAlchemyRepository(Repository):
                 native_symbols_by_symbol_public_id=native_symbols_by_symbol_public_id,
                 order_instrument_ids_by_scope=order_instrument_ids_by_scope,
                 annulment_rows=annulment_rows,
+                annulment_witnesses=annulment_witnesses,
             )
         )
         return {
@@ -14744,19 +15055,53 @@ class SQLAlchemyRepository(Repository):
         validated against the proven rows and the correctly bound targets are
         excluded from witness assignment and from the returned rows; the
         applied corrections are returned alongside them. Only corrections whose
-        ``correction_time`` this ``as_of`` has passed participate, so a
+        SERVER knowledge stamp this ``as_of`` has passed participate, so a
         historical read keeps failing rather than pretending a later correction
         was already known. A manifest binding that is dangling, scope-crossed,
         duplicated, digest-mismatched, or contradicted by a durable
         ``fill_observed`` witness refuses the whole prefix by name.
+
+        Every read backing that proof runs inside ONE snapshot, for the reason
+        stated on :meth:`_begin_effective_execution_snapshot`.
         """
-        async with self.session() as s:
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
             return await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 wallet_public_id,
                 mode,
                 as_of,
             )
+
+    async def _begin_effective_execution_snapshot(self, s: AsyncSession) -> None:
+        """Pin one effective-execution read to a single consistent view.
+
+        Every read that decides which bookings still count does it in several
+        statements — the executions themselves, the annulment manifest, the
+        manifest's contradiction witnesses, and for certification the sealed
+        fill lineage as well — and draws a money-truth conclusion from how they
+        AGREE. Under PostgreSQL's default READ COMMITTED each statement takes a
+        fresh snapshot, so a fill committed between two of them yields a torn
+        view: the exclusion set is computed while the booking still looks
+        unwitnessed, and the consuming query then drops a fill the database has
+        already confirmed. REPEATABLE READ READ ONLY removes that window — every
+        statement answers for the same instant, and the read cannot write.
+
+        Shared by certification and by the derived planes rather than owned by
+        either, because the hazard is identical wherever validation and
+        consumption are separate statements: recovery and the scope listing
+        would otherwise validate under one snapshot and filter under another.
+        Mirrors the spot reconciliation bundle, which pins its own multi-read
+        evidence the same way. SQLite needs no analogue — one connection
+        serializes with any writer, so the reads already share one view — which
+        is why the SQLite suites pin the statement ORDERING and not the
+        isolation level.
+
+        Args:
+            s: The session whose read transaction is being pinned.
+        """
+        if self.dialect_name == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
 
     async def get_pnl_timeline_execution_prefix_bundle(
         self,
@@ -14767,8 +15112,7 @@ class SQLAlchemyRepository(Repository):
     ) -> PnlTimelineExecutionPrefixBundle:
         """Return request and activation cuts with independent identity proof."""
         async with self.session() as s, s.begin():
-            if self.dialect_name == "postgresql":
-                await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            await self._begin_effective_execution_snapshot(s)
             request = await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 wallet_public_id,
@@ -14801,13 +15145,24 @@ class SQLAlchemyRepository(Repository):
         a lower sequence while retaining a higher one. Sentinel-active Order
         supplies immutable instrument lineage without imposing its own clock.
 
-        ECONOMIC plane: annulled bookings are excluded through
-        :func:`effective_execution_predicate` at the same knowledge horizon the
-        watermarks are captured at. This read carries no contiguity proof of
-        its own — it is a scope listing, not a certification — so the sealed
-        certification path is ``get_pnl_timeline_execution_prefix``; what this
-        read guarantees is only that it never hands a repudiated booking to an
-        economic consumer.
+        ECONOMIC plane, and self-sufficient about it. Annulled bookings are
+        excluded through :meth:`_validated_execution_annulment_exclusions` — the
+        same bind, digest, and witness-contradiction proof the certification
+        prefix applies — so this read fails closed on an unprovable or
+        contradicted manifest rather than suppressing a booking on the
+        manifest's own say-so. It carries NO ordering precondition: it does not
+        require a caller to have certified the prefix first, because it does not
+        rely on one having done so.
+
+        That independence is deliberate. This surface currently has no
+        production consumer at all — the certified path is
+        ``get_pnl_timeline_execution_prefix``, which is what the series and
+        marker builders read — and an economic read whose safety depended on an
+        unenforced call ordering would become wrong the moment someone reached
+        for it. Validation and consumption share ONE pinned snapshot
+        (:meth:`_begin_effective_execution_snapshot`) for the same reason. What
+        it still does NOT provide is a contiguity proof: it is a scope listing,
+        not a certification, so certification remains the prefix read's job.
 
         Args:
             wallet_public_id: Wallet scope to reconstruct.
@@ -14819,6 +15174,10 @@ class SQLAlchemyRepository(Repository):
 
         Returns:
             Effective execution rows ordered by ``(exchange, scope_sequence)``.
+
+        Raises:
+            ExecutionChainError: If any correction known at ``as_of`` cannot be
+                proven against the ledger it claims to correct.
         """
         watermark_map = (
             select(
@@ -14834,7 +15193,13 @@ class SQLAlchemyRepository(Repository):
             .group_by(Execution.exchange)
             .subquery()
         )
-        async with self.session() as s:
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
+            annulled = await self._validated_execution_annulment_exclusions(
+                s,
+                as_of,
+                wallet_public_id,
+            )
             query = (
                 select(Execution, Order.instrument_public_id)
                 .join(
@@ -14855,7 +15220,6 @@ class SQLAlchemyRepository(Repository):
                     Execution.wallet_public_id == wallet_public_id,
                     Execution.mode == mode,
                     Execution.known_to == KNOWN_TO_MAX,
-                    effective_execution_predicate(as_of),
                 )
             )
             if since_scope_sequence is not None:
@@ -14881,6 +15245,7 @@ class SQLAlchemyRepository(Repository):
                     "trade_id": exe.trade_id,
                 }
                 for exe, instrument_public_id in result.all()
+                if exe.public_id not in annulled
             ]
 
     async def get_pnl_timeline_execution_lineage(
@@ -15821,7 +16186,8 @@ class SQLAlchemyRepository(Repository):
             True unless every recorded and consumed shard quantity agrees
             within the fill tolerance.
         """
-        async with self.session() as s:
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
             return await self._pnl_timeline_scope_has_fill_gap_in_session(
                 s,
                 _PnlTimelineScopeGapRequest(
@@ -21372,6 +21738,8 @@ class SQLAlchemyRepository(Repository):
                     exchange=exchange,
                     mode=mode,
                     as_of=as_of,
+                    anchor_watermark=anchor_watermark,
+                    boundary_watermark=boundary_watermark,
                     replay=replay,
                 ),
             )
@@ -21503,7 +21871,7 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         request: _SpotReplayEffectiveRequest,
     ) -> list[SpotReplayExecutionSourceRow]:
-        """Drop the repudiated bookings from one already counted replay range.
+        """Fold the validated manifest into one already counted replay range.
 
         Runs strictly AFTER the counted-contiguity proof, which is the whole
         reason the exclusion is a post-filter and not a ``WHERE`` clause: a
@@ -21512,13 +21880,22 @@ class SQLAlchemyRepository(Repository):
         physical range is proven first, then the fold consumes only what is
         still economically effective.
 
-        Matching is by scope coordinate rather than execution identity because
-        the replay projection carries ``scope_sequence``, and the manifest's
-        TOTAL ``uq_execution_annulments_scope`` index makes that coordinate a
-        unique key for one wallet, exchange, and mode — the same coordinate the
-        writer proved equal to its target's. The read is pinned to the caller's
-        snapshot transaction so the manifest is evidence from the same instant
-        as the range it corrects.
+        It consumes the SAME validated fold the P&L certification does — bind by
+        coordinate AND immutable id AND canonical digest, then refuse any
+        contradicted annulment — rather than trusting the manifest's coordinate
+        on its own. A scope-sequence match alone would let this plane suppress a
+        booking on evidence the certification plane would have refused, which is
+        precisely the divergence a single shared theorem exists to prevent. Any
+        invalid or contradicted binding raises rather than silently dropping a
+        row, so a reconciliation run fails closed instead of certifying balances
+        against a manifest it could not prove.
+
+        The range's rows are re-read here rather than threaded down from the
+        caller's projection because the fold binds ORM executions, and the
+        caller's transaction is a pinned snapshot, so the second read is the
+        same rows at the same instant. The manifest is narrowed through
+        :func:`annulment_knowledge_bound`, so a capture pinned to a historical
+        instant additionally requires each correction's stamp to have settled.
 
         Args:
             s: The session holding the bundle's snapshot transaction.
@@ -21528,18 +21905,62 @@ class SQLAlchemyRepository(Repository):
         Returns:
             The replay rows that are still economically effective, in the
             caller's ascending scope-sequence order.
+
+        Raises:
+            ExecutionChainError: If any manifest binding covering this range is
+                dangling, scope-crossed, duplicated, digest-mismatched, or
+                contradicted by a durable fill witness.
         """
         if not request.replay:
             return request.replay
-        result = await s.execute(
-            select(ExecutionAnnulment.scope_sequence).where(
-                ExecutionAnnulment.wallet_public_id == request.wallet_public_id,
-                ExecutionAnnulment.exchange == request.exchange,
-                ExecutionAnnulment.mode == request.mode,
-                ExecutionAnnulment.correction_time <= request.as_of,
+        annulment_rows = list(
+            (
+                await s.execute(
+                    select(ExecutionAnnulment)
+                    .where(
+                        ExecutionAnnulment.wallet_public_id == request.wallet_public_id,
+                        ExecutionAnnulment.exchange == request.exchange,
+                        ExecutionAnnulment.mode == request.mode,
+                        ExecutionAnnulment.timestamp <= annulment_knowledge_bound(request.as_of),
+                    )
+                    .order_by(ExecutionAnnulment.scope_sequence.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not annulment_rows:
+            return request.replay
+        range_rows = (
+            (
+                await s.execute(
+                    select(Execution).where(
+                        Execution.wallet_public_id == request.wallet_public_id,
+                        Execution.exchange == request.exchange,
+                        Execution.mode == request.mode,
+                        Execution.scope_sequence > request.anchor_watermark,
+                        Execution.scope_sequence <= request.boundary_watermark,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        witnesses = await SQLAlchemyRepository._read_execution_annulment_contradiction_witnesses(
+            s,
+            [annulment.target_execution_public_id for annulment in annulment_rows],
+        )
+        fold = SQLAlchemyRepository._validated_execution_annulment_fold(
+            _ExecutionAnnulmentFoldRequest(
+                annulment_rows=annulment_rows,
+                executions_by_coordinate={
+                    (execution.exchange, int(execution.scope_sequence)): execution
+                    for execution in range_rows
+                },
+                witnesses_by_execution_public_id=witnesses,
             )
         )
-        annulled_sequences = {int(sequence) for sequence in result.scalars().all()}
+        annulled_sequences = {applied["scope_sequence"] for applied in fold.applied}
         return [row for row in request.replay if row["scope_sequence"] not in annulled_sequences]
 
     @staticmethod

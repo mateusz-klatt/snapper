@@ -452,11 +452,18 @@ class ExecutionAnnulmentRequest(TypedDict):
     CONTENT, so a request prepared against a row that has since been re-read
     differently is refused rather than recorded.
 
-    ``correction_time`` is the knowledge instant the correction takes effect
-    from; ``evidence`` is the free-form diagnosis envelope (a JSON object, no
-    duplicate keys, finite numbers) canonicalized before storage. The temporal
-    provenance trio (``session_id`` / ``sequence_id`` / ``timestamp``) is
-    supplied by the caller exactly as it is for every other appended event.
+    ``correction_time`` is the operator's DECLARED correction instant — the
+    moment they consider the booking repudiated — and is informational audit
+    metadata only. It is deliberately NOT the knowledge time any fold keys on:
+    it is caller-supplied, so honouring it would let a correction claim to have
+    been known before it was written and silently rewrite an already-answered
+    historical read. The knowledge instant is the manifest row's ``timestamp``,
+    which this request cannot carry because the writer stamps it server-side at
+    insert. ``session_id`` and ``sequence_id`` remain caller-supplied: they name
+    WHICH operator session authored the act, not WHEN it became true.
+
+    ``evidence`` is the free-form diagnosis envelope (a JSON object, no
+    duplicate keys, finite numbers) canonicalized before storage.
     """
 
     target_execution_public_id: str
@@ -471,7 +478,6 @@ class ExecutionAnnulmentRequest(TypedDict):
     evidence: JsonObject
     session_id: str
     sequence_id: int
-    timestamp: datetime
 
 
 class ExecutionAnnulmentRow(TypedDict):
@@ -483,6 +489,11 @@ class ExecutionAnnulmentRow(TypedDict):
     that implies a lifecycle this plane does not have. ``evidence_json`` is the
     canonical stored text rather than a parsed object so a consumer that
     re-hashes or forwards an audit payload sees the exact persisted bytes.
+
+    ``timestamp`` is the SERVER-stamped instant this correction became known,
+    assigned by the writer rather than by the caller, and it is the value every
+    knowledge-horizon fold filters on. ``correction_time`` is the operator's
+    declared correction instant, disclosed to humans but never load-bearing.
     """
 
     public_id: str
