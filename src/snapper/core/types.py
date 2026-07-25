@@ -276,6 +276,26 @@ class ExecutionPlanStatusEnum(StrEnum):
     EXPIRED = "expired"
 
 
+TERMINAL_EXECUTION_PLAN_STATUSES: frozenset[str] = frozenset(
+    {
+        ExecutionPlanStatusEnum.COMPLETED,
+        ExecutionPlanStatusEnum.CANCELLED,
+        ExecutionPlanStatusEnum.FAILED,
+        ExecutionPlanStatusEnum.EXPIRED,
+    }
+)
+"""The plan statuses from which no further command can ever be emitted.
+
+Derived from the enum members rather than restated as literals so a new
+lifecycle state cannot silently be treated as terminal by one caller and
+non-terminal by another. Held here, beside the enum, because three planes ask
+the same question for three different reasons: the plan executor refuses to
+advance a terminal plan, the cancel service answers a repeat cancel from the
+recorded terminal state, and the derived-projection maintenance writer proves
+that the ``execution_plan_checkpoints`` it deliberately does NOT rebuild belong
+to plans that can no longer act on the state they hold."""
+
+
 class PairedExecutionGroupStatusEnum(StrEnum):
     """Lifecycle state of a ``paired_execution_groups`` SCD2 row.
 

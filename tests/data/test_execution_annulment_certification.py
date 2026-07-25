@@ -47,6 +47,7 @@ from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import User
 from snapper.data.models import VenueEvent
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
@@ -378,12 +379,38 @@ def _uncorrupted_lineage() -> list[Symbol | Instrument | Order | Execution | Ven
     ]
 
 
+def _acting_user() -> User:
+    """Build the ACTIVE user every annulment request in this file asserts.
+
+    The guarded writer proves the asserted acting identity resolves to an
+    existing active user inside its own fenced transaction, so a certification
+    fixture that omits the ``users`` row is not exercising the real writer at
+    all — it is exercising a refusal.
+    """
+    return User(
+        public_id=_USER,
+        username="operator",
+        email=None,
+        password_hash="x",
+        role="admin",
+        is_active=True,
+        default_language=None,
+        created_at=_WALUTOMAT_TRADE_AT,
+        created_by_user_public_id=None,
+        timestamp=_WALUTOMAT_TRADE_AT,
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION,
+        sequence_id=1,
+    )
+
+
 async def _build_repository(
     db_path: Path,
     lineage: list[Symbol | Instrument | Order | Execution | VenueEvent],
 ) -> SQLAlchemyRepository:
     """Create an isolated repository holding one execution-lineage fixture."""
     schema_engine = create_engine(f"sqlite:///{db_path}")
+    User.__table__.create(schema_engine)
     Symbol.__table__.create(schema_engine)
     Instrument.__table__.create(schema_engine)
     Order.__table__.create(schema_engine)
@@ -398,7 +425,7 @@ async def _build_repository(
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     async with repo.session() as s:
-        s.add_all(lineage)
+        s.add_all([_acting_user(), *lineage])
         await s.commit()
     return repo
 

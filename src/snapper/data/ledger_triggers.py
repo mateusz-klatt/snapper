@@ -49,7 +49,7 @@ The PostgreSQL function ``executions_reject_mutation()`` persists after a
 the standalone function); this is harmless on throwaway databases and
 migration 0030's downgrade drops it explicitly. The same holds for
 ``execution_annulments_reject_mutation()`` and migration 0037, and for
-``execution_annulment_visibility_reject_mutation()`` and migration 0038.
+``execution_annulment_visibility_reject_mutation()`` and migration 0039.
 
 The annulment and visibility installers are exact mirrors of the executions one: same
 ``after_create``-plus-migration dual install through a single function, same
@@ -352,7 +352,7 @@ def install_execution_annulment_visibility_immutability_triggers(
 
     The third member of the same family, installed from the same shared source
     the ``after_create`` DDL event on
-    ``ExecutionAnnulmentVisibility.__table__`` and migration 0038 both call, so
+    ``ExecutionAnnulmentVisibility.__table__`` and migration 0039 both call, so
     the ``create_all``-built and Alembic-built schemas are byte-identical by
     construction rather than by convention.
 

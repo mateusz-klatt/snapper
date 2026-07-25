@@ -471,6 +471,17 @@ class ExecutionAnnulmentRequest(TypedDict):
     insert. ``session_id`` and ``sequence_id`` remain caller-supplied: they name
     WHICH operator session authored the act, not WHEN it became true.
 
+    ``annulled_by_user_public_id`` is an OPERATOR ASSERTION, not an
+    authentication result. The command surface that builds this request runs on
+    the database host with no session, no token and no principal, so nothing
+    there can authenticate anybody; the writer's own check is existence, not
+    identity — it proves the asserted id resolves to a user row that is present
+    and ``is_active``, which catches a typo and a fabricated id and nothing
+    more. Whoever can reach that surface can name any active user. The
+    attribution is therefore only as strong as the control over the host, and
+    the audit weight sits in the reviewed request document plus the evidence
+    envelope, never in this field alone.
+
     ``evidence`` is the free-form diagnosis envelope (a JSON object, no
     duplicate keys, finite numbers) canonicalized before storage.
     """
@@ -503,6 +514,9 @@ class ExecutionAnnulmentRow(TypedDict):
     assigned by the writer rather than by the caller, and it is the value every
     knowledge-horizon fold filters on. ``correction_time`` is the operator's
     declared correction instant, disclosed to humans but never load-bearing.
+    ``annulled_by_user_public_id`` is the OPERATOR-ASSERTED acting user, proven
+    by the writer to resolve to an existing active user and never authenticated
+    by the maintenance surface that supplied it.
     """
 
     public_id: str
@@ -609,6 +623,110 @@ class UnwitnessedExecutionRow(TypedDict):
     timestamp: datetime
     canonical_digest: str | None
     annulment_public_id: str | None
+
+
+type DerivedProjectionPlane = Literal["trade_projection_checkpoints", "positions"]
+"""The two derived planes an execution annulment invalidates.
+
+Both are PROJECTIONS rebuilt from the ledger by the trader's normal recovery
+path, which is precisely why an SCD2 close is correct for them and forbidden
+for the ledger itself. ``execution_plan_checkpoints`` is deliberately absent:
+it is control state rather than economic projection, and the adopted design
+forbids rebuilding it."""
+
+
+class DerivedProjectionVersionRow(TypedDict):
+    """One SCD2 version of a derived projection row, as the operator sees it.
+
+    ``public_id`` is stable across a projection's versions (the SCD2 idiom
+    carries it onto each successor), so it is the identity an operator asserts
+    and the writer proves. ``identity`` is the plane's own natural key — the
+    ``shard_key`` for a trade projection checkpoint, the instrument identity for
+    a position — printed so a listed row is recognizable without a second query.
+    ``version_started_at`` is the version's own ``timestamp``; the writer
+    refuses to retire a version that STARTED after the correction became known,
+    because closing it at the correction instant would invert its interval and
+    would mean a live writer is still producing state from the uncorrected
+    ledger.
+    """
+
+    plane: DerivedProjectionPlane
+    public_id: str
+    identity: str
+    version_started_at: datetime
+
+
+class ExecutionPlanCheckpointWitnessRow(TypedDict):
+    """One ``execution_plan_checkpoints`` row the maintenance writer left alone.
+
+    Reported, never touched. The adopted design excludes plan checkpoints from
+    the derived-plane rebuild because they are control state, so the operator's
+    postcondition is not "they were rebuilt" but "they are untouched and the
+    plans holding them can no longer act". ``plan_is_terminal`` answers the
+    second half objectively against
+    :data:`snapper.core.types.TERMINAL_EXECUTION_PLAN_STATUSES` rather than
+    leaving a status string to be eyeballed.
+    """
+
+    public_id: str
+    plan_public_id: str
+    plan_status: str
+    plan_is_terminal: bool
+
+
+class DerivedProjectionScopeRow(TypedDict):
+    """One scope's derived plane, as it stands right now.
+
+    The read-only diagnosis behind ``snapper annulment retire-derived``: which
+    corrections are applied (durable AND observed), the knowledge instant a
+    retirement would close at, the active rows of both rebuildable planes, and
+    the plan checkpoints that must stay untouched. ``retired_at`` is ``None``
+    exactly when the scope carries no applied correction, which is itself the
+    answer — there is nothing whose consequences need retiring.
+    """
+
+    wallet_public_id: str
+    mode: str
+    applied_annulment_public_ids: list[str]
+    retired_at: datetime | None
+    trade_projection_checkpoints: list[DerivedProjectionVersionRow]
+    positions: list[DerivedProjectionVersionRow]
+    execution_plan_checkpoints: list[ExecutionPlanCheckpointWitnessRow]
+
+
+class DerivedProjectionRetirementRequest(TypedDict):
+    """One operator-authored request to retire a scope's derived projections.
+
+    The two expected-id lists are ASSERTIONS, exactly like the annulment
+    request's digest: the writer computes the scope's active set itself and
+    refuses unless it equals what the operator wrote. A row the operator did not
+    list is never retired silently, and a row they listed that is already
+    retired is a refusal rather than a second close.
+    """
+
+    wallet_public_id: str
+    mode: Literal["live", "paper"]
+    expected_trade_projection_checkpoint_public_ids: list[str]
+    expected_position_public_ids: list[str]
+
+
+class DerivedProjectionRetirementResult(TypedDict):
+    """What one retirement closed, and the scope it left behind.
+
+    ``retired`` names every version this act closed and nothing else.
+    ``scope_after`` is the SAME read the operator ran as a preflight, re-taken
+    after the commit, so the postconditions a runbook checks — no active
+    projection rows remain, the plan checkpoints are still there, their plans
+    are terminal — are the writer's own output rather than a follow-up query
+    an operator has to compose under pressure.
+    """
+
+    wallet_public_id: str
+    mode: str
+    retired_at: datetime
+    applied_annulment_public_ids: list[str]
+    retired: list[DerivedProjectionVersionRow]
+    scope_after: DerivedProjectionScopeRow
 
 
 class PortfolioPnlAnchorRow(TypedDict):

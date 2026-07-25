@@ -1182,14 +1182,26 @@ class ExecutionAnnulment(TemporalMixin, Base):
         BigInteger().with_variant(Integer, "sqlite"), nullable=False
     )
     annulled_by_user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
-    """The authenticated human who authorized this correction.
+    """The OPERATOR-ASSERTED acting user, proven to exist and be active.
 
     Stamped as the acting USER, mirroring
     ``WalletOperatorScopeGrant.granted_by_user_public_id``: an administrative
     act over someone else's money truth is attributed to the person who took it,
     while an ``operator_public_id`` names the SUBJECT of an act, not its author.
     NOT NULL by design — there is no automation that may annul an execution, so
-    an unattributed correction is not a thing this table can hold."""
+    an unattributed correction is not a thing this table can hold.
+
+    What this column is NOT is an authentication result, and the difference
+    matters enough to state here rather than leave to a reader's assumption. The
+    only writer is a maintenance command run on the database host: it has no
+    session, no token and no principal, so nothing in that path can authenticate
+    anyone. What the writer DOES prove, inside the same fenced transaction that
+    appends the correction, is that the asserted id resolves to a ``users`` row
+    that is present and ``is_active`` — which catches a typo and a fabricated
+    identity, and catches nothing else. Whoever can reach the writer can name
+    any active user, so this attribution is exactly as strong as the control
+    over that host; the reviewable weight of the act lives in the request
+    document and ``evidence_json``, never in this field alone."""
     correction_time: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     """The instant the OPERATOR declares the booking repudiated from.
 
@@ -1363,7 +1375,7 @@ def _install_execution_annulment_visibility_immutability_triggers(
     migration-built production table. ``create_all`` defaults to
     ``checkfirst=True`` so this fires only on actual creation, and migrations
     use ``op.*`` rather than ``create_all`` so it never fires during a migration
-    run (migration 0038 calls the same installer explicitly).
+    run (migration 0039 calls the same installer explicitly).
     """
     install_execution_annulment_visibility_immutability_triggers(connection)
 

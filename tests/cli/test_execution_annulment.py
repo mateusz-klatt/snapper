@@ -24,11 +24,16 @@ import typer.main
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
+from snapper.data.repository import DerivedProjectionRetirementError
 from snapper.data.repository import ExecutionAnnulmentTargetError
 from snapper.data.repository import Repository
+from snapper.data.repository_types import DerivedProjectionRetirementResult
+from snapper.data.repository_types import DerivedProjectionScopeRow
+from snapper.data.repository_types import DerivedProjectionVersionRow
 from snapper.data.repository_types import ExecutionAnnulmentRow
 from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 from snapper.data.repository_types import ExecutionAnnulmentWriteResult
+from snapper.data.repository_types import ExecutionPlanCheckpointWitnessRow
 from snapper.data.repository_types import UnwitnessedExecutionRow
 
 _WALLET = "0000face-0000-7000-8000-0000000000a1"
@@ -36,6 +41,8 @@ _USER = "0000face-0000-7000-8000-0000000000d1"
 _SESSION = "00000000-0000-7000-8000-000000000901"
 _EXECUTION = "00000000-0000-7000-8000-000000000e01"
 _ANNULMENT = "00000000-0000-7000-8000-0000000009a1"
+_CHECKPOINT = "00000000-0000-7000-8000-0000000009c1"
+_POSITION = "00000000-0000-7000-8000-0000000009c2"
 _DIGEST = "a" * 64
 _PHANTOM_AT = datetime(2026, 7, 19, 21, 54, tzinfo=UTC)
 _KNOWN_AT = datetime(2026, 7, 26, 10, 0, tzinfo=UTC)
@@ -284,14 +291,16 @@ def test_annul_without_confirmation_prints_the_request_and_writes_nothing(
     repository: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """The confirmation gate is the difference between reviewing and writing.
+    """An unconfirmed run is a COMPLETE parse preview, not a partial summary.
 
     Given: A valid request document and no ``--confirm`` flag.
     When: ``annulment annul`` runs.
-    Then: The parsed request is printed so the operator can check the target and
-        the copied digest, the guarded writer is never called, and the command
-        exits non-zero — an unconfirmed run must not read as a success in a
-        runbook.
+    Then: The whole parsed request is printed — target, scope, copied digest,
+        the acting user labelled as operator-asserted, and the canonical
+        evidence envelope, which is the part a reviewer actually argues with —
+        the run names itself a parse preview that made no database contact, the
+        guarded writer is never called, and the command exits non-zero so an
+        unconfirmed run cannot read as success in a runbook.
     """
     repository.record_execution_annulment = AsyncMock(return_value=_write_result(observed=True))
     path = _write_request(tmp_path, _request_document())
@@ -302,6 +311,12 @@ def test_annul_without_confirmation_prints_the_request_and_writes_nothing(
     assert f"target execution : {_EXECUTION}" in result.stdout
     assert f"expected digest  : {_DIGEST}" in result.stdout
     assert "scope            : kraken/live/1" in result.stdout
+    assert f"acting user      : {_USER} (operator-asserted)" in result.stdout
+    assert (
+        'evidence         : {"diagnosis":"size 0 / price 0 residue",'
+        '"fixed_in_commit":"13a6a397"}' in result.stdout
+    )
+    assert "parse preview only: no database contact, nothing was written" in result.stdout
     assert "--confirm was not supplied" in result.stderr
     repository.record_execution_annulment.assert_not_awaited()
 
@@ -538,16 +553,18 @@ def test_complete_visibility_completes_every_pending_correction(
     """
     repository.get_unobserved_execution_annulments = AsyncMock(return_value=[_manifest_row()])
     repository.observe_execution_annulment_visibility = AsyncMock(return_value=_observation())
+    repository.count_unobserved_execution_annulments = AsyncMock(return_value=0)
 
     result = runner.invoke(
         app, ["annulment", "complete-visibility", "--wallet", _WALLET, "--mode", "live"]
     )
 
     assert result.exit_code == 0, result.stderr
-    assert "corrections without a visibility observation: 1" in result.stdout
+    assert "corrections without a visibility observation in this pass: 1" in result.stdout
     assert f"completed annulment={_ANNULMENT}" in result.stdout
-    assert "completed 1, remaining 0" in result.stdout
+    assert "completed 1, remaining 0 (whole scope)" in result.stdout
     repository.observe_execution_annulment_visibility.assert_awaited_once_with(_ANNULMENT)
+    repository.count_unobserved_execution_annulments.assert_awaited_once_with(_WALLET, "live")
 
 
 def test_complete_visibility_reports_what_it_could_not_complete(
@@ -565,6 +582,7 @@ def test_complete_visibility_reports_what_it_could_not_complete(
     repository.observe_execution_annulment_visibility = AsyncMock(
         side_effect=RuntimeError("visibility transaction unavailable")
     )
+    repository.count_unobserved_execution_annulments = AsyncMock(return_value=1)
 
     result = runner.invoke(
         app, ["annulment", "complete-visibility", "--wallet", _WALLET, "--mode", "live"]
@@ -572,7 +590,7 @@ def test_complete_visibility_reports_what_it_could_not_complete(
 
     assert result.exit_code == 3
     assert f"FAILED annulment={_ANNULMENT}" in result.stderr
-    assert "completed 0, remaining 1" in result.stdout
+    assert "completed 0, remaining 1 (whole scope)" in result.stdout
 
 
 def test_complete_visibility_on_a_clean_scope_completes_nothing_and_succeeds(
@@ -588,6 +606,7 @@ def test_complete_visibility_on_a_clean_scope_completes_nothing_and_succeeds(
     """
     repository.get_unobserved_execution_annulments = AsyncMock(return_value=[])
     repository.observe_execution_annulment_visibility = AsyncMock(return_value=_observation())
+    repository.count_unobserved_execution_annulments = AsyncMock(return_value=0)
 
     result = runner.invoke(
         app,
@@ -604,9 +623,47 @@ def test_complete_visibility_on_a_clean_scope_completes_nothing_and_succeeds(
     )
 
     assert result.exit_code == 0, result.stderr
-    assert "completed 0, remaining 0" in result.stdout
+    assert "completed 0, remaining 0 (whole scope)" in result.stdout
     repository.get_unobserved_execution_annulments.assert_awaited_once_with(_WALLET, "live", 7)
     repository.observe_execution_annulment_visibility.assert_not_awaited()
+
+
+def test_complete_visibility_reports_the_true_remainder_beyond_its_page(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """A full page must never be reported as a closed knowledge gap.
+
+    Given: A scope holding more unobserved corrections than ``--limit`` returns,
+        where every correction the page DID return completes successfully.
+    When: ``annulment complete-visibility`` runs with that bound.
+    Then: The remainder is the scope-wide count rather than
+        ``discovered - completed``, so it reports the corrections still beyond
+        the page instead of ``remaining 0``, and it exits with the
+        incomplete-knowledge code so a runbook reruns rather than continuing.
+    """
+    repository.get_unobserved_execution_annulments = AsyncMock(return_value=[_manifest_row()])
+    repository.observe_execution_annulment_visibility = AsyncMock(return_value=_observation())
+    repository.count_unobserved_execution_annulments = AsyncMock(return_value=4)
+
+    result = runner.invoke(
+        app,
+        [
+            "annulment",
+            "complete-visibility",
+            "--wallet",
+            _WALLET,
+            "--mode",
+            "live",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "corrections without a visibility observation in this pass: 1" in result.stdout
+    assert "completed 1, remaining 4 (whole scope)" in result.stdout
+    assert "rerun this command" in result.stdout
 
 
 def test_complete_visibility_refuses_an_unsupported_discovery_bound(
@@ -634,6 +691,286 @@ def test_complete_visibility_refuses_an_unsupported_discovery_bound(
     repository.observe_execution_annulment_visibility.assert_not_awaited()
 
 
+def _checkpoint_row() -> DerivedProjectionVersionRow:
+    """Build one active trade projection checkpoint version row."""
+    return {
+        "plane": "trade_projection_checkpoints",
+        "public_id": _CHECKPOINT,
+        "identity": "kraken.EUR-PLN.live.wa10000000001",
+        "version_started_at": _PHANTOM_AT,
+    }
+
+
+def _position_row() -> DerivedProjectionVersionRow:
+    """Build one active position projection version row."""
+    return {
+        "plane": "positions",
+        "public_id": _POSITION,
+        "identity": "00000000-0000-7000-8000-000000000b01",
+        "version_started_at": _PHANTOM_AT,
+    }
+
+
+def _plan_checkpoint_row(*, terminal: bool = True) -> ExecutionPlanCheckpointWitnessRow:
+    """Build one plan checkpoint witness the retirement must leave alone."""
+    return {
+        "public_id": "00000000-0000-7000-8000-0000000000p1",
+        "plan_public_id": "00000000-0000-7000-8000-0000000000p2",
+        "plan_status": "completed" if terminal else "active",
+        "plan_is_terminal": terminal,
+    }
+
+
+def _derived_scope(*, retired: bool) -> DerivedProjectionScopeRow:
+    """Build one derived-plane scope before or after a retirement."""
+    return {
+        "wallet_public_id": _WALLET,
+        "mode": "live",
+        "applied_annulment_public_ids": [_ANNULMENT],
+        "retired_at": _KNOWN_AT,
+        "trade_projection_checkpoints": [] if retired else [_checkpoint_row()],
+        "positions": [] if retired else [_position_row()],
+        "execution_plan_checkpoints": [_plan_checkpoint_row()],
+    }
+
+
+def _retirement_result() -> DerivedProjectionRetirementResult:
+    """Build one reviewed-writer retirement result."""
+    return {
+        "wallet_public_id": _WALLET,
+        "mode": "live",
+        "retired_at": _KNOWN_AT,
+        "applied_annulment_public_ids": [_ANNULMENT],
+        "retired": [_checkpoint_row(), _position_row()],
+        "scope_after": _derived_scope(retired=True),
+    }
+
+
+def test_retire_derived_without_confirmation_is_a_read_only_preflight(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """The ids an operator must assert have to come from a reviewed read.
+
+    Given: A scope with one applied correction, one active checkpoint, one
+        active position, and one plan checkpoint that must not be rebuilt.
+    When: ``annulment retire-derived`` runs without ``--confirm``.
+    Then: It prints the applied correction, the retirement instant, both public
+        ids to assert, and the plan checkpoint with its plan's terminality; it
+        never calls the writer, and it exits non-zero so a preflight cannot read
+        as a completed act.
+    """
+    repository.get_derived_projection_scope = AsyncMock(return_value=_derived_scope(retired=False))
+    repository.retire_execution_annulment_derived_projections = AsyncMock(
+        return_value=_retirement_result()
+    )
+
+    result = runner.invoke(
+        app, ["annulment", "retire-derived", "--wallet", _WALLET, "--mode", "live"]
+    )
+
+    assert result.exit_code == 1
+    assert f"annulment={_ANNULMENT}" in result.stdout
+    assert f"retirement instant : {_KNOWN_AT.isoformat()}" in result.stdout
+    assert f"active trade_projection_checkpoints: 1\n  {_CHECKPOINT}" in result.stdout
+    assert f"active positions: 1\n  {_POSITION}" in result.stdout
+    assert "execution_plan_checkpoints (never rebuilt): 1" in result.stdout
+    assert "status=completed terminal" in result.stdout
+    assert "--confirm was not supplied" in result.stderr
+    repository.retire_execution_annulment_derived_projections.assert_not_awaited()
+
+
+def test_retire_derived_preflight_says_plainly_when_nothing_is_retirable(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """A scope with no applied correction has nothing whose effects need retiring.
+
+    Given: A scope whose manifest holds no correction that is durable AND
+        observed.
+    When: The read-only preflight runs.
+    Then: It reports no retirement instant at all rather than printing a
+        plausible-looking one, so an operator cannot copy a timestamp that no
+        correction justifies.
+    """
+    scope = _derived_scope(retired=False)
+    scope["applied_annulment_public_ids"] = []
+    scope["retired_at"] = None
+    repository.get_derived_projection_scope = AsyncMock(return_value=scope)
+
+    result = runner.invoke(
+        app, ["annulment", "retire-derived", "--wallet", _WALLET, "--mode", "live"]
+    )
+
+    assert result.exit_code == 1
+    assert "applied corrections (durable and observed): 0" in result.stdout
+    assert "retirement instant : NONE — nothing to retire" in result.stdout
+
+
+def test_retire_derived_preflight_surfaces_a_malformed_scope_read(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """A refused read must not be printed as an empty derived plane.
+
+    Given: A scope read that refuses the requested wallet identity.
+    When: The read-only preflight runs.
+    Then: It exits non-zero with the refusal and prints no scope report.
+    """
+    repository.get_derived_projection_scope = AsyncMock(
+        side_effect=ValueError("execution annulment wallet_public_id is not a valid uuid")
+    )
+
+    result = runner.invoke(
+        app, ["annulment", "retire-derived", "--wallet", "nope", "--mode", "live"]
+    )
+
+    assert result.exit_code == 1
+    assert "refused: execution annulment wallet_public_id is not a valid uuid" in result.stderr
+    assert "applied corrections" not in result.stdout
+
+
+def test_retire_derived_retires_exactly_the_asserted_rows_and_verifies_the_result(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """A confirmed retirement states what it closed and proves the postconditions.
+
+    Given: The asserted checkpoint and position ids, and a writer that closes
+        both.
+    When: ``annulment retire-derived`` runs confirmed.
+    Then: It exits zero, names each retired version with the plane it belongs
+        to, and prints the scope re-read afterwards — no active projection rows
+        left, the plan checkpoints still present and their plans terminal — so
+        the runbook's postconditions are the command's own output rather than a
+        follow-up query. The writer receives exactly the asserted sets.
+    """
+    repository.retire_execution_annulment_derived_projections = AsyncMock(
+        return_value=_retirement_result()
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "annulment",
+            "retire-derived",
+            "--wallet",
+            _WALLET,
+            "--mode",
+            "live",
+            "--checkpoint",
+            _CHECKPOINT,
+            "--position",
+            _POSITION,
+            "--confirm",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert f"retired at       : {_KNOWN_AT.isoformat()}" in result.stdout
+    assert f"trade_projection_checkpoints {_CHECKPOINT}" in result.stdout
+    assert f"positions {_POSITION}" in result.stdout
+    assert "verification — scope after the retirement" in result.stdout
+    assert "active trade_projection_checkpoints: 0" in result.stdout
+    assert "active positions: 0" in result.stdout
+    assert "execution_plan_checkpoints (never rebuilt): 1" in result.stdout
+    request = repository.retire_execution_annulment_derived_projections.await_args.args[0]
+    assert request["wallet_public_id"] == _WALLET
+    assert request["mode"] == "live"
+    assert request["expected_trade_projection_checkpoint_public_ids"] == [_CHECKPOINT]
+    assert request["expected_position_public_ids"] == [_POSITION]
+
+
+def test_retire_derived_asserts_an_empty_set_when_no_row_is_named(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """Naming no row asserts that no row is active, and is proven like any other.
+
+    Given: A confirmed run with neither ``--checkpoint`` nor ``--position``.
+    When: ``annulment retire-derived`` runs.
+    Then: The writer is handed two EMPTY assertions rather than a wildcard, so
+        an active row the operator did not see refuses the act instead of being
+        retired by omission.
+    """
+    empty = _retirement_result()
+    empty["retired"] = []
+    repository.retire_execution_annulment_derived_projections = AsyncMock(return_value=empty)
+
+    result = runner.invoke(
+        app,
+        ["annulment", "retire-derived", "--wallet", _WALLET, "--mode", "live", "--confirm"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    request = repository.retire_execution_annulment_derived_projections.await_args.args[0]
+    assert request["expected_trade_projection_checkpoint_public_ids"] == []
+    assert request["expected_position_public_ids"] == []
+
+
+def test_retire_derived_surfaces_a_reviewed_writer_refusal_verbatim(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """Rerunning a completed retirement must refuse, and say which row it is.
+
+    Given: A writer that refuses because the asserted checkpoint is already
+        retired — the shape a second run of a completed retirement takes.
+    When: ``annulment retire-derived`` runs confirmed.
+    Then: The refusal reaches the operator unchanged and the command exits
+        non-zero, so idempotence is a visible refusal rather than a silent
+        second close.
+    """
+    repository.retire_execution_annulment_derived_projections = AsyncMock(
+        side_effect=DerivedProjectionRetirementError(
+            "already_retired_derived_projection: "
+            f"plane=trade_projection_checkpoints public_id={_CHECKPOINT}"
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "annulment",
+            "retire-derived",
+            "--wallet",
+            _WALLET,
+            "--mode",
+            "live",
+            "--checkpoint",
+            _CHECKPOINT,
+            "--confirm",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "refused by the reviewed writer: already_retired_derived_projection" in result.stderr
+
+
+def test_retire_derived_refuses_a_mode_outside_the_closed_vocabulary(
+    runner: CliRunner,
+    repository: MagicMock,
+) -> None:
+    """A mode typo must never reach the writer as a scope with nothing in it.
+
+    Given: A mode spelling no certification scope uses.
+    When: ``annulment retire-derived`` runs confirmed.
+    Then: It exits non-zero before any database contact.
+    """
+    repository.retire_execution_annulment_derived_projections = AsyncMock(
+        return_value=_retirement_result()
+    )
+
+    result = runner.invoke(
+        app,
+        ["annulment", "retire-derived", "--wallet", _WALLET, "--mode", "SHADOW", "--confirm"],
+    )
+
+    assert result.exit_code == 1
+    assert "mode must be one of live, paper" in result.stderr
+    repository.retire_execution_annulment_derived_projections.assert_not_awaited()
+
+
 def _annulment_group() -> click.Group:
     """Resolve the registered ``annulment`` command group from the real CLI."""
     root = cast(click.Group, typer.main.get_command(app))
@@ -646,20 +983,28 @@ def _registered_options(command_name: str) -> set[str]:
     return {opt for param in command.params for opt in param.opts if opt.startswith("--")}
 
 
-def test_the_operator_surface_registers_exactly_three_commands() -> None:
+def test_the_operator_surface_registers_exactly_four_commands() -> None:
     """The surface an operator is told to run must be the surface that exists.
 
     Given: The real Snapper CLI.
     When: The ``annulment`` group is resolved.
-    Then: It registers exactly ``inspect``, ``annul`` and ``complete-visibility``
-        with the flags the runbook uses — and notably NO bulk flag, because a
-        mode that annulled everything unwitnessed would repudiate real money the
-        moment a witness was merely late.
+    Then: It registers exactly ``inspect``, ``annul``, ``complete-visibility``
+        and ``retire-derived`` with the flags the runbook uses — and notably NO
+        bulk flag, because a mode that annulled everything unwitnessed would
+        repudiate real money the moment a witness was merely late.
     """
-    assert set(_annulment_group().commands) == {"inspect", "annul", "complete-visibility"}
+    assert set(_annulment_group().commands) == {
+        "inspect",
+        "annul",
+        "complete-visibility",
+        "retire-derived",
+    }
     assert {"--wallet", "--mode", "--exchange", "--limit"} <= _registered_options("inspect")
     assert {"--request-file", "--confirm"} <= _registered_options("annul")
     assert {"--wallet", "--mode", "--limit"} <= _registered_options("complete-visibility")
+    assert {"--wallet", "--mode", "--checkpoint", "--position", "--confirm"} <= _registered_options(
+        "retire-derived"
+    )
     assert not any("bulk" in option for option in _registered_options("annul"))
 
 

@@ -35,6 +35,7 @@ from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import TERMINAL_EXECUTION_PLAN_STATUSES
 from snapper.core.types import ExecutionPlanStatusEnum
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderEventEnum
@@ -75,14 +76,7 @@ _DECISION_OUTBOX_GIVE_UP_AFTER_ATTEMPTS = 3
 _DECISION_OUTBOX_BACKOFF_BASE_S = 30.0
 _DECISION_OUTBOX_BACKOFF_CAP_S = 300.0
 _DECISION_OUTBOX_STREAM = "plan_decisions_outbox"
-_TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {
-        ExecutionPlanStatusEnum.COMPLETED,
-        ExecutionPlanStatusEnum.CANCELLED,
-        ExecutionPlanStatusEnum.FAILED,
-        ExecutionPlanStatusEnum.EXPIRED,
-    }
-)
+_TERMINAL_STATUSES: frozenset[str] = TERMINAL_EXECUTION_PLAN_STATUSES
 
 
 def _decision_outbox_backoff_seconds(attempt_number: int) -> float:

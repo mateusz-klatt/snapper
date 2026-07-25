@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,7 +37,9 @@ from snapper.data.models import Execution
 from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import Order
+from snapper.data.models import User
 from snapper.data.models import VenueEvent
+from snapper.data.repository import ExecutionAnnulmentActorError
 from snapper.data.repository import ExecutionAnnulmentConflictError
 from snapper.data.repository import ExecutionAnnulmentTargetError
 from snapper.data.repository import ExecutionAnnulmentWitnessedError
@@ -48,6 +51,8 @@ from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 
 _SESSION = "00000000-0000-7000-8000-000000000901"
 _USER = "0000face-0000-7000-8000-0000000000d1"
+_DEACTIVATED_USER = "0000face-0000-7000-8000-0000000000d2"
+_ABSENT_USER = "0000face-0000-7000-8000-0000000000d3"
 _MAIN_WALLET = "0000face-0000-7000-8000-0000000000a1"
 _PAPER_WALLET = "0000face-0000-7000-8000-0000000000a2"
 
@@ -183,7 +188,26 @@ def _fill_event(
     )
 
 
-def _production_lineage() -> list[Order | Execution | VenueEvent]:
+def _user(public_id: str, username: str, is_active: bool) -> User:
+    """Build one acting-user row the guarded writer can resolve."""
+    return User(
+        public_id=public_id,
+        username=username,
+        email=None,
+        password_hash="x",
+        role="admin",
+        is_active=is_active,
+        default_language=None,
+        created_at=_WALUTOMAT_TRADE_AT,
+        created_by_user_public_id=None,
+        timestamp=_WALUTOMAT_TRADE_AT,
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION,
+        sequence_id=1,
+    )
+
+
+def _production_lineage() -> list[Order | Execution | User | VenueEvent]:
     """Build the measured production shape: five executions, two witnesses.
 
     ``main/kraken/live`` seq 1 is the phantom that blocks the only real trading
@@ -192,6 +216,8 @@ def _production_lineage() -> list[Order | Execution | VenueEvent]:
     the row predating durable fill lineage, and one properly witnessed fill.
     """
     return [
+        _user(_USER, "operator", True),
+        _user(_DEACTIVATED_USER, "retired-operator", False),
         _order(_KRAKEN_ORDER, "client-kraken-1", _MAIN_WALLET),
         _order(_WALUTOMAT_ORDER, "client-walutomat-1", _MAIN_WALLET),
         _order(_PAPER_PHANTOM_ORDER, "client-paper-1", _PAPER_WALLET),
@@ -265,6 +291,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     VenueEvent.__table__.create(schema_engine)
     ExecutionAnnulment.__table__.create(schema_engine)
     ExecutionAnnulmentVisibility.__table__.create(schema_engine)
+    User.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     try:
@@ -859,6 +886,128 @@ async def test_a_wrong_expected_digest_is_refused(repository: SQLAlchemyReposito
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
 
+async def test_an_active_acting_user_is_proven_and_stamped_on_the_correction(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The acting identity is verified to EXIST, and that is all it claims.
+
+    Given: An asserted acting user that resolves to a present, active ``users``
+        row.
+    When: The Kraken phantom is annulled.
+    Then: The correction is appended carrying that identity. The proof is
+        existence and not authentication — this writer has no principal to
+        authenticate — so what the manifest records is an operator assertion the
+        database could resolve at the instant it was recorded.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    appended = await _record_annulment(repository, _request(digest))
+
+    assert appended["annulled_by_user_public_id"] == _USER
+
+
+async def test_an_acting_user_no_row_resolves_is_refused(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A fabricated or mistyped acting identity must not reach the manifest.
+
+    Given: An asserted acting user that is a well-formed UUID no ``users`` row
+        carries.
+    When: The annulment is attempted.
+    Then: It is refused with ``unknown_annulment_actor`` inside the fenced
+        transaction and nothing is written, so an unwithdrawable correction can
+        never be attributed to somebody who does not exist.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    with pytest.raises(ExecutionAnnulmentActorError, match="unknown_annulment_actor"):
+        await repository.record_execution_annulment(
+            _request(digest, annulled_by_user_public_id=_ABSENT_USER)
+        )
+
+    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
+
+
+async def test_a_deactivated_acting_user_is_refused(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A deactivated account may not author a money-truth correction.
+
+    Given: An asserted acting user whose ``users`` row exists and is
+        deactivated.
+    When: The annulment is attempted.
+    Then: It is refused with ``inactive_annulment_actor`` and nothing is
+        written. The check runs in the same transaction that would append, so a
+        deactivation committed a moment earlier is honoured rather than raced.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+
+    with pytest.raises(ExecutionAnnulmentActorError, match="inactive_annulment_actor"):
+        await repository.record_execution_annulment(
+            _request(digest, annulled_by_user_public_id=_DEACTIVATED_USER)
+        )
+
+    assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
+
+
+async def test_a_superseded_acting_user_version_authorizes_nothing(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Only the CURRENT version of a user can act.
+
+    Given: An acting user whose only ``users`` version has been closed, which is
+        how this schema records a superseded account version.
+    When: The annulment is attempted.
+    Then: It is refused with ``unknown_annulment_actor``: the writer asks about
+        the open-sentinel version, so a historical row cannot quietly keep
+        authorizing corrections after the account it described stopped being
+        current.
+    """
+    digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
+    async with repository.session() as s:
+        await s.execute(update(User).where(User.public_id == _USER).values(known_to=_CORRECTION_AT))
+        await s.commit()
+
+    with pytest.raises(ExecutionAnnulmentActorError, match="unknown_annulment_actor"):
+        await repository.record_execution_annulment(_request(digest))
+
+
+async def test_the_unobserved_count_is_independent_of_the_discovery_page(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The remaining-work number must not inherit the paging bound.
+
+    Given: Two paper corrections, neither carrying a durability observation.
+    When: The bounded discovery read is taken with a page of one, and the count
+        is taken separately.
+    Then: The page returns one row while the count returns two. A maintenance
+        surface that derived "remaining" from the page would report a closed
+        knowledge gap while a correction history still refuses sat beyond it.
+    """
+    corrections = await _two_unobserved_paper_corrections(repository)
+
+    page = await repository.get_unobserved_execution_annulments(_PAPER_WALLET, "live", 1)
+    total = await repository.count_unobserved_execution_annulments(_PAPER_WALLET, "live")
+
+    assert len(corrections) == 2
+    assert len(page) == 1
+    assert total == 2
+
+
+async def test_the_unobserved_count_refuses_a_malformed_wallet_identity(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A count is a scope answer, so an unresolvable scope has no answer.
+
+    Given: A wallet spelling that is not a UUID.
+    When: The unobserved count is taken.
+    Then: It refuses rather than counting zero, because a zero would be read as
+        "no corrections await observation".
+    """
+    with pytest.raises(ValueError, match="wallet_public_id is not a valid uuid"):
+        await repository.count_unobserved_execution_annulments("not-a-uuid", "live")
+
+
 async def test_a_scope_slot_collision_without_a_target_winner_reraises(
     repository: SQLAlchemyRepository,
 ) -> None:
@@ -1151,7 +1300,9 @@ async def test_the_postgresql_writer_locks_venue_events_before_it_looks_for_a_wi
         rendered = " ".join(str(statement).split())
         statements.append(rendered)
         result = MagicMock()
-        if rendered.startswith("SELECT executions."):
+        if rendered.startswith("SELECT users."):
+            result.scalars.return_value.first.return_value = _user(_USER, "operator", True)
+        elif rendered.startswith("SELECT executions."):
             result.scalars.return_value.first.return_value = target
         elif rendered.startswith("SELECT DISTINCT orders.client_order_id"):
             result.scalars.return_value.all.return_value = ["client-kraken-1"]

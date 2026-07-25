@@ -50,6 +50,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.json_types import JsonObject
+from snapper.core.types import TERMINAL_EXECUTION_PLAN_STATUSES
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CancelClaimResult
@@ -57,7 +58,7 @@ from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "cancelled", "failed", "expired"})
+_TERMINAL_STATUSES: frozenset[str] = TERMINAL_EXECUTION_PLAN_STATUSES
 _CANCEL_REQUESTED_STATUS = "cancel_requested"
 _CANCEL_STREAM = "service.cancel"
 _CANCEL_IDEMPOTENCY_KEY_INDEX = "uq_ep_active_cancel_idempotency_key"

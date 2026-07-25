@@ -88,6 +88,7 @@ from struct import pack
 from typing import Any
 from typing import Final
 from typing import Literal
+from typing import NoReturn
 from typing import Protocol
 from typing import Unpack
 from typing import cast
@@ -172,6 +173,7 @@ from snapper.core.json_types import JsonValue
 from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
+from snapper.core.types import TERMINAL_EXECUTION_PLAN_STATUSES
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -277,6 +279,11 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import CreateWalletUserReadGrantRequest
+from snapper.data.repository_types import DerivedProjectionPlane
+from snapper.data.repository_types import DerivedProjectionRetirementRequest
+from snapper.data.repository_types import DerivedProjectionRetirementResult
+from snapper.data.repository_types import DerivedProjectionScopeRow
+from snapper.data.repository_types import DerivedProjectionVersionRow
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionAnnulmentReason
@@ -286,6 +293,7 @@ from snapper.data.repository_types import ExecutionAnnulmentVisibilityRow
 from snapper.data.repository_types import ExecutionAnnulmentWriteResult
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
+from snapper.data.repository_types import ExecutionPlanCheckpointWitnessRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanDecisionOutboxInsertRow
 from snapper.data.repository_types import ExecutionPlanDecisionOutboxRow
@@ -408,8 +416,10 @@ __all__ = [
     "ScopeGrantValidationError",
     "PnlTimelineAnchorEvidenceMismatchError",
     "ExecutionAnnulmentTargetError",
+    "ExecutionAnnulmentActorError",
     "ExecutionAnnulmentWitnessedError",
     "ExecutionAnnulmentConflictError",
+    "DerivedProjectionRetirementError",
     "WalletConflictError",
     "WalletUserReadGrantConflictError",
     "WalletUserReadGrantNotFoundError",
@@ -797,6 +807,26 @@ class _ExecutionAnnulmentCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class _DerivedProjectionVersion:
+    """One SCD2 version of a derived projection row, with its physical handle.
+
+    Carries ``row_id`` because the retirement closes a version by its immutable
+    surrogate key rather than by re-deriving a natural-key filter, and
+    ``known_to`` because "already retired" and "still active" are the same
+    question asked of the same row. ``public_id`` is stable across versions —
+    the SCD2 idiom copies it onto each successor — which is exactly why it is
+    the identity an operator can assert and a version count cannot be.
+    """
+
+    plane: DerivedProjectionPlane
+    row_id: int
+    public_id: str
+    identity: str
+    version_started_at: datetime
+    known_to: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class _FuturesPositionProjection:
     """Validated futures projection and its native-symbol lineage."""
 
@@ -920,6 +950,25 @@ class ExecutionAnnulmentTargetError(RuntimeError):
     """
 
 
+class ExecutionAnnulmentActorError(RuntimeError):
+    """Raised when the asserted acting user is not an existing active user.
+
+    The message is ``unknown_annulment_actor`` (no ``users`` row carries the
+    asserted public id) or ``inactive_annulment_actor`` (the row exists but is
+    deactivated). Both are proven inside the same fenced transaction that would
+    append the correction, so no correction can name an identity the database
+    cannot resolve at the instant it is recorded.
+
+    What this proves and what it deliberately does NOT. The check is EXISTENCE,
+    never authentication: the only writer runs on the database host with no
+    session, no token and no principal, so the acting identity is an operator
+    ASSERTION and this refusal exists to catch a typo and a fabricated id.
+    Whoever can reach the writer can name any active user. Pretending otherwise
+    in the manifest's contract would be the more dangerous failure, so both the
+    column docstring and the operator surface state it in the same words.
+    """
+
+
 class ExecutionAnnulmentWitnessedError(RuntimeError):
     """Raised when a ``fill_observed`` witness matches the annulment target.
 
@@ -954,6 +1003,27 @@ class ExecutionAnnulmentConflictError(RuntimeError):
             f"annulment_public_id={winner['public_id']}"
         )
         self.winner = winner
+
+
+class DerivedProjectionRetirementError(RuntimeError):
+    """Raised when a derived-plane retirement cannot be proven safe.
+
+    The message is one of the stable reasons
+    ``no_applied_execution_annulment`` (the scope carries no correction that is
+    both durable and observed, so nothing has invalidated its projections),
+    ``unknown_derived_projection`` (an asserted public id names no row in the
+    scope at all), ``already_retired_derived_projection`` (the asserted row
+    exists but its versions are all closed — the retirement already ran, and a
+    second close would move a proven interval), ``unexpected_derived_projection_set``
+    (the scope's active set is not the set the operator asserted, in either
+    direction), or ``derived_projection_postdates_correction`` (a targeted
+    version STARTED after the correction became known, which means a live
+    writer is still producing projection state from the uncorrected ledger and
+    closing it at the correction instant would invert its interval).
+
+    Every one of them means the same thing operationally: the derived plane is
+    not in the state the operator believes it is in, so nothing is closed.
+    """
 
 
 class PortfolioPnlSampleScopeError(RuntimeError):
@@ -1286,6 +1356,15 @@ corrections or unwitnessed rows in one pass is itself the finding."""
 
 EXECUTION_ANNULMENT_DISCOVERY_LIMIT_MAX: Final[int] = 1_000
 """Hard ceiling an operator-supplied discovery limit may not exceed."""
+
+_SHARD_KEY_MODE_SEGMENT_INDEX: Final[int] = 2
+"""Position of the trading mode inside a canonical shard key.
+
+``compute_shard_key`` builds ``{exchange}.{instrument}.{mode}`` before it
+appends the optional wallet and strategy segments, so the mode is always the
+third dot-separated segment. ``trade_projection_checkpoints`` has no ``mode``
+column, and this index is the only place the derived-plane maintenance writer
+depends on that layout."""
 
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
@@ -3195,6 +3274,13 @@ class Repository(ABC):
         last proof held against concurrent witness writers by a lock no witness
         insert can cross, so the proof cannot be racing an uncommitted fill.
 
+        Implementations must additionally prove, in the SAME transaction, that
+        ``annulled_by_user_public_id`` resolves to an existing ACTIVE user. That
+        is an existence proof and not an authentication: this surface has no
+        principal to authenticate, so the acting identity is an operator
+        assertion whose only machine-checkable content is that somebody by that
+        id exists and has not been deactivated.
+
         The result names the correction AND the state of its durability
         observation. Implementations must report ``pending`` whenever the
         observation could not be taken, because such a correction is durable but
@@ -3204,6 +3290,8 @@ class Repository(ABC):
         Raises:
             ExecutionAnnulmentTargetError: If the target is unknown, sits in a
                 different scope, or does not match the expected digest.
+            ExecutionAnnulmentActorError: If the asserted acting user does not
+                exist or is deactivated.
             ExecutionAnnulmentWitnessedError: If a durable fill witness matches
                 the target, so the execution is real money.
             ExecutionAnnulmentConflictError: If the target — or its scope slot
@@ -3277,6 +3365,79 @@ class Repository(ABC):
         Raises:
             ValueError: If the wallet identity is not a UUID, or the limit is
                 not a positive integer within the supported bound.
+        """
+        ...
+
+    @abstractmethod
+    async def count_unobserved_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> int:
+        """Count every correction in one scope that carries no observation.
+
+        The TRUE remaining total, deliberately independent of the paging bound
+        :meth:`get_unobserved_execution_annulments` applies. A maintenance
+        surface that derived "remaining" by subtracting what it completed from
+        what one bounded page returned would print ``remaining 0`` while
+        unobserved corrections sat beyond the bound — reporting a closed
+        knowledge gap that is still open, which is the one thing this protocol
+        exists to make impossible.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+        """
+        ...
+
+    @abstractmethod
+    async def get_derived_projection_scope(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> DerivedProjectionScopeRow:
+        """Report one scope's derived plane and the corrections that invalidate it.
+
+        The read-only preflight for
+        :meth:`retire_execution_annulment_derived_projections` and the
+        postcondition read after it: the applied corrections (durable AND
+        observed), the knowledge instant a retirement would close at, the active
+        rows of both rebuildable planes, and the ``execution_plan_checkpoints``
+        that must stay untouched together with whether their plans are terminal.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+        """
+        ...
+
+    @abstractmethod
+    async def retire_execution_annulment_derived_projections(
+        self,
+        request: DerivedProjectionRetirementRequest,
+    ) -> DerivedProjectionRetirementResult:
+        """SCD2-retire the projections one scope's corrections invalidated.
+
+        The single reviewed writer for the derived plane, and the reason no
+        operator needs to compose an UPDATE against live money state. It closes
+        the scope's active ``trade_projection_checkpoints`` and ``positions``
+        versions at the correction knowledge instant and does nothing else: no
+        delete, no backdate, no successor row — the trader's normal recovery
+        path rebuilds from the annulment-aware ledger read.
+
+        An SCD2 close is correct HERE and forbidden one plane over: these are
+        projections derived from the ledger, whereas the ledger itself is an
+        append-only event log whose corrections must be appended.
+        ``execution_plan_checkpoints`` is untouched by construction — it is
+        control state, not economic projection — and is reported so its
+        untouchedness is verifiable rather than asserted.
+
+        Implementations must prove the scope carries an applied correction,
+        must retire exactly the set the operator asserted, and must refuse a row
+        that is already retired or whose version started after the correction.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+            DerivedProjectionRetirementError: If the derived plane is not in the
+                state the request asserts.
         """
         ...
 
@@ -12122,6 +12283,59 @@ class SQLAlchemyRepository(Repository):
         return target
 
     @staticmethod
+    async def _proven_execution_annulment_actor(
+        s: AsyncSession,
+        command: _ExecutionAnnulmentCommand,
+    ) -> None:
+        """Prove the asserted acting user exists and is active, inside the fence.
+
+        Deliberately a narrow claim. This surface has no authentication context
+        — the only writer is a maintenance command on the database host, with no
+        session, token or principal — so the acting identity is an operator
+        ASSERTION and cannot be anything else. What can still be proven is that
+        the assertion names somebody the database knows and has not deactivated,
+        which is exactly what catches a mistyped UUID and an invented one. It
+        runs inside the same fenced transaction that appends, so a user
+        deactivated a moment earlier cannot be recorded as the author of a
+        correction committed a moment later.
+
+        The read filters ``known_to`` to the open sentinel so it answers about
+        the CURRENT version of the user, matching the partial unique index on
+        ``users.public_id``; a superseded historical version never authorizes
+        anything.
+
+        Args:
+            s: The session holding the open write transaction.
+            command: The canonicalized annulment command.
+
+        Raises:
+            ExecutionAnnulmentActorError: If no active user carries the asserted
+                public id, or the user exists and is deactivated.
+        """
+        actor = (
+            (
+                await s.execute(
+                    select(User).where(
+                        User.public_id == command.annulled_by_user_public_id,
+                        User.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if actor is None:
+            raise ExecutionAnnulmentActorError(
+                "unknown_annulment_actor: "
+                f"annulled_by_user_public_id={command.annulled_by_user_public_id}"
+            )
+        if not actor.is_active:
+            raise ExecutionAnnulmentActorError(
+                "inactive_annulment_actor: "
+                f"annulled_by_user_public_id={command.annulled_by_user_public_id}"
+            )
+
+    @staticmethod
     async def _refuse_witnessed_execution_annulment(
         s: AsyncSession,
         command: _ExecutionAnnulmentCommand,
@@ -12411,12 +12625,22 @@ class SQLAlchemyRepository(Repository):
         """Prove one execution is annullable under a scope fence, then append.
 
         The proving protocol runs in ONE transaction: open with explicit dialect
-        guarantees, fence the certification scope AND the witness table, re-read
-        and prove the target (exists, same scope, same canonical digest), refuse
-        any durable fill witness, then append. Nothing is superseded, nothing is
+        guarantees, fence the certification scope AND the witness table, prove
+        the asserted acting user resolves to an ACTIVE user, re-read and prove
+        the target (exists, same scope, same canonical digest), refuse any
+        durable fill witness, then append. Nothing is superseded, nothing is
         closed, and no generic CRUD primitive is involved — the manifest's
         physical name is registered in :data:`IMMUTABLE_LEDGER_TABLE_NAMES`
         precisely so it cannot be.
+
+        The acting identity is an operator ASSERTION, verified to exist and be
+        active, and NOT authenticated by this surface. There is no principal on
+        a database-host maintenance command to authenticate; the existence proof
+        (:meth:`_proven_execution_annulment_actor`) catches a typo and a
+        fabricated id and claims nothing beyond that. Every contract that
+        mentions the field says so in the same words, because a manifest that
+        implied authentication it never performed would be the more dangerous
+        artifact.
 
         The fence's second lock is what makes the no-witness proof a proof
         rather than a sample: it holds ``venue_events`` in SHARE mode, which no
@@ -12498,6 +12722,8 @@ class SQLAlchemyRepository(Repository):
                 malformed.
             ExecutionAnnulmentTargetError: If the request does not provably
                 describe its target.
+            ExecutionAnnulmentActorError: If the asserted acting user is not an
+                existing active user.
             ExecutionAnnulmentWitnessedError: If a durable fill witness matches
                 the target.
             ExecutionAnnulmentConflictError: If the target or its scope slot is
@@ -12508,6 +12734,7 @@ class SQLAlchemyRepository(Repository):
             try:
                 await self._begin_execution_annulment_transaction(s)
                 await self._acquire_execution_annulment_fence(s, command)
+                await self._proven_execution_annulment_actor(s, command)
                 target = await self._proven_execution_annulment_target(s, command)
                 await self._refuse_witnessed_execution_annulment(s, command, target)
                 row = ExecutionAnnulment(
@@ -12673,6 +12900,609 @@ class SQLAlchemyRepository(Repository):
                 .all()
             )
         return [self._execution_annulment_to_row(row) for row in rows]
+
+    async def count_unobserved_execution_annulments(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> int:
+        """Count every correction in one scope that carries no observation.
+
+        Deliberately UNBOUNDED, and deliberately not derivable from
+        :meth:`get_unobserved_execution_annulments`. That read is paged, so a
+        caller that computed "remaining" as "what one page returned minus what
+        it completed" would report a closed knowledge gap the moment more
+        corrections existed than the page held. This asks the database the whole
+        question instead, so the number an operator reads is the number of
+        corrections that current truth honours and history still refuses.
+
+        Args:
+            wallet_public_id: Wallet identity whose manifest is counted.
+            mode: Trading mode of the certification scope.
+
+        Returns:
+            The total number of manifest rows in scope with no observation.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+        """
+        wallet = self._canonical_execution_annulment_uuid(wallet_public_id, "wallet_public_id")
+        async with self.session() as s:
+            total = (
+                await s.execute(
+                    select(func.count())
+                    .select_from(ExecutionAnnulment)
+                    .outerjoin(
+                        ExecutionAnnulmentVisibility,
+                        ExecutionAnnulmentVisibility.annulment_public_id
+                        == ExecutionAnnulment.public_id,
+                    )
+                    .where(
+                        ExecutionAnnulment.wallet_public_id == wallet,
+                        ExecutionAnnulment.mode == mode,
+                        ExecutionAnnulmentVisibility.id.is_(None),
+                    )
+                )
+            ).scalar_one()
+        return int(total)
+
+    @staticmethod
+    def _trade_projection_checkpoint_in_mode(shard_key: str, mode: str) -> bool:
+        """Decide whether one checkpoint's shard key belongs to a trading mode.
+
+        ``trade_projection_checkpoints`` carries no ``mode`` column; the mode is
+        the third segment of the canonical shard key built by
+        :func:`snapper.application.engine.service.compute_shard_key`
+        (``{exchange}.{instrument}.{mode}``). A key too short to carry that
+        segment is treated as IN scope rather than filtered away: an unrecognized
+        legacy spelling must surface in the operator's asserted set — where it is
+        seen and decided on — instead of being silently skipped by a maintenance
+        writer.
+
+        Args:
+            shard_key: The stored shard key.
+            mode: The trading mode being scoped.
+
+        Returns:
+            Whether the checkpoint belongs to the scoped mode.
+        """
+        segments = shard_key.split(".")
+        if len(segments) <= _SHARD_KEY_MODE_SEGMENT_INDEX:
+            return True
+        return segments[_SHARD_KEY_MODE_SEGMENT_INDEX] == mode
+
+    async def _read_trade_projection_versions(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        lock_rows: bool,
+    ) -> list[_DerivedProjectionVersion]:
+        """Load every version of the scope's trade projection checkpoints.
+
+        Closed versions are loaded alongside active ones on purpose: telling an
+        operator "that row is already retired" apart from "that row does not
+        exist here" needs both, and the two mistakes call for opposite actions.
+
+        ``lock_rows`` is the difference between the diagnosis and the act. The
+        writer takes ``FOR UPDATE`` so the rows it proved cannot change under it;
+        the read-only preflight takes NO lock, because a diagnostic run against a
+        live deployment must not block the trader for the length of an operator's
+        reading.
+
+        Args:
+            s: The session holding the open write or read transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+            lock_rows: Whether to hold the loaded versions for update.
+
+        Returns:
+            The scope's checkpoint versions ordered by identity then version.
+        """
+        statement = (
+            select(TradeProjectionCheckpoint)
+            .where(TradeProjectionCheckpoint.wallet_public_id == wallet_public_id)
+            .order_by(
+                TradeProjectionCheckpoint.shard_key.asc(),
+                TradeProjectionCheckpoint.timestamp.asc(),
+            )
+        )
+        if lock_rows:
+            statement = statement.with_for_update()
+        rows = (await s.execute(statement)).scalars().all()
+        return [
+            _DerivedProjectionVersion(
+                plane="trade_projection_checkpoints",
+                row_id=int(row.id),
+                public_id=row.public_id,
+                identity=row.shard_key,
+                version_started_at=row.timestamp,
+                known_to=row.known_to,
+            )
+            for row in rows
+            if self._trade_projection_checkpoint_in_mode(row.shard_key, mode)
+        ]
+
+    @staticmethod
+    async def _read_position_projection_versions(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        lock_rows: bool,
+    ) -> list[_DerivedProjectionVersion]:
+        """Load every version of the scope's position projections.
+
+        Args:
+            s: The session holding the open write or read transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+            lock_rows: Whether to hold the loaded versions for update; the
+                writer does, the read-only preflight deliberately does not.
+
+        Returns:
+            The scope's position versions ordered by instrument then version.
+        """
+        statement = (
+            select(Position)
+            .where(
+                Position.wallet_public_id == wallet_public_id,
+                Position.mode == mode,
+            )
+            .order_by(
+                Position.instrument_public_id.asc(),
+                Position.timestamp.asc(),
+            )
+        )
+        if lock_rows:
+            statement = statement.with_for_update()
+        rows = (await s.execute(statement)).scalars().all()
+        return [
+            _DerivedProjectionVersion(
+                plane="positions",
+                row_id=int(row.id),
+                public_id=row.public_id,
+                identity=row.instrument_public_id,
+                version_started_at=row.timestamp,
+                known_to=row.known_to,
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _derived_projection_version_row(
+        version: _DerivedProjectionVersion,
+    ) -> DerivedProjectionVersionRow:
+        """Project one internal version onto its typed operator row.
+
+        Args:
+            version: The loaded projection version.
+
+        Returns:
+            The typed row an operator reads and asserts against.
+        """
+        return {
+            "plane": version.plane,
+            "public_id": version.public_id,
+            "identity": version.identity,
+            "version_started_at": version.version_started_at,
+        }
+
+    @staticmethod
+    async def _read_execution_plan_checkpoint_witnesses(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+    ) -> list[ExecutionPlanCheckpointWitnessRow]:
+        """Report the plan checkpoints this maintenance path must NOT rebuild.
+
+        Read, never written. The adopted design excludes
+        ``execution_plan_checkpoints`` from the derived-plane rebuild because it
+        holds control state rather than economic projection, so the operator's
+        postcondition is that these rows are still here and the plans holding
+        them can no longer act. Reporting both halves turns "we did not touch
+        them" from an assurance into an observation.
+
+        Args:
+            s: The session holding the open write or read transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+
+        Returns:
+            The scope's active plan checkpoints with their plan's status.
+        """
+        rows = (
+            await s.execute(
+                select(
+                    ExecutionPlanCheckpoint.public_id,
+                    ExecutionPlan.public_id,
+                    ExecutionPlan.status,
+                )
+                .join(
+                    ExecutionPlan,
+                    ExecutionPlan.public_id == ExecutionPlanCheckpoint.plan_public_id,
+                )
+                .where(
+                    ExecutionPlanCheckpoint.known_to == KNOWN_TO_MAX,
+                    ExecutionPlan.known_to == KNOWN_TO_MAX,
+                    ExecutionPlan.wallet_public_id == wallet_public_id,
+                    ExecutionPlan.mode == mode,
+                )
+                .order_by(ExecutionPlan.public_id.asc(), ExecutionPlanCheckpoint.public_id.asc())
+            )
+        ).all()
+        return [
+            {
+                "public_id": checkpoint_public_id,
+                "plan_public_id": plan_public_id,
+                "plan_status": status,
+                "plan_is_terminal": status in TERMINAL_EXECUTION_PLAN_STATUSES,
+            }
+            for checkpoint_public_id, plan_public_id, status in rows
+        ]
+
+    @staticmethod
+    async def _read_applied_execution_annulments(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+    ) -> list[ExecutionAnnulment]:
+        """Load the scope's corrections that are BOTH durable and observed.
+
+        An unobserved correction is honoured by current truth and refused by
+        every historical horizon, so it is exactly the state in which a derived
+        rebuild must not be started: the rebuild would bake in an effect that
+        history still denies. Joining the observation plane makes "applied" mean
+        both halves of the knowledge protocol rather than just the first.
+
+        Args:
+            s: The session holding the open write or read transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+
+        Returns:
+            The applied manifest rows, oldest correction first.
+        """
+        return list(
+            (
+                await s.execute(
+                    select(ExecutionAnnulment)
+                    .join(
+                        ExecutionAnnulmentVisibility,
+                        ExecutionAnnulmentVisibility.annulment_public_id
+                        == ExecutionAnnulment.public_id,
+                    )
+                    .where(
+                        ExecutionAnnulment.wallet_public_id == wallet_public_id,
+                        ExecutionAnnulment.mode == mode,
+                    )
+                    .order_by(
+                        ExecutionAnnulment.timestamp.asc(),
+                        ExecutionAnnulment.public_id.asc(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def _load_derived_projection_scope(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+    ) -> DerivedProjectionScopeRow:
+        """Assemble one scope's derived-plane picture from a single session.
+
+        Args:
+            s: The session holding the open read transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+
+        Returns:
+            The scope's applied corrections, retirement instant, active
+            projection rows, and untouched plan checkpoints.
+        """
+        applied = await self._read_applied_execution_annulments(s, wallet_public_id, mode)
+        checkpoints = await self._read_trade_projection_versions(s, wallet_public_id, mode, False)
+        positions = await self._read_position_projection_versions(s, wallet_public_id, mode, False)
+        plan_checkpoints = await self._read_execution_plan_checkpoint_witnesses(
+            s, wallet_public_id, mode
+        )
+        return {
+            "wallet_public_id": wallet_public_id,
+            "mode": mode,
+            "applied_annulment_public_ids": [row.public_id for row in applied],
+            "retired_at": max((row.timestamp for row in applied), default=None),
+            "trade_projection_checkpoints": [
+                self._derived_projection_version_row(version)
+                for version in checkpoints
+                if version.known_to == KNOWN_TO_MAX
+            ],
+            "positions": [
+                self._derived_projection_version_row(version)
+                for version in positions
+                if version.known_to == KNOWN_TO_MAX
+            ],
+            "execution_plan_checkpoints": plan_checkpoints,
+        }
+
+    async def get_derived_projection_scope(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> DerivedProjectionScopeRow:
+        """Report one scope's derived plane and the corrections that invalidate it.
+
+        Read-only. Run as the preflight before
+        :meth:`retire_execution_annulment_derived_projections` — it publishes
+        the exact public ids that request must assert, the way ``inspect``
+        publishes the digest an annulment request must assert — and re-run by
+        the writer afterwards as the postcondition evidence.
+
+        Args:
+            wallet_public_id: Wallet identity of the certification scope.
+            mode: Trading mode of the certification scope.
+
+        Returns:
+            The scope's derived-plane picture.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+        """
+        wallet = self._canonical_execution_annulment_uuid(wallet_public_id, "wallet_public_id")
+        async with self.session() as s:
+            return await self._load_derived_projection_scope(s, wallet, mode)
+
+    @staticmethod
+    def _refuse_unassertable_derived_projection(
+        plane: DerivedProjectionPlane,
+        public_id: str,
+        exists_in_scope: bool,
+    ) -> NoReturn:
+        """Name why one asserted id is not an active row in this scope.
+
+        Args:
+            plane: The derived plane the assertion belongs to.
+            public_id: The asserted projection identity.
+            exists_in_scope: Whether any version of it exists in the scope.
+
+        Raises:
+            DerivedProjectionRetirementError: Always — ``already_retired`` when a
+                closed version exists, ``unknown`` when nothing does.
+        """
+        if exists_in_scope:
+            raise DerivedProjectionRetirementError(
+                f"already_retired_derived_projection: plane={plane} public_id={public_id}"
+            )
+        raise DerivedProjectionRetirementError(
+            f"unknown_derived_projection: plane={plane} public_id={public_id}"
+        )
+
+    @staticmethod
+    def _validated_derived_retirement_targets(
+        plane: DerivedProjectionPlane,
+        versions: list[_DerivedProjectionVersion],
+        asserted_public_ids: list[str],
+        retired_at: datetime,
+    ) -> list[_DerivedProjectionVersion]:
+        """Prove the operator's asserted set IS the scope's active set.
+
+        Equality in both directions, on purpose. An asserted id that is not
+        active is either already retired or not here at all, and both are
+        refusals; an active row the operator did not assert is a row they have
+        not seen, and retiring it would be exactly the improvised blast radius
+        this writer exists to remove. A version that STARTED after the
+        correction became known is refused separately, because closing it at the
+        correction instant would invert its interval and because its existence
+        means something is still writing projection state from the uncorrected
+        ledger.
+
+        Args:
+            plane: The derived plane being validated.
+            versions: Every version of the plane's rows in this scope.
+            asserted_public_ids: The public ids the operator asserted.
+            retired_at: The correction knowledge instant versions close at.
+
+        Returns:
+            Exactly the active versions to retire, in scope order.
+
+        Raises:
+            DerivedProjectionRetirementError: If the asserted set is not the
+                active set, or a target postdates the correction.
+        """
+        active = [version for version in versions if version.known_to == KNOWN_TO_MAX]
+        active_ids = {version.public_id for version in active}
+        present_ids = {version.public_id for version in versions}
+        asserted = set(asserted_public_ids)
+        for public_id in sorted(asserted - active_ids):
+            SQLAlchemyRepository._refuse_unassertable_derived_projection(
+                plane, public_id, public_id in present_ids
+            )
+        unexpected = sorted(active_ids - asserted)
+        if unexpected:
+            raise DerivedProjectionRetirementError(
+                f"unexpected_derived_projection_set: plane={plane} "
+                f"unasserted_active={','.join(unexpected)}"
+            )
+        for version in active:
+            if version.version_started_at >= retired_at:
+                raise DerivedProjectionRetirementError(
+                    f"derived_projection_postdates_correction: plane={plane} "
+                    f"public_id={version.public_id} "
+                    f"version_started_at={version.version_started_at.isoformat()} "
+                    f"retired_at={retired_at.isoformat()}"
+                )
+        return active
+
+    async def _acquire_derived_projection_fence(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+    ) -> None:
+        """Serialize derived-plane retirements for one scope against each other.
+
+        The advisory key is disjoint from the manifest writer's, because the two
+        acts contend for nothing: the retirement never touches the ledger and the
+        annulment never touches a projection. What it does prevent is two
+        operators retiring the same scope concurrently and each seeing the other's
+        rows as still active.
+
+        SQLite needs no key: ``BEGIN IMMEDIATE``, this transaction's first
+        statement, already holds a database-wide write reservation.
+
+        Args:
+            s: The session holding the open write transaction.
+            wallet_public_id: Canonical wallet identity of the scope.
+            mode: Trading mode of the scope.
+
+        Raises:
+            NotImplementedError: If the dialect has no explicit fence here.
+        """
+        dialect = self.dialect_name
+        if dialect == "sqlite":
+            return
+        if dialect != "postgresql":
+            raise NotImplementedError(
+                f"derived projection retirement fence is not implemented for dialect={dialect}"
+            )
+        await s.execute(
+            text(
+                "SELECT pg_advisory_xact_lock(hashtext('execution_annulment_derived'), "
+                "hashtext(:scope))"
+            ),
+            {"scope": "|".join((wallet_public_id, mode))},
+        )
+
+    @staticmethod
+    async def _close_derived_projection_versions(
+        s: AsyncSession,
+        model: type[TradeProjectionCheckpoint] | type[Position],
+        versions: list[_DerivedProjectionVersion],
+        retired_at: datetime,
+    ) -> None:
+        """Close each proven version, refusing anything that is no longer active.
+
+        The ``known_to`` predicate is not redundant with the proof above it. It
+        is re-evaluated against committed state at UPDATE time, so a writer that
+        closed the row between the proof and this statement makes the UPDATE
+        match nothing rather than move an interval somebody else already fixed.
+        No successor row is inserted: the trader's recovery path rebuilds the
+        projection from the annulment-aware ledger read, and inventing a
+        successor here would be this writer guessing at economics.
+
+        Args:
+            s: The session holding the open write transaction.
+            model: The projection model whose versions are being closed.
+            versions: The proven active versions to close.
+            retired_at: The correction knowledge instant to close them at.
+
+        Raises:
+            DerivedProjectionRetirementError: If a version stopped being active
+                between the proof and the close.
+        """
+        for version in versions:
+            closed = await SQLAlchemyRepository._execute_statement_count(
+                s,
+                update(model)
+                .where(model.id == version.row_id, model.known_to == KNOWN_TO_MAX)
+                .values(known_to=retired_at),
+            )
+            if closed != 1:
+                raise DerivedProjectionRetirementError(
+                    "already_retired_derived_projection: "
+                    f"plane={version.plane} public_id={version.public_id}"
+                )
+
+    async def retire_execution_annulment_derived_projections(
+        self,
+        request: DerivedProjectionRetirementRequest,
+    ) -> DerivedProjectionRetirementResult:
+        """SCD2-retire the projections one scope's corrections invalidated.
+
+        The reviewed alternative to hand-written UPDATEs against live money
+        state, and the whole of the adopted design's derived-plane procedure in
+        one idempotent, scoped act: prove the scope carries a correction that is
+        durable AND observed, take its knowledge instant, prove the operator's
+        asserted set is exactly the scope's active set on both rebuildable
+        planes, and close those versions at that instant. Nothing is deleted,
+        nothing is backdated, and no successor is written — the trader's normal
+        recovery path rebuilds from the annulment-aware ledger read.
+
+        An SCD2 close is correct here and forbidden one plane over. These are
+        PROJECTIONS derived from the ledger; the ledger itself is an append-only
+        event log whose corrections must be appended, which is why
+        ``executions`` and its manifest sit in
+        :data:`IMMUTABLE_LEDGER_TABLE_NAMES` and these two tables do not.
+
+        ``execution_plan_checkpoints`` is untouched BY CONSTRUCTION — this
+        method never names that table in a mutation — because it holds control
+        state rather than economic projection. It is reported in the result so
+        an operator verifies the untouchedness and the terminality of the plans
+        holding it, rather than being asked to trust both.
+
+        Re-running the same request refuses with
+        ``already_retired_derived_projection`` rather than closing a second time:
+        a second close would move an interval that has already been proven, and
+        the honest answer to "did this run?" is a refusal that names the row.
+
+        Args:
+            request: The operator-authored retirement request.
+
+        Returns:
+            What was retired, together with the scope as it stands afterwards.
+
+        Raises:
+            ValueError: If the wallet identity is not a UUID.
+            DerivedProjectionRetirementError: If the derived plane is not in the
+                state the request asserts.
+        """
+        wallet = self._canonical_execution_annulment_uuid(
+            request["wallet_public_id"], "wallet_public_id"
+        )
+        mode = request["mode"]
+        async with self.session() as s:
+            try:
+                await self._begin_execution_annulment_transaction(s)
+                await self._acquire_derived_projection_fence(s, wallet, mode)
+                applied = await self._read_applied_execution_annulments(s, wallet, mode)
+                if not applied:
+                    raise DerivedProjectionRetirementError(
+                        f"no_applied_execution_annulment: wallet_public_id={wallet} mode={mode}"
+                    )
+                retired_at = max(row.timestamp for row in applied)
+                checkpoints = self._validated_derived_retirement_targets(
+                    "trade_projection_checkpoints",
+                    await self._read_trade_projection_versions(s, wallet, mode, True),
+                    request["expected_trade_projection_checkpoint_public_ids"],
+                    retired_at,
+                )
+                positions = self._validated_derived_retirement_targets(
+                    "positions",
+                    await self._read_position_projection_versions(s, wallet, mode, True),
+                    request["expected_position_public_ids"],
+                    retired_at,
+                )
+                await self._close_derived_projection_versions(
+                    s, TradeProjectionCheckpoint, checkpoints, retired_at
+                )
+                await self._close_derived_projection_versions(s, Position, positions, retired_at)
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+            applied_public_ids = [row.public_id for row in applied]
+        return {
+            "wallet_public_id": wallet,
+            "mode": mode,
+            "retired_at": retired_at,
+            "applied_annulment_public_ids": applied_public_ids,
+            "retired": [
+                self._derived_projection_version_row(version)
+                for version in (*checkpoints, *positions)
+            ],
+            "scope_after": await self.get_derived_projection_scope(wallet, mode),
+        }
 
     @staticmethod
     def _witnessed_order_public_ids() -> Select[tuple[str]]:
