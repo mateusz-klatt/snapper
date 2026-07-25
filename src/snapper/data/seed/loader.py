@@ -5,6 +5,12 @@ Loads seed profiles from TOML files using a three-tier lookup:
 -> ``proprietary/data/seed/{profile}.toml`` (CWD, local dev)
 -> package-bundled ``snapper/data/seed/{profile}.toml`` (installed wheel).
 
+A seed profile is a complete, self-sufficient description of a database
+state: format version 2 declares operators, per-user operator
+memberships, wallet read grants and operator scope grants in the file
+instead of leaving them to be synthesized in code. Every file stands
+alone — there is no cross-file inheritance and no base/overlay merging.
+
 Provides idempotent semantics so ``db-seed`` can be run repeatedly
 without duplicating data. Users are skipped entirely when any account
 already exists; settings use INSERT OR IGNORE to preserve manually
@@ -24,6 +30,8 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+from typing import cast
 from uuid import uuid7
 
 import bcrypt
@@ -37,12 +45,72 @@ from snapper.application.portfolio.reconciliation_methods import PortfolioReconc
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.exchanges.reconciliation_policy import account_mode_for_exchange
 from snapper.infrastructure.exchanges.reconciliation_policy import is_reconciliation_method_allowed
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+SUPPORTED_SEED_FORMAT_VERSIONS: frozenset[int] = frozenset({2})
+"""Seed profile format versions this loader accepts.
+
+Version 1 profiles described only settings, users and wallets, leaving
+operators, memberships and scope grants to code-side synthesis. They are
+rejected at parse time so a deployment fails loud and is hand-migrated
+instead of silently seeding a database state no profile describes.
+"""
+
+_TOP_LEVEL_SECTIONS: frozenset[str] = frozenset(
+    {"profile", "runtime_owned", "operators", "users", "settings", "wallets", "scope_grants"}
+)
+"""Sections a version-2 seed document is allowed to declare.
+
+An unrecognised top-level section is either a typo or a fact the loader
+would silently drop. Both contradict the premise that a profile is a
+complete description of a database state, so they are rejected instead
+of ignored.
+"""
+
+_READ_GRANT_FORBIDDEN_PERMISSIONS: frozenset[Permission] = frozenset(
+    {Permission.CREATE_ORDERS, Permission.IMPERSONATE_OPERATOR}
+)
+"""Permissions whose holders must never be modelled as read-only principals.
+
+A named permission set holding either permission can place orders or act
+as an operator, so a read-only wallet grant on such a user is a modelling
+error rather than a narrower entitlement.
+"""
+
+
+@dataclass
+class SeedOperator:
+    """Seed data for one operator (trading identity).
+
+    Attributes:
+        label: Operator label, unique within the profile.
+        description: Human-readable purpose of the operator.
+    """
+
+    label: str
+    description: str
+
+
+@dataclass
+class SeedReadGrant:
+    """Seed data for one read-only wallet grant held by a user.
+
+    Attributes:
+        wallet: Label of the readable wallet.
+        wallet_is_paper: Paper flag completing the wallet natural key.
+        note: Operator-facing rationale for the read grant.
+    """
+
+    wallet: str
+    wallet_is_paper: bool
+    note: str
 
 
 @dataclass
@@ -54,12 +122,62 @@ class SeedUser:
         email: User email address.
         password: Plaintext password (will be bcrypt-hashed before insert).
         role: User role (admin, operator, viewer).
+        operators: Labels of the operators this user is a member of.
+        primary_operator: Label of the primary membership, or ``""``
+            when the user holds no operator membership at all.
+        readable_wallets: Read-only wallet grants held by this user.
     """
 
     username: str
     email: str
     password: str
     role: str
+    operators: list[str] = field(default_factory=list)
+    primary_operator: str = ""
+    readable_wallets: list[SeedReadGrant] = field(default_factory=list)
+
+
+@dataclass
+class SeedScopeGrant:
+    """Seed data for one operator market-scope grant on a wallet.
+
+    The wallet is addressed by the natural ``(wallet, wallet_is_paper)``
+    key because the wallets table is unique on ``(label, is_paper)``.
+
+    Attributes:
+        operator: Label of the granted operator, declared in ``[[operators]]``.
+        wallet: Label of the wallet the scope is granted on.
+        wallet_is_paper: Paper flag completing the wallet natural key.
+        granted_by: Username of the declaring principal.
+        scope_kind: Either ``"underlying"`` or ``"instrument"``.
+        underlying: Underlying symbol for an underlying-kind grant.
+        instrument: Instrument symbol for an instrument-kind grant.
+        note: Operator-facing rationale for the grant.
+    """
+
+    operator: str
+    wallet: str
+    wallet_is_paper: bool
+    granted_by: str
+    scope_kind: Literal["underlying", "instrument"]
+    underlying: str | None
+    instrument: str | None
+    note: str
+
+
+@dataclass
+class SeedRuntimeOwned:
+    """Facts a profile deliberately leaves to runtime provisioning.
+
+    An empty ``user_roles`` list is a deliberate statement that the
+    profile owns every user row, not an omission.
+
+    Attributes:
+        user_roles: Role names whose users, memberships and caps are
+            minted at runtime rather than declared by any profile.
+    """
+
+    user_roles: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -146,11 +264,24 @@ class SeedProfile:
         users: List of user seed entries.
         settings: List of setting seed entries.
         wallets: List of wallet seed entries (with nested credentials).
+        name: Profile identity declared in ``[profile]``.
+        format_version: Declared seed format version.
+        tier: Lookup tier the profile is authored for (1 = ``data/seed``,
+            2 = ``proprietary/data/seed``, 3 = package-bundled).
+        operators: Operators the profile declares.
+        scope_grants: Operator market-scope grants the profile declares.
+        runtime_owned: Facts the profile deliberately leaves to runtime.
     """
 
     users: list[SeedUser] = field(default_factory=list)
     settings: list[SeedSetting] = field(default_factory=list)
     wallets: list[SeedWallet] = field(default_factory=list)
+    name: str = ""
+    format_version: int = 0
+    tier: int = 0
+    operators: list[SeedOperator] = field(default_factory=list)
+    scope_grants: list[SeedScopeGrant] = field(default_factory=list)
+    runtime_owned: SeedRuntimeOwned = field(default_factory=SeedRuntimeOwned)
 
 
 def _package_dir() -> Path:
@@ -184,40 +315,485 @@ def resolve_seed_path(profile: str) -> Path:
         cwd / "proprietary" / "data" / "seed" / f"{profile}.toml",
         _package_dir() / f"{profile}.toml",
     ]
-    for path in candidates:
+    for tier, path in enumerate(candidates, start=1):
         if path.exists():
-            logger.info(f"Seed profile resolved: {path}")
+            logger.info(f"Seed profile resolved: {path} (lookup tier {tier})")
             return path
     searched = ", ".join(str(p) for p in candidates)
     raise FileNotFoundError(f"Seed profile '{profile}' not found. Searched: {searched}")
 
 
+def _as_int(value: JsonValue) -> int:
+    """Return a decoded TOML integer scalar typed as ``int``."""
+    return cast(int, value)
+
+
+def _as_tables(value: JsonValue) -> list[JsonObject]:
+    """Return a decoded TOML array-of-tables typed as a list of mappings."""
+    return cast(list[JsonObject], value)
+
+
+def _as_texts(value: JsonValue) -> list[str]:
+    """Return a decoded TOML string array typed as a list of ``str``."""
+    return [str(item) for item in cast(list[JsonValue], value)]
+
+
+def _optional_text(entry: JsonObject, key: str) -> str | None:
+    """Return a TOML string field, or ``None`` when absent or empty."""
+    value = entry.get(key)
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _check_keys(
+    entry: JsonObject, required: tuple[str, ...], optional: tuple[str, ...], context: str
+) -> None:
+    """Validate one seed table's key set against the version-2 format.
+
+    Args:
+        entry: Decoded TOML table to validate.
+        required: Keys the format demands, in the order they are reported.
+        optional: Keys the format allows but does not demand.
+        context: Location prefix naming the offending table in messages.
+
+    Raises:
+        ValueError: When a required key is absent, or when the table
+            declares a key outside the required and optional sets. An
+            unrecognised key is a typo or a fact the loader would drop
+            without a word, so it is rejected rather than ignored.
+    """
+    missing = [key for key in required if key not in entry]
+    if missing:
+        raise ValueError(f"{context} is missing required key(s): {', '.join(missing)}")
+    unknown = sorted(key for key in entry if key not in required and key not in optional)
+    if unknown:
+        raise ValueError(f"{context} declares unknown key(s): {', '.join(unknown)}")
+
+
+def _reject_unknown_sections(document: JsonObject, source: str) -> None:
+    """Fail closed when a seed document declares a section the loader ignores."""
+    unknown = sorted(key for key in document if key not in _TOP_LEVEL_SECTIONS)
+    if unknown:
+        raise ValueError(
+            f"Seed profile '{source}' declares unknown section(s): {', '.join(unknown)}; "
+            f"supported sections are {sorted(_TOP_LEVEL_SECTIONS)}"
+        )
+
+
+def _parse_profile_header(document: JsonObject, source: str) -> tuple[str, int, int]:
+    """Parse the ``[profile]`` identity block and enforce the format version."""
+    if "profile" not in document:
+        raise ValueError(
+            f"Seed profile '{source}' has no [profile] section; a v2 profile must declare "
+            f"name, format_version and tier"
+        )
+    header = cast(JsonObject, document["profile"])
+    _check_keys(
+        header,
+        ("name", "format_version", "tier"),
+        (),
+        f"[profile] in seed profile '{source}'",
+    )
+    format_version = _as_int(header["format_version"])
+    if format_version not in SUPPORTED_SEED_FORMAT_VERSIONS:
+        raise ValueError(
+            f"Seed profile '{source}' declares unsupported format_version {format_version}; "
+            f"this loader supports {sorted(SUPPORTED_SEED_FORMAT_VERSIONS)}"
+        )
+    return str(header["name"]), format_version, _as_int(header["tier"])
+
+
+def _known_role_names() -> frozenset[str]:
+    """Return every role name the permission model defines."""
+    return frozenset(role.value for role in ROLE_PERMISSIONS)
+
+
+def _parse_runtime_owned(document: JsonObject, source: str) -> SeedRuntimeOwned:
+    """Parse the ``[runtime_owned]`` block naming runtime-minted facts."""
+    if "runtime_owned" not in document:
+        raise ValueError(
+            f"Seed profile '{source}' has no [runtime_owned] section; declare an empty "
+            f"user_roles list when the profile owns every user"
+        )
+    section = cast(JsonObject, document["runtime_owned"])
+    _check_keys(section, ("user_roles",), (), f"[runtime_owned] in seed profile '{source}'")
+    user_roles = _as_texts(section["user_roles"])
+    known = _known_role_names()
+    unknown = sorted(set(user_roles) - known)
+    if unknown:
+        raise ValueError(
+            f"Seed profile '{source}' [runtime_owned] names unknown role(s): "
+            f"{', '.join(unknown)}; known roles are {sorted(known)}"
+        )
+    return SeedRuntimeOwned(user_roles=user_roles)
+
+
+def _parse_operators(document: JsonObject, source: str) -> list[SeedOperator]:
+    """Parse ``[[operators]]`` entries and reject duplicate labels."""
+    operators: list[SeedOperator] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(_as_tables(document.get("operators", [])), start=1):
+        _check_keys(
+            entry,
+            ("label", "description"),
+            (),
+            f"[[operators]] entry {index} in seed profile '{source}'",
+        )
+        label = str(entry["label"])
+        if label in seen:
+            raise ValueError(f"Seed profile '{source}' declares duplicate operator label '{label}'")
+        seen.add(label)
+        operators.append(SeedOperator(label=label, description=str(entry["description"])))
+    return operators
+
+
+def _read_grant_forbidden_roles() -> frozenset[str]:
+    """Return role names whose permission set forbids declared read grants."""
+    return frozenset(
+        role.value
+        for role, permissions in ROLE_PERMISSIONS.items()
+        if _READ_GRANT_FORBIDDEN_PERMISSIONS & permissions
+    )
+
+
+def _parse_read_grants(entry: JsonObject, username: str, source: str) -> list[SeedReadGrant]:
+    """Parse one user's ``[[users.readable_wallets]]`` entries."""
+    grants: list[SeedReadGrant] = []
+    seen: set[tuple[str, bool]] = set()
+    for index, raw in enumerate(_as_tables(entry["readable_wallets"]), start=1):
+        context = (
+            f"[[users.readable_wallets]] entry {index} for user '{username}' "
+            f"in seed profile '{source}'"
+        )
+        _check_keys(raw, ("wallet", "wallet_is_paper", "note"), (), context)
+        wallet = str(raw["wallet"])
+        wallet_is_paper = bool(raw["wallet_is_paper"])
+        if (wallet, wallet_is_paper) in seen:
+            raise ValueError(
+                f"Seed profile '{source}' user '{username}' declares readable wallet "
+                f"('{wallet}', is_paper={wallet_is_paper}) more than once"
+            )
+        seen.add((wallet, wallet_is_paper))
+        grants.append(
+            SeedReadGrant(
+                wallet=wallet,
+                wallet_is_paper=wallet_is_paper,
+                note=str(raw["note"]),
+            )
+        )
+    return grants
+
+
+def _parse_users(document: JsonObject, source: str) -> list[SeedUser]:
+    """Parse ``[[users]]`` entries with their membership and read-grant blocks."""
+    forbidden_roles = _read_grant_forbidden_roles()
+    users: list[SeedUser] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(_as_tables(document.get("users", [])), start=1):
+        _check_keys(
+            entry,
+            (
+                "username",
+                "email",
+                "password",
+                "role",
+                "operators",
+                "primary_operator",
+                "readable_wallets",
+            ),
+            (),
+            f"[[users]] entry {index} in seed profile '{source}'",
+        )
+        username = str(entry["username"])
+        if username in seen:
+            raise ValueError(f"Seed profile '{source}' declares duplicate username '{username}'")
+        seen.add(username)
+        role = str(entry["role"])
+        operators = _as_texts(entry["operators"])
+        primary_operator = str(entry["primary_operator"])
+        if primary_operator and primary_operator not in operators:
+            raise ValueError(
+                f"Seed profile '{source}' user '{username}' declares primary_operator "
+                f"'{primary_operator}' outside its own operators list {operators}"
+            )
+        readable_wallets = _parse_read_grants(entry, username, source)
+        if readable_wallets and role in forbidden_roles:
+            raise ValueError(
+                f"Seed profile '{source}' user '{username}' holds trade-capable role '{role}' "
+                f"and must not declare readable_wallets; read grants model read-only principals"
+            )
+        users.append(
+            SeedUser(
+                username=username,
+                email=str(entry["email"]),
+                password=str(entry["password"]),
+                role=role,
+                operators=operators,
+                primary_operator=primary_operator,
+                readable_wallets=readable_wallets,
+            )
+        )
+    return users
+
+
+def _scope_kind_of(value: str, context: str) -> Literal["underlying", "instrument"]:
+    """Return the validated scope-kind literal for one seed scope grant."""
+    if value == "underlying":
+        return "underlying"
+    if value == "instrument":
+        return "instrument"
+    raise ValueError(
+        f"{context} declares unknown scope_kind '{value}'; expected 'underlying' or 'instrument'"
+    )
+
+
+def _parse_scope_grants(document: JsonObject, source: str) -> list[SeedScopeGrant]:
+    """Parse ``[[scope_grants]]`` entries and enforce the scope-kind XOR rule."""
+    grants: list[SeedScopeGrant] = []
+    for index, entry in enumerate(_as_tables(document.get("scope_grants", [])), start=1):
+        context = f"[[scope_grants]] entry {index} in seed profile '{source}'"
+        _check_keys(
+            entry,
+            ("operator", "wallet", "wallet_is_paper", "granted_by", "scope_kind", "note"),
+            ("underlying", "instrument"),
+            context,
+        )
+        scope_kind = _scope_kind_of(str(entry["scope_kind"]), context)
+        underlying = _optional_text(entry, "underlying")
+        instrument = _optional_text(entry, "instrument")
+        target = f"operator '{entry['operator']}' wallet '{entry['wallet']}'"
+        if scope_kind == "underlying" and (underlying is None or instrument is not None):
+            raise ValueError(
+                f"{context} for {target} uses scope_kind='underlying' and must set underlying "
+                f"while leaving instrument unset"
+            )
+        if scope_kind == "instrument" and (instrument is None or underlying is not None):
+            raise ValueError(
+                f"{context} for {target} uses scope_kind='instrument' and must set instrument "
+                f"while leaving underlying unset"
+            )
+        grants.append(
+            SeedScopeGrant(
+                operator=str(entry["operator"]),
+                wallet=str(entry["wallet"]),
+                wallet_is_paper=bool(entry["wallet_is_paper"]),
+                granted_by=str(entry["granted_by"]),
+                scope_kind=scope_kind,
+                underlying=underlying,
+                instrument=instrument,
+                note=str(entry["note"]),
+            )
+        )
+    return grants
+
+
+def _parse_settings(document: JsonObject, source: str) -> list[SeedSetting]:
+    """Parse ``[[settings]]`` entries into their dataclass."""
+    settings: list[SeedSetting] = []
+    for index, entry in enumerate(_as_tables(document.get("settings", [])), start=1):
+        _check_keys(
+            entry,
+            ("key", "value", "category", "description"),
+            (),
+            f"[[settings]] entry {index} in seed profile '{source}'",
+        )
+        settings.append(
+            SeedSetting(
+                key=str(entry["key"]),
+                value=str(entry["value"]),
+                category=str(entry["category"]),
+                description=str(entry["description"]),
+            )
+        )
+    return settings
+
+
+def _parse_wallet_credential(entry: JsonObject, context: str) -> SeedWalletCredential:
+    """Parse one ``[[wallets.credentials]]`` table into its dataclass."""
+    _check_keys(
+        entry,
+        ("exchange", "credential_type", "reconciliation_method"),
+        ("api_key", "api_secret", "private_key_pem_base64", "initial_balance", "label"),
+        context,
+    )
+    return SeedWalletCredential(
+        exchange=str(entry["exchange"]),
+        credential_type=str(entry["credential_type"]),
+        reconciliation_method=cast(
+            PortfolioReconciliationMethod, str(entry["reconciliation_method"])
+        ),
+        api_key=str(entry.get("api_key", "")),
+        api_secret=str(entry.get("api_secret", "")),
+        private_key_pem_base64=str(entry.get("private_key_pem_base64", "")),
+        initial_balance=str(entry.get("initial_balance", "")),
+        label=_optional_text(entry, "label"),
+    )
+
+
+def _parse_wallets(document: JsonObject, source: str) -> list[SeedWallet]:
+    """Parse ``[[wallets]]`` entries with their nested credential tables.
+
+    ``is_paper`` is required rather than defaulted: it completes the
+    ``(label, is_paper)`` natural key every cross-reference validator
+    matches on, and a silent default would quietly promote an
+    under-specified entry to a live-money wallet.
+    """
+    wallets: list[SeedWallet] = []
+    seen: set[tuple[str, bool]] = set()
+    for index, entry in enumerate(_as_tables(document.get("wallets", [])), start=1):
+        context = f"[[wallets]] entry {index} in seed profile '{source}'"
+        _check_keys(entry, ("label", "is_paper"), ("description", "credentials"), context)
+        label = str(entry["label"])
+        is_paper = bool(entry["is_paper"])
+        if (label, is_paper) in seen:
+            raise ValueError(
+                f"Seed profile '{source}' declares wallet "
+                f"('{label}', is_paper={is_paper}) more than once"
+            )
+        seen.add((label, is_paper))
+        wallets.append(
+            SeedWallet(
+                label=label,
+                is_paper=is_paper,
+                description=_optional_text(entry, "description"),
+                credentials=[
+                    _parse_wallet_credential(
+                        raw, f"[[wallets.credentials]] entry {position} under {context}"
+                    )
+                    for position, raw in enumerate(
+                        _as_tables(entry.get("credentials", [])), start=1
+                    )
+                ],
+            )
+        )
+    return wallets
+
+
+def _validate_user_references(profile: SeedProfile, source: str) -> None:
+    """Fail closed when a user names an operator or wallet the profile omits."""
+    operator_labels = {operator.label for operator in profile.operators}
+    wallet_keys = {(wallet.label, wallet.is_paper) for wallet in profile.wallets}
+    for user in profile.users:
+        for label in user.operators:
+            if label not in operator_labels:
+                raise ValueError(
+                    f"Seed profile '{source}' user '{user.username}' names operator '{label}' "
+                    f"which is not declared in [[operators]]"
+                )
+        for grant in user.readable_wallets:
+            if (grant.wallet, grant.wallet_is_paper) not in wallet_keys:
+                raise ValueError(
+                    f"Seed profile '{source}' user '{user.username}' names readable wallet "
+                    f"('{grant.wallet}', is_paper={grant.wallet_is_paper}) which is not "
+                    f"declared in [[wallets]]"
+                )
+
+
+def _validate_scope_grant_references(profile: SeedProfile, source: str) -> None:
+    """Fail closed when a scope grant names an undeclared operator, user or wallet."""
+    operator_labels = {operator.label for operator in profile.operators}
+    wallet_keys = {(wallet.label, wallet.is_paper) for wallet in profile.wallets}
+    usernames = {user.username for user in profile.users}
+    for grant in profile.scope_grants:
+        if grant.operator not in operator_labels:
+            raise ValueError(
+                f"Seed profile '{source}' scope grant names operator '{grant.operator}' "
+                f"which is not declared in [[operators]]"
+            )
+        if grant.granted_by not in usernames:
+            raise ValueError(
+                f"Seed profile '{source}' scope grant names granted_by '{grant.granted_by}' "
+                f"which is not declared in [[users]]"
+            )
+        if (grant.wallet, grant.wallet_is_paper) not in wallet_keys:
+            raise ValueError(
+                f"Seed profile '{source}' scope grant names wallet "
+                f"('{grant.wallet}', is_paper={grant.wallet_is_paper}) which is not "
+                f"declared in [[wallets]]"
+            )
+
+
+def _validate_runtime_owned_users(profile: SeedProfile, source: str) -> None:
+    """Fail closed when a declared user holds a role stated to be runtime-owned."""
+    runtime_roles = set(profile.runtime_owned.user_roles)
+    for user in profile.users:
+        if user.role in runtime_roles:
+            raise ValueError(
+                f"Seed profile '{source}' declares user '{user.username}' with role "
+                f"'{user.role}', which [runtime_owned] states is minted at runtime"
+            )
+
+
+def _validate_profile_identity(profile: SeedProfile, requested: str, source: str) -> None:
+    """Fail closed when the declared name contradicts the name it was loaded as.
+
+    The declared ``tier`` is deliberately NOT cross-checked against the
+    tier the file was resolved from: the container image copies the
+    proprietary tier-2 profiles into the package-bundled tier-3 slot
+    (``Dockerfile``), so one authored file legitimately resolves from
+    different tiers depending on packaging. ``tier`` records where the
+    profile is authored to live; the name is the identity that must hold
+    everywhere.
+
+    Args:
+        profile: Parsed profile carrying the declared identity block.
+        requested: Profile name the caller asked ``load_seed_profile`` for.
+        source: Resolved file path, quoted in failure messages.
+
+    Raises:
+        ValueError: When the declared name is not the requested name. An
+            unchecked name is decoration: a renamed or mis-copied file
+            could otherwise claim to describe a state it does not seed.
+    """
+    if profile.name != requested:
+        raise ValueError(
+            f"Seed profile '{source}' declares name '{profile.name}' but was loaded as "
+            f"'{requested}'; the identity block must name the profile it is resolved as"
+        )
+
+
+def _parse_seed_profile(document: JsonObject, source: str) -> SeedProfile:
+    """Parse a decoded seed document into a fully validated ``SeedProfile``."""
+    _reject_unknown_sections(document, source)
+    name, format_version, tier = _parse_profile_header(document, source)
+    profile = SeedProfile(
+        users=_parse_users(document, source),
+        settings=_parse_settings(document, source),
+        wallets=_parse_wallets(document, source),
+        name=name,
+        format_version=format_version,
+        tier=tier,
+        operators=_parse_operators(document, source),
+        scope_grants=_parse_scope_grants(document, source),
+        runtime_owned=_parse_runtime_owned(document, source),
+    )
+    _validate_user_references(profile, source)
+    _validate_scope_grant_references(profile, source)
+    _validate_runtime_owned_users(profile, source)
+    return profile
+
+
 def load_seed_profile(profile: str) -> SeedProfile:
-    """Load and parse a seed profile from TOML.
+    """Load, parse and validate a seed profile from TOML.
 
     Args:
         profile: Seed profile name.
 
     Returns:
-        Parsed SeedProfile with users, settings, and wallets.
+        Parsed SeedProfile with users, settings, wallets, operators,
+        scope grants and the runtime-owned declaration.
+
+    Raises:
+        ValueError: When the resolved file is not a complete, internally
+            consistent profile at a supported format version, or when its
+            identity block declares a different profile name.
     """
     path = resolve_seed_path(profile)
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    users = [SeedUser(**entry) for entry in data.get("users", [])]
-    settings = [SeedSetting(**entry) for entry in data.get("settings", [])]
-    wallets: list[SeedWallet] = []
-    for wallet_entry in data.get("wallets", []):
-        credential_entries = wallet_entry.get("credentials", [])
-        credentials = [SeedWalletCredential(**cred) for cred in credential_entries]
-        wallets.append(
-            SeedWallet(
-                label=wallet_entry["label"],
-                is_paper=bool(wallet_entry.get("is_paper", False)),
-                description=wallet_entry.get("description"),
-                credentials=credentials,
-            )
-        )
-    return SeedProfile(users=users, settings=settings, wallets=wallets)
+    document: JsonObject = tomllib.loads(path.read_text(encoding="utf-8"))
+    parsed = _parse_seed_profile(document, str(path))
+    _validate_profile_identity(parsed, profile, str(path))
+    return parsed
 
 
 def _hash_password(password: str) -> str:

@@ -243,6 +243,121 @@ Envelope shapes by `credential_type`:
 - `oauth` — `{"client_id": "...", "client_secret": "...", "refresh_token": "..."}`
 - `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
 
+#### Seed profile format version 2
+
+A seed profile is a complete, self-sufficient description of a database
+state. Every file stands alone: there is no cross-file inheritance and no
+base/overlay merging. Format version 2 adds the sections that version 1
+left to code-side synthesis, and the loader rejects any other version at
+parse time so a stale profile fails loud instead of seeding a state no
+file describes.
+
+Required sections, all validated when the profile is parsed:
+
+- `[profile]` with `name`, `format_version` and `tier` (1 = `data/seed`,
+    2 = `proprietary/data/seed`, 3 = package-bundled). No defaults. `name`
+    must equal the profile name the file is loaded as, so a renamed or
+    mis-copied file fails loud instead of claiming to describe a state it
+    does not seed. `tier` records where the profile is *authored* to live
+    and is deliberately not cross-checked against the tier it resolved
+    from: the container image copies the proprietary tier-2 profiles into
+    the package-bundled tier-3 slot, so one authored file legitimately
+    resolves from different tiers depending on packaging.
+- `[runtime_owned]` with `user_roles` — the roles whose users, memberships
+    and caps are minted at runtime rather than declared by any profile. An
+    empty list is a deliberate statement; an absent section is an omission
+    and is rejected. Every name must be a real role, and no `[[users]]`
+    entry may hold a role the same file calls runtime-owned.
+- `[[operators]]` entries with `label` and `description`. Labels are unique.
+- Per-user `operators`, `primary_operator` and `readable_wallets`. They may
+    be empty but never absent. `primary_operator` is either `""` or a member
+    of that user's own `operators` list. Usernames are unique.
+- `[[settings]]` entries with `key`, `value`, `category` and `description`.
+- `[[wallets]]` entries with `label` and `is_paper` (plus optional
+    `description` and nested `[[wallets.credentials]]`, which require
+    `exchange`, `credential_type` and `reconciliation_method`). `is_paper`
+    has no default because it completes the wallet's natural key, and a
+    defaulted one would quietly become a live-money wallet. The
+    `(label, is_paper)` pair is unique.
+- Optional `[[scope_grants]]` entries with `operator`, `wallet`,
+    `wallet_is_paper`, `granted_by`, `scope_kind`, `note`, plus exactly one
+    of `underlying` (for `scope_kind = "underlying"`) or `instrument` (for
+    `scope_kind = "instrument"`).
+
+Unknown top-level sections and unknown keys inside any table are
+rejected rather than ignored. A profile only describes a database state
+completely if everything it states is actually read, so a misspelled
+`[[scope_grant]]` fails loud instead of vanishing.
+
+Wallets are addressed by the natural `(wallet, wallet_is_paper)` key
+because the `wallets` table is unique on `(label, is_paper)`. Every
+operator label, `granted_by` username and wallet key referenced by a user
+or a scope grant must be declared in the same file. `readable_wallets`
+models read-only principals: a user whose role permissions include
+`create:orders` or `impersonate:operator` may not declare one.
+
+```toml
+[profile]
+name = "prod"
+format_version = 2
+tier = 1
+
+[runtime_owned]
+user_roles = ["ai_delegate", "ai_researcher"]
+
+[[operators]]
+label = "default"
+description = "Default seed operator for single-user deployment"
+
+[[users]]
+username = "admin"
+email = "admin@snapper.local"
+password = "change-me-after-first-login"
+role = "admin"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
+
+[[users]]
+username = "viewer"
+email = "viewer@snapper.local"
+password = "change-me-after-first-login"
+role = "viewer"
+operators = []
+primary_operator = ""
+
+  [[users.readable_wallets]]
+  wallet = "paper"
+  wallet_is_paper = true
+  note = "read-only oversight of the paper book"
+
+[[wallets]]
+label = "paper"
+is_paper = true
+description = "Paper-mode wallet (10k USD bootstrap)"
+
+  [[wallets.credentials]]
+  exchange = "paper"
+  credential_type = "paper"
+  reconciliation_method = "unclassified"
+  initial_balance = "10000.0"
+  label = "paper bootstrap"
+
+[[scope_grants]]
+operator = "default"
+wallet = "paper"
+wallet_is_paper = true
+granted_by = "admin"
+scope_kind = "underlying"
+underlying = "BTC"
+note = "heartbeat AI reviews"
+```
+
+Declaring these facts does not yet change what `db-seed` writes: the
+current bootstrap still synthesizes the default operator and the
+memberships described below. The declarations become authoritative in a
+follow-up change.
+
 Seed profiles are resolved in three tiers:
 `data/seed/{profile}.toml`, then `proprietary/data/seed/{profile}.toml`,
 then the package-bundled `src/snapper/data/seed/{profile}.toml`. The
@@ -280,7 +395,8 @@ credential CRUD as MCP tools). Other recovery options
 are re-running the seed against a clean DB or direct SQL surgery on
 the encrypted payload as a last resort.
 
-Seed file structure:
+Wallet sections of a seed file (the `[profile]`, `[runtime_owned]` and
+`[[operators]]` sections above are required in the same file):
 
 ```toml
 [[wallets]]

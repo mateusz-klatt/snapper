@@ -965,6 +965,34 @@ class TestResolveAdminCredentialsFromSeed:
         message = str(exc_info.value).lower() + " " + getattr(exc_info.value, "code", "").__str__()
         assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"} or "exit" in message
 
+    def test_exits_when_a_resolved_profile_fails_validation(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Given the first profile is present but invalid, when invoked, then exit 1 naming it."""
+        dev_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="dev-admin",
+                    email="dev-admin@x",
+                    password="DEV_PW",
+                    role="admin",
+                ),
+            ],
+        )
+
+        def _loader(profile: str) -> SeedProfile:
+            if profile == "mcp":
+                raise ValueError("has no [profile] section")
+            return dev_profile
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        with pytest.raises(Exception) as exc_info:
+            resolve_admin_credentials_from_seed()
+        assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"}
+        stderr = capsys.readouterr().err
+        assert "mcp" in stderr
+        assert "has no [profile] section" in stderr
+
     def test_exits_when_profiles_have_users_but_no_admin(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

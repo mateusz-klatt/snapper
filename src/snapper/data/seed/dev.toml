@@ -1,20 +1,41 @@
+[profile]
+name = "dev"
+format_version = 2
+tier = 3
+
+[runtime_owned]
+user_roles = ["ai_delegate", "ai_researcher"]
+
+[[operators]]
+label = "default"
+description = "Default seed operator for single-user deployment"
+
 [[users]]
 username = "admin"
 email = "admin@snapper.local"
 password = "change-me-after-first-login"
 role = "admin"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
 
 [[users]]
 username = "operator"
 email = "operator@snapper.local"
 password = "change-me-after-first-login"
 role = "operator"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
 
 [[users]]
 username = "viewer"
 email = "viewer@snapper.local"
 password = "change-me-after-first-login"
 role = "viewer"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
 
 [[settings]]
 key = "ui_origin"

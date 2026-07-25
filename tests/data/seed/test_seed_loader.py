@@ -2,6 +2,7 @@
 
 import base64
 import json
+import tomllib
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,12 @@ from sqlalchemy.pool import NullPool
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
+from snapper.data.seed.loader import SUPPORTED_SEED_FORMAT_VERSIONS
+from snapper.data.seed.loader import SeedOperator
 from snapper.data.seed.loader import SeedProfile
+from snapper.data.seed.loader import SeedReadGrant
+from snapper.data.seed.loader import SeedRuntimeOwned
+from snapper.data.seed.loader import SeedScopeGrant
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
 from snapper.data.seed.loader import SeedWallet
@@ -27,6 +33,7 @@ from snapper.data.seed.loader import _build_credential_envelope
 from snapper.data.seed.loader import _hash_password
 from snapper.data.seed.loader import _known_to_value
 from snapper.data.seed.loader import _package_dir
+from snapper.data.seed.loader import _parse_seed_profile
 from snapper.data.seed.loader import _sync_db_url
 from snapper.data.seed.loader import _timestamp_value
 from snapper.data.seed.loader import _validate_seed_reconciliation_method
@@ -128,6 +135,79 @@ class TestPackageDir:
         assert (result / "loader.py").exists()
 
 
+_V2_PREAMBLE = """[profile]
+name = "unit"
+format_version = 2
+tier = 1
+
+[runtime_owned]
+user_roles = []
+
+[[operators]]
+label = "default"
+description = "Unit-test seed operator"
+"""
+"""Minimal valid version-2 header shared by the inline parser tests."""
+
+_V2_PAPER_WALLET = """
+[[wallets]]
+label = "paper"
+is_paper = true
+description = "Unit-test paper wallet"
+
+[[wallets.credentials]]
+exchange = "paper"
+credential_type = "paper"
+reconciliation_method = "unclassified"
+initial_balance = "10000.0"
+label = "paper bootstrap"
+"""
+"""One paper wallet so read/scope grants have a declared target."""
+
+_V2_ADMIN_USER = """
+[[users]]
+username = "klattm"
+email = "klattm@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
+"""
+"""One trade-capable user usable as a scope grant's granted_by."""
+
+_V2_UNDERLYING_GRANT = """
+[[scope_grants]]
+operator = "default"
+wallet = "paper"
+wallet_is_paper = true
+granted_by = "klattm"
+scope_kind = "underlying"
+underlying = "BTC"
+note = "heartbeat_consult_btc_1h AI reviews"
+"""
+"""One valid underlying-kind scope grant against the paper wallet."""
+
+
+def _load_inline_profile(tmp_path: Path, body: str, *, requested: str = "unit") -> SeedProfile:
+    """Parse an inline profile body through the real loader entry point.
+
+    Args:
+        tmp_path: Pytest temporary directory for the profile file.
+        body: Complete TOML document text.
+        requested: Profile name the loader is asked to resolve; defaults
+            to the name declared by :data:`_V2_PREAMBLE` so the identity
+            check passes.
+
+    Returns:
+        The parsed and validated profile.
+    """
+    toml_file = tmp_path / "inline.toml"
+    toml_file.write_text(body, encoding="utf-8")
+    with patch("snapper.data.seed.loader.resolve_seed_path", return_value=toml_file):
+        return load_seed_profile(requested)
+
+
 class TestLoadSeedProfile:
     """Tests for TOML seed profile loading."""
 
@@ -136,7 +216,7 @@ class TestLoadSeedProfile:
 
         Given: dev.toml exists in seed directory,
         When: loading 'dev' profile,
-        Then: profile contains expected users and settings.
+        Then: profile contains expected users, settings and v2 identity.
         """
         profile = load_seed_profile("dev")
         assert len(profile.users) == 3
@@ -147,20 +227,25 @@ class TestLoadSeedProfile:
         assert len(profile.settings) >= 1
         ui_origin = next(s for s in profile.settings if s.key == "ui_origin")
         assert ui_origin.value
+        assert profile.name == "dev"
+        assert profile.format_version == 2
+        assert [operator.label for operator in profile.operators] == ["default"]
+        assert all(user.primary_operator == "default" for user in profile.users)
 
-    def test_load_profile_with_empty_sections(self, tmp_path: Path) -> None:
-        """Test loading profile with empty/missing sections.
+    def test_load_profile_with_empty_optional_sections(self, tmp_path: Path) -> None:
+        """Test loading a header-only profile.
 
-        Given: TOML file with no users or settings,
+        Given: a v2 profile declaring no users, settings or wallets,
         When: loading the profile,
-        Then: profile has empty lists.
+        Then: the optional collections are empty and the header is parsed.
         """
-        toml_file = tmp_path / "seed-empty.toml"
-        toml_file.write_text("")
-        with patch("snapper.data.seed.loader.resolve_seed_path", return_value=toml_file):
-            profile = load_seed_profile("empty")
+        profile = _load_inline_profile(tmp_path, _V2_PREAMBLE)
         assert profile.users == []
         assert profile.settings == []
+        assert profile.wallets == []
+        assert profile.scope_grants == []
+        assert profile.runtime_owned.user_roles == []
+        assert profile.tier == 1
 
     def test_load_profile_users_only(self, tmp_path: Path) -> None:
         """Test loading profile with users only.
@@ -169,19 +254,20 @@ class TestLoadSeedProfile:
         When: loading the profile,
         Then: profile has users and empty settings.
         """
-        toml_content = """
+        body = _V2_PREAMBLE + """
 [[users]]
 username = "testuser"
 email = "test@test.com"
 password = "TestPass123!"
 role = "admin"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
 """
-        toml_file = tmp_path / "seed-users.toml"
-        toml_file.write_text(toml_content)
-        with patch("snapper.data.seed.loader.resolve_seed_path", return_value=toml_file):
-            profile = load_seed_profile("users")
+        profile = _load_inline_profile(tmp_path, body)
         assert len(profile.users) == 1
         assert profile.users[0].username == "testuser"
+        assert profile.users[0].operators == ["default"]
         assert profile.settings == []
 
     def test_load_profile_settings_only(self, tmp_path: Path) -> None:
@@ -191,20 +277,594 @@ role = "admin"
         When: loading the profile,
         Then: profile has settings and empty users.
         """
-        toml_content = """
+        body = _V2_PREAMBLE + """
 [[settings]]
 key = "test_key"
 value = "test_value"
 category = "test"
 description = "Test setting"
 """
-        toml_file = tmp_path / "seed-settings.toml"
-        toml_file.write_text(toml_content)
-        with patch("snapper.data.seed.loader.resolve_seed_path", return_value=toml_file):
-            profile = load_seed_profile("settings")
+        profile = _load_inline_profile(tmp_path, body)
         assert profile.users == []
         assert len(profile.settings) == 1
         assert profile.settings[0].key == "test_key"
+
+
+class TestSeedProfileFormatV2:
+    """Parse-time validation of the self-sufficient version-2 profile format.
+
+    A seed profile must describe a complete database state on its own.
+    Every rejection here is raised while parsing, so an under-specified
+    profile can never reach the write path and silently seed a state that
+    no file describes.
+    """
+
+    def test_missing_profile_section_is_rejected(self, tmp_path: Path) -> None:
+        """A document without the [profile] section is rejected.
+
+        Given: a legacy version-1 document declaring only users,
+        When: the profile is loaded,
+        Then: a ValueError names the missing [profile] section.
+        """
+        body = """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = []
+primary_operator = ""
+readable_wallets = []
+"""
+        with pytest.raises(ValueError, match=r"has no \[profile\] section"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_missing_profile_header_keys_are_rejected(self, tmp_path: Path) -> None:
+        """The [profile] identity keys have no defaults.
+
+        Given: a [profile] section declaring only name,
+        When: the profile is loaded,
+        Then: a ValueError names format_version and tier as missing.
+        """
+        body = '[profile]\nname = "unit"\n\n[runtime_owned]\nuser_roles = []\n'
+        with pytest.raises(ValueError, match=r"missing required key\(s\): format_version, tier"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_unsupported_format_version_is_rejected(self, tmp_path: Path) -> None:
+        """Only the supported format versions parse.
+
+        Given: a document declaring format_version 1,
+        When: the profile is loaded,
+        Then: a ValueError names the unsupported version.
+        """
+        assert 2 in SUPPORTED_SEED_FORMAT_VERSIONS
+        assert 1 not in SUPPORTED_SEED_FORMAT_VERSIONS
+        body = _V2_PREAMBLE.replace("format_version = 2", "format_version = 1")
+        with pytest.raises(ValueError, match="unsupported format_version 1"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_missing_runtime_owned_section_is_rejected(self, tmp_path: Path) -> None:
+        """An absent [runtime_owned] section is an omission, not a statement.
+
+        Given: a v2 header without the [runtime_owned] section,
+        When: the profile is loaded,
+        Then: a ValueError names the missing section.
+        """
+        body = _V2_PREAMBLE.replace("[runtime_owned]\nuser_roles = []\n\n", "")
+        with pytest.raises(ValueError, match=r"has no \[runtime_owned\] section"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_missing_user_membership_keys_are_rejected(self, tmp_path: Path) -> None:
+        """Per-user membership keys may be empty but never absent.
+
+        Given: a user table omitting operators and readable_wallets,
+        When: the profile is loaded,
+        Then: a ValueError names both missing keys.
+        """
+        body = _V2_PREAMBLE + """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+primary_operator = "default"
+"""
+        with pytest.raises(
+            ValueError, match=r"missing required key\(s\): operators, readable_wallets"
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_primary_operator_outside_own_operators_is_rejected(self, tmp_path: Path) -> None:
+        """A primary membership must be one of the user's own memberships.
+
+        Given: a user whose primary_operator is absent from its operators list,
+        When: the profile is loaded,
+        Then: a ValueError names the offending primary_operator.
+        """
+        body = _V2_PREAMBLE + """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = []
+primary_operator = "default"
+readable_wallets = []
+"""
+        with pytest.raises(ValueError, match="declares primary_operator 'default' outside"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_user_operator_must_be_declared(self, tmp_path: Path) -> None:
+        """A membership can only name an operator the profile declares.
+
+        Given: a user that is a member of an undeclared operator label,
+        When: the profile is loaded,
+        Then: a ValueError names the undeclared operator.
+        """
+        body = _V2_PREAMBLE + """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = ["ghost"]
+primary_operator = "ghost"
+readable_wallets = []
+"""
+        with pytest.raises(ValueError, match="names operator 'ghost' which is not declared"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_duplicate_operator_label_is_rejected(self, tmp_path: Path) -> None:
+        """Operator labels are unique within a profile.
+
+        Given: two [[operators]] entries sharing one label,
+        When: the profile is loaded,
+        Then: a ValueError names the duplicated label.
+        """
+        body = _V2_PREAMBLE + """
+[[operators]]
+label = "default"
+description = "Duplicate of the first operator"
+"""
+        with pytest.raises(ValueError, match="duplicate operator label 'default'"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_scope_grant_operator_must_be_declared(self, tmp_path: Path) -> None:
+        """A scope grant can only name a declared operator.
+
+        Given: a scope grant naming an undeclared operator label,
+        When: the profile is loaded,
+        Then: a ValueError names the undeclared operator.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace('operator = "default"', 'operator = "ghost"')
+        )
+        with pytest.raises(ValueError, match="scope grant names operator 'ghost'"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_scope_grant_granted_by_must_be_declared(self, tmp_path: Path) -> None:
+        """A scope grant can only be attributed to a declared user.
+
+        Given: a scope grant whose granted_by names no declared user,
+        When: the profile is loaded,
+        Then: a ValueError names the unknown username.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace('granted_by = "klattm"', 'granted_by = "ghost"')
+        )
+        with pytest.raises(ValueError, match="scope grant names granted_by 'ghost'"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_scope_grant_wallet_must_be_declared(self, tmp_path: Path) -> None:
+        """A scope grant addresses a wallet by its natural key.
+
+        Given: a scope grant whose paper flag matches no declared wallet,
+        When: the profile is loaded,
+        Then: a ValueError reports the unknown wallet key.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace("wallet_is_paper = true", "wallet_is_paper = false")
+        )
+        with pytest.raises(ValueError, match="scope grant names wallet"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_read_grant_wallet_must_be_declared(self, tmp_path: Path) -> None:
+        """A read grant addresses a wallet by its natural key.
+
+        Given: a viewer read grant naming an undeclared wallet,
+        When: the profile is loaded,
+        Then: a ValueError reports the unknown wallet key.
+        """
+        body = _V2_PREAMBLE + _V2_PAPER_WALLET + """
+[[users]]
+username = "viewer"
+email = "viewer@test.local"
+password = "unit-test-password"
+role = "viewer"
+operators = []
+primary_operator = ""
+
+  [[users.readable_wallets]]
+  wallet = "main"
+  wallet_is_paper = false
+  note = "read-only oversight"
+"""
+        with pytest.raises(ValueError, match="names readable wallet"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_duplicate_read_grant_is_rejected(self, tmp_path: Path) -> None:
+        """One user cannot declare the same readable wallet twice.
+
+        Given: a viewer declaring the paper wallet twice,
+        When: the profile is loaded,
+        Then: a ValueError reports the repeated wallet key.
+        """
+        body = _V2_PREAMBLE + _V2_PAPER_WALLET + """
+[[users]]
+username = "viewer"
+email = "viewer@test.local"
+password = "unit-test-password"
+role = "viewer"
+operators = []
+primary_operator = ""
+
+  [[users.readable_wallets]]
+  wallet = "paper"
+  wallet_is_paper = true
+  note = "read-only oversight of the paper book"
+
+  [[users.readable_wallets]]
+  wallet = "paper"
+  wallet_is_paper = true
+  note = "duplicate of the same wallet"
+"""
+        with pytest.raises(ValueError, match="more than once"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_trade_capable_role_cannot_hold_read_grants(self, tmp_path: Path) -> None:
+        """Read grants model read-only principals only.
+
+        Given: an operator-role user declaring a readable wallet,
+        When: the profile is loaded,
+        Then: a ValueError rejects the trade-capable read grant.
+        """
+        body = _V2_PREAMBLE + _V2_PAPER_WALLET + """
+[[users]]
+username = "trader"
+email = "trader@test.local"
+password = "unit-test-password"
+role = "operator"
+operators = ["default"]
+primary_operator = "default"
+
+  [[users.readable_wallets]]
+  wallet = "paper"
+  wallet_is_paper = true
+  note = "invalid read grant for a trade-capable role"
+"""
+        with pytest.raises(ValueError, match="must not declare readable_wallets"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_unknown_scope_kind_is_rejected(self, tmp_path: Path) -> None:
+        """Scope kinds are a closed set.
+
+        Given: a scope grant declaring an unrecognised scope_kind,
+        When: the profile is loaded,
+        Then: a ValueError names the unknown scope_kind.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace('scope_kind = "underlying"', 'scope_kind = "venue"')
+        )
+        with pytest.raises(ValueError, match="unknown scope_kind 'venue'"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_underlying_scope_kind_rejects_instrument_field(self, tmp_path: Path) -> None:
+        """An underlying-kind grant must leave instrument unset.
+
+        Given: an underlying-kind scope grant that also sets instrument,
+        When: the profile is loaded,
+        Then: a ValueError states the underlying-only requirement.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace(
+                'underlying = "BTC"', 'underlying = "BTC"\ninstrument = "BTC/USD"'
+            )
+        )
+        with pytest.raises(ValueError, match="must set underlying"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_instrument_scope_kind_requires_instrument_field(self, tmp_path: Path) -> None:
+        """An instrument-kind grant must set instrument and leave underlying unset.
+
+        Given: an instrument-kind scope grant carrying only an underlying,
+        When: the profile is loaded,
+        Then: a ValueError states the instrument-only requirement.
+        """
+        body = (
+            _V2_PREAMBLE
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + _V2_UNDERLYING_GRANT.replace('scope_kind = "underlying"', 'scope_kind = "instrument"')
+        )
+        with pytest.raises(ValueError, match="must set instrument"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_complete_profile_parses_every_declared_fact(self, tmp_path: Path) -> None:
+        """A complete profile round-trips every v2 fact it declares.
+
+        Given: a profile with runtime-owned roles, an operator, a wallet, a
+            trade-capable member, a read-only viewer and both scope kinds,
+        When: the profile is loaded,
+        Then: every declared fact is present on the parsed profile.
+        """
+        body = (
+            _V2_PREAMBLE.replace("user_roles = []", 'user_roles = ["ai_delegate"]')
+            + _V2_PAPER_WALLET
+            + _V2_ADMIN_USER
+            + """
+[[users]]
+username = "viewer"
+email = "viewer@test.local"
+password = "unit-test-password"
+role = "viewer"
+operators = []
+primary_operator = ""
+
+  [[users.readable_wallets]]
+  wallet = "paper"
+  wallet_is_paper = true
+  note = "read-only oversight of the paper book"
+"""
+            + _V2_UNDERLYING_GRANT
+            + """
+[[scope_grants]]
+operator = "default"
+wallet = "paper"
+wallet_is_paper = true
+granted_by = "klattm"
+scope_kind = "instrument"
+instrument = "PI_XBTUSD"
+note = "single instrument delegation"
+"""
+        )
+        profile = _load_inline_profile(tmp_path, body)
+        assert profile.runtime_owned == SeedRuntimeOwned(user_roles=["ai_delegate"])
+        assert profile.operators == [
+            SeedOperator(label="default", description="Unit-test seed operator")
+        ]
+        assert profile.users[1].primary_operator == ""
+        assert profile.users[1].readable_wallets == [
+            SeedReadGrant(
+                wallet="paper",
+                wallet_is_paper=True,
+                note="read-only oversight of the paper book",
+            )
+        ]
+        assert profile.scope_grants == [
+            SeedScopeGrant(
+                operator="default",
+                wallet="paper",
+                wallet_is_paper=True,
+                granted_by="klattm",
+                scope_kind="underlying",
+                underlying="BTC",
+                instrument=None,
+                note="heartbeat_consult_btc_1h AI reviews",
+            ),
+            SeedScopeGrant(
+                operator="default",
+                wallet="paper",
+                wallet_is_paper=True,
+                granted_by="klattm",
+                scope_kind="instrument",
+                underlying=None,
+                instrument="PI_XBTUSD",
+                note="single instrument delegation",
+            ),
+        ]
+        assert profile.wallets[0].credentials[0].initial_balance == "10000.0"
+        assert profile.wallets[0].description == "Unit-test paper wallet"
+
+    def test_missing_runtime_owned_user_roles_is_rejected(self, tmp_path: Path) -> None:
+        """A present [runtime_owned] section still has to state its roles.
+
+        Given: a [runtime_owned] section declaring no user_roles key,
+        When: the profile is loaded,
+        Then: a ValueError names the missing key and its section.
+        """
+        body = _V2_PREAMBLE.replace("user_roles = []", "")
+        with pytest.raises(
+            ValueError, match=r"\[runtime_owned\] in seed profile .* missing required key\(s\): "
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_unknown_runtime_owned_role_is_rejected(self, tmp_path: Path) -> None:
+        """Runtime-owned roles are checked against the permission model.
+
+        Given: a [runtime_owned] section naming a misspelled role,
+        When: the profile is loaded,
+        Then: a ValueError names the unknown role.
+        """
+        body = _V2_PREAMBLE.replace("user_roles = []", 'user_roles = ["ai_delegat"]')
+        with pytest.raises(ValueError, match=r"names unknown role\(s\): ai_delegat"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_runtime_owned_role_cannot_also_be_declared(self, tmp_path: Path) -> None:
+        """A file cannot both declare a user and disown its role.
+
+        Given: a profile listing 'admin' as runtime-owned while declaring
+            an admin user,
+        When: the profile is loaded,
+        Then: a ValueError names the self-contradicting user and role.
+        """
+        body = _V2_PREAMBLE.replace("user_roles = []", 'user_roles = ["admin"]') + _V2_ADMIN_USER
+        with pytest.raises(ValueError, match="which \\[runtime_owned\\] states is minted"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_unknown_top_level_section_is_rejected(self, tmp_path: Path) -> None:
+        """A section the loader would ignore is an error, not a no-op.
+
+        Given: a profile declaring a misspelled [[scope_grant]] section,
+        When: the profile is loaded,
+        Then: a ValueError names the unknown section.
+        """
+        body = _V2_PREAMBLE + '\n[[scope_grant]]\noperator = "default"\n'
+        with pytest.raises(ValueError, match=r"declares unknown section\(s\): scope_grant"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_unknown_key_in_a_table_is_rejected(self, tmp_path: Path) -> None:
+        """A key the loader would drop is an error, not a no-op.
+
+        Given: a user table carrying a key outside the v2 format,
+        When: the profile is loaded,
+        Then: a ValueError names the unknown key and the offending entry.
+        """
+        body = _V2_PREAMBLE + _V2_ADMIN_USER + "is_superuser = true\n"
+        with pytest.raises(
+            ValueError,
+            match=r"\[\[users\]\] entry 1 .* declares unknown key\(s\): is_superuser",
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_duplicate_username_is_rejected(self, tmp_path: Path) -> None:
+        """Usernames are unique within a profile.
+
+        Given: two [[users]] entries sharing one username,
+        When: the profile is loaded,
+        Then: a ValueError names the duplicated username.
+        """
+        body = _V2_PREAMBLE + _V2_ADMIN_USER + _V2_ADMIN_USER
+        with pytest.raises(ValueError, match="duplicate username 'klattm'"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_missing_setting_keys_are_rejected(self, tmp_path: Path) -> None:
+        """A settings table states all four columns or none of them.
+
+        Given: a settings entry omitting description,
+        When: the profile is loaded,
+        Then: a ValueError names the entry and the missing key.
+        """
+        body = _V2_PREAMBLE + '\n[[settings]]\nkey = "k"\nvalue = "v"\ncategory = "c"\n'
+        with pytest.raises(
+            ValueError,
+            match=r"\[\[settings\]\] entry 1 .* missing required key\(s\): description",
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_wallet_must_declare_is_paper(self, tmp_path: Path) -> None:
+        """The paper flag completes the wallet key and has no default.
+
+        Given: a wallet entry declaring only its label,
+        When: the profile is loaded,
+        Then: a ValueError names the missing is_paper key.
+        """
+        body = _V2_PREAMBLE + '\n[[wallets]]\nlabel = "paper"\n'
+        with pytest.raises(
+            ValueError, match=r"\[\[wallets\]\] entry 1 .* missing required key\(s\): is_paper"
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_wallet_credential_missing_keys_are_rejected(self, tmp_path: Path) -> None:
+        """Credential envelopes state their exchange, type and method.
+
+        Given: a nested credential entry omitting reconciliation_method,
+        When: the profile is loaded,
+        Then: a ValueError names the nested entry and the missing key.
+        """
+        body = _V2_PREAMBLE + _V2_PAPER_WALLET.replace(
+            'reconciliation_method = "unclassified"\n', ""
+        )
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"\[\[wallets\.credentials\]\] entry 1 under \[\[wallets\]\] entry 1 .* "
+                r"missing required key\(s\): reconciliation_method"
+            ),
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_duplicate_wallet_key_is_rejected(self, tmp_path: Path) -> None:
+        """Wallets are unique on their (label, is_paper) natural key.
+
+        Given: two [[wallets]] entries sharing one label and paper flag,
+        When: the profile is loaded,
+        Then: a ValueError names the duplicated wallet key.
+        """
+        body = _V2_PREAMBLE + _V2_PAPER_WALLET + _V2_PAPER_WALLET
+        with pytest.raises(
+            ValueError, match=r"declares wallet \('paper', is_paper=True\) more than once"
+        ):
+            _load_inline_profile(tmp_path, body)
+
+    def test_declared_name_must_match_requested_profile(self, tmp_path: Path) -> None:
+        """The identity block cannot claim to be a different profile.
+
+        Given: a profile declaring name 'unit' resolved as 'prod',
+        When: the profile is loaded,
+        Then: a ValueError reports both names.
+        """
+        with pytest.raises(ValueError, match="declares name 'unit' but was loaded as 'prod'"):
+            _load_inline_profile(tmp_path, _V2_PREAMBLE, requested="prod")
+
+    def test_declared_tier_is_not_cross_checked_against_the_lookup_tier(
+        self, tmp_path: Path
+    ) -> None:
+        """The declared tier records authorship, not the resolved slot.
+
+        The container image copies the proprietary tier-2 profiles into
+        the package-bundled tier-3 slot, so one authored file resolves
+        from different tiers depending on packaging and the declared tier
+        cannot be an equality check.
+
+        Given: a profile declaring tier 2 loaded from an arbitrary path,
+        When: the profile is loaded,
+        Then: it parses and keeps the declared tier verbatim.
+        """
+        body = _V2_PREAMBLE.replace("tier = 1", "tier = 2")
+        assert _load_inline_profile(tmp_path, body).tier == 2
+
+
+class TestDocumentedSeedProfileExample:
+    """The documented version-2 example must parse with the shipped loader.
+
+    ``docs/configuration.md`` carries the canonical profile operators copy
+    when authoring a new seed file. A documented example the loader
+    rejects is worse than no example at all, so it is parsed here.
+    """
+
+    def test_documented_v2_examples_parse(self) -> None:
+        """Every documented v2 TOML example is a loadable profile.
+
+        Given: the fenced TOML blocks in docs/configuration.md that
+            declare format_version 2,
+        When: each block is parsed by the loader,
+        Then: it parses and declares a supported format version.
+        """
+        docs = _package_dir().parents[3] / "docs" / "configuration.md"
+        blocks = [
+            block.split("\n", 1)[1]
+            for block in docs.read_text(encoding="utf-8").split("```")[1::2]
+            if block.startswith("toml\n") and "format_version = 2" in block
+        ]
+        assert blocks
+        for block in blocks:
+            profile = _parse_seed_profile(tomllib.loads(block), "docs/configuration.md")
+            assert profile.format_version in SUPPORTED_SEED_FORMAT_VERSIONS
 
 
 class TestSeedDataclasses:
@@ -241,11 +901,29 @@ class TestSeedDataclasses:
 
         Given: no arguments,
         When: creating a SeedProfile instance,
-        Then: users and settings are empty lists.
+        Then: every collection is empty and the identity fields are unset.
         """
         profile = SeedProfile()
         assert profile.users == []
         assert profile.settings == []
+        assert profile.operators == []
+        assert profile.scope_grants == []
+        assert profile.runtime_owned == SeedRuntimeOwned()
+        assert profile.name == ""
+        assert profile.format_version == 0
+        assert profile.tier == 0
+
+    def test_seed_user_membership_defaults(self) -> None:
+        """Test SeedUser membership fields default to declared-nothing.
+
+        Given: only the legacy identity arguments,
+        When: creating a SeedUser instance,
+        Then: the membership and read-grant fields are empty.
+        """
+        user = SeedUser(username="viewer", email="v@t.com", password="pass", role="viewer")
+        assert user.operators == []
+        assert user.primary_operator == ""
+        assert user.readable_wallets == []
 
 
 class TestHashPassword:
@@ -1348,11 +2026,24 @@ class TestSeedProfilesFitColumnLimits:
 
     @pytest.mark.parametrize("profile", ["dev", "prod"])
     def test_settings_fit_column_widths(self, profile: str) -> None:
-        """All settings in each resolvable profile fit the model columns."""
+        """All settings in each resolvable profile fit the model columns.
+
+        A profile that fails v2 validation is not loadable at all — its
+        ``db-seed`` run fails loud before any INSERT — so the width guard
+        has nothing to inspect and skips with the parse error. Tracked
+        profiles keep unconditional coverage in
+        :class:`TestTrackedSeedProfilesUseFormatV2`.
+
+        Given: a seed profile name resolvable in this checkout,
+        When: every parsed setting is measured against the ORM columns,
+        Then: no key, category or description exceeds its varchar width.
+        """
         try:
             seed = load_seed_profile(profile)
         except FileNotFoundError:
             pytest.skip(f"profile {profile!r} not present in this checkout")
+        except ValueError as exc:
+            pytest.skip(f"profile {profile!r} is not a loadable v2 seed profile: {exc}")
         limits = {
             "key": Setting.__table__.c.key.type.length,
             "category": Setting.__table__.c.category.type.length,
@@ -1366,3 +2057,69 @@ class TestSeedProfilesFitColumnLimits:
                     f"{profile}: setting {setting.key!r} field {field!r}"
                     f" is {len(value)} chars > varchar({limit})"
                 )
+
+
+class TestTrackedSeedProfilesUseFormatV2:
+    """Every git-tracked seed profile parses as a complete v2 description.
+
+    Tier-1 ``data/seed`` files are deployment-local and untracked, so they
+    can shadow a tracked profile name during resolution. These checks read
+    the tracked files by path instead, keeping the format contract and the
+    settings column-width guard honest regardless of local overrides.
+    """
+
+    def _tracked_profile_paths(self) -> list[tuple[str, Path]]:
+        """Return the tracked (label, path) seed profiles present on disk.
+
+        Returns:
+            One entry per tracked profile file that exists in this checkout.
+        """
+        repo_root = _package_dir().parents[3]
+        candidates = [
+            ("bundled dev", _package_dir() / "dev.toml"),
+            ("proprietary dev", repo_root / "proprietary" / "data" / "seed" / "dev.toml"),
+            ("proprietary prod", repo_root / "proprietary" / "data" / "seed" / "prod.toml"),
+        ]
+        return [(name, path) for name, path in candidates if path.exists()]
+
+    def test_tracked_profiles_declare_supported_format(self) -> None:
+        """Tracked profiles parse and declare a supported format version.
+
+        Given: the tracked seed profiles present in this checkout,
+        When: each file is parsed directly by path,
+        Then: each declares a supported format_version and a named profile.
+        """
+        tracked = self._tracked_profile_paths()
+        assert tracked
+        for name, path in tracked:
+            profile = _parse_seed_profile(
+                tomllib.loads(path.read_text(encoding="utf-8")), str(path)
+            )
+            assert profile.format_version in SUPPORTED_SEED_FORMAT_VERSIONS, name
+            assert profile.name, name
+            assert profile.tier in {2, 3}, name
+
+    def test_tracked_profile_settings_fit_column_widths(self) -> None:
+        """Tracked profile settings fit the Setting column widths.
+
+        Given: the tracked seed profiles present in this checkout,
+        When: each parsed setting is measured against the ORM column limits,
+        Then: no key, category or description exceeds its varchar width.
+        """
+        limits = {
+            "key": Setting.__table__.c.key.type.length,
+            "category": Setting.__table__.c.category.type.length,
+            "description": Setting.__table__.c.description.type.length,
+        }
+        for name, path in self._tracked_profile_paths():
+            profile = _parse_seed_profile(
+                tomllib.loads(path.read_text(encoding="utf-8")), str(path)
+            )
+            for setting in profile.settings:
+                for field, limit in limits.items():
+                    assert limit is not None
+                    value = getattr(setting, field, None) or ""
+                    assert len(value) <= limit, (
+                        f"{name}: setting {setting.key!r} field {field!r}"
+                        f" is {len(value)} chars > varchar({limit})"
+                    )

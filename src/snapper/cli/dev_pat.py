@@ -78,13 +78,20 @@ def resolve_admin_credentials_from_seed() -> tuple[str, str]:
     wins. ``mcp`` is checked before ``dev`` so operators can drop a
     private override outside open source without touching dev.toml.
 
+    A profile that is absent is skipped so the next candidate can win. A
+    profile that is present but fails seed-format validation is fatal
+    rather than skipped: falling through would mint the PAT against a
+    different profile's admin, silently swapping the identity the
+    operator asked for.
+
     Returns:
         Tuple of (username, password) for the seed admin user.
 
     Raises:
-        typer.Exit: When no profile in the lookup order yields an admin
-            user; exits the CLI with a stderr message naming the
-            profiles that were attempted.
+        typer.Exit: When a resolved profile fails seed-format validation,
+            or when no profile in the lookup order yields an admin user;
+            exits the CLI with a stderr message naming the profiles that
+            were attempted.
     """
     profiles_tried: list[str] = []
     for profile in SEED_PROFILE_LOOKUP_ORDER:
@@ -93,6 +100,12 @@ def resolve_admin_credentials_from_seed() -> tuple[str, str]:
             seed = load_seed_profile(profile)
         except FileNotFoundError:
             continue
+        except ValueError as exc:
+            _fatal(
+                f"Seed profile '{profile}' exists but is not a valid seed profile: {exc}. "
+                "Migrate it to the current seed format, or pass --admin-username and "
+                "--admin-password explicitly."
+            )
         for user in seed.users:
             if user.role == "admin":
                 logger.info(
