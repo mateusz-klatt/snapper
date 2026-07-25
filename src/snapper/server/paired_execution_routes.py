@@ -60,7 +60,8 @@ from snapper.data.repository_types import PairedExecutionHaltRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
+from snapper.server.scoping import resolve_tradable_wallets
 
 router = APIRouter(prefix="/paired-execution", tags=["paired-execution"])
 
@@ -310,7 +311,7 @@ async def list_paired_execution_incidents(
         halted / exposed scope.
     """
     sql_repo = _require_sql_repository(repo)
-    allowed = await resolve_target_wallets(principal, repo)
+    allowed = await resolve_readable_wallets(principal, repo)
     halts = await sql_repo.list_active_paired_execution_halts()
     groups = await sql_repo.list_current_paired_execution_groups(_EXPOSED_GROUP_STATUSES)
     halts_by_scope = _halts_by_scope(halts)
@@ -387,7 +388,7 @@ async def terminalize_paired_execution_group(
     group = await sql_repo.get_current_paired_execution_group(group_public_id)
     if group is None:
         raise not_found
-    allowed = await resolve_target_wallets(principal, repo)
+    allowed = await resolve_tradable_wallets(principal, repo)
     if allowed is not None and group["wallet_public_id"] not in allowed:
         raise not_found
     tracker: SequenceTracker = request.app.state.rest_tracker

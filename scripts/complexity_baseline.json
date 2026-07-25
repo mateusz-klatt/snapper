@@ -1,11 +1,11 @@
 {
-  "schema_version": 1,
   "limits": {
     "C901": 10,
     "PLR0912": 12,
     "PLR0913": 5,
     "PLR0915": 50
   },
+  "schema_version": 1,
   "violations": {
     "proprietary/tests/strategies/test_parlay_cascade.py": {
       "_cleanup_strategy": {
@@ -1182,9 +1182,6 @@
     "src/snapper/server/_plan_route_helpers.py": {
       "_build_cancel_trade_command": {
         "PLR0913": 7
-      },
-      "load_accessible_execution_plan": {
-        "PLR0913": 6
       }
     },
     "src/snapper/server/ai_review_routes.py": {
@@ -2268,11 +2265,6 @@
     "tests/server/test_alerts_routes.py": {
       "_alert_row": {
         "PLR0913": 7
-      }
-    },
-    "tests/server/test_backtest_routes.py": {
-      "_create_client": {
-        "PLR0913": 6
       }
     },
     "tests/server/test_device_routes.py": {

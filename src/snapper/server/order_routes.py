@@ -72,7 +72,7 @@ from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_tradable_wallets
 
 _REST_STREAM = "rest.orders"
 _EVALUATOR = ManualOnceEvaluator()
@@ -224,7 +224,7 @@ async def _resolve_create_order_wallet(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=_wallet_resolution_error_detail(len(exc.candidates)),
         ) from exc
-    await resolve_target_wallets(
+    await resolve_tradable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=wallet_public_id,

@@ -167,15 +167,15 @@ class TestListIncidents:
 
     @pytest.mark.asyncio
     async def test_operator_is_wallet_scoped(self) -> None:
-        """A non-admin caller only sees scopes for accessible wallets.
+        """A non-admin caller only sees scopes for readable wallets.
 
-        Given: incidents on wallets w-1 and w-2 while the caller's operator
-            set grants access to w-1 only,
+        Given: incidents on wallets w-1 and w-2 while the caller's read
+            plane covers w-1 only,
         When: the OPERATOR lists incidents,
         Then: only the w-1 scope is returned.
         """
         repo = _sql_repo()
-        repo.list_accessible_wallets_for_operators = AsyncMock(
+        repo.list_readable_wallets_for_user = AsyncMock(
             return_value=[cast(Any, {"public_id": "w-1"})]
         )
         repo.list_active_paired_execution_halts = AsyncMock(return_value=[_halt_row(wallet="w-2")])

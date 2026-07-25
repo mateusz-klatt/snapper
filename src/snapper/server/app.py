@@ -258,7 +258,7 @@ from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
 from snapper.server.remote_summary_cache import RemoteSummaryCache
 from snapper.server.scope_grant_routes import router as scope_grant_router
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
 from snapper.server.strategy_routes import router as strategy_router
 from snapper.server.trailing_stop_routes import router as trailing_stop_router
 from snapper.server.wallet_routes import router as wallet_router
@@ -2015,7 +2015,7 @@ async def _handle_get_signals(
     """
     processing_date = as_of or datetime.now(UTC)
     try:
-        target_wallets = await resolve_target_wallets(
+        target_wallets = await resolve_readable_wallets(
             principal, repo, operator_public_id, wallet_public_id
         )
         since = processing_date - timedelta(hours=hours)
@@ -2533,7 +2533,7 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         with _translate_endpoint_errors("fetch orders", "Failed to fetch orders"):
-            target_wallets = await resolve_target_wallets(
+            target_wallets = await resolve_readable_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
             rows = await repo.get_orders(
@@ -2590,7 +2590,7 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         with _translate_endpoint_errors("fetch executions", "Failed to fetch executions"):
-            target_wallets = await resolve_target_wallets(
+            target_wallets = await resolve_readable_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
             rows = await repo.get_executions(
@@ -2653,7 +2653,7 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         with _translate_endpoint_errors("fetch positions", "Failed to fetch positions"):
-            target_wallets = await resolve_target_wallets(
+            target_wallets = await resolve_readable_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
             rows = await repo.get_positions(as_of=processing_date, wallet_public_ids=target_wallets)
@@ -2715,7 +2715,7 @@ def _create_orders_executions_router() -> APIRouter:
             "fetch portfolio accounts",
             "Failed to fetch portfolio accounts",
         ):
-            target_wallets = await resolve_target_wallets(
+            target_wallets = await resolve_readable_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
             contexts = await repo.get_portfolio_reconciliation_read_contexts(target_wallets)

@@ -5982,10 +5982,12 @@ class Repository(ABC):
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
         """Return every active wallet at the given bus time.
 
-        Used by the wallet catalogue endpoint (ADMIN only
-        non-admin callers must go through
-        ``list_accessible_wallets_for_operators`` so they only see
-        wallets covered by at least one of their active scope grants).
+        Used by the wallet catalogue endpoint for callers holding global
+        scope only. Other callers must go through
+        ``list_readable_wallets_for_user`` on read surfaces (their
+        operators' scope grants UNION their personal read grants) and
+        ``list_accessible_wallets_for_operators`` on trade surfaces, so
+        neither plane can see a wallet no grant reaches.
 
         Args:
             as_of: Bus time for the temporal query.
@@ -21570,8 +21572,8 @@ class SQLAlchemyRepository(Repository):
         filter (the ADMIN-unscoped view, mirroring ``get_positions``); a
         non-empty list scopes to those wallets; an EMPTY list scopes to
         nothing (a caller with no accessible wallets — never an unfiltered
-        scan, since ``resolve_target_wallets`` returns ``None`` only for an
-        admin with no explicit scope).
+        scan, since the ``server.scoping`` primitives return ``None`` only
+        for an admin with no explicit scope).
 
         Args:
             wallet_public_ids: Full wallet identities to include, or ``None``

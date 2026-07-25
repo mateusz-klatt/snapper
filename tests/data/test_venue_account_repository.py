@@ -841,7 +841,7 @@ async def test_get_states_none_returns_all_unscoped(tmp_path: Path) -> None:
     When: get_venue_account_states runs with ``None`` (no wallet filter),
     Then: rows for BOTH wallets come back — mirroring get_positions, the
         admin-unscoped view is the only path that reaches an unfiltered read
-        (resolve_target_wallets returns None only for an admin with no scope).
+        (the scoping primitives return None only for an admin with no scope).
     """
     repo = await _make_repo(tmp_path)
     other_wallet = "019e873c-d060-762d-8cee-5fde40095131"

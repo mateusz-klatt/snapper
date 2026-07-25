@@ -45,6 +45,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanDecisionData
 from snapper.server._capability_guard import require_tradable
 from snapper.server._plan_route_helpers import PlanRouteContext
+from snapper.server._plan_route_helpers import PlanTypeGuard
 from snapper.server._plan_route_helpers import build_cancel_plan_state
 from snapper.server._plan_route_helpers import build_cancel_submission
 from snapper.server._plan_route_helpers import build_execution_plan_response
@@ -56,9 +57,10 @@ from snapper.server._plan_route_helpers import handle_cancel_command_insert_fail
 from snapper.server._plan_route_helpers import insert_execution_plan_decision
 from snapper.server._plan_route_helpers import insert_execution_plan_decision_best_effort
 from snapper.server._plan_route_helpers import insert_execution_plan_or_raise
-from snapper.server._plan_route_helpers import load_accessible_execution_plan
 from snapper.server._plan_route_helpers import load_cycle_trading_context
 from snapper.server._plan_route_helpers import load_open_accessible_cycle
+from snapper.server._plan_route_helpers import load_readable_execution_plan
+from snapper.server._plan_route_helpers import load_tradable_execution_plan
 from snapper.server._plan_route_helpers import prepare_cancel_trade_commands
 from snapper.server._plan_route_helpers import request_plan_status_transition
 from snapper.server._plan_route_helpers import resolve_average_price
@@ -66,13 +68,17 @@ from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
 
 router = APIRouter(prefix="/trailing-stops", tags=["trailing-stops"])
 
 _REST_STREAM = "trailing_stop_rest"
 _EVALUATOR = TrailingStopEvaluator()
 _TRAILING_STOP_NOT_FOUND = "Trailing stop plan not found"
+_TRAILING_STOP_GUARD = PlanTypeGuard(
+    not_found_detail=_TRAILING_STOP_NOT_FOUND,
+    allowed_plan_type="trailing_stop",
+)
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         ExecutionPlanStatusEnum.COMPLETED,
@@ -427,13 +433,12 @@ async def cancel_trailing_stop(
     service = _get_plan_executor(request)
     route_context = build_plan_route_context(request, _REST_STREAM)
 
-    plan = await load_accessible_execution_plan(
+    plan = await load_tradable_execution_plan(
         repo=repo,
         principal=principal,
         plan_public_id=plan_public_id,
         as_of=route_context.now,
-        not_found_detail=_TRAILING_STOP_NOT_FOUND,
-        allowed_plan_type="trailing_stop",
+        guard=_TRAILING_STOP_GUARD,
     )
     ensure_plan_not_terminal(
         plan=plan,
@@ -536,13 +541,12 @@ async def get_trailing_stop(
         HTTPException: 404 if not found, 403 if wallet not accessible.
     """
     route_context = build_plan_route_context(request, _REST_STREAM)
-    plan = await load_accessible_execution_plan(
+    plan = await load_readable_execution_plan(
         repo=repo,
         principal=principal,
         plan_public_id=plan_public_id,
         as_of=route_context.now,
-        not_found_detail=_TRAILING_STOP_NOT_FOUND,
-        allowed_plan_type="trailing_stop",
+        guard=_TRAILING_STOP_GUARD,
     )
     return build_execution_plan_response(
         plan,
@@ -589,11 +593,10 @@ async def list_trailing_stop_decisions(
             detail=_TRAILING_STOP_NOT_FOUND,
         )
 
-    await resolve_target_wallets(
+    await resolve_readable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],
-        operator_public_id=plan.get("operator_public_id"),
     )
 
     decisions = await repo.list_execution_plan_decisions(
@@ -650,11 +653,10 @@ async def get_trailing_stop_by_cycle(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Position cycle not found",
         )
-    await resolve_target_wallets(
+    await resolve_readable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=cycle["wallet_public_id"],
-        operator_public_id=cycle.get("operator_public_id"),
     )
 
     for plan in service.plans.values():

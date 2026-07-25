@@ -436,20 +436,40 @@ class ScopeGrantService:
         principal: AuthPrincipal,
         as_of: datetime,
     ) -> set[str]:
-        """Return the set of wallet ``public_id`` values the principal can read.
+        """Return the wallet ``public_id`` set visible on the OPERATOR plane.
 
-        Mirrors the REST `/api/wallets` and `/api/orders` server-side
-        wallet-scope filter so the WebSocket per-frame
-        ``orders.events.*`` filter sees the same set of wallets as the
-        REST snapshot endpoints — closes the v0.7.0 RBAC asymmetry
-        where REST applied scope filtering and WS bridge did not.
+        Sole wallet resolver for the WebSocket per-frame filters
+        (``orders.events.*``, ``portfolio.accounts.*``). It closed the
+        v0.7.0 RBAC asymmetry where REST applied scope filtering and the
+        WS bridge did not.
+
+        It is NO LONGER a mirror of the REST read surfaces. Since the
+        read/trade split, ``/api/wallets``, ``/api/orders`` and the other
+        REST GETs resolve through
+        ``Repository.list_readable_wallets_for_user`` — operator grants
+        UNION the user's personal ``wallet_user_read_grants`` — while this
+        method still resolves through
+        ``list_accessible_wallets_for_operators``, the operator plane
+        alone. A user whose only visibility of a wallet is a personal read
+        grant therefore gets REST rows for it but no live WS delta frames.
+
+        The read grants were deliberately NOT wired in here: this method
+        also serves AI_DELEGATE sockets, and delegates are trade principals
+        (the same reasoning that keeps the MCP mirror on the operator
+        plane). A delegate is its OWN user row with its own generated
+        ``user_public_id`` — ``AiDelegateService._create_delegate_locked``
+        records the creator in ``created_by_user_public_id`` alone — so
+        consulting personal read grants here would not hand a delegate its
+        owner's grants. It would instead turn any ``wallet_user_read_grants``
+        row written against a delegate's own user id into live trade-plane
+        socket visibility, with no carve-out standing in the way. Widening
+        this path needs its own decision and its own delegate rule rather
+        than riding along with the REST wiring.
 
         Global-scope permission bypass: a named set carrying
-        ``IMPERSONATE_OPERATOR`` receives every active wallet. Empty
-        operator-set on a non-global principal
-        principal returns an empty set without hitting the
-        repository's joined query path — matches the wallet-picker
-        contract that "no operator membership = no wallet visibility".
+        ``IMPERSONATE_OPERATOR`` receives every active wallet. A non-global
+        principal with an empty operator set returns an empty set without
+        hitting the repository's joined query path.
 
         Args:
             principal: Authenticated caller whose named permissions and
@@ -458,9 +478,10 @@ class ScopeGrantService:
                 memberships and scope grants.
 
         Returns:
-            Set of wallet ``public_id`` strings the principal can read.
-            Empty set when the principal has no operator memberships
-            without global scope when no grants reach it transitively.
+            Set of wallet ``public_id`` strings the principal's operators
+            hold an active scope grant on. Empty set when the principal has
+            no operator memberships without global scope, or when no grants
+            reach it transitively.
         """
         if has_effective_permission(
             principal.role,

@@ -560,9 +560,11 @@ class TestHasGrantForDelegate:
 class TestListAccessibleWalletPublicIds:
     """Wrapper for ``list_accessible_wallets_for_operators`` + ``list_active_wallets``.
 
-    Drives the v0.7.0 RBAC-symmetry filter for ``orders.events.*`` WS
-    frames; also called by REST scoping indirectly via the same
-    repository methods.
+    Drives the v0.7.0 RBAC-symmetry filter for ``orders.events.*`` and
+    ``portfolio.accounts.*`` WS frames. Since the read/trade split it is
+    the OPERATOR plane alone and is deliberately NARROWER than the REST
+    read surfaces, which resolve through ``list_readable_wallets_for_user``
+    — the method's docstring records why the read grants stop at REST.
     """
 
     @pytest.mark.asyncio
@@ -599,8 +601,18 @@ class TestListAccessibleWalletPublicIds:
     async def test_viewer_with_empty_operator_set_returns_empty(self) -> None:
         """Non-ADMIN with no operator memberships -> empty set, no DB hit.
 
-        Matches the wallet-picker contract: "no operator membership =
-        no wallet visibility".
+        Given a VIEWER with no operator memberships,
+        When list_accessible_wallet_public_ids is called,
+        Then the empty set is returned without any repository query, and
+            in particular WITHOUT consulting the read-grant union: the WS
+            frame filters stay on the operator plane, so a personal read
+            grant widens the REST snapshot but not the live deltas. This
+            asymmetry is deliberate — the same method also serves
+            AI_DELEGATE sockets, whose principal carries the delegate's
+            OWN generated ``user_public_id`` (the owner is recorded only
+            as ``created_by_user_public_id``), so a read grant written
+            against that id would become live trade-plane socket
+            visibility rather than a read-only widening.
         """
         service = ScopeGrantService()
         viewer = AuthPrincipal(
@@ -611,6 +623,7 @@ class TestListAccessibleWalletPublicIds:
         )
         service.repository.list_active_wallets = AsyncMock()
         service.repository.list_accessible_wallets_for_operators = AsyncMock()
+        service.repository.list_readable_wallets_for_user = AsyncMock()
 
         result = await service.list_accessible_wallet_public_ids(
             principal=viewer, as_of=datetime.now(UTC)
@@ -621,6 +634,8 @@ class TestListAccessibleWalletPublicIds:
         active_mock.assert_not_called()
         scoped_mock: AsyncMock = service.repository.list_accessible_wallets_for_operators
         scoped_mock.assert_not_called()
+        readable_mock: AsyncMock = service.repository.list_readable_wallets_for_user
+        readable_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_viewer_with_operators_uses_scoped_query(self) -> None:

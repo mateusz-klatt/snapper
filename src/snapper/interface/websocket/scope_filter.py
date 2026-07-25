@@ -15,10 +15,18 @@ Four filters live here today:
 - :func:`enforce_ai_review_scope` — gates ``ai_reviews.*`` per-AI-delegate
   by ``(wallet, instrument)`` grant.
 - :func:`enforce_orders_events_scope` — gates ``orders.events.*`` per
-  principal by accessible-wallet set, mirroring the REST
-  ``/api/orders`` wallet-scope filter (the v0.7.0 RBAC symmetry fix).
+  principal by accessible-wallet set (the v0.7.0 RBAC symmetry fix).
 - :func:`enforce_account_state_scope` — gates ``portfolio.accounts.*``
-  invalidations by the same accessible-wallet set as the REST account page.
+  invalidations by the same accessible-wallet set.
+
+Both wallet filters resolve through
+:meth:`ScopeGrantService.list_accessible_wallet_public_ids`, the OPERATOR
+plane alone. Since the read/trade split the REST GETs resolve through the
+wider READ plane (operator grants UNION personal
+``wallet_user_read_grants``), so these filters are no longer a mirror of
+the REST snapshot endpoints: a wallet visible to a user only through a
+personal read grant yields REST rows but no live delta frames. That
+service method's docstring records why the read grants stop at REST.
 - :func:`enforce_alerts_scope` — gates ``alerts.*`` per principal by
   exact ``user_public_id`` match (global-scope permission bypass). Powers the web
   (WebSocket) live-refresh path so a web user only sees their own
@@ -221,10 +229,12 @@ async def enforce_orders_events_scope(
 ) -> bool:
     """Return ``True`` iff principal may receive this ``orders.events.*`` frame.
 
-    Mirrors the REST ``/api/orders`` wallet-scope filter so a VIEWER /
-    OPERATOR / AI_DELEGATE on the WebSocket sees the same wallet set
-    via live deltas that they would see via the REST snapshot — closing
-    the v0.7.0 RBAC asymmetry.
+    Gates a VIEWER / OPERATOR / AI_DELEGATE socket by the OPERATOR-plane
+    wallet set, which closed the v0.7.0 asymmetry where REST filtered and
+    WS did not. It is narrower than the REST ``/api/orders`` filter since
+    the read/trade split: a wallet the caller can read only through a
+    personal ``wallet_user_read_grants`` row appears in the REST snapshot
+    but is dropped here (module docstring records why).
 
     Pass-through rules:
 
@@ -284,7 +294,9 @@ async def enforce_account_state_scope(
 ) -> bool:
     """Return whether a principal may receive an account invalidation frame.
 
-    Mirrors the REST account page's accessible-wallet scope. Every account
+    Applies the OPERATOR-plane accessible-wallet scope — narrower than the
+    REST account page's read plane, exactly as
+    :func:`enforce_orders_events_scope`. Every account
     frame is first revalidated against the exact event schema, UUID7 topic,
     and topic-payload wallet invariant. ``IMPERSONATE_OPERATOR`` then bypasses
     only the accessible wallet lookup. The optional cache is frame-local so one ZMQ frame performs

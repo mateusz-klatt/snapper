@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -40,6 +40,13 @@ help:
 	$(info check-no-comments         Fail if Python hash comments exist [strict])
 	$(info check-main-guard          Validate __main__ blocks use raise SystemExit)
 	$(info check-delegate-boundary    Fail if delegate agent-plane imports the bus or data layer)
+	$(info check-read-visibility-boundary Fail if a mutation route statically reaches the wallet read plane)
+	$(info                           proves same-request AST reachability inside src/snapper/server only)
+	$(info                           does NOT prove anything about claim-mediated cross-request flows -)
+	$(info                           a JWT claim minted under the read plane and consumed as write)
+	$(info                           authority on a LATER request has no call-graph edge to follow; that)
+	$(info                           class is covered by scoping.require_tradable_active_wallet instead)
+	$(info                           see the script docstring for the full list of non-claims)
 	$(info check-pydantic-routes     Fail if FastAPI routes use dict/Any/Response on I/O)
 	$(info check-init-files          Validate __init__.py files are empty [strict])
 	$(info check-temporal-mutations  Fail if forbidden temporal mutations exist)
@@ -304,7 +311,7 @@ cov-serial: $(TEST_DB_FILE)
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
 
-check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary
+check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary
 
 fix: fmt-fix lint-fix move-imports
 
@@ -334,6 +341,9 @@ check-main-guard:
 
 check-delegate-boundary:
 	$(VENV_PY) scripts/check_delegate_boundary.py --strict
+
+check-read-visibility-boundary:
+	$(VENV_PY) scripts/check_read_visibility_boundary.py --strict
 
 check-init-files:
 	$(VENV_PY) scripts/check_init_files.py --strict

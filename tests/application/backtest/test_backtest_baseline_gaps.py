@@ -534,7 +534,14 @@ class TestBacktestTopicValidatorEdges:
 
 
 class TestCreateBacktestConfigHashFallback:
-    """server.backtest_routes.create_backtest config_hash exception branch."""
+    """server.backtest_routes.create_backtest config_hash exception branch.
+
+    The handler is invoked directly rather than through the app, so the
+    ``wallet_id`` that ``Depends(require_tradable_active_wallet)`` would
+    supply must be passed by keyword. It is the same value the gate would
+    return for this principal, since the wallet claim is in the caller's
+    trade scope here.
+    """
 
     @pytest.mark.asyncio
     async def test_fingerprint_exception_stores_null(self) -> None:
@@ -615,7 +622,7 @@ class TestCreateBacktestConfigHashFallback:
             patch("snapper.server.backtest_routes.get_settings") as mock_settings,
         ):
             mock_settings.return_value = MagicMock(db_url="sqlite://")
-            await create_backtest(request, command, principal, repo)
+            await create_backtest(request, command, principal, repo, wallet_id="wallet-1")
         args, kwargs = bt.create_run.call_args
         assert kwargs["row"]["config_hash"] is None
 

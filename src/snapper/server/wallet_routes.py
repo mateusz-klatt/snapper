@@ -3,8 +3,9 @@
 Provides the frontend wallet picker with the list of
 wallets the current principal can act on, plus a guarded create
 endpoint backing the admin Wallet Credentials tab. Principals granted
-``IMPERSONATE_OPERATOR`` see every active wallet; other principals see only
-the subset covered by at least one of their active scope grants.
+``IMPERSONATE_OPERATOR`` see every active wallet; other principals see the
+read plane — the wallets covered by one of their operators' active scope
+grants, plus the wallets they personally hold an active read grant on.
 Credential management (add / rotate / restart) lives on dedicated
 routes under ``/wallets/{id}/credentials`` and never co-returns the
 encrypted payload. Gap detection provenance
@@ -67,12 +68,16 @@ async def list_wallets(
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> WalletListResponse:
-    """List wallets accessible to the current principal.
+    """List wallets readable by the current principal.
 
     A caller granted ``IMPERSONATE_OPERATOR`` sees every active wallet.
-    Other callers see only the wallets covered by at least one active scope grant from the
-    principal's operator set — matching the wallet picker
-    contract that the picker is filtered server-side.
+    Other callers see the READ plane: the union of the wallets covered by
+    an active scope grant from the principal's operator set and the wallets
+    the user personally holds an active ``wallet_user_read_grants`` row on.
+    A user with no operator membership and one read grant therefore still
+    gets that wallet in the picker. Visibility here never implies the right
+    to trade the wallet — order submission resolves through
+    ``resolve_tradable_wallets``, which consults the operator plane alone.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
@@ -94,7 +99,11 @@ async def list_wallets(
     ):
         rows = await repo.list_active_wallets(now)
     else:
-        rows = await repo.list_accessible_wallets_for_operators(principal.operator_public_ids, now)
+        rows = await repo.list_readable_wallets_for_user(
+            principal.user_public_id,
+            principal.operator_public_ids,
+            now,
+        )
     items = [_wallet_info(row) for row in rows]
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id

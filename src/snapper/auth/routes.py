@@ -337,6 +337,39 @@ async def login(
     )
 
 
+async def _readable_wallet_ids(principal: AuthPrincipal, repo: Repository) -> set[str]:
+    """Return the wallet ids this principal may SEE right now.
+
+    Shared by the two paths through :func:`_apply_wallet_hint` — the
+    hint being validated and the carried claim being re-validated — so
+    the two can never drift onto different planes. A named set carrying
+    ``IMPERSONATE_OPERATOR`` sees every active wallet; every other set
+    sees the READ plane (operator scope grants UNION the user's personal
+    ``wallet_user_read_grants`` rows).
+
+    Args:
+        principal: Authenticated caller whose visibility is resolved.
+        repo: Repository for the wallet lookup.
+
+    Returns:
+        The set of wallet public ids visible to this principal at the
+        current instant.
+    """
+    now = datetime.now(UTC)
+    if has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
+        rows = await repo.list_active_wallets(now)
+    else:
+        rows = await repo.list_readable_wallets_for_user(
+            principal.user_public_id, principal.operator_public_ids, now
+        )
+    return {row["public_id"] for row in rows}
+
+
 async def _apply_wallet_hint(
     payload: RefreshTokenPayload,
     principal: AuthPrincipal,
@@ -346,26 +379,70 @@ async def _apply_wallet_hint(
 
     Permission-derived membership validation: a named set carrying
     ``IMPERSONATE_OPERATOR`` sees every active wallet via
-    ``list_active_wallets``; other sets see only wallets their operator
-    memberships grant access to via
-    ``list_accessible_wallets_for_operators``. A hint that doesn't
-    match the caller's visibility returns 404 with a uniform message
-    so cross-tenant existence is not leaked.
+    ``list_active_wallets``; other sets see the READ plane via
+    ``list_readable_wallets_for_user`` — their operators' scope grants
+    UNION their personal ``wallet_user_read_grants`` rows. A hint that
+    doesn't match that visibility returns 404 with a uniform message so
+    cross-tenant existence is not leaked.
+
+    The READ plane is the right gate here even though this runs under a
+    POST, because the hint is validated against what the caller may SEE,
+    not what they may trade — no trade authority is derived from
+    ``active_wallet_public_id``. It is nonetheless more than a restored UI
+    selection: it is an authorization input for
+    ``_is_backtest_topic_allowed``, where it is the only wallet a caller
+    without global scope may subscribe ``backtest.*`` frames for. A
+    read-granted, membership-less user can therefore pin the hint to the
+    read-granted wallet and receive that wallet's backtest stream. That is
+    read authority conferring read visibility, deliberately.
+
+    Any surface deriving WRITE authority from this hint must re-resolve it
+    through the trade plane, and that requirement is CODE, not a promise
+    made here: :func:`snapper.server.scoping.require_tradable_active_wallet`
+    is the dependency every such surface declares, and it is pinned as a
+    ``resolve_tradable_wallets`` call site in
+    ``scripts/check_read_visibility_boundary.py`` so it cannot be deleted
+    silently. An earlier revision of this docstring stated the rule and
+    nothing enforced it, while ``POST /backtests/compare`` was already
+    persisting rows against the hinted wallet — a read-granted
+    ``AI_REVIEWER`` could write into a wallet it could only see. A checker
+    cannot catch that class: the mint and the consumption are two
+    different requests with no call-graph edge between them.
+
+    A hint-less refresh re-validates the CARRIED claim against the same
+    plane and drops it to ``None`` when it no longer resolves. Without
+    that, mint-time validation was the only validation the claim ever
+    got: ``_load_refresh_identity`` copies it onto the freshly built
+    principal, the three documented zero-body callers refresh forever,
+    and a revoked ``wallet_user_read_grants`` row therefore never
+    reached the surfaces reading the claim. Dropping rather than 401-ing
+    is deliberate — the session is still valid, only the wallet
+    selection is gone, and the response projects
+    ``active_wallet_public_id`` from the principal, so the client sees
+    ``null`` and re-selects.
+
+    This bounds claim staleness on the REST path to one access-token
+    lifetime; it does not make revocation immediate, and it is not a
+    substitute for consumption-time re-resolution. It does NOT bound the
+    WebSocket path: in-place reauthentication replaces a connection's
+    token timing without replacing the principal its handlers captured,
+    so a socket can carry a revoked wallet across repeated refresh and
+    reauthentication cycles. Closing that requires principal replacement
+    plus subscription revalidation, which is a separate change; until it
+    lands, a personal read grant must not be treated as promptly
+    revocable on a live socket. The REST readers therefore also call
+    :func:`snapper.server.scoping.resolve_readable_active_wallet` per
+    request. The residual is the WebSocket path: a connection's
+    principal is built once from the access token
+    (``WebSocketAuthenticator``) and ``_is_backtest_topic_allowed``
+    consumes the claim at subscribe time, so an already-open socket
+    keeps its ``backtest.*`` subscription until the token behind it is
+    replaced. That window is the access-token lifetime, not unbounded,
+    and it is the same window every WS principal-snapshot family
+    carries.
     """
     if payload.active_wallet_public_id is not None:
-        now = datetime.now(UTC)
-        if has_effective_permission(
-            principal.role,
-            principal.permissions,
-            principal.permission_scope_version,
-            Permission.IMPERSONATE_OPERATOR,
-        ):
-            rows = await repo.list_active_wallets(now)
-        else:
-            rows = await repo.list_accessible_wallets_for_operators(
-                principal.operator_public_ids, now
-            )
-        if payload.active_wallet_public_id not in {w["public_id"] for w in rows}:
+        if payload.active_wallet_public_id not in await _readable_wallet_ids(principal, repo):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="wallet not found",
@@ -375,6 +452,9 @@ async def _apply_wallet_hint(
         )
     if payload.clear_active_wallet:
         return principal.model_copy(update={"active_wallet_public_id": None})
+    carried = principal.active_wallet_public_id
+    if carried is not None and carried not in await _readable_wallet_ids(principal, repo):
+        return principal.model_copy(update={"active_wallet_public_id": None})
     return principal
 
 
@@ -382,7 +462,14 @@ async def _load_refresh_identity(
     request: Request,
     repo: Repository,
 ) -> _RefreshIdentity:
-    """Verify one refresh token and resolve its current account principal."""
+    """Verify one refresh token and resolve its current account principal.
+
+    The wallet claim copied off the verified token is PROVISIONAL: it
+    was validated when it was minted and has been carried across every
+    refresh since. :func:`_apply_wallet_hint` re-validates it against
+    the read plane before it is minted again, so the copy here is an
+    input to that check rather than a decision.
+    """
     refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(
         "refresh_token"
     )

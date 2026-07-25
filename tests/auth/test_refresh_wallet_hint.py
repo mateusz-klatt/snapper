@@ -1,7 +1,8 @@
 """Tests for refresh-token wallet-hint validation.
 
 Covers ``_apply_wallet_hint`` (role-branched membership validation,
-404 on foreign wallet, model_copy projection) and the
+404 on foreign wallet, model_copy projection, and re-validation of the
+claim carried across a hint-less refresh) and the
 ``RefreshTokenPayload`` field/model validators.
 """
 
@@ -33,7 +34,7 @@ def _principal(
         username="u",
         role=role,
         active_wallet_public_id=active_wallet,
-        operator_public_ids=operator_public_ids or ["op-1"],
+        operator_public_ids=["op-1"] if operator_public_ids is None else operator_public_ids,
     )
 
 
@@ -43,7 +44,7 @@ def _repo(
     """Build a Repository mock returning configured wallet rows."""
     repo = MagicMock()
     repo.list_active_wallets = AsyncMock(return_value=admin_rows or [])
-    repo.list_accessible_wallets_for_operators = AsyncMock(return_value=rows or [])
+    repo.list_readable_wallets_for_user = AsyncMock(return_value=rows or [])
     return repo
 
 
@@ -106,23 +107,89 @@ class TestRefreshTokenPayloadValidators:
 
 
 class TestApplyWalletHint:
-    """Coverage for the role-branched membership validator."""
+    """Coverage for the role-branched membership validator.
+
+    Two paths reach the same plane: the hint supplied on this request,
+    and the claim carried from the previous one. The second exists
+    because the claim is minted once and then travels on every refresh,
+    so mint-time validation alone left a revoked read grant live for as
+    long as the client kept refreshing.
+    """
 
     @pytest.mark.asyncio
-    async def test_no_hint_returns_principal_unchanged(self) -> None:
+    async def test_no_hint_preserves_a_still_readable_claim(self) -> None:
         """Empty payload preserves the existing claim byte-identically.
 
-        Given: A payload with no fields set,
+        Given: A payload with no fields set and a carried claim the
+            caller can still see,
         When: _apply_wallet_hint runs,
-        Then: The original principal is returned unchanged.
+        Then: The original principal is returned unchanged, so the
+            common refresh keeps the user's wallet selection.
         """
         principal = _principal(active_wallet=_OWN_WALLET)
+        payload = RefreshTokenPayload()
+        repo = _repo(rows=[{"public_id": _OWN_WALLET}])
+        result = await _apply_wallet_hint(payload, principal, repo)
+        assert result is principal
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_hint_drops_a_claim_that_is_no_longer_readable(self) -> None:
+        """A revoked read grant stops being carried across refreshes.
+
+        Given: A payload with no fields set and a carried claim naming a
+            wallet the READ plane no longer returns (the personal
+            ``wallet_user_read_grants`` row was revoked),
+        When: _apply_wallet_hint runs,
+        Then: The claim is dropped to None rather than re-minted. Mint
+            time used to be the ONLY validation the claim ever got, and
+            the documented zero-body callers refresh forever, so without
+            this the revocation would never take effect on any surface
+            reading the claim.
+        """
+        principal = _principal(active_wallet=_OWN_WALLET)
+        payload = RefreshTokenPayload()
+        repo = _repo(rows=[])
+        result = await _apply_wallet_hint(payload, principal, repo)
+        assert result.active_wallet_public_id is None
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_hint_and_no_claim_skips_the_lookup(self) -> None:
+        """Nothing to re-validate costs no query.
+
+        Given: A payload with no fields set and no carried claim,
+        When: _apply_wallet_hint runs,
+        Then: The principal is returned unchanged and neither wallet
+            lookup is issued, so the re-validation adds no query to the
+            "All wallets" refresh.
+        """
+        principal = _principal(active_wallet=None)
         payload = RefreshTokenPayload()
         repo = _repo()
         result = await _apply_wallet_hint(payload, principal, repo)
         assert result is principal
         repo.list_active_wallets.assert_not_called()
-        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.list_readable_wallets_for_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_admin_carried_claim_re_validates_against_active_wallets(self) -> None:
+        """The carried-claim check uses the same role branch as the hint.
+
+        Given: An ADMIN principal carrying a claim, and a repository
+            whose ``list_active_wallets`` no longer returns it,
+        When: _apply_wallet_hint runs with an empty payload,
+        Then: The claim is dropped via the global-scope branch, and the
+            operator-scoped lookup is never consulted — pinning that
+            both paths share ``_readable_wallet_ids``.
+        """
+        principal = _principal(role=UserRole.ADMIN, active_wallet=_OWN_WALLET)
+        payload = RefreshTokenPayload()
+        repo = _repo(admin_rows=[])
+        result = await _apply_wallet_hint(payload, principal, repo)
+        assert result.active_wallet_public_id is None
+        repo.list_active_wallets.assert_awaited_once()
+        repo.list_readable_wallets_for_user.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_clear_active_wallet_sets_claim_to_none(self) -> None:
@@ -152,29 +219,51 @@ class TestApplyWalletHint:
         result = await _apply_wallet_hint(payload, principal, repo)
         assert result.active_wallet_public_id == _OWN_WALLET
         repo.list_active_wallets.assert_awaited_once()
-        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.list_readable_wallets_for_user.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_non_admin_uses_accessible_wallets(self) -> None:
-        """Non-admin role calls list_accessible_wallets_for_operators.
+    async def test_non_admin_uses_readable_wallets(self) -> None:
+        """Non-admin role calls list_readable_wallets_for_user.
 
-        Given: An OPERATOR principal hinting at an accessible wallet,
+        Given: An OPERATOR principal hinting at a readable wallet,
         When: _apply_wallet_hint runs,
-        Then: The accessible-wallets query runs and the hint applies.
+        Then: The read-plane query runs, carrying the caller's user id
+            and operator set, and the hint applies.
         """
         principal = _principal(role=UserRole.OPERATOR)
         payload = RefreshTokenPayload(active_wallet_public_id=_OWN_WALLET)
         repo = _repo(rows=[{"public_id": _OWN_WALLET}])
         result = await _apply_wallet_hint(payload, principal, repo)
         assert result.active_wallet_public_id == _OWN_WALLET
-        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+        call = repo.list_readable_wallets_for_user.await_args
+        assert call.args[0] == principal.user_public_id
+        assert call.args[1] == ["op-1"]
         repo.list_active_wallets.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_granted_wallet_hint_survives_zero_memberships(self) -> None:
+        """A membership-less user may restore a read-granted wallet hint.
+
+        Given: A VIEWER with an EMPTY operator set whose only visibility
+            of the hinted wallet is a personal read grant,
+        When: _apply_wallet_hint runs,
+        Then: The hint applies instead of 404, and the read-plane query
+            was asked with the empty operator list.
+        """
+        principal = _principal(role=UserRole.VIEWER, operator_public_ids=[])
+        payload = RefreshTokenPayload(active_wallet_public_id=_OWN_WALLET)
+        repo = _repo(rows=[{"public_id": _OWN_WALLET}])
+        result = await _apply_wallet_hint(payload, principal, repo)
+        assert result.active_wallet_public_id == _OWN_WALLET
+        call = repo.list_readable_wallets_for_user.await_args
+        assert call.args[1] == []
 
     @pytest.mark.asyncio
     async def test_foreign_wallet_returns_404(self) -> None:
         """Hinted wallet outside caller scope → 404 (no info leak).
 
-        Given: A non-admin principal hinting at a wallet they cannot see,
+        Given: A non-admin principal hinting at a wallet they cannot read,
         When: _apply_wallet_hint runs,
         Then: HTTPException 404 with uniform "wallet not found" detail.
         """

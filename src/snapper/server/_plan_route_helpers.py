@@ -30,7 +30,8 @@ from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
+from snapper.server.scoping import resolve_tradable_wallets
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,25 @@ class CycleTradingContext:
     native_instrument: str
     total_quantity: float
     side: str
+
+
+@dataclass(frozen=True)
+class PlanTypeGuard:
+    """A route's plan-type restriction and its uniform not-found detail.
+
+    Bundled because they are one decision: what counts as *this* route's
+    plan, and what the route says when the requested id is not one. Each
+    route module declares a single module-level instance.
+
+    Attributes:
+        not_found_detail: HTTP detail raised when the plan is absent or
+            fails the type restriction.
+        allowed_plan_type: Plan type the loaded plan must match, or
+            ``None`` when any plan type is acceptable.
+    """
+
+    not_found_detail: str
+    allowed_plan_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -217,7 +237,10 @@ async def load_open_accessible_cycle(
     route_context: PlanRouteContext,
     position_cycle_public_id: str,
 ) -> PositionCycleRow:
-    """Load an open, wallet-accessible position cycle.
+    """Load an open position cycle the caller may TRADE on.
+
+    Only plan-creation routes call this, so it resolves through the trade
+    plane: a personal read grant must never let a caller arm a plan.
 
     Args:
         repo: Repository used for cycle lookup.
@@ -237,7 +260,7 @@ async def load_open_accessible_cycle(
             status_code=status.HTTP_409_CONFLICT,
             detail="Position cycle not found or not open",
         )
-    await resolve_target_wallets(
+    await resolve_tradable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=cycle["wallet_public_id"],
@@ -458,35 +481,103 @@ async def insert_execution_plan_decision_best_effort(
         logger.error("{} {}: {}", failure_log, row["plan_public_id"], exc)
 
 
-async def load_accessible_execution_plan(
+async def _load_execution_plan_or_404(
+    *,
+    repo: Repository,
+    plan_public_id: str,
+    as_of: datetime,
+    guard: PlanTypeGuard,
+) -> ExecutionPlanRow:
+    """Load a plan by id and validate its type, 404 when absent or mismatched.
+
+    Shared lookup for the readable and tradable loaders. It deliberately
+    performs NO authorization: the two loaders differ only in which scoping
+    primitive they then apply, and that difference must stay visible at
+    their call sites rather than hidden behind a flag.
+    """
+    plan = await repo.get_execution_plan(plan_public_id, as_of=as_of)
+    if plan is None or (
+        guard.allowed_plan_type is not None and plan["plan_type"] != guard.allowed_plan_type
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=guard.not_found_detail,
+        )
+    return plan
+
+
+async def load_readable_execution_plan(
     *,
     repo: Repository,
     principal: AuthPrincipal,
     plan_public_id: str,
     as_of: datetime,
-    not_found_detail: str,
-    allowed_plan_type: str | None = None,
+    guard: PlanTypeGuard,
 ) -> ExecutionPlanRow:
-    """Load a plan by id, validate type when required, and enforce wallet access.
+    """Load a plan the caller may SEE (GET detail surfaces).
+
+    Resolves through the read plane, so a user with no operator membership
+    but an active ``wallet_user_read_grants`` row on the plan's wallet can
+    open the plan. The plan's ``operator_public_id`` is deliberately NOT
+    passed as a narrowing parameter: the wallet is the authoritative read
+    boundary, and narrowing on the record's owning operator would 403
+    exactly the read-granted principal this plane exists to serve.
 
     Args:
         repo: Repository used to load the execution plan.
         principal: Authenticated caller making the REST request.
         plan_public_id: Public id of the plan to load.
         as_of: Temporal snapshot used for the lookup.
-        not_found_detail: HTTP detail to use when the plan is absent or invalid.
-        allowed_plan_type: Optional plan type the loaded plan must match.
+        guard: Route's plan-type restriction and not-found detail.
 
     Returns:
-        Wallet-accessible execution-plan row matching the request.
+        Readable execution-plan row matching the request.
     """
-    plan = await repo.get_execution_plan(plan_public_id, as_of=as_of)
-    if plan is None or (allowed_plan_type is not None and plan["plan_type"] != allowed_plan_type):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=not_found_detail,
-        )
-    await resolve_target_wallets(
+    plan = await _load_execution_plan_or_404(
+        repo=repo,
+        plan_public_id=plan_public_id,
+        as_of=as_of,
+        guard=guard,
+    )
+    await resolve_readable_wallets(
+        principal=principal,
+        repo=repo,
+        wallet_public_id=plan["wallet_public_id"],
+    )
+    return plan
+
+
+async def load_tradable_execution_plan(
+    *,
+    repo: Repository,
+    principal: AuthPrincipal,
+    plan_public_id: str,
+    as_of: datetime,
+    guard: PlanTypeGuard,
+) -> ExecutionPlanRow:
+    """Load a plan the caller may ACT on (POST cancel / plan-action surfaces).
+
+    Resolves through the trade plane exactly as before the read/trade
+    split, including the plan's ``operator_public_id`` narrowing, so a
+    personal read grant can never authorize a cancel.
+
+    Args:
+        repo: Repository used to load the execution plan.
+        principal: Authenticated caller making the REST request.
+        plan_public_id: Public id of the plan to load.
+        as_of: Temporal snapshot used for the lookup.
+        guard: Route's plan-type restriction and not-found detail.
+
+    Returns:
+        Tradable execution-plan row matching the request.
+    """
+    plan = await _load_execution_plan_or_404(
+        repo=repo,
+        plan_public_id=plan_public_id,
+        as_of=as_of,
+        guard=guard,
+    )
+    await resolve_tradable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],

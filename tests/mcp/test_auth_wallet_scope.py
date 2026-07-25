@@ -52,7 +52,7 @@ class TestValidateUserWalletScope:
         When: the gate runs for any wallet,
         Then: it returns without calling
             ``list_accessible_wallets_for_operators`` — matches the
-            REST ``resolve_target_wallets`` ADMIN bypass behaviour.
+            REST ``resolve_tradable_wallets`` ADMIN bypass behaviour.
         """
         repo = AsyncMock()
         await validate_user_wallet_scope(

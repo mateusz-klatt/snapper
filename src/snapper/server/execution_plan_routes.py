@@ -37,6 +37,7 @@ from snapper.data.repository_types import PositionRow
 from snapper.messaging.schemas.data import ExecutionPlanDecisionData
 from snapper.server._capability_guard import require_tradable
 from snapper.server._plan_route_helpers import PlanRouteContext
+from snapper.server._plan_route_helpers import PlanTypeGuard
 from snapper.server._plan_route_helpers import build_cancel_plan_state
 from snapper.server._plan_route_helpers import build_cancel_submission
 from snapper.server._plan_route_helpers import build_execution_plan_response
@@ -48,9 +49,10 @@ from snapper.server._plan_route_helpers import handle_cancel_command_insert_fail
 from snapper.server._plan_route_helpers import insert_execution_plan_decision
 from snapper.server._plan_route_helpers import insert_execution_plan_decision_best_effort
 from snapper.server._plan_route_helpers import insert_execution_plan_or_raise
-from snapper.server._plan_route_helpers import load_accessible_execution_plan
 from snapper.server._plan_route_helpers import load_cycle_trading_context
 from snapper.server._plan_route_helpers import load_open_accessible_cycle
+from snapper.server._plan_route_helpers import load_readable_execution_plan
+from snapper.server._plan_route_helpers import load_tradable_execution_plan
 from snapper.server._plan_route_helpers import prepare_cancel_trade_commands
 from snapper.server._plan_route_helpers import request_plan_status_transition
 from snapper.server._plan_route_helpers import resolve_average_price
@@ -58,12 +60,13 @@ from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
 
 router = APIRouter(prefix="/execution-plans", tags=["execution-plans"])
 
 _REST_STREAM = "execution_plan_rest"
 _EXECUTION_PLAN_NOT_FOUND = "Execution plan not found"
+_EXECUTION_PLAN_GUARD = PlanTypeGuard(not_found_detail=_EXECUTION_PLAN_NOT_FOUND)
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         ExecutionPlanStatusEnum.COMPLETED,
@@ -418,12 +421,12 @@ async def cancel_bracket(
     service = _get_plan_executor(request)
     route_context = build_plan_route_context(request, _REST_STREAM)
 
-    plan = await load_accessible_execution_plan(
+    plan = await load_tradable_execution_plan(
         repo=repo,
         principal=principal,
         plan_public_id=plan_public_id,
         as_of=route_context.now,
-        not_found_detail=_EXECUTION_PLAN_NOT_FOUND,
+        guard=_EXECUTION_PLAN_GUARD,
     )
     ensure_plan_not_terminal(
         plan=plan,
@@ -526,12 +529,12 @@ async def get_bracket(
         HTTPException: 404 if not found, 403 if wallet not accessible.
     """
     route_context = build_plan_route_context(request, _REST_STREAM)
-    plan = await load_accessible_execution_plan(
+    plan = await load_readable_execution_plan(
         repo=repo,
         principal=principal,
         plan_public_id=plan_public_id,
         as_of=route_context.now,
-        not_found_detail=_EXECUTION_PLAN_NOT_FOUND,
+        guard=_EXECUTION_PLAN_GUARD,
     )
     return build_execution_plan_response(
         plan,
@@ -578,11 +581,10 @@ async def list_bracket_decisions(
             detail=_EXECUTION_PLAN_NOT_FOUND,
         )
 
-    await resolve_target_wallets(
+    await resolve_readable_wallets(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],
-        operator_public_id=plan.get("operator_public_id"),
     )
 
     decisions = await repo.list_execution_plan_decisions(

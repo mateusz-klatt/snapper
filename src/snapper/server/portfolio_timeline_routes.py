@@ -6,7 +6,7 @@ for a from/to window at a chosen granularity, mirroring the structure of
 ``position_cycle_routes`` (standalone ``APIRouter`` module, permission-gated
 dependency, repository injection, ``SequenceTracker`` provenance from
 ``request.app.state.rest_tracker``) and the wallet-scoping pattern of
-``/api/positions`` (:func:`resolve_target_wallets`). Unlike the list endpoints a
+``/api/positions`` (:func:`resolve_readable_wallets`). Unlike the list endpoints a
 single wallet is REQUIRED — there is no all-wallets P&L aggregation in v1 (the
 activation epoch is per wallet/mode).
 
@@ -14,6 +14,18 @@ activation epoch is per wallet/mode).
 rules and augments that series with bounded fill, signal, and AI-decision
 markers. Signals and decisions are independent reads so a rejected decision or
 one that produced no fill remains visible.
+
+Both endpoints consult BOTH wallet planes, and the two answers gate different
+things. :func:`resolve_readable_wallets` decides whether the caller may SEE this
+scope's P&L at all — the read plane, because a personal
+``wallet_user_read_grants`` row is exactly the grant this surface exists to
+honour. :func:`resolve_tradable_wallets` decides one further thing only: whether
+this GET may PERSIST the missing activation anchor, the permanent record that
+defines where the scope's P&L history begins. Anchor creation is a durable write
+of money truth, so it stays on the trade plane; a read-granted caller looking at
+a scope that has no anchor yet gets the honest no-anchor response rather than a
+silently created one. Splitting the two is what keeps this endpoint on the read
+plane without letting a read grant author the ledger's starting point.
 """
 
 from collections.abc import Sequence
@@ -70,7 +82,8 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
-from snapper.server.scoping import resolve_target_wallets
+from snapper.server.scoping import resolve_readable_wallets
+from snapper.server.scoping import resolve_tradable_wallets
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio-timeline"])
 
@@ -107,7 +120,28 @@ _INTERNAL_TIMELINE_ERROR_DETAIL: Final[str] = "Failed to build P&L timeline"
 
 @dataclass(frozen=True, slots=True)
 class _ValidatedTimelineRequest:
-    """Validated and scope-authorized reconstruction request values."""
+    """Validated and scope-authorized reconstruction request values.
+
+    ``allow_anchor_creation`` and ``current_truth`` are deliberately two
+    fields rather than one derived from ``as_of is None``. ``current_truth``
+    states only that the caller named no knowledge horizon.
+    ``allow_anchor_creation`` additionally states that this caller may WRITE
+    the scope's activation anchor, which is answered by the TRADE plane; a
+    caller holding only a personal read grant reads the scope with this flag
+    off and receives the honest no-anchor result.
+
+    Attributes:
+        wallet_public_id: Single wallet scope proven readable by the caller.
+        mode: Validated ``live`` or ``paper`` trading mode.
+        granularity: Validated series granularity.
+        window_from: Inclusive UTC window start.
+        window_to: Inclusive UTC window end.
+        as_of: One effective UTC knowledge horizon shared by every read.
+        valuation_ccy: Normalized three-letter valuation currency.
+        allow_anchor_creation: Whether this request may persist a missing
+            activation anchor: current-truth AND trade-plane authorized.
+        current_truth: Whether the caller named no knowledge horizon.
+    """
 
     wallet_public_id: str
     mode: str
@@ -197,6 +231,24 @@ async def _validate_timeline_request(
 ) -> _ValidatedTimelineRequest:
     """Validate and authorize the request shared by both P&L endpoints.
 
+    Response authorization is the READ plane's answer alone: a caller holding a
+    personal ``wallet_user_read_grants`` row on this wallet may look at its P&L.
+
+    Permission to CREATE the activation anchor is derived separately, from the
+    TRADE plane, and only for a current-truth request. The anchor is a durable
+    write that permanently fixes where a scope's P&L history begins, so
+    widening who may SEE a scope must never widen who may author it. The trade
+    plane is consulted only when ``as_of`` is absent, because a historical read
+    can never create an anchor whatever the caller's authority — so a
+    horizon-bearing request costs no extra lookup.
+
+    :func:`resolve_tradable_wallets` is called WITHOUT ``wallet_public_id`` so
+    it answers with a set instead of raising: an unauthorized caller must still
+    receive their read, just without the write. Its ``operator_public_id``
+    validation cannot raise here either, because
+    :func:`resolve_readable_wallets` has already run the identical operator
+    check on the line above.
+
     Args:
         auth: Authenticated caller used by wallet-scope resolution.
         repo: Repository providing wallet access and mode metadata.
@@ -210,7 +262,8 @@ async def _validate_timeline_request(
         valuation_ccy: Currency the series is expressed in.
 
     Returns:
-        Normalized UTC values and one effective read horizon shared by all reads.
+        Normalized UTC values, one effective read horizon shared by all reads,
+        and the separately derived anchor-creation permission.
 
     Raises:
         HTTPException: 400 for invalid scope/window values or 403 when wallet
@@ -267,8 +320,13 @@ async def _validate_timeline_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="to must be less than or equal to as_of; shorten the window or move as_of forward",
         )
-    await resolve_target_wallets(auth, repo, operator_public_id, wallet_public_id)
+    await resolve_readable_wallets(auth, repo, operator_public_id, wallet_public_id)
     await _require_matching_wallet_mode(repo, wallet_public_id, mode, effective_as_of)
+    current_truth = as_of is None
+    allow_anchor_creation = False
+    if current_truth:
+        tradable = await resolve_tradable_wallets(auth, repo, operator_public_id)
+        allow_anchor_creation = tradable is None or wallet_public_id in tradable
     return _ValidatedTimelineRequest(
         wallet_public_id=wallet_public_id,
         mode=mode,
@@ -277,8 +335,8 @@ async def _validate_timeline_request(
         window_to=window_to,
         as_of=effective_as_of,
         valuation_ccy=normalized_ccy,
-        allow_anchor_creation=as_of is None,
-        current_truth=as_of is None,
+        allow_anchor_creation=allow_anchor_creation,
+        current_truth=current_truth,
     )
 
 
@@ -461,6 +519,11 @@ async def get_pnl_series(
     The optional ``as_of`` value selects the historical knowledge horizon. When
     omitted, one current UTC horizon is captured and shared by every input read.
 
+    Visibility is authorized on the READ plane, so a personal read grant is
+    enough to see the series. Persisting a missing activation anchor stays on
+    the TRADE plane: a read-only caller receives the honest no-anchor result
+    instead of a silently created one.
+
     Args:
         request: FastAPI request (provides the REST tracker for provenance).
         _auth: Authenticated caller with READ_POSITIONS permission.
@@ -601,7 +664,9 @@ async def get_pnl_timeline(
     The endpoint uses the same required wallet, mode consistency,
     authorization, safe-window, granularity, and total-work rules as the
     series-only endpoint. Its effective ``as_of`` horizon is passed unchanged
-    through the series, signal, and AI-event reads.
+    through the series, signal, and AI-event reads. It shares the same
+    two-plane split: READ authorizes the response, TRADE alone authorizes
+    persisting a missing activation anchor.
 
     Args:
         request: FastAPI request providing REST sequence provenance.

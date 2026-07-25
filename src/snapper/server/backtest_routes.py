@@ -78,6 +78,9 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.server.scoping import ACTIVE_WALLET_REQUIRED_DETAIL
+from snapper.server.scoping import require_tradable_active_wallet
+from snapper.server.scoping import resolve_readable_active_wallet
 from snapper.strategies.factory import StrategyFactory
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
@@ -172,7 +175,7 @@ def _run_to_detail_data(
     )
 
 
-_NO_ACTIVE_WALLET = "no active wallet selected"
+_NO_ACTIVE_WALLET = ACTIVE_WALLET_REQUIRED_DETAIL
 _NO_ACTIVE_WALLET_RESPONSE: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET}
 }
@@ -219,8 +222,33 @@ _BACKTEST_COMPARISON_WRITE_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
-def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[str, Any]) -> None:
-    """Fail-closed wallet scope check for backtest read endpoints.
+def _enforce_run_wallet(wallet_public_id: str, run: BacktestRunRow | dict[str, Any]) -> None:
+    """Reject a run owned by a wallet other than the resolved one.
+
+    Split out of :func:`_enforce_wallet_scope` so the WRITE routes can
+    reuse the ownership half against a wallet that
+    :func:`snapper.server.scoping.require_tradable_active_wallet` has
+    already proven tradable, instead of re-reading the raw
+    ``active_wallet_public_id`` claim (which certifies visibility only).
+
+    Args:
+        wallet_public_id: Wallet the caller is scoped to for this request.
+        run: Backtest run row whose owning wallet is compared.
+
+    Raises:
+        HTTPException: 404 when the run belongs to another wallet, so a
+            cross-tenant run's existence is never confirmed.
+    """
+    if run["wallet_public_id"] != wallet_public_id:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+
+
+async def _enforce_wallet_scope(
+    principal: AuthPrincipal,
+    repo: Repository,
+    run: BacktestRunRow | dict[str, Any],
+) -> None:
+    """Fail-closed wallet scope check for backtest READ endpoints.
 
     The old truthy guard
     ``if principal.active_wallet_public_id and run[...]!=...`` becomes
@@ -228,14 +256,30 @@ def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[s
     backtest read must instead fail-closed on no-active-wallet (400)
     and 404 on cross-tenant mismatch to match the
     ``create_backtest`` guard's shape.
+
+    Reads resolve the claim through the READ plane on every request
+    (:func:`snapper.server.scoping.resolve_readable_active_wallet`) —
+    the right plane, because a personal read grant conferring read
+    visibility is the intended behaviour, and the right time, because
+    the claim is minted once and carried forward across refreshes, so
+    consuming it as minted would keep a revoked read grant alive
+    indefinitely. WRITE routes must NOT come through here — they take
+    the wallet from
+    :func:`snapper.server.scoping.require_tradable_active_wallet` and
+    call :func:`_enforce_run_wallet` with it.
+
+    Args:
+        principal: Authenticated caller carrying the wallet claim.
+        repo: Repository used for the read-plane re-resolution.
+        run: Backtest run row whose owning wallet is compared.
+
+    Raises:
+        HTTPException: 400 when no wallet is selected, 403 when the
+            claimed wallet is no longer readable, 404 when the run
+            belongs to another wallet.
     """
-    if principal.active_wallet_public_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_NO_ACTIVE_WALLET,
-        )
-    if run["wallet_public_id"] != principal.active_wallet_public_id:
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    wallet_public_id = await resolve_readable_active_wallet(principal, repo)
+    _enforce_run_wallet(wallet_public_id, run)
 
 
 def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInline:
@@ -382,6 +426,7 @@ async def create_backtest(
     command: Annotated[BacktestCreateCommand, Depends(json_body(BacktestCreateCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    wallet_id: Annotated[str, Depends(require_tradable_active_wallet)],
 ) -> BacktestRunResponse:
     """Create and launch a new backtest run.
 
@@ -390,6 +435,8 @@ async def create_backtest(
         command: Validated create command envelope.
         principal: Authenticated caller with MANAGE_BACKTESTS.
         repo: Database repository.
+        wallet_id: Active wallet re-resolved through the trade plane, so
+            a wallet the caller may only READ cannot own a new run.
 
     Returns:
         Created backtest run response.
@@ -403,13 +450,6 @@ async def create_backtest(
 
     run_public_id = str(uuid7())
     process_name = f"backtest_runner_{run_public_id}"
-
-    wallet_id = principal.active_wallet_public_id
-    if not wallet_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No active wallet selected — select a wallet before creating backtests",
-        )
 
     body = command.payload
     instrument_public_id = await _resolve_backtest_instrument(
@@ -553,12 +593,7 @@ async def list_backtests(
     seq = tracker.next_sequence(_REST_STREAM)
     ts = _resolve_as_of(as_of)
 
-    wallet_id = principal.active_wallet_public_id
-    if wallet_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_NO_ACTIVE_WALLET,
-        )
+    wallet_id = await resolve_readable_active_wallet(principal, repo)
     runs = await bt_repo.list_runs(
         as_of=ts,
         wallet_public_id=wallet_id,
@@ -746,6 +781,7 @@ async def create_comparison(
         Depends(require_permission(Permission.CREATE_BACKTEST_COMPARISONS)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    wallet_id: Annotated[str, Depends(require_tradable_active_wallet)],
 ) -> BacktestComparisonResponse:
     """Create (or return idempotent existing) backtest comparison.
 
@@ -765,6 +801,10 @@ async def create_comparison(
         command: Validated compare-request envelope.
         principal: Authenticated caller with CREATE_BACKTEST_COMPARISONS.
         repo: Database repository dependency.
+        wallet_id: Active wallet re-resolved through the trade plane. The
+            permission alone is not enough — ``AI_REVIEWER`` holds it and
+            may also hold a personal read grant, so without this the
+            read-plane wallet claim would authorize a shared write.
 
     Returns:
         Envelope wrapping the created (or existing) comparison row.
@@ -775,9 +815,6 @@ async def create_comparison(
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     body = command.payload
-    wallet_id = principal.active_wallet_public_id
-    if wallet_id is None:
-        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
     ts = datetime.now(UTC)
     if body.mode == "auto":
         if body.config_hash is None:
@@ -876,9 +913,7 @@ async def list_comparisons(
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = _resolve_as_of(as_of)
-    wallet_id = principal.active_wallet_public_id
-    if wallet_id is None:
-        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
+    wallet_id = await resolve_readable_active_wallet(principal, repo)
     rows = await bt_repo.list_comparisons(
         as_of=ts, wallet_public_id=wallet_id, limit=limit, offset=offset
     )
@@ -923,9 +958,7 @@ async def get_comparison(
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = _resolve_as_of(as_of)
-    wallet_id = principal.active_wallet_public_id
-    if wallet_id is None:
-        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
+    wallet_id = await resolve_readable_active_wallet(principal, repo)
     comparison = await bt_repo.get_comparison(comparison_public_id, as_of=ts)
     if comparison is None or comparison["wallet_public_id"] != wallet_id:
         raise HTTPException(status_code=404, detail="Comparison not found")
@@ -999,7 +1032,7 @@ async def get_backtest(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    await _enforce_wallet_scope(principal, repo, run)
 
     inline_result: BacktestResultInline | None = None
     if run["status"] == "completed":
@@ -1020,24 +1053,33 @@ async def get_backtest(
 @router.post(
     "/{run_id}/cancel",
     openapi_extra=openapi_schema(BacktestCancelCommand),
-    dependencies=[Depends(validate_csrf_token)],
+    dependencies=[
+        Depends(validate_csrf_token),
+        Depends(json_body(BacktestCancelCommand)),
+    ],
     responses=_BACKTEST_CANCEL_RESPONSES,
 )
 async def cancel_backtest(
     run_id: str,
     request: Request,
-    command: Annotated[BacktestCancelCommand, Depends(json_body(BacktestCancelCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    wallet_id: Annotated[str, Depends(require_tradable_active_wallet)],
 ) -> BacktestRunResponse:
     """Cancel a running or pending backtest run.
+
+    The ``BacktestCancelCommand`` envelope moved from a handler parameter
+    to a route-level dependency: the body was never read here, only
+    validated, and keeping it as a parameter would push this signature
+    past the argument ceiling once the trade-plane wallet joined it.
+    Validation and the ``openapi_extra`` schema are unchanged.
 
     Args:
         run_id: Run public ID.
         request: FastAPI request.
-        command: Cancel command envelope.
         principal: Authenticated caller with MANAGE_BACKTESTS.
         repo: Database repository.
+        wallet_id: Active wallet re-resolved through the trade plane.
 
     Returns:
         Updated backtest run.
@@ -1051,7 +1093,7 @@ async def cancel_backtest(
     run = await bt_repo.get_run(run_id, as_of=now)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    _enforce_run_wallet(wallet_id, run)
     if run["status"] not in _CANCELLABLE_STATUSES:
         raise HTTPException(
             status_code=409,
@@ -1090,6 +1132,7 @@ async def rerun_backtest(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    wallet_id: Annotated[str, Depends(require_tradable_active_wallet)],
 ) -> BacktestRunResponse:
     """Re-run a backtest with the same configuration.
 
@@ -1098,6 +1141,9 @@ async def rerun_backtest(
         request: FastAPI request.
         principal: Authenticated caller with MANAGE_BACKTESTS.
         repo: Database repository.
+        wallet_id: Active wallet re-resolved through the trade plane and
+            handed straight to :func:`create_backtest`, so the replay
+            cannot land in a wallet the caller may only read.
 
     Returns:
         Newly created backtest run.
@@ -1109,7 +1155,7 @@ async def rerun_backtest(
     original = await bt_repo.get_run(run_id, as_of=now)
     if original is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, original)
+    _enforce_run_wallet(wallet_id, original)
 
     rerun_body = BacktestCreateBody(
         strategy_class=original["strategy_name"],
@@ -1135,7 +1181,7 @@ async def rerun_backtest(
         payload=rerun_body,
     )
 
-    return await create_backtest(request, rerun_command, principal, repo)
+    return await create_backtest(request, rerun_command, principal, repo, wallet_id)
 
 
 @router.get(
@@ -1174,7 +1220,7 @@ async def get_backtest_trades(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    await _enforce_wallet_scope(principal, repo, run)
 
     trades = await bt_repo.get_trades(run_id, as_of=ts, limit=limit, offset=offset)
     items = [
@@ -1244,7 +1290,7 @@ async def get_backtest_signals(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    await _enforce_wallet_scope(principal, repo, run)
 
     signals = await bt_repo.get_signals(run_id, as_of=ts, limit=limit, offset=offset)
     items = [
@@ -1306,7 +1352,7 @@ async def get_backtest_events(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    await _enforce_wallet_scope(principal, repo, run)
 
     events = await bt_repo.get_events(run_id, as_of=ts)
     items = [
@@ -1373,7 +1419,7 @@ async def get_backtest_equity(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    _enforce_wallet_scope(principal, run)
+    await _enforce_wallet_scope(principal, repo, run)
 
     points = await bt_repo.get_equity_points(run_id, as_of=ts, limit=limit, after=after)
     items = [

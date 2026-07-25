@@ -175,6 +175,13 @@ async def list_scope_grants(
     with 403 so the existence of the wallet is not leaked through
     an empty payload vs. a 404.
 
+    Deliberately stays on the OPERATOR plane after the read/trade split: a
+    personal ``wallet_user_read_grants`` row grants sight of a wallet's
+    trading DATA, not of its authorization TOPOLOGY — which operators hold
+    which grants on it, i.e. who may trade it. A read-granted, membership-less
+    caller is therefore still refused here, and this endpoint is not part
+    of the read plane despite being a GET.
+
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         principal: Authenticated caller.

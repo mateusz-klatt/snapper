@@ -4,8 +4,9 @@ Exercises:
 
 - The role-scoped visibility contract on ``list_wallets``: ADMIN
   sees every active wallet through ``list_active_wallets``;
-  VIEWER and OPERATOR see only the wallets their operator set
-  covers via ``list_accessible_wallets_for_operators``.
+  VIEWER and OPERATOR see the READ plane via
+  ``list_readable_wallets_for_user`` — their operators' scope grants
+  UNION their personal wallet read grants.
 - The ``create_wallet`` POST handler, including happy-path
   projection and the ``WalletConflictError`` -> HTTP 409 mapping.
 
@@ -74,7 +75,7 @@ class TestListWallets:
                 _wallet_row("wallet-live", "default", False),
             ]
         )
-        mock_repo.list_accessible_wallets_for_operators = AsyncMock()
+        mock_repo.list_readable_wallets_for_user = AsyncMock()
         principal = AuthPrincipal(username="admin", role=UserRole.ADMIN)
 
         result = await list_wallets(request=_make_request(), principal=principal, repo=mock_repo)
@@ -83,26 +84,27 @@ class TestListWallets:
         assert [w.label for w in result.payload] == ["default", "default"]
         assert [w.is_paper for w in result.payload] == [True, False]
         mock_repo.list_active_wallets.assert_awaited_once()
-        mock_repo.list_accessible_wallets_for_operators.assert_not_awaited()
+        mock_repo.list_readable_wallets_for_user.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_operator_sees_only_accessible_wallets(self) -> None:
-        """OPERATOR branch routes through the operator-scoped lookup.
+    async def test_operator_sees_only_readable_wallets(self) -> None:
+        """OPERATOR branch routes through the read-plane lookup.
 
         Given: An OPERATOR principal with two operator memberships,
         When: ``list_wallets`` is called,
-        Then: The repository's operator-scoped method is awaited with
-            the principal's operator IDs and the full-catalogue method
-            is never called.
+        Then: The repository's read-plane method is awaited with the
+            caller's user id and operator IDs, and the full-catalogue
+            method is never called.
         """
         mock_repo = AsyncMock()
         mock_repo.list_active_wallets = AsyncMock()
-        mock_repo.list_accessible_wallets_for_operators = AsyncMock(
+        mock_repo.list_readable_wallets_for_user = AsyncMock(
             return_value=[_wallet_row("wallet-firm", "firm", False)]
         )
         principal = AuthPrincipal(
             username="alice",
             role=UserRole.OPERATOR,
+            user_public_id="user-alice",
             operator_public_ids=["op-1", "op-2"],
         )
 
@@ -111,25 +113,28 @@ class TestListWallets:
         assert result.count == 1
         assert result.payload[0].label == "firm"
         mock_repo.list_active_wallets.assert_not_awaited()
-        mock_repo.list_accessible_wallets_for_operators.assert_awaited_once()
-        call = mock_repo.list_accessible_wallets_for_operators.await_args
-        assert call.args[0] == ["op-1", "op-2"]
+        mock_repo.list_readable_wallets_for_user.assert_awaited_once()
+        call = mock_repo.list_readable_wallets_for_user.await_args
+        assert call.args[0] == "user-alice"
+        assert call.args[1] == ["op-1", "op-2"]
 
     @pytest.mark.asyncio
     async def test_viewer_with_empty_operator_set_returns_empty(self) -> None:
-        """VIEWER without memberships receives an empty payload.
+        """VIEWER without memberships or grants receives an empty payload.
 
-        Given: A VIEWER principal carrying no operator IDs,
+        Given: A VIEWER principal carrying no operator IDs and no read
+            grants,
         When: ``list_wallets`` is called,
-        Then: The repository's operator-scoped method is invoked with
-            an empty list and the response payload is empty.
+        Then: The repository's read-plane method is invoked with an empty
+            operator list and the response payload is empty.
         """
         mock_repo = AsyncMock()
         mock_repo.list_active_wallets = AsyncMock()
-        mock_repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        mock_repo.list_readable_wallets_for_user = AsyncMock(return_value=[])
         principal = AuthPrincipal(
             username="bob",
             role=UserRole.VIEWER,
+            user_public_id="user-bob",
             operator_public_ids=[],
         )
 
@@ -137,9 +142,38 @@ class TestListWallets:
 
         assert result.count == 0
         assert result.payload == []
-        mock_repo.list_accessible_wallets_for_operators.assert_awaited_once()
-        call = mock_repo.list_accessible_wallets_for_operators.await_args
-        assert call.args[0] == []
+        mock_repo.list_readable_wallets_for_user.assert_awaited_once()
+        call = mock_repo.list_readable_wallets_for_user.await_args
+        assert call.args[0] == "user-bob"
+        assert call.args[1] == []
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_only_a_read_grant_sees_that_wallet(self) -> None:
+        """A membership-less VIEWER still gets their read-granted wallet.
+
+        Given: A VIEWER with an EMPTY operator set whose only visibility
+            is one personal wallet read grant,
+        When: ``list_wallets`` is called,
+        Then: The picker contains that wallet — the read plane must not
+            inherit the trade plane's empty-operator short-circuit.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.list_active_wallets = AsyncMock()
+        mock_repo.list_readable_wallets_for_user = AsyncMock(
+            return_value=[_wallet_row("wallet-granted", "granted", False)]
+        )
+        principal = AuthPrincipal(
+            username="carol",
+            role=UserRole.VIEWER,
+            user_public_id="user-carol",
+            operator_public_ids=[],
+        )
+
+        result = await list_wallets(request=_make_request(), principal=principal, repo=mock_repo)
+
+        assert result.count == 1
+        assert result.payload[0].public_id == "wallet-granted"
+        mock_repo.list_active_wallets.assert_not_awaited()
 
 
 def _make_create_wallet_command(

@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -158,14 +159,38 @@ def _cancel_body() -> dict[str, Any]:
 
 
 def _create_client(
-    bt_repo_mock: AsyncMock,
     role: UserRole = UserRole.ADMIN,
     wallet: str | None = "wallet-1",
     launch_error: Exception | None = None,
     resolved_map: dict[str, str] | None = None,
     resolved_symbol: str | None = "BTC-USD",
 ) -> TestClient:
-    """Create test client with mocked BacktestRepository and auth bypassed."""
+    """Create test client with mocked BacktestRepository and auth bypassed.
+
+    The ``BacktestRepository`` mock is NOT injected here. Every caller
+    installs it by patching ``backtest_routes._bt_repo``, which is the
+    only wiring the routes actually read; the factory previously also
+    registered a ``dependency_overrides`` entry for a placeholder
+    callable no route depended on, which did nothing but suggest a
+    second, non-existent injection path.
+
+    Both wallet planes default to the same single-wallet answer, so a
+    test that says nothing gets a wallet that is both readable and
+    tradable. Tests that need the planes to disagree — a read grant
+    without trade authority, or a revoked read grant — reach the mock
+    through :func:`_repo_of` and override one plane.
+
+    Args:
+        role: Role the bypassed authentication dependency returns.
+        wallet: Active wallet claim, and the wallet both plane lookups
+            return. ``None`` clears the claim and empties both planes.
+        launch_error: Optional exception raised by the process factory.
+        resolved_map: Optional symbol-to-instrument resolution table.
+        resolved_symbol: Optional reverse instrument-to-symbol answer.
+
+    Returns:
+        A ``TestClient`` wired to the mocked application.
+    """
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     mock_settings = MagicMock()
@@ -189,6 +214,9 @@ def _create_client(
     mock_repo.session_factory = MagicMock()
     mock_repo.get_instrument_public_id_by_symbol = AsyncMock(side_effect=_resolve_by_symbol)
     mock_repo.get_symbol_for_instrument = AsyncMock(return_value=resolved_symbol)
+    wallet_rows = [{"public_id": wallet}] if wallet is not None else []
+    mock_repo.list_accessible_wallets_for_operators = AsyncMock(return_value=wallet_rows)
+    mock_repo.list_readable_wallets_for_user = AsyncMock(return_value=wallet_rows)
 
     def skip_csrf() -> None:
         return None
@@ -203,12 +231,18 @@ def _create_client(
     app.dependency_overrides[validate_csrf_token] = skip_csrf
     app.dependency_overrides[require_authentication] = skip_auth
     app.dependency_overrides[get_repository_dependency] = lambda: mock_repo
-    app.dependency_overrides[_bt_repo_dep] = lambda: bt_repo_mock
     return TestClient(app)
 
 
-def _bt_repo_dep() -> None:
-    """Placeholder for BacktestRepository dependency override."""
+def _repo_of(client: TestClient) -> MagicMock:
+    """Return the repository mock one test client's app is wired to.
+
+    Reaching the mock through the override keeps the trade-plane wallet
+    set configurable per test without growing ``_create_client``'s
+    argument list past its complexity baseline.
+    """
+    app = cast(FastAPI, client.app)
+    return cast(MagicMock, app.dependency_overrides[get_repository_dependency]())
 
 
 class TestListBacktests:
@@ -219,7 +253,7 @@ class TestListBacktests:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests")
             assert response.status_code == 200
             data = response.json()
@@ -232,7 +266,7 @@ class TestListBacktests:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[_make_run_row()])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests")
             assert response.status_code == 200
             data = response.json()
@@ -253,13 +287,12 @@ class TestListStrategyClasses:
         route at all also proves it is matched ahead of the dynamic
         ``/{run_id}`` route.
         """
-        bt = AsyncMock()
         saved = dict(StrategyFactory.STRATEGY_CLASSES)
         try:
             StrategyFactory.STRATEGY_CLASSES.clear()
             StrategyFactory.STRATEGY_CLASSES["ZetaStrategy"] = RSIReversion
             StrategyFactory.STRATEGY_CLASSES["AlphaStrategy"] = RSIReversion
-            client = _create_client(bt)
+            client = _create_client()
             try:
                 response = client.get("/api/backtests/strategy-classes")
             finally:
@@ -282,7 +315,7 @@ class TestGetBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-1"
@@ -298,7 +331,7 @@ class TestGetBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=row)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]
             assert payload["execution_mode"] == "zmq_replay"
@@ -311,7 +344,7 @@ class TestGetBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/nonexistent")
             assert response.status_code == 404
             client.close()
@@ -321,7 +354,7 @@ class TestGetBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other-wallet"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.get("/api/backtests/run-1")
             assert response.status_code == 404
             client.close()
@@ -346,7 +379,7 @@ class TestGetBacktest:
             }
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]
             assert payload["result"] is not None
@@ -361,7 +394,7 @@ class TestGetBacktest:
         bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
         bt.get_result = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             assert response.json()["payload"]["result"] is None
             client.close()
@@ -372,7 +405,7 @@ class TestGetBacktest:
         bt.get_run = AsyncMock(return_value=_make_run_row(status="pending"))
         bt.get_result = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             assert response.json()["payload"]["result"] is None
             bt.get_result.assert_not_called()
@@ -410,7 +443,7 @@ class TestGetBacktest:
             }
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]["result"]
             assert payload["sortino_ratio"] == pytest.approx(1.9)
@@ -461,7 +494,7 @@ class TestGetBacktest:
             }
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]["result"]
             assert payload["sortino_ratio"] == pytest.approx(1.4)
@@ -515,7 +548,7 @@ class TestGetBacktest:
             }
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]["result"]
             assert payload["sortino_ratio"] == pytest.approx(1.4)
@@ -569,7 +602,7 @@ class TestGetBacktest:
             }
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1")
             payload = response.json()["payload"]["result"]
             assert payload["sortino_ratio"] == pytest.approx(0.0)
@@ -607,7 +640,7 @@ class TestGetBacktestEquity:
         bt.get_run = AsyncMock(return_value=_make_run_row())
         bt.get_equity_points = AsyncMock(return_value=rows)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             cursor = NOW.isoformat().replace("+", "%2B")
             response = client.get(f"/api/backtests/run-1/equity?limit=50&after={cursor}")
             assert response.status_code == 200
@@ -624,7 +657,7 @@ class TestGetBacktestEquity:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/missing/equity")
             assert response.status_code == 404
             client.close()
@@ -634,7 +667,7 @@ class TestGetBacktestEquity:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.get("/api/backtests/run-1/equity")
             assert response.status_code == 404
             client.close()
@@ -643,7 +676,7 @@ class TestGetBacktestEquity:
         """Limit > 20000 fails query validation (422)."""
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/equity?limit=20001")
             assert response.status_code == 422
             client.close()
@@ -663,7 +696,7 @@ class TestCancelBacktest:
         )
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 200
             assert response.json()["payload"]["status"] == "cancel_requested"
@@ -674,7 +707,7 @@ class TestCancelBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 409
             client.close()
@@ -684,7 +717,7 @@ class TestCancelBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 404
             client.close()
@@ -699,7 +732,7 @@ class TestGetTrades:
         bt.get_run = AsyncMock(return_value=_make_run_row())
         bt.get_trades = AsyncMock(return_value=[_make_trade_row()])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/trades")
             assert response.status_code == 200
             data = response.json()
@@ -713,7 +746,7 @@ class TestGetTrades:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/trades")
             assert response.status_code == 404
             client.close()
@@ -728,7 +761,7 @@ class TestGetSignals:
         bt.get_run = AsyncMock(return_value=_make_run_row())
         bt.get_signals = AsyncMock(return_value=[_make_signal_row()])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/signals")
             assert response.status_code == 200
             data = response.json()
@@ -746,7 +779,7 @@ class TestGetEvents:
         bt.get_run = AsyncMock(return_value=_make_run_row())
         bt.get_events = AsyncMock(return_value=[_make_event_row()])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/events")
             assert response.status_code == 200
             data = response.json()
@@ -765,7 +798,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-new"))
         bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-new"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-new"
@@ -781,7 +814,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-new"))
         bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-new"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 200
             inserted = bt.create_run.await_args.kwargs["row"]
@@ -794,7 +827,7 @@ class TestCreateBacktest:
         bt = AsyncMock()
         bt.create_run = AsyncMock(return_value=(1, "run-new"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1", resolved_map={})
+            client = _create_client(wallet="wallet-1", resolved_map={})
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 422
             assert response.json()["detail"]["error_code"] == "unknown_instrument"
@@ -815,7 +848,6 @@ class TestCreateBacktest:
         body["payload"]["instrument_public_id"] = "019EDA8D-9D34-73DE-B365-920301E26549"
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(
-                bt,
                 wallet="wallet-1",
                 resolved_map={"BTC-USD": "019eda8d-9d34-73de-b365-920301e26549"},
                 resolved_symbol="BTC-USD",
@@ -834,7 +866,6 @@ class TestCreateBacktest:
         body["payload"]["instrument_public_id"] = "019eda8d-9d34-73de-b365-920301e26549"
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(
-                bt,
                 wallet="wallet-1",
                 resolved_map={},
                 resolved_symbol=None,
@@ -856,7 +887,6 @@ class TestCreateBacktest:
         body["payload"]["instrument_public_id"] = "019eda8d-9d34-73de-b365-920301e26549"
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(
-                bt,
                 wallet="wallet-1",
                 resolved_map={"BTC-USD": "different-instrument-uuid"},
                 resolved_symbol="BTC-USD",
@@ -872,7 +902,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-fail"))
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1", launch_error=RuntimeError("no thread"))
+            client = _create_client(wallet="wallet-1", launch_error=RuntimeError("no thread"))
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 500
             bt.update_run_status.assert_called_once()
@@ -890,7 +920,7 @@ class TestCreateBacktest:
         body["payload"]["target_execution_exchange"] = "kraken"
         body["payload"]["exchange"] = "kraken_futures"
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=body)
 
             assert response.status_code == 200
@@ -907,7 +937,7 @@ class TestCreateBacktest:
         body = _create_body()
         body["payload"]["target_execution_exchange"] = "kraken_equities"
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=body)
 
             assert response.status_code == 422
@@ -920,7 +950,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-single"))
         bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-single"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
 
             assert response.status_code == 200
@@ -939,7 +969,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.get("/api/backtests/run-1/trades")
             assert response.status_code == 404
             client.close()
@@ -949,7 +979,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.get("/api/backtests/run-1/signals")
             assert response.status_code == 404
             client.close()
@@ -959,7 +989,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.get("/api/backtests/run-1/events")
             assert response.status_code == 404
             client.close()
@@ -969,7 +999,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/signals")
             assert response.status_code == 404
             client.close()
@@ -979,7 +1009,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/run-1/events")
             assert response.status_code == 404
             client.close()
@@ -989,7 +1019,7 @@ class TestWalletScopingOnSubResources:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 404
             client.close()
@@ -1024,7 +1054,7 @@ class TestCreateWalletGuard:
         """Create without active wallet returns 400."""
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 400
             assert "wallet" in response.json()["detail"].lower()
@@ -1041,7 +1071,7 @@ class TestCreateEdgeCases:
         bt.create_run = AsyncMock(return_value=(1, "run-ghost"))
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 500
             assert "not found" in response.json()["detail"]
@@ -1053,7 +1083,7 @@ class TestCreateEdgeCases:
         bt.get_run = AsyncMock(side_effect=[_make_run_row(status="running"), None])
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 500
             assert "not found" in response.json()["detail"]
@@ -1069,7 +1099,7 @@ class TestRerunBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 404
             client.close()
@@ -1079,7 +1109,7 @@ class TestRerunBacktest:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 404
             client.close()
@@ -1095,7 +1125,7 @@ class TestRerunBacktest:
         )
         bt.create_run = AsyncMock(return_value=(2, "run-rerun"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-rerun"
@@ -1112,7 +1142,7 @@ class TestRerunBacktest:
         )
         bt.create_run = AsyncMock(return_value=(2, "run-rerun"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet="wallet-1")
+            client = _create_client(wallet="wallet-1")
             response = client.post("/api/backtests/run-1/rerun")
 
             assert response.status_code == 200
@@ -1179,7 +1209,7 @@ class TestNoActiveWalletGuards:
         """
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             response = client.get("/api/backtests")
             assert response.status_code == 400
             client.close()
@@ -1194,7 +1224,7 @@ class TestNoActiveWalletGuards:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             response = client.get("/api/backtests/run-1")
             assert response.status_code == 400
             client.close()
@@ -1217,14 +1247,17 @@ class TestCompareCreate:
     def test_role_permission_matrix(self, role: UserRole, expected_status: int) -> None:
         """Comparison persistence follows CREATE_BACKTEST_COMPARISONS.
 
-        Given: Each named permission set with a selected wallet,
+        Given: Each named permission set with a selected wallet that the
+            fixture also makes TRADABLE (``_create_client`` returns it from
+            ``list_accessible_wallets_for_operators``), isolating the
+            permission gate from the trade-plane wallet gate,
         When: The principal requests a valid auto comparison with no runs,
         Then: Granted principals reach the handler's 409 and denied principals get 403.
         """
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, role=role)
+            client = _create_client(role=role)
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == expected_status
@@ -1243,7 +1276,7 @@ class TestCompareCreate:
         """
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 400
@@ -1258,7 +1291,7 @@ class TestCompareCreate:
         """
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto"})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 422
@@ -1276,7 +1309,7 @@ class TestCompareCreate:
             return_value=[_make_run_row(public_id="run-only", status="completed")]
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 409
@@ -1300,7 +1333,7 @@ class TestCompareCreate:
         bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row(public_id="cmp-new"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
@@ -1317,7 +1350,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1341,7 +1374,7 @@ class TestCompareCreate:
             return_value=[_make_run_row(public_id="anchor-1", status="running")]
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1364,7 +1397,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[run_no_hash])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1388,7 +1421,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[run])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1412,7 +1445,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.list_runs = AsyncMock(return_value=[anchor])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1441,7 +1474,7 @@ class TestCompareCreate:
         bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1493,7 +1526,7 @@ class TestCompareCreate:
         bt.create_comparison = fake_create_comparison
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
@@ -1535,7 +1568,7 @@ class TestCompareCreate:
         bt.create_comparison = fake_create_comparison
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
@@ -1580,7 +1613,7 @@ class TestCompareCreate:
         bt.create_comparison = fake_create_comparison
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1627,7 +1660,7 @@ class TestCompareCreate:
         bt.create_comparison = fake_create_comparison
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "auto",
@@ -1649,7 +1682,7 @@ class TestCompareCreate:
         """
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "manual", "run_a_public_id": "x"})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 422
@@ -1664,7 +1697,7 @@ class TestCompareCreate:
         """
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "manual",
@@ -1686,7 +1719,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "manual",
@@ -1710,7 +1743,7 @@ class TestCompareCreate:
         bt = AsyncMock()
         bt.get_run = AsyncMock(side_effect=[run_a, run_b])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "manual",
@@ -1739,7 +1772,7 @@ class TestCompareCreate:
         bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare(
                 {
                     "mode": "manual",
@@ -1770,7 +1803,7 @@ class TestCompareCreate:
         )
         bt.create_comparison = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
@@ -1797,7 +1830,7 @@ class TestCompareCreate:
         bt.get_comparison_by_pair = AsyncMock(side_effect=[None, existing])
         bt.create_comparison = AsyncMock(side_effect=IntegrityError("INSERT", {}, MagicMock()))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
@@ -1821,7 +1854,7 @@ class TestCompareCreate:
         bt.get_comparison_by_pair = AsyncMock(side_effect=[None, None])
         bt.create_comparison = AsyncMock(side_effect=IntegrityError("INSERT", {}, MagicMock()))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 500
@@ -1835,7 +1868,7 @@ class TestCompareList:
         """Caller without active wallet → 400."""
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             response = client.get("/api/backtests/compare")
             assert response.status_code == 400
             client.close()
@@ -1847,7 +1880,7 @@ class TestCompareList:
             return_value=[_make_comparison_row(public_id=f"c{i}") for i in range(3)]
         )
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/compare")
             assert response.status_code == 200
             data = response.json()
@@ -1862,7 +1895,7 @@ class TestCompareDetail:
         """Caller without active wallet → 400."""
         bt = AsyncMock()
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, wallet=None)
+            client = _create_client(wallet=None)
             response = client.get("/api/backtests/compare/cmp-1")
             assert response.status_code == 400
             client.close()
@@ -1872,7 +1905,7 @@ class TestCompareDetail:
         bt = AsyncMock()
         bt.get_comparison = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/compare/cmp-1")
             assert response.status_code == 404
             client.close()
@@ -1884,7 +1917,7 @@ class TestCompareDetail:
         bt = AsyncMock()
         bt.get_comparison = AsyncMock(return_value=cmp_row)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/compare/cmp-1")
             assert response.status_code == 404
             client.close()
@@ -1895,7 +1928,7 @@ class TestCompareDetail:
         bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
         bt.get_run = AsyncMock(side_effect=[_make_run_row(), None])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/compare/cmp-1")
             assert response.status_code == 404
             client.close()
@@ -1915,7 +1948,7 @@ class TestCompareDetail:
         bt.get_trades = AsyncMock(return_value=[])
         bt.get_signals = AsyncMock(return_value=[])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client()
             response = client.get("/api/backtests/compare/cmp-1")
             assert response.status_code == 200
             data = response.json()["payload"]
@@ -1954,20 +1987,22 @@ def test_detail_routes_fail_closed_without_active_wallet(method: str, path: str)
         rerun).
 
     Then:
-        The ``_enforce_wallet_scope`` guard fires 400 with the
-        ``no active wallet selected`` detail before any repo mutation
-        happens. This pins the fail-closed contract — the previous
-        truthy guard (``if principal.active_wallet_public_id and ...``)
-        was a no-op under a cleared wallet claim and leaked
-        cross-tenant reads; the new guard must raise 400 on every
-        detail surface.
+        The fail-closed guard fires 400 with the ``no active wallet
+        selected`` detail before any repo mutation happens. This pins the
+        contract — the original truthy guard
+        (``if principal.active_wallet_public_id and ...``) was a no-op
+        under a cleared wallet claim and leaked cross-tenant reads. The
+        five GET rows are guarded by ``_enforce_wallet_scope``; the two
+        POST rows are guarded earlier, by
+        ``require_tradable_active_wallet``, which raises the SAME detail
+        so the surface stays uniform.
     """
     bt = AsyncMock()
     bt.get_run = AsyncMock(return_value=_make_run_row())
     bt.update_run_status = AsyncMock()
     bt.create_run = AsyncMock()
     with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-        client = _create_client(bt, wallet=None)
+        client = _create_client(wallet=None)
         if method == "GET":
             response = client.get(path)
         elif method == "POST_CANCEL":
@@ -1977,3 +2012,278 @@ def test_detail_routes_fail_closed_without_active_wallet(method: str, path: str)
         assert response.status_code == 400
         assert response.json()["detail"] == _NO_WALLET_DETAIL
         client.close()
+
+
+@patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", _MOCK_STRATEGIES)
+class TestReadGrantConfersNoWriteAuthority:
+    """The READ-plane wallet claim must not authorize a wallet-scoped write.
+
+    ``POST /auth/refresh`` validates ``active_wallet_public_id`` against
+    the READ plane (``list_readable_wallets_for_user`` — operator scope
+    grants UNION the user's personal ``wallet_user_read_grants`` rows) and
+    mints it into the JWT. That is deliberate: a read-granted user must be
+    able to pin the hint and receive that wallet's read surfaces.
+
+    ``AI_REVIEWER`` turns the claim into a reachable privilege escalation
+    unless the write surfaces re-resolve it: the role holds
+    ``CREATE_BACKTEST_COMPARISONS``, and the seed loader refuses read
+    grants only to permission sets holding ``CREATE_ORDERS`` or
+    ``IMPERSONATE_OPERATOR``, so a read-granted reviewer is a legal
+    principal. These tests pin both halves — the write is refused, and the
+    reads it was granted still work.
+    """
+
+    def test_read_granted_reviewer_cannot_persist_a_comparison(self) -> None:
+        """A read-only wallet claim is refused at the comparison write.
+
+        Given:
+            An ``AI_REVIEWER`` principal holding
+            ``CREATE_BACKTEST_COMPARISONS``, with zero operator
+            memberships and ``active_wallet_public_id`` pinned to a wallet
+            it sees only through a personal read grant, so the TRADE plane
+            (``list_accessible_wallets_for_operators``) returns nothing.
+            The repository is stocked with two terminal runs and an
+            insert that succeeds, so every remaining precondition for
+            persistence is satisfied — the wallet gate is the only thing
+            standing between this request and a written row.
+
+        When:
+            The principal posts a valid auto comparison request.
+
+        Then:
+            The request is refused with 403 and no ``BacktestComparison``
+            row is written — neither the idempotent pair lookup nor the
+            insert is reached, so the escalation is closed BEFORE
+            persistence rather than reported after it. Removing
+            ``require_tradable_active_wallet`` from ``create_comparison``
+            turns this into a 200 with ``create_comparison`` awaited.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[
+                _make_run_row(public_id="run-a", status="completed"),
+                _make_run_row(public_id="run-b", status="completed"),
+            ]
+        )
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row(public_id="cmp-new"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(role=UserRole.AI_REVIEWER)
+            _repo_of(client).list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 403
+            bt.list_runs.assert_not_awaited()
+            bt.get_comparison_by_pair.assert_not_awaited()
+            bt.create_comparison.assert_not_awaited()
+            client.close()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/backtests",
+            "/api/backtests/compare",
+            "/api/backtests/compare/cmp-1",
+            "/api/backtests/run-1",
+            "/api/backtests/run-1/trades",
+            "/api/backtests/run-1/signals",
+            "/api/backtests/run-1/events",
+            "/api/backtests/run-1/equity",
+        ],
+    )
+    def test_read_granted_reviewer_still_reads_the_wallet(self, path: str) -> None:
+        """The write gate does not over-correct into the read surfaces.
+
+        Given:
+            The same read-granted ``AI_REVIEWER`` principal whose wallet is
+            absent from the trade plane, and repository fixtures owned by
+            the pinned wallet.
+
+        When:
+            Each wallet-scoped backtest READ route is requested.
+
+        Then:
+            Every one answers 200. Read authority conferring read
+            visibility is the feature the read/trade split exists to
+            deliver, so the fix must refuse writes without touching this.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[_make_run_row()])
+        bt.list_comparisons = AsyncMock(return_value=[_make_comparison_row()])
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        bt.get_run = AsyncMock(return_value=_make_run_row())
+        bt.get_result = AsyncMock(return_value=None)
+        bt.get_trades = AsyncMock(return_value=[])
+        bt.get_signals = AsyncMock(return_value=[])
+        bt.get_events = AsyncMock(return_value=[])
+        bt.get_equity_points = AsyncMock(return_value=[])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(role=UserRole.AI_REVIEWER)
+            _repo_of(client).list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+            response = client.get(path)
+            assert response.status_code == 200
+            client.close()
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("POST_CREATE", "/api/backtests"),
+            ("POST_COMPARE", "/api/backtests/compare"),
+            ("POST_CANCEL", "/api/backtests/run-1/cancel"),
+            ("POST_RERUN", "/api/backtests/run-1/rerun"),
+        ],
+    )
+    def test_untradable_claim_is_refused_on_every_write_route(self, method: str, path: str) -> None:
+        """All four backtest write consumers re-resolve the wallet claim.
+
+        Given:
+            An ``OPERATOR`` principal — the only named set holding both
+            ``MANAGE_BACKTESTS`` and ``CREATE_BACKTEST_COMPARISONS`` — whose
+            active wallet claim is outside its operator scope grants, and a
+            repository that would happily return a run for the path.
+
+        When:
+            Each of the four wallet-writing backtest routes is called.
+
+        Then:
+            Every one answers 403 and nothing is persisted or even read:
+            the gate is a dependency, so it runs ahead of the handler
+            body. Parametrising all four is the point — the reported
+            defect was on ``/compare`` alone, and a fix applied only there
+            would leave create, cancel and rerun open.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="running"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(role=UserRole.OPERATOR)
+            _repo_of(client).list_accessible_wallets_for_operators = AsyncMock(
+                return_value=[{"public_id": "wallet-elsewhere"}]
+            )
+            if method == "POST_CREATE":
+                response = client.post(path, json=_create_body())
+            elif method == "POST_COMPARE":
+                response = client.post(
+                    path, json=_wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+                )
+            elif method == "POST_CANCEL":
+                response = client.post(path, json=_cancel_body())
+            else:
+                response = client.post(path)
+            assert response.status_code == 403
+            bt.get_run.assert_not_awaited()
+            bt.create_run.assert_not_awaited()
+            bt.update_run_status.assert_not_awaited()
+            bt.create_comparison.assert_not_awaited()
+            client.close()
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("POST_CANCEL", "/api/backtests/run-1/cancel"),
+            ("POST_RERUN", "/api/backtests/run-1/rerun"),
+        ],
+    )
+    def test_tradable_wallet_still_gates_foreign_runs(self, method: str, path: str) -> None:
+        """A tradable wallet does not unlock another wallet's run.
+
+        Given:
+            An ``OPERATOR`` principal whose active wallet IS tradable, and
+            a run owned by a different wallet.
+
+        When:
+            The cancel or rerun route is called for that run.
+
+        Then:
+            404 is returned by ``_enforce_run_wallet`` and no status
+            update happens, proving the ownership half of the old
+            ``_enforce_wallet_scope`` survived the split intact.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other-wallet", status="running"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(role=UserRole.OPERATOR)
+            if method == "POST_CANCEL":
+                response = client.post(path, json=_cancel_body())
+            else:
+                response = client.post(path)
+            assert response.status_code == 404
+            bt.update_run_status.assert_not_awaited()
+            bt.create_run.assert_not_awaited()
+            client.close()
+
+
+class TestRevokedReadGrantStopsBacktestReads:
+    """The wallet claim must not outlive the read grant that justified it.
+
+    ``active_wallet_public_id`` is validated once, at mint, and then
+    carried forward by every refresh — including the documented zero-body
+    refreshes, which run forever. The wallet-scoped backtest readers used
+    to authorize from that claim alone, so an admin revoking a personal
+    ``wallet_user_read_grants`` row never stopped the holder: they kept
+    listing that wallet's runs, comparisons, trades, signals, events and
+    equity indefinitely. Every OTHER read surface in the tree resolves
+    ``resolve_readable_wallets`` per request and was revocation-immediate
+    already; these tests pin that the backtest family now is too.
+
+    The mirror — a live grant still answering 200 on all eight routes —
+    is ``TestReadGrantConfersNoWriteAuthority``'s
+    ``test_read_granted_reviewer_still_reads_the_wallet``, which runs the
+    same principal through the same gate with the read plane populated.
+    """
+
+    @pytest.mark.parametrize(
+        ("path", "unreached"),
+        [
+            ("/api/backtests", "list_runs"),
+            ("/api/backtests/compare", "list_comparisons"),
+            ("/api/backtests/compare/cmp-1", "get_comparison"),
+            ("/api/backtests/run-1", "get_result"),
+            ("/api/backtests/run-1/trades", "get_trades"),
+            ("/api/backtests/run-1/signals", "get_signals"),
+            ("/api/backtests/run-1/events", "get_events"),
+            ("/api/backtests/run-1/equity", "get_equity_points"),
+        ],
+    )
+    def test_revoked_read_grant_is_refused_on_every_read_route(
+        self, path: str, unreached: str
+    ) -> None:
+        """A claim whose grant is gone stops working on the next request.
+
+        Given:
+            An ``AI_REVIEWER`` with zero operator memberships whose claim
+            still names the wallet, but whose read grant has been
+            revoked, so BOTH planes now return nothing. Every repository
+            fixture the route would need is stocked, so the gate is the
+            only thing standing between the request and the rows.
+
+        When:
+            Each of the eight wallet-scoped backtest READ routes is
+            requested.
+
+        Then:
+            Every one answers 403 and the route's payload fetch is never
+            awaited. Parametrising all eight is the point: the claim was
+            read raw in three handlers and in the shared
+            ``_enforce_wallet_scope``, so a fix applied to one shape
+            would leave the other open.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[_make_run_row()])
+        bt.list_comparisons = AsyncMock(return_value=[_make_comparison_row()])
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(return_value=None)
+        bt.get_trades = AsyncMock(return_value=[])
+        bt.get_signals = AsyncMock(return_value=[])
+        bt.get_events = AsyncMock(return_value=[])
+        bt.get_equity_points = AsyncMock(return_value=[])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(role=UserRole.AI_REVIEWER)
+            repo = _repo_of(client)
+            repo.list_readable_wallets_for_user = AsyncMock(return_value=[])
+            repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+            response = client.get(path)
+            assert response.status_code == 403
+            getattr(bt, unreached).assert_not_awaited()
+            client.close()

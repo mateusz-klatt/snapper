@@ -16,9 +16,11 @@ tool dispatch needs an equivalent per-call gate.
 :func:`validate_user_wallet_scope` is that gate. It is a thin
 adapter over
 :meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`
-so cross-surface policy stays in one place (the REST list
-endpoints go through :func:`snapper.server.scoping.resolve_target_wallets`
-which consults the same primitive). Keeping the MCP helper
+so cross-surface policy stays in one place (the REST trade
+routes go through :func:`snapper.server.scoping.resolve_tradable_wallets`
+which consults the same primitive; the REST READ routes resolve through
+the wider ``resolve_readable_wallets``, which MCP deliberately does not
+mirror — delegates are trade principals). Keeping the MCP helper
 *separate* from the REST scoping function is intentional: the REST
 variant raises :class:`HTTPException` whose semantics are
 REST-specific (status codes, detail strings, OpenAPI responses)
@@ -68,12 +70,24 @@ def ensure_operator_in_claims(
     plugs in downstream; the claim set is the source of truth for
     that fallback so no extra validation is required.
 
-    Wiring pairs with :func:`validate_user_wallet_scope` so the two
-    checks together cover the `(operator, wallet)` tuple any MCP
-    write tool stamps onto the persisted row: the wallet gate
-    proves the wallet sits inside *some* operator the caller holds,
-    and this helper proves the caller actually chose *that* same
-    operator instead of spoofing a peer.
+    Wiring pairs with :func:`validate_user_wallet_scope`, and the pair
+    proves LESS than the `(operator, wallet)` tuple an MCP write tool
+    stamps onto the persisted row. The wallet gate proves the wallet
+    sits inside *some* operator the caller holds; this helper proves the
+    selection is *some* operator the caller holds. Neither proves the
+    two are the SAME operator, so a caller belonging to operators A and
+    B, acting on a wallet only B grants, may stamp the row with A. The
+    row is then misattributed between two operators the caller
+    legitimately holds — it is not an escalation, because no
+    authorization surface reads the row's ``operator_public_id`` back
+    (the WS filters key on wallet or on delegate grants), and the same
+    shape exists on the REST writers, which stamp
+    ``principal.primary_operator_public_id`` without proving it covers
+    the wallet either. Narrowing the wallet lookup to the SELECTED
+    operator would close it, and would also start refusing calls that
+    are legal today, so it is a product decision rather than a defect
+    fix. Recorded here so the next surface that wants to authorize off a
+    row's operator knows it may not.
 
     Args:
         claims: Verified :class:`TokenClaims` for the current call.
@@ -123,7 +137,7 @@ async def validate_user_wallet_scope(
 
     Global-scope bypass: a caller whose role permission set grants
     :attr:`Permission.IMPERSONATE_OPERATOR` implicitly covers every wallet,
-    matching the REST ``resolve_target_wallets`` behaviour. Every other caller
+    matching the REST ``resolve_tradable_wallets`` behaviour. Every other caller
     goes through the repository lookup.
 
     A caller with *no* operator memberships (``operator_public_ids``

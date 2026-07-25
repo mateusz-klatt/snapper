@@ -409,7 +409,6 @@ max-statements = 50
 "tests/scripts/test_seed_demo.py" = ["PLR0913"]
 "tests/scripts/test_test_live_orders.py" = ["PLR0913"]
 "tests/server/test_alerts_routes.py" = ["PLR0913"]
-"tests/server/test_backtest_routes.py" = ["PLR0913"]
 "tests/server/test_device_routes.py" = ["PLR0913"]
 "tests/server/test_order_wallet_autolookup.py" = ["PLR0913"]
 "tests/server/test_process_routes.py" = ["PLR0913"]

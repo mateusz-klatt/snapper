@@ -260,9 +260,34 @@ def _seeded_repo() -> AsyncMock:
         ]
     )
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+    repo.list_readable_wallets_for_user = AsyncMock(return_value=[])
     repo.list_active_wallets = AsyncMock(return_value=[_wallet_row()])
     repo.pnl_timeline_scope_has_fill_gap = AsyncMock(return_value=False)
     repo.get_portfolio_pnl_samples = AsyncMock(return_value=[])
+    return repo
+
+
+def _anchorless_repo() -> AsyncMock:
+    """Build a repo mock for a scope that has no durable activation anchor.
+
+    The ACTIVATION half of the prefix bundle is emptied so the scope is flat at
+    t0 and needs no opening marks. A request that is permitted to create the
+    anchor therefore reaches the durable writer instead of failing earlier on
+    absent mark evidence, which is what lets the read-plane regressions assert
+    on the writer itself rather than on a downstream symptom.
+
+    Returns:
+        The seeded repository double with no visible anchor and a flat
+        activation prefix.
+    """
+    repo = _seeded_repo()
+    repo.get_portfolio_pnl_anchor = AsyncMock(return_value=None)
+    repo.get_pnl_timeline_execution_prefix_bundle = AsyncMock(
+        return_value={
+            "request": repo.get_pnl_timeline_execution_prefix.return_value,
+            "activation": {"watermarks": {}, "executions": [], "annulments": []},
+        }
+    )
     return repo
 
 
@@ -288,8 +313,23 @@ def _corrected_repo() -> AsyncMock:
     return repo
 
 
-def _create_client(mock_repo: AsyncMock, role: UserRole = UserRole.ADMIN) -> TestClient:
-    """Create a test client with auth/csrf bypassed and the mock repo bound."""
+def _create_client(
+    mock_repo: AsyncMock,
+    role: UserRole = UserRole.ADMIN,
+    operator_public_ids: list[str] | None = None,
+) -> TestClient:
+    """Create a test client with auth/csrf bypassed and the mock repo bound.
+
+    Args:
+        mock_repo: Repository double bound to the repository dependency.
+        role: Role the injected principal carries.
+        operator_public_ids: Operator memberships the principal carries. The
+            default of none models the read-granted caller: zero operator
+            memberships, so the trade plane can only ever answer empty.
+
+    Returns:
+        A test client whose requests carry the described principal.
+    """
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     app.state.rest_tracker = SequenceTracker()
@@ -298,7 +338,11 @@ def _create_client(mock_repo: AsyncMock, role: UserRole = UserRole.ADMIN) -> Tes
         return None
 
     def skip_auth() -> AuthPrincipal:
-        return AuthPrincipal(username="tester", role=role)
+        return AuthPrincipal(
+            username="tester",
+            role=role,
+            operator_public_ids=list(operator_public_ids or []),
+        )
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf
     app.dependency_overrides[require_authentication] = skip_auth
@@ -918,12 +962,32 @@ class TestScopeAndFailures:
     """Cover the wallet-scope 403 and the internal-error wrapper."""
 
     def test_foreign_wallet_is_forbidden_for_non_admin(self) -> None:
-        """A non-admin requesting an inaccessible wallet gets a 403."""
+        """A non-admin requesting an unreadable wallet gets a 403."""
         repo = _seeded_repo()
         client = _create_client(repo, role=UserRole.OPERATOR)
         response = client.get(_url())
         assert response.status_code == 403
         repo.list_active_wallets.assert_not_awaited()
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+
+    def test_read_granted_wallet_is_allowed_without_membership(self) -> None:
+        """A membership-less caller may read a wallet they were granted.
+
+        Given: an OPERATOR whose read plane returns the requested wallet
+            while the operator plane stays empty (the seeded default),
+        When: the P&L series is requested for that wallet,
+        Then: the request is served instead of 403, and the only lookup that
+            could have authorized it is the read-plane one.
+        """
+        repo = _seeded_repo()
+        repo.list_readable_wallets_for_user = AsyncMock(
+            return_value=[{"public_id": _WALLET, "is_paper": False}]
+        )
+        client = _create_client(repo, role=UserRole.OPERATOR)
+        response = client.get(_url())
+        assert response.status_code == 200
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+        assert repo.list_accessible_wallets_for_operators.return_value == []
 
     def test_reconstruction_failure_is_wrapped_as_500(self) -> None:
         """An unexpected repository error is surfaced as a 500."""
@@ -933,6 +997,127 @@ class TestScopeAndFailures:
         response = client.get(_url())
         assert response.status_code == 500
         assert response.json()["detail"] == "Failed to build P&L series"
+
+
+class TestAnchorCreationPlane:
+    """Pin anchor creation to the TRADE plane while reads stay on the read plane.
+
+    The activation anchor is the permanent record of where a scope's P&L
+    history begins, and a current-truth GET persists it when one is missing.
+    Deriving that permission from the same resolver that authorizes the
+    RESPONSE would mean a personal read grant could author money truth, so the
+    two are resolved separately. These tests assert the separation from both
+    sides: a read-only caller never reaches the writer, and a trade-authorized
+    caller still does.
+    """
+
+    def test_read_granted_current_truth_never_creates_the_anchor(self) -> None:
+        """A read-only caller gets the honest no-anchor result, not a new anchor.
+
+        Given: an OPERATOR with zero operator memberships whose only access to
+            the wallet is a personal read grant, and a scope that has no
+            durable activation anchor,
+        When: a current-truth P&L series is requested (no ``as_of``),
+        Then: the response is 200 with no points, the anchor writer is never
+            invoked, and the builder was told anchor creation is not permitted.
+        """
+        repo = _anchorless_repo()
+        repo.list_readable_wallets_for_user = AsyncMock(
+            return_value=[{"public_id": _WALLET, "is_paper": False}]
+        )
+        client = _create_client(repo, role=UserRole.OPERATOR)
+        response = client.get(_url())
+        repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+        assert response.status_code == 200
+        assert response.json()["payload"]["points"] == []
+        assert repo.get_portfolio_pnl_anchor.await_args.args[3] is not None
+
+    def test_read_granted_current_truth_timeline_never_creates_the_anchor(self) -> None:
+        """The marker sibling gates the same write the same way.
+
+        Given: the same read-only caller and anchor-less scope,
+        When: the marker-bearing timeline is requested at current truth,
+        Then: the anchor writer is never invoked and the series is empty.
+        """
+        repo = _anchorless_repo()
+        repo.list_readable_wallets_for_user = AsyncMock(
+            return_value=[{"public_id": _WALLET, "is_paper": False}]
+        )
+        client = _create_client(repo, role=UserRole.OPERATOR)
+        response = client.get(_timeline_url())
+        repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+        assert response.status_code == 200
+        assert response.json()["payload"]["points"] == []
+
+    def test_read_granted_scope_with_an_anchor_still_reads(self) -> None:
+        """Losing the write does not cost the read for an anchored scope.
+
+        Given: the same read-only caller and the seeded scope, which HAS a
+            durable activation anchor,
+        When: a current-truth P&L series is requested,
+        Then: the full series is served and no anchor is written.
+        """
+        repo = _seeded_repo()
+        repo.list_readable_wallets_for_user = AsyncMock(
+            return_value=[{"public_id": _WALLET, "is_paper": False}]
+        )
+        client = _create_client(repo, role=UserRole.OPERATOR)
+        response = client.get(_url())
+        assert response.status_code == 200
+        points = response.json()["payload"]["points"]
+        assert len(points) == 3
+        assert points[0]["net_pnl"] == 4.5
+        repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+
+    def test_trade_authorized_caller_still_creates_the_anchor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An operator holding a scope grant keeps the pre-split behaviour.
+
+        Given: an OPERATOR whose operator scope grants cover the wallet,
+        When: a current-truth P&L series is requested,
+        Then: the builder is told anchor creation is permitted, exactly as
+            before the read/trade split.
+        """
+        repo = _seeded_repo()
+        granted = [{"public_id": _WALLET, "is_paper": False}]
+        repo.list_readable_wallets_for_user = AsyncMock(return_value=granted)
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=granted)
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", build)
+        client = _create_client(repo, role=UserRole.OPERATOR, operator_public_ids=["op-1"])
+        response = client.get(_url())
+        assert response.status_code == 200
+        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["policy"].allow_anchor_creation is True
+
+    def test_historical_read_skips_the_trade_plane_entirely(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A horizon-bearing read cannot create an anchor, so it asks nothing.
+
+        Given: an OPERATOR whose operator scope grants cover the wallet,
+        When: the series is requested with an explicit ``as_of``,
+        Then: anchor creation stays off and the trade plane is never consulted,
+            because the answer could not change the outcome.
+        """
+        repo = _seeded_repo()
+        granted = [{"public_id": _WALLET, "is_paper": False}]
+        repo.list_readable_wallets_for_user = AsyncMock(return_value=granted)
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=granted)
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", build)
+        client = _create_client(repo, role=UserRole.OPERATOR, operator_public_ids=["op-1"])
+        response = client.get(_url(as_of=_AS_OF))
+        assert response.status_code == 200
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["policy"].allow_anchor_creation is False
 
 
 class TestValuationCurrency:

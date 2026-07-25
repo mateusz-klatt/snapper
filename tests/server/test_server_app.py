@@ -2587,8 +2587,17 @@ class MockRepository:
         self._error = error
         self._account_state_rows = account_state_rows or []
         self._accessible_wallet_ids = accessible_wallet_ids or []
+        self._read_granted_wallet_ids: list[str] = []
         self._duplicate_active_rows = duplicate_active_rows
         self.reconciliation_context_calls: list[list[str] | None] = []
+
+    def grant_read_access(self, wallet_public_ids: list[str]) -> None:
+        """Make wallets visible through the personal read-grant plane only.
+
+        Kept off ``__init__`` so the constructor stays within the argument
+        budget; the read plane is an additive disjunct anyway.
+        """
+        self._read_granted_wallet_ids = wallet_public_ids
 
     def session(self) -> MockSession:
         """Return mock session with configured result or error."""
@@ -2719,9 +2728,28 @@ class MockRepository:
     async def list_accessible_wallets_for_operators(
         self, operator_public_ids: list[str], as_of: Any
     ) -> list[dict[str, Any]]:
-        """Return mock accessible-wallet rows for the given operators."""
+        """Return mock accessible-wallet rows for the given operators.
+
+        Mirrors the real trade-plane short-circuit: an empty operator list
+        can never yield a wallet.
+        """
         self._raise_if_error()
+        if not operator_public_ids:
+            return []
         return [{"public_id": wid} for wid in self._accessible_wallet_ids]
+
+    async def list_readable_wallets_for_user(
+        self, user_public_id: str, operator_public_ids: list[str], as_of: Any
+    ) -> list[dict[str, Any]]:
+        """Return the mock read plane: operator-covered UNION read-granted.
+
+        Mirrors the real read-plane contract by NOT short-circuiting on an
+        empty operator list — the read-grant disjunct always participates.
+        """
+        self._raise_if_error()
+        covered = self._accessible_wallet_ids if operator_public_ids else []
+        ordered = list(dict.fromkeys([*covered, *self._read_granted_wallet_ids]))
+        return [{"public_id": wid} for wid in ordered]
 
     async def get_venue_account_states(
         self, wallet_public_ids: list[str] | None
@@ -4412,7 +4440,7 @@ def _create_scoped_client(role: UserRole, operator_ids: list[str]) -> TestClient
 
 
 class TestScopedEndpoints403Propagation:
-    """HTTPException(403) from resolve_target_wallets must NOT be swallowed.
+    """HTTPException(403) from resolve_readable_wallets must NOT be swallowed.
 
     Before this fix, the broad ``except Exception`` in the signals /
     orders / executions / positions handlers remapped the 403 to 500.
@@ -4834,7 +4862,7 @@ class TestPortfolioAccountsEndpoint:
         assert repo.reconciliation_context_calls == [None]
 
     def test_wallet_scoping_returns_only_accessible_rows(self) -> None:
-        """resolve_target_wallets narrows results to the accessible set.
+        """resolve_readable_wallets narrows results to the readable set.
 
         Given: an OPERATOR whose accessible set is only ``w-visible`` and a
             repo holding rows for ``w-visible`` and ``w-hidden``,
@@ -4855,6 +4883,32 @@ class TestPortfolioAccountsEndpoint:
         assert data["payload"][0]["public_id"] == "acct-visible"
         assert data["payload"][0]["wallet_public_id"] == "w-visible"
         assert repo.reconciliation_context_calls == [["w-visible"]]
+
+    def test_read_granted_wallet_is_visible_without_membership(self) -> None:
+        """A membership-less caller still sees their read-granted wallet.
+
+        Given: an OPERATOR with an EMPTY operator set holding a read grant
+            on ``w-granted``, and a repo carrying rows for ``w-granted``
+            and ``w-hidden``,
+        When: GET /portfolio/accounts is called,
+        Then: only the read-granted row is returned — the read plane must
+            not inherit the trade plane's empty-operator short-circuit,
+            which would have produced an empty payload.
+        """
+        granted = _account_state_row(public_id="acct-granted", wallet_public_id="w-granted")
+        hidden = _account_state_row(public_id="acct-hidden", wallet_public_id="w-hidden")
+        repo = MockRepository(
+            account_state_rows=[granted, hidden],
+            accessible_wallet_ids=["w-hidden"],
+        )
+        repo.grant_read_access(["w-granted"])
+        client = _account_state_client(UserRole.OPERATOR, repo, operator_ids=[])
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert data["payload"][0]["wallet_public_id"] == "w-granted"
+        assert repo.reconciliation_context_calls == [["w-granted"]]
 
     def test_duplicate_active_rows_corrupt_account_and_reconciliation(self) -> None:
         """Active multiplicity fails closed across the whole REST account item.
@@ -4899,7 +4953,7 @@ class TestPortfolioAccountsEndpoint:
         assert repo.reconciliation_context_calls == [None]
 
     def test_foreign_operator_scope_403_propagates(self) -> None:
-        """A 403 from resolve_target_wallets is not remapped to 500.
+        """A 403 from resolve_readable_wallets is not remapped to 500.
 
         Given: an OPERATOR scoped to ``op-1`` querying a foreign operator,
         When: GET /portfolio/accounts?operator_public_id=op-foreign is called,

@@ -598,7 +598,14 @@ async def _resolve_target_wallets_for_mcp(
     wallet_public_id: str | None,
     as_of: datetime,
 ) -> tuple[list[str] | None, bool]:
-    """Mirror REST :func:`snapper.server.scoping.resolve_target_wallets`.
+    """Mirror REST :func:`snapper.server.scoping.resolve_tradable_wallets`.
+
+    The TRADE plane is the mirrored one on purpose. MCP callers are
+    delegates acting as trade principals, so the wider read plane
+    (``resolve_readable_wallets``, operator grants UNION the user's
+    personal ``wallet_user_read_grants``) is deliberately not reachable
+    from here: a read grant must never widen what a delegate can see or do
+    through a tool call.
 
     Returns ``(wallet_public_ids, scope_violation)``. ``scope_violation``
     is ``True`` when the caller cannot legally see

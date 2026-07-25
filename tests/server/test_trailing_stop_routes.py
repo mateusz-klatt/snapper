@@ -37,6 +37,7 @@ def _make_cycle_row(
     public_id: str = "cycle-1",
     status: str = "open",
     direction: str = "long",
+    operator_public_id: str | None = None,
 ) -> dict[str, Any]:
     now = _ts()
     return {
@@ -49,7 +50,7 @@ def _make_cycle_row(
         "mode": "paper",
         "shard_key": "kraken_futures.BTC-USD.paper",
         "wallet_public_id": "wallet-1",
-        "operator_public_id": None,
+        "operator_public_id": operator_public_id,
         "direction": direction,
         "max_qty": 1.0,
         "status": status,
@@ -63,6 +64,7 @@ def _make_cycle_row(
 def _make_plan_row(
     public_id: str = "ts-1",
     status: str = "armed",
+    operator_public_id: str | None = None,
 ) -> dict[str, Any]:
     now = _ts()
     return {
@@ -79,7 +81,7 @@ def _make_plan_row(
         "mode": "paper",
         "shard_key": "kraken_futures.BTC-USD.paper",
         "wallet_public_id": "wallet-1",
-        "operator_public_id": None,
+        "operator_public_id": operator_public_id,
         "total_quantity": 1.0,
         "filled_quantity": 0.0,
         "side": "buy",
@@ -132,8 +134,17 @@ def _cancel_body() -> dict[str, Any]:
     }
 
 
-def _create_client(mock_repo: Any) -> TestClient:
-    """Create test client with auth bypassed, mock repo, and mock plan executor."""
+def _create_client(mock_repo: Any, principal: AuthPrincipal | None = None) -> TestClient:
+    """Create test client with auth bypassed, mock repo, and mock plan executor.
+
+    Args:
+        mock_repo: Repository double backing the request.
+        principal: Optional authenticated caller; defaults to an ADMIN so
+            existing tests keep their unscoped behaviour.
+
+    Returns:
+        A test client wired with CSRF, auth, and repository overrides.
+    """
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     mock_settings = MagicMock()
@@ -153,6 +164,8 @@ def _create_client(mock_repo: Any) -> TestClient:
         return None
 
     def skip_auth() -> AuthPrincipal:
+        if principal is not None:
+            return principal
         return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf
@@ -881,3 +894,142 @@ class TestListDecisions:
         client = _create_client(repo)
         response = client.get("/api/trailing-stops/nonexistent/decisions")
         assert response.status_code == 404
+
+
+def _read_granted_principal() -> AuthPrincipal:
+    """Return an OPERATOR whose ONLY wallet visibility is a personal read grant."""
+    return AuthPrincipal(
+        username="carol",
+        role=UserRole.OPERATOR,
+        user_public_id="user-carol",
+        operator_public_ids=[],
+    )
+
+
+def _read_granted_repo(operator_public_id: str | None = "op-foreign") -> AsyncMock:
+    """Return a repo where wallet-1 is read-granted but operator-covered by nobody.
+
+    The plan and cycle rows carry a FOREIGN ``operator_public_id`` by
+    default, the shape production rows have: a record-operator narrowing
+    reintroduced on a read path would 403 on it before the wallet is
+    consulted, so the read assertions below only bite with a non-``None``
+    operator here.
+
+    Args:
+        operator_public_id: Operator stamped on the plan and cycle rows;
+            pass ``None`` for the shape that reaches the wallet gate.
+
+    Returns:
+        Repository double whose only visibility of wallet-1 is a read grant.
+    """
+    repo = AsyncMock()
+    repo.get_execution_plan = AsyncMock(
+        return_value=_make_plan_row(operator_public_id=operator_public_id)
+    )
+    repo.get_position_cycle_by_public_id = AsyncMock(
+        return_value=_make_cycle_row(operator_public_id=operator_public_id)
+    )
+    repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+    repo.list_readable_wallets_for_user = AsyncMock(return_value=[{"public_id": "wallet-1"}])
+    repo.list_execution_plan_decisions = AsyncMock(return_value=[])
+    return repo
+
+
+class TestReadGrantPlaneSeparation:
+    """A zero-membership read grant opens the GETs and stays shut on cancel.
+
+    Every other test in this module authenticates as ADMIN, which holds
+    global scope and so never performs a wallet lookup at all — meaning
+    none of them can tell which plane a trailing-stop route resolves
+    through. These tests are the ones that pin it: swap any GET here to
+    the trade primitive and it 403s, swap the cancel to the read primitive
+    and a mere read grant starts authorizing cancellation.
+    """
+
+    def test_read_grant_opens_trailing_stop_detail(self) -> None:
+        """GET detail resolves through the read plane.
+
+        Given: an OPERATOR with ZERO operator memberships whose only
+            visibility of wallet-1 is a personal read grant, and a plan
+            owned by a FOREIGN operator,
+        When: the trailing-stop detail endpoint is requested,
+        Then: the plan is returned, and the read-plane lookup was asked
+            with the caller's user id and the EMPTY operator list.
+        """
+        repo = _read_granted_repo()
+        client = _create_client(repo, principal=_read_granted_principal())
+        response = client.get("/api/trailing-stops/ts-1")
+        assert response.status_code == 200
+        assert response.json()["payload"]["public_id"] == "ts-1"
+        call = repo.list_readable_wallets_for_user.await_args
+        assert call.args[0] == "user-carol"
+        assert call.args[1] == []
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+
+    def test_read_grant_opens_trailing_stop_decisions(self) -> None:
+        """GET decisions resolves through the read plane.
+
+        Given: the same read-granted, membership-less caller and the same
+            foreign-operator plan,
+        When: the trailing-stop decisions endpoint is requested,
+        Then: the audit rows are returned rather than a 403.
+        """
+        repo = _read_granted_repo()
+        client = _create_client(repo, principal=_read_granted_principal())
+        response = client.get("/api/trailing-stops/ts-1/decisions")
+        assert response.status_code == 200
+        assert response.json()["count"] == 0
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+
+    def test_read_grant_opens_trailing_stop_by_cycle(self) -> None:
+        """GET by-cycle resolves through the read plane.
+
+        Given: the same caller and a cycle on the read-granted wallet owned
+            by a foreign operator,
+        When: the by-cycle live-state endpoint is requested,
+        Then: the endpoint answers instead of refusing, and the read-plane
+            lookup is the one that authorized it.
+        """
+        repo = _read_granted_repo()
+        client = _create_client(repo, principal=_read_granted_principal())
+        response = client.get("/api/trailing-stops/by-cycle/cycle-1")
+        assert response.status_code == 200
+        assert response.json()["payload"] == "none"
+        repo.list_readable_wallets_for_user.assert_awaited()
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+
+    def test_read_grant_is_refused_on_trailing_stop_cancel(self) -> None:
+        """POST cancel resolves through the trade plane and refuses.
+
+        Given: the same read-granted caller and the same foreign-operator
+            plan they can successfully GET,
+        When: the trailing-stop cancel endpoint is posted to,
+        Then: HTTP 403 is returned by the trade-plane operator check, and
+            the read-grant union was never consulted.
+        """
+        repo = _read_granted_repo()
+        client = _create_client(repo, principal=_read_granted_principal())
+        response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Operator not in accessible set"
+        repo.list_readable_wallets_for_user.assert_not_awaited()
+        repo.update_execution_plan_status.assert_not_awaited()
+
+    def test_read_grant_is_refused_on_cancel_of_operatorless_plan(self) -> None:
+        """The trade-plane WALLET gate refuses too, not just the operator gate.
+
+        Given: the same caller and an operator-less plan, so the trade
+            resolver reaches its wallet check instead of stopping at the
+            operator check,
+        When: the trailing-stop cancel endpoint is posted to,
+        Then: HTTP 403 comes from the wallet gate, which consulted the
+            operator-only lookup and never the read-grant union.
+        """
+        repo = _read_granted_repo(operator_public_id=None)
+        client = _create_client(repo, principal=_read_granted_principal())
+        response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Wallet not in accessible set"
+        repo.list_accessible_wallets_for_operators.assert_awaited()
+        repo.list_readable_wallets_for_user.assert_not_awaited()
+        repo.update_execution_plan_status.assert_not_awaited()

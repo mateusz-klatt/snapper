@@ -460,6 +460,14 @@ class PnlSeriesReadPolicy:
     grant off. Conflating them would either leak present-epoch equity into the
     snapshotter's results or make it answer as though it had named a past
     instant. The default is the conservative one: an explicit horizon.
+
+    ``allow_anchor_creation`` still defaults ON, which is the one permissive
+    default here and a known wart: it is a durable WRITE reachable from a GET, so
+    a caller that forgets to state the capability receives it. Flipping it is a
+    defense-in-depth change, not a fix — every current construction site passes
+    the flag explicitly or is deliberately permissive — and it requires auditing
+    ``_DEFAULT_READ_POLICY`` and every implicit construction site together, so it
+    belongs in its own change rather than riding along with an authority fix.
     """
 
     allow_anchor_creation: bool = True
