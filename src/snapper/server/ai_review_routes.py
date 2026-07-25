@@ -18,10 +18,21 @@ Routes
       terminal review plus exact-scope trading activity since creation.
 
 Permission gates
-    ``POST .../decision`` requires :data:`Permission.CREATE_ORDERS` —
-      matches the MCP tool. This REST surface deliberately follows
-      the MCP precedent so a single delegate JWT works both transports
-      without per-request role gymnastics.
+    ``POST .../decision`` requires AI-review decision capability via
+      :func:`require_ai_review_decision_access`, the dependency that
+      projects :data:`Permission.SUBMIT_AI_REVIEW_DECISION` through the
+      same predicate the MCP tool uses for both visibility and
+      execution. One predicate across both transports is deliberate:
+      this REST surface is the bridge's documented HTTP fallback, so a
+      single delegate JWT must work on either without per-request role
+      gymnastics. It replaces the historical
+      :data:`Permission.CREATE_ORDERS` gate, which admitted every
+      order-creating principal and deferred the real rejection to the
+      delegate-identity check inside
+      :meth:`AiReviewService.submit_decision`. The capability is
+      necessary but never sufficient: the service still requires an
+      active delegate lifecycle identity plus a live scope grant for
+      the review's wallet and instrument.
     ``GET .../pending`` requires :data:`Permission.READ_SIGNALS` —
       AI_DELEGATE inherits this; non-delegate principals are admitted
       by the role check but get a 422 because the endpoint is keyed
@@ -52,6 +63,7 @@ from snapper.application.ai_review.service import ERROR_PEER_RESOLVED
 from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.auth.dependencies import require_ai_review_decision_access
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -241,7 +253,7 @@ def _build_envelope(
 async def submit_ai_review_decision_route(
     review_public_id: str,
     command: Annotated[AiReviewDecisionCommand, Depends(json_body(AiReviewDecisionCommand))],
-    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.CREATE_ORDERS))],
+    principal: Annotated[AuthPrincipal, Depends(require_ai_review_decision_access)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)] = None,
 ) -> AiReviewDecisionResponse:
@@ -256,8 +268,10 @@ async def submit_ai_review_decision_route(
         command: :class:`AiReviewDecisionCommand` envelope wrapping
             the inner :class:`AiReviewDecisionRequest` (decision +
             optional rationale).
-        principal: Authenticated caller (must hold
-            :data:`Permission.CREATE_ORDERS`).
+        principal: Authenticated caller admitted by
+            :func:`require_ai_review_decision_access`. Order-creating
+            principals without decision capability are now rejected here
+            rather than deeper in the service's delegate-identity check.
         repo: Repository handle.
 
     Returns:

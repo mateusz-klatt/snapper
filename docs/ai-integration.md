@@ -500,12 +500,13 @@ to `caps_enforcer_getter` at registration.
     `POST /api/ai-reviews/{review_public_id}/decision` route for
     the in-process MCP surface; lets the delegate approve or
     reject a pending CONSULT review. `review_id` is the UUID7 of
-    the `ai_reviews` row. Current tool-catalog visibility requires
-    `submit:ai_review_decision`; legacy version-one decision-capable tokens
-    remain visible when they retained `create:orders`. Invoking the MCP tool
-    also requires `create:orders`, and the REST route uses that same permission.
-    A usable current delegate token therefore retains both permissions. The
-    review service also
+    the `ai_reviews` row. Requires `submit:ai_review_decision`. Tool-catalog
+    visibility, the tool's call gate, and the REST route all answer to one
+    shared capability projection, so a token that can see the tool can also
+    call it and behaves identically on either transport; legacy version-one
+    decision-capable tokens remain admitted when they retained `create:orders`.
+    Order-creation authority alone no longer reaches the decision write on
+    either surface. The review service also
     verifies the caller has an active operational delegate lifecycle identity
     and scope grant for the review wallet and instrument. Any such delegate
     may decide — the selected delegate is who was consulted, not an exclusive

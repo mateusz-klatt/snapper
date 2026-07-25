@@ -95,8 +95,8 @@ def test_ai_delegate_holds_ai_review_decision_permission() -> None:
         "converted_reads_allowed",
         "process_mutations_allowed",
         "ai_integration_mutations_allowed",
-        "rest_review_decisions_allowed",
-        "submission_capability_allowed",
+        "order_creation_allowed",
+        "review_decision_writes_allowed",
     ),
     [
         pytest.param(UserRole.AI_RESEARCHER, False, False, False, False, False, id="researcher"),
@@ -112,16 +112,19 @@ def test_converted_surface_permission_matrix_is_exact(
     converted_reads_allowed: bool,
     process_mutations_allowed: bool,
     ai_integration_mutations_allowed: bool,
-    rest_review_decisions_allowed: bool,
-    submission_capability_allowed: bool,
+    order_creation_allowed: bool,
+    review_decision_writes_allowed: bool,
 ) -> None:
     """Pin the effective access matrix for all converted authorization surfaces.
 
     Given: The seven GET surfaces converted from operator-role checks and their
-        associated process, AI integration, and review-decision mutations.
+        associated process, AI integration, order-creation, and review-decision
+        mutations.
     When: Access is projected exclusively from each role's named permission set.
-    Then: Every non-viewer role retains its prior allow or deny result, while
-        viewer gains the three read capability groups and no mutation grant.
+    Then: Every non-viewer role retains its prior read result, viewer gains the
+        three read capability groups and no mutation grant, and the review
+        decision write is gated by SUBMIT_AI_REVIEW_DECISION rather than by
+        the unrelated order-creation capability.
     """
     get_requirements = {
         "ai_reviews_list": Permission.READ_AI_REVIEWS,
@@ -141,10 +144,10 @@ def test_converted_surface_permission_matrix_is_exact(
     assert (
         Permission.MANAGE_AI_INTEGRATION in role_permissions
     ) is ai_integration_mutations_allowed
-    assert (Permission.CREATE_ORDERS in role_permissions) is rest_review_decisions_allowed
+    assert (Permission.CREATE_ORDERS in role_permissions) is order_creation_allowed
     assert (
         Permission.SUBMIT_AI_REVIEW_DECISION in role_permissions
-    ) is submission_capability_allowed
+    ) is review_decision_writes_allowed
 
 
 def test_viewer_has_no_operational_or_administrative_mutation() -> None:

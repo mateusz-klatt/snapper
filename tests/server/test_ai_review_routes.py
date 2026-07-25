@@ -30,6 +30,7 @@ from snapper.application.ai_review.service import AiReviewDecisionResult
 from snapper.application.ai_review.service import AiReviewService
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
@@ -59,7 +60,7 @@ def _delegate_principal() -> AuthPrincipal:
 
 
 def _operator_principal() -> AuthPrincipal:
-    """OPERATOR principal — has CREATE_ORDERS + READ_SIGNALS but no delegate id."""
+    """OPERATOR principal — holds CREATE_ORDERS + READ_SIGNALS, never the decision write."""
     return AuthPrincipal(
         username="operator-1",
         role=UserRole.OPERATOR,
@@ -70,7 +71,7 @@ def _operator_principal() -> AuthPrincipal:
 
 
 def _viewer_principal() -> AuthPrincipal:
-    """VIEWER principal — lacks CREATE_ORDERS so decision route 403s."""
+    """VIEWER principal — lacks every decision capability so the route 403s."""
     return AuthPrincipal(
         username="viewer-1",
         role=UserRole.VIEWER,
@@ -81,14 +82,33 @@ def _viewer_principal() -> AuthPrincipal:
 
 
 def _reviewer_principal() -> AuthPrincipal:
-    """AI_REVIEWER principal that remains outside the live decision gate."""
+    """AI_REVIEWER principal holding the decision permission without delegate identity."""
     return AuthPrincipal(
         username="reviewer-1",
         role=UserRole.AI_REVIEWER,
         user_public_id="reviewer-user-1",
         operator_public_ids=["op-1"],
         primary_operator_public_id="op-1",
-        delegate_public_id="reviewer-row-1",
+    )
+
+
+def _legacy_v1_delegate_principal() -> AuthPrincipal:
+    """AI_DELEGATE principal on a historical scope-version-one token grant.
+
+    Carries only ``create:orders`` because the dedicated decision permission
+    did not exist when the token was minted. The shared capability projector
+    admits it through its narrow compatibility branch, which is what keeps the
+    REST fallback usable for the same legacy tokens MCP still admits.
+    """
+    return AuthPrincipal(
+        username="legacy-delegate-1",
+        role=UserRole.AI_DELEGATE,
+        user_public_id="legacy-user-1",
+        operator_public_ids=["op-1"],
+        primary_operator_public_id="op-1",
+        delegate_public_id="legacy-del-1",
+        permissions=[Permission.CREATE_ORDERS.value],
+        permission_scope_version=1,
     )
 
 
@@ -322,27 +342,130 @@ class TestSubmitDecisionRoute:
         )
         assert response.status_code == 422
 
-    def test_permission_denied_for_role_without_create_orders(self) -> None:
-        """VIEWER role -> 403 from require_permission(CREATE_ORDERS).
+    def test_permission_denied_for_role_without_decision_permission(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VIEWER role -> 403 from require_ai_review_decision_access.
 
-        Given a VIEWER principal (lacks CREATE_ORDERS),
+        Given a VIEWER principal (projects no decision capability),
         When the route is invoked,
-        Then require_permission raises 403 BEFORE the route body runs.
+        Then the dependency raises 403 BEFORE the route body runs.
         """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="should never be called",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={},
+            ),
+        )
         client = _create_client(repo=AsyncMock(), principal=_viewer_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
             json=_decision_envelope(decision="approve"),
         )
         assert response.status_code == 403
+        stub.assert_not_called()
 
-    def test_ai_reviewer_remains_denied_before_live_gate_cutover(self) -> None:
-        """D4a keeps the REST decision gate on CREATE_ORDERS.
+    def test_order_creator_without_decision_permission_is_denied_at_the_route_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An order-creating principal without the decision write never reaches the service.
 
-        Given: An operationally recognized AI_REVIEWER with its complete role grant.
-        When: The reviewer submits an approval through the live REST route.
-        Then: The unchanged CREATE_ORDERS dependency returns HTTP 403.
+        Given: An OPERATOR principal holding create:orders but not
+            submit:ai_review_decision — the shape the historical CREATE_ORDERS
+            gate admitted, leaving the rejection to the service's
+            delegate-identity check.
+        When: It submits an approval through the REST decision route.
+        Then: The route dependency returns HTTP 403 and submit_decision is
+            never awaited, pinning the denial at the route layer.
         """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="should never be called",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={},
+            ),
+        )
+        client = _create_client(repo=AsyncMock(), principal=_operator_principal())
+
+        response = client.post(
+            "/api/ai-reviews/rev-operator/decision",
+            json=_decision_envelope(decision="approve"),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            f"Permission '{Permission.SUBMIT_AI_REVIEW_DECISION.value}' required"
+        )
+        stub.assert_not_called()
+
+    def test_legacy_v1_delegate_token_keeps_rest_decision_access(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A historical v1 delegate token still clears the REST decision gate.
+
+        Given: An AI_DELEGATE principal on a permission-scope-version-one grant
+            carrying only create:orders, because the dedicated decision
+            permission postdates the token.
+        When: It submits an approval through the REST decision route.
+        Then: The shared capability projector admits it and the service records
+            the decision, mirroring the MCP call gate exactly — the REST route
+            is the bridge's HTTP fallback, so the same legacy token must work
+            on both transports.
+        """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="Decision recorded.",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={"previous_status": "pending"},
+            ),
+        )
+        client = _create_client(repo=AsyncMock(), principal=_legacy_v1_delegate_principal())
+
+        response = client.post(
+            "/api/ai-reviews/rev-legacy/decision",
+            json=_decision_envelope(decision="approve"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        stub.assert_awaited_once()
+
+    def test_ai_reviewer_passes_the_route_gate_and_is_denied_by_the_service(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A decision-capable principal without delegate identity 403s one layer deeper.
+
+        Given: An AI_REVIEWER principal holding submit:ai_review_decision but
+            no delegate lifecycle identity.
+        When: It submits an approval through the REST decision route.
+        Then: The route permission gate admits it, the service is awaited, and
+            the service's ``not_authorized`` envelope maps to HTTP 403 —
+            proving the deeper identity check still owns that denial.
+        """
+        stub = _stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code="not_authorized",
+                message="Caller is not registered as an AI delegate.",
+                status=None,
+                resolution_mode=None,
+                dispatch_version=None,
+                details={},
+            ),
+        )
         client = _create_client(repo=AsyncMock(), principal=_reviewer_principal())
 
         response = client.post(
@@ -351,6 +474,8 @@ class TestSubmitDecisionRoute:
         )
 
         assert response.status_code == 403
+        assert response.json()["detail"]["error_code"] == "not_authorized"
+        stub.assert_awaited_once()
 
 
 class TestListPendingRoute:

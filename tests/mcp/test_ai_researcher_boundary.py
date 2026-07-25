@@ -36,7 +36,7 @@ _RAISING_TRADING_CALLS: tuple[tuple[str, dict[str, object], Permission], ...] = 
     (
         "submit_ai_review_decision",
         {"review_id": "review-1", "decision": "approve"},
-        Permission.CREATE_ORDERS,
+        Permission.SUBMIT_AI_REVIEW_DECISION,
     ),
 )
 

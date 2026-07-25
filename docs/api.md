@@ -3925,10 +3925,14 @@ REST counterpart to the `submit_ai_review_decision` MCP tool. Body is
 `AiReviewDecisionEnum`; unknown values yield `422` with
 `error_code='invalid_decision'`). `rationale` is optional free
 text, ≤ 4096 chars per the `ai_reviews.rationale` column
-constraint. Requires `Permission.CREATE_ORDERS`, but that permission is
-not sufficient by itself: the caller must resolve to a registered
-`ai_delegates` row and have a live scope grant for the review wallet and
-instrument. The dispatch fans out on `bus.ai_review_decision` and emits
+constraint. Requires `submit:ai_review_decision`, resolved through the same
+capability projection the `submit_ai_review_decision` MCP tool uses for both
+visibility and execution, so one delegate token behaves identically on either
+transport (legacy version-one decision-capable tokens that retained
+`create:orders` stay admitted on both). The capability is not sufficient by
+itself: the caller must resolve to a registered `ai_delegates` row and have a
+live scope grant for the review wallet and instrument. Principals whose grant
+projects only `create:orders` are rejected at the route gate. The dispatch fans out on `bus.ai_review_decision` and emits
 `ai_reviews.{user}.{strategy}.decision_ack` on the WS surface.
 
 Responses use `AiReviewDecisionResponse` — the canonical envelope

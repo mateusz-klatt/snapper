@@ -10,7 +10,8 @@ Covers the full envelope contract:
   review_id_expired) -> ``success=False, isError=True``.
 - Invalid decision string (validated server-side) -> ``success=False,
   error_code='invalid_decision'`` WITHOUT calling submit_decision.
-- Permission denied for non-CREATE_ORDERS role -> ToolError.
+- Permission denied without SUBMIT_AI_REVIEW_DECISION capability ->
+  ToolError.
 - Pre-lifespan repository getter -> ToolError (RuntimeError chain).
 
 The tool body is exercised through FastMCP's tool manager so the
@@ -249,7 +250,8 @@ class TestSubmitAiReviewDecisionTool:
 
         Given: An explicit v1 AI_DELEGATE token carrying only historical CREATE_ORDERS.
         When: The token lists tools and submits an approve decision through MCP.
-        Then: The v1 projector lists the tool and its unchanged CREATE_ORDERS call gate succeeds.
+        Then: The shared capability projector both lists the tool and admits the
+            call, so visibility and execution stay aligned for legacy tokens.
         """
         stub = self._stub_submit_decision(
             monkeypatch,
@@ -393,12 +395,13 @@ class TestSubmitAiReviewDecisionTool:
         stub.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_permission_denied_for_role_without_create_orders(self) -> None:
-        """Role missing CREATE_ORDERS -> ToolError.
+    async def test_permission_denied_for_role_without_decision_permission(self) -> None:
+        """Role missing SUBMIT_AI_REVIEW_DECISION -> ToolError.
 
         Given a contrived VIEWER role with no permissions,
-        When the MCP tool checks permissions,
-        Then ToolError is raised wrapping a PermissionError.
+        When the MCP tool projects decision capability,
+        Then ToolError is raised wrapping a PermissionError that names the
+        dedicated decision permission.
         """
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
@@ -415,19 +418,65 @@ class TestSubmitAiReviewDecisionTool:
                     "submit_ai_review_decision",
                     {"review_id": "rev-1", "decision": "approve"},
                 )
-            assert Permission.CREATE_ORDERS.value in str(exc.value)
+            assert Permission.SUBMIT_AI_REVIEW_DECISION.value in str(exc.value)
         finally:
             if saved is not None:
                 ROLE_PERMISSIONS[UserRole.VIEWER] = saved
 
     @pytest.mark.asyncio
-    async def test_ai_reviewer_remains_denied_by_live_create_orders_gate(self) -> None:
-        """D4a leaves the live decision gate unchanged for AI_REVIEWER.
+    async def test_order_creator_without_decision_permission_is_denied_by_the_call_gate(
+        self,
+    ) -> None:
+        """An order-creating principal without the decision write cannot call the tool.
 
-        Given: A v2 AI_REVIEWER token carrying its complete review-only role grant.
-        When: It invokes the submit_ai_review_decision MCP tool before cutover.
-        Then: The live CREATE_ORDERS gate raises ToolError and no approval occurs.
+        Given: A v2 OPERATOR token whose grant carries create:orders but never
+            submit:ai_review_decision — the shape the historical call gate admitted.
+        When: It invokes the submit_ai_review_decision MCP tool.
+        Then: The aligned call gate raises ToolError naming the decision permission.
         """
+        claims = _make_claims(role=UserRole.OPERATOR).model_copy(
+            update={
+                "permissions": sorted(
+                    permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
+                ),
+                "permission_scope_version": 2,
+            }
+        )
+        server = _build_server(repository=AsyncMock(), claims=claims)
+
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_ai_review_decision",
+                {"review_id": "rev-operator", "decision": "approve"},
+            )
+
+        assert Permission.CREATE_ORDERS in ROLE_PERMISSIONS[UserRole.OPERATOR]
+        assert Permission.SUBMIT_AI_REVIEW_DECISION not in ROLE_PERMISSIONS[UserRole.OPERATOR]
+        assert Permission.SUBMIT_AI_REVIEW_DECISION.value in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_ai_reviewer_passes_the_call_gate_and_is_denied_by_the_service(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The review-only principal now clears the call gate and 403s one layer deeper.
+
+        Given: A v2 AI_REVIEWER token carrying its complete review-only role grant,
+            which holds submit:ai_review_decision but no delegate lifecycle identity.
+        When: It invokes the submit_ai_review_decision MCP tool.
+        Then: The aligned call gate admits it, the service is awaited, and the
+            service's ``not_authorized`` envelope is what denies the write.
+        """
+        stub = self._stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code="not_authorized",
+                message="Caller is not registered as an AI delegate.",
+                status=None,
+                resolution_mode=None,
+                dispatch_version=None,
+                details={},
+            ),
+        )
         claims = _make_claims(role=UserRole.AI_REVIEWER).model_copy(
             update={
                 "permissions": sorted(
@@ -438,13 +487,15 @@ class TestSubmitAiReviewDecisionTool:
         )
         server = _build_server(repository=AsyncMock(), claims=claims)
 
-        with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
-                "submit_ai_review_decision",
-                {"review_id": "rev-reviewer", "decision": "approve"},
-            )
+        result = await server._tool_manager.call_tool(
+            "submit_ai_review_decision",
+            {"review_id": "rev-reviewer", "decision": "approve"},
+        )
 
-        assert Permission.CREATE_ORDERS.value in str(exc.value)
+        envelope = _decode_call_tool_result(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "not_authorized"
+        stub.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_repository_not_initialized_yields_tool_error(self) -> None:

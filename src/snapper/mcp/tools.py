@@ -14,8 +14,11 @@ matches the action:
   ``get_ai_review_aftermath``.
 - ``READ_MARKET_VIEWS`` for ``get_latest_research``.
 - ``SUBMIT_MARKET_VIEW`` for ``submit_market_view``.
-- ``CREATE_ORDERS`` for ``submit_manual_order`` and
-  ``submit_ai_review_decision``.
+- ``CREATE_ORDERS`` for ``submit_manual_order``.
+- ``SUBMIT_AI_REVIEW_DECISION`` for ``submit_ai_review_decision``,
+  projected through :func:`is_ai_review_decision_capable` so the call
+  gate is the same predicate that decides tool visibility in
+  :data:`MCP_TOOL_VISIBILITY_POLICY`.
 - ``CANCEL_ORDERS`` for ``cancel_order``.
 
 Write tools that create trade commands stamp ``source_surface="mcp"``
@@ -67,6 +70,7 @@ from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import is_ai_review_decision_capable
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -962,6 +966,49 @@ def _require_tool_access(
     return _ToolAccess(claims=claims, repo=repo)
 
 
+def _require_ai_review_decision_access(
+    *,
+    claims_getter: Callable[[], TokenClaims],
+    repository_getter: Callable[[], Repository | None],
+) -> _ToolAccess:
+    """Resolve tool access behind the shared AI-review decision projector.
+
+    The decision tool's call gate deliberately reuses
+    :func:`is_ai_review_decision_capable` — the exact predicate
+    :data:`MCP_TOOL_VISIBILITY_POLICY` uses to decide whether the tool
+    appears in a catalog — so a token that can SEE the tool can also
+    CALL it, including the narrow historical permission-scope
+    compatibility branch. Before this alignment the call gate was
+    ``CREATE_ORDERS``, which both admitted order-creating principals
+    holding no decision authority and diverged from visibility.
+
+    Args:
+        claims_getter: Accessor for the authenticated MCP caller's claims.
+        repository_getter: Accessor for the repository singleton.
+
+    Returns:
+        Claims and repository for one decision-tool invocation.
+
+    Raises:
+        PermissionError: when the caller's effective grant does not
+            project AI-review decision capability. Caught by FastMCP
+            and returned to the client as a tool error.
+    """
+    claims = claims_getter()
+    if not is_ai_review_decision_capable(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+    ):
+        raise PermissionError(
+            f"Tool requires permission "
+            f"'{Permission.SUBMIT_AI_REVIEW_DECISION.value}' which is not "
+            f"granted to this '{claims.role.value}' token."
+        )
+    repo = _get_repository_or_raise(repository_getter)
+    return _ToolAccess(claims=claims, repo=repo)
+
+
 def _get_tool_access_or_envelope(
     *,
     claims_getter: Callable[[], TokenClaims],
@@ -1143,10 +1190,9 @@ async def _submit_ai_review_decision_tool(
     rationale: str | None,
 ) -> CallToolResult:
     """Run the AI-review decision MCP path."""
-    access = _require_tool_access(
+    access = _require_ai_review_decision_access(
         claims_getter=claims_getter,
         repository_getter=repository_getter,
-        permission=Permission.CREATE_ORDERS,
     )
     try:
         decision_enum = AiReviewDecisionEnum(decision)
@@ -2074,10 +2120,13 @@ def register_mcp_tools(
         """AI delegate decision endpoint for a CONSULT request.
 
         Wraps :meth:`AiReviewService.submit_decision` for the MCP
-        transport. Expects an AI_DELEGATE caller (the role narrows
-        the permission set; ``CREATE_ORDERS`` is the explicit gate
-        since the decision affects the trade path the strategy is
-        awaiting).
+        transport. ``SUBMIT_AI_REVIEW_DECISION`` is the explicit call
+        gate, projected through :func:`is_ai_review_decision_capable`
+        so tool visibility and tool execution answer to one predicate
+        instead of diverging (visibility already used it; execution
+        used ``CREATE_ORDERS``). The permission is necessary but not
+        sufficient — the service still requires an active delegate
+        lifecycle identity and scope grant.
 
         Args:
             review_id: UUID7 of the ``ai_reviews`` row the delegate is
@@ -2099,8 +2148,8 @@ def register_mcp_tools(
 
         Raises:
             PermissionError: if the caller lacks
-                :data:`Permission.CREATE_ORDERS` (caught by FastMCP
-                and surfaced to the client as a tool error). All
+                :data:`Permission.SUBMIT_AI_REVIEW_DECISION` (caught by
+                FastMCP and surfaced to the client as a tool error). All
                 other failure modes flow through the envelope —
                 FastMCP NEVER sees an exception for a known
                 :class:`AiReviewDecisionResult` outcome.

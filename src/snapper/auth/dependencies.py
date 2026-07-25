@@ -20,6 +20,7 @@ from fastapi import status
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.permissions import is_ai_review_decision_capable
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
@@ -259,6 +260,55 @@ def require_any_permission(
         return current_user
 
     return permission_checker
+
+
+def require_ai_review_decision_access(
+    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+) -> AuthPrincipal:
+    """Require AI-review decision capability through the shared projector.
+
+    The AI-review decision write is exposed on two transports: the
+    ``submit_ai_review_decision`` MCP tool and its REST counterpart
+    ``POST /api/ai-reviews/{review_public_id}/decision``, which the
+    bridge documents as its HTTP fallback. Transport parity is the whole
+    point of that pairing, so both surfaces resolve access through
+    :func:`is_ai_review_decision_capable` — the single predicate that
+    also decides MCP tool visibility. One predicate keeps visibility and
+    execution from drifting apart, and keeps a token that works on one
+    transport working on the other.
+
+    A bare ``require_permission(Permission.SUBMIT_AI_REVIEW_DECISION)``
+    check would not be equivalent: the projector carries a deliberate,
+    narrow compatibility branch for permission-scope-version-one tokens
+    whose role grants the decision permission and whose grant retained
+    ``CREATE_ORDERS``. Enforcing the bare permission would strand those
+    legacy tokens on REST while MCP still admitted them. This dependency
+    is nonetheless strictly narrower than the historical ``CREATE_ORDERS``
+    gate it replaced, which admitted every order-creating principal.
+
+    The capability is necessary but never sufficient: the service still
+    requires an active delegate lifecycle identity and a live scope grant
+    for the review's wallet and instrument.
+
+    Args:
+        current_user: Authenticated principal whose token grant is projected.
+
+    Returns:
+        The authenticated principal when the decision capability projects.
+
+    Raises:
+        HTTPException: 403 naming the required capability when it does not.
+    """
+    if not is_ai_review_decision_capable(
+        current_user.role,
+        current_user.permissions,
+        current_user.permission_scope_version,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission '{Permission.SUBMIT_AI_REVIEW_DECISION.value}' required",
+        )
+    return current_user
 
 
 class CSRFManager:
