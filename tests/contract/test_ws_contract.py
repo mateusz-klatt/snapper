@@ -34,6 +34,7 @@ import snapper.interface.websocket.handlers.auth as auth_handler_mod
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.core.types import SubscriptionStatusEnum
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
@@ -111,7 +112,9 @@ class TestWsBearerTransportContract:
         principal, returned_claims = result
         assert isinstance(principal, AuthPrincipal)
         assert returned_claims is claims
-        mock_verify.assert_awaited_once_with("header-only-token", repo)
+        mock_verify.assert_awaited_once_with(
+            "header-only-token", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_cookie_fallback_is_accepted(self) -> None:
@@ -136,7 +139,9 @@ class TestWsBearerTransportContract:
             result = await manager.verify_session_cookie(ws, repo)
 
         assert result is not None
-        mock_verify.assert_awaited_once_with("cookie-only-token", repo)
+        mock_verify.assert_awaited_once_with(
+            "cookie-only-token", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_bearer_preferred_over_cookie_when_both_present(self) -> None:
@@ -162,7 +167,9 @@ class TestWsBearerTransportContract:
         ) as mock_verify:
             await manager.verify_session_cookie(ws, repo)
 
-        mock_verify.assert_awaited_once_with("header-token", repo)
+        mock_verify.assert_awaited_once_with(
+            "header-token", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_missing_header_and_cookie_returns_none(self) -> None:
@@ -212,7 +219,9 @@ class TestWsBearerTransportContract:
         ) as mock_verify:
             await manager.verify_session_cookie(ws, repo)
 
-        mock_verify.assert_awaited_once_with("cookie-only-token", repo)
+        mock_verify.assert_awaited_once_with(
+            "cookie-only-token", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
 
 class TestWsBearerExtractionContract:
