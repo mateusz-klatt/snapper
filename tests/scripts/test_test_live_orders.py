@@ -20,6 +20,7 @@ from scripts.test_live_orders import run_kraken_spot
 from scripts.test_live_orders import run_walutomat
 from scripts.test_live_orders import safe_get_ticker
 from scripts.test_live_orders import snapshot_to_dict
+from snapper.core.ids import is_uuid7
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -176,6 +177,25 @@ def _created_requests(client: MagicMock) -> list[ExchangeOrderRequest]:
     return requests
 
 
+def _assert_ids_unique_and_well_formed(client: MagicMock, expected_count: int) -> None:
+    """Assert every submit in a run carried a distinct, uuid7-shaped id.
+
+    Correlation ids are asserted by shape and distinctness rather than
+    by literal value. A repeated id is the collision that turns into a
+    venue duplicate-id refusal, which the submit path does not classify
+    as ambiguous and which therefore becomes a false REJECTED plus a
+    sweep-exempting durable row for a possibly-live order.
+
+    Args:
+        client: Mock exchange client the runner submitted through.
+        expected_count: Number of submits the run should have made.
+    """
+    ids = [request.client_order_id for request in _created_requests(client)]
+    assert len(ids) == expected_count
+    assert all(is_uuid7(value) for value in ids)
+    assert len(set(ids)) == expected_count
+
+
 async def _run_with_client(
     runner: LiveRunner,
     settings: SimpleNamespace,
@@ -198,7 +218,6 @@ async def _run_with_client(
     with (
         patch(client_patch_target, return_value=client) as constructor,
         patch("scripts.test_live_orders.asyncio.sleep", new_callable=AsyncMock),
-        patch("scripts.test_live_orders.time.time", return_value=1_700_000_000.0),
     ):
         await runner(settings, scenarios)
     return constructor
@@ -487,7 +506,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
         "scenario",
         "expected_side",
         "expected_price",
-        "expected_client_order_id",
         "expected_steps",
         "expected_get_count",
         "expected_cancel_count",
@@ -497,7 +515,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
             "passive_buy",
             OrderSideEnum.BUY,
             3.99,
-            "test-pass-buy-1700000000",
             ("create", "fetch", "cancel"),
             1,
             1,
@@ -506,7 +523,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
             "passive_sell",
             OrderSideEnum.SELL,
             4.515,
-            "test-pass-sell-1700000000",
             ("create", "fetch", "cancel"),
             1,
             1,
@@ -515,7 +531,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
             "aggressive_buy",
             OrderSideEnum.BUY,
             4.343,
-            "test-aggr-buy-1700000000",
             ("create", "fetch"),
             1,
             0,
@@ -524,7 +539,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
             "aggressive_sell",
             OrderSideEnum.SELL,
             4.158,
-            "test-aggr-sell-1700000000",
             ("create", "fetch"),
             1,
             0,
@@ -533,7 +547,6 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
             "cancel_inflight",
             OrderSideEnum.BUY,
             3.99,
-            "test-cancel-1700000000",
             ("create", "cancel"),
             0,
             1,
@@ -546,7 +559,6 @@ async def test_run_walutomat_scenario_places_expected_order(
     scenario: str,
     expected_side: OrderSideEnum,
     expected_price: float,
-    expected_client_order_id: str,
     expected_steps: tuple[str, ...],
     expected_get_count: int,
     expected_cancel_count: int,
@@ -556,6 +568,18 @@ async def test_run_walutomat_scenario_places_expected_order(
     Given: A mocked Walutomat client and one selected scenario.
     When: run_walutomat executes the scenario.
     Then: The request, subsequent calls, and emitted fixtures match the scenario.
+
+    The correlation id is asserted by SHAPE, not by literal value.
+    These scenarios used to label the id with the scenario name and the
+    wall-clock second, and the tests pinned the resulting string against
+    a frozen clock — which is precisely what made the collision
+    invisible: two concurrent runs of the same scenario within one
+    second mint the same id, and a venue duplicate-id refusal is a plain
+    ExchangeError that the submit path does not wrap as ambiguous, so it
+    becomes a false REJECTED plus a sweep-exempting order_rejected row
+    for a possibly-live order. A uuid7 has no such collision mode, and
+    there is no literal left to pin. Uniqueness across a whole run is
+    pinned separately by the all-scenarios test.
     """
     symbol = "EUR-PLN"
     amount = 1.0
@@ -611,7 +635,7 @@ async def test_run_walutomat_scenario_places_expected_order(
     assert request.type == ExchangeOrderTypeEnum.LIMIT
     assert request.amount == amount
     assert request.price == expected_price
-    assert request.client_order_id == expected_client_order_id
+    assert is_uuid7(request.client_order_id)
     assert client.get_order.await_count == expected_get_count
     assert client.cancel_order.await_count == expected_cancel_count
     if expected_get_count:
@@ -700,6 +724,7 @@ async def test_run_walutomat_defaults_to_all_scenarios(
     assert client.create_order.await_count == 5
     assert client.get_order.await_count == 4
     assert client.cancel_order.await_count == 5
+    _assert_ids_unique_and_well_formed(client, 5)
     lines = _json_lines(capsys)
     assert len(lines) == 14
     assert [line["scenario"] for line in lines if line["step"] == "create"] == scenarios
@@ -709,21 +734,6 @@ async def test_run_walutomat_defaults_to_all_scenarios(
     assert ("aggressive_sell", "cancel_unfilled") in [
         (line["scenario"], line["step"]) for line in lines
     ]
-
-
-_KRAKEN_SPOT_EXPECTED_CLIENT_ORDER_IDS = {
-    "passive_buy": "test-pass-buy-1700000000",
-    "passive_sell": "test-pass-sell-1700000000",
-    "aggressive_buy": "test-aggr-buy-1700000000",
-    "aggressive_sell": "test-aggr-sell-1700000000",
-    "cancel_inflight": "test-cancel-1700000000",
-}
-"""Correlation id ``run_kraken_spot`` must send per scenario.
-
-The suffix is the frozen clock ``_run_with_client`` patches in, so an
-id that silently reverted to being omitted, or that stopped being
-derived from the scenario, fails here rather than against Kraken.
-"""
 
 
 @pytest.mark.parametrize(
@@ -801,14 +811,12 @@ async def test_run_kraken_spot_scenario_places_expected_order(
     When: run_kraken_spot executes the scenario.
     Then: The request, subsequent calls, and emitted fixtures match the scenario.
 
-    The client_order_id assertion is the point of this file's change:
-    these five scenarios used to submit with no correlation id at all
-    against a real Kraken account, which is the one place either
-    venue-boundary defect reached a live venue. The expected ids come
-    from a module-level table rather than a parametrize column — the
-    Walutomat and Futures siblings carry theirs as a column, but this
-    signature is already pinned at eight arguments by the complexity
-    ratchet and a ninth would trip PLR0913.
+    The client_order_id assertion matters twice over: these five
+    scenarios used to submit with NO correlation id at all against a
+    real Kraken account, the one place either venue-boundary defect
+    reached a live venue. It is asserted by SHAPE — see the Walutomat
+    sibling for why a literal, scenario-and-clock id was itself a
+    collision hazard in a real-money script.
     """
     symbol = "BTC-EUR"
     amount = 0.0001
@@ -853,7 +861,7 @@ async def test_run_kraken_spot_scenario_places_expected_order(
     assert request.amount == amount
     assert request.price == expected_price
     assert request.post_only is expected_post_only
-    assert request.client_order_id == _KRAKEN_SPOT_EXPECTED_CLIENT_ORDER_IDS[scenario]
+    assert is_uuid7(request.client_order_id)
     assert client.get_order.await_count == expected_get_count
     assert client.cancel_order.await_count == expected_cancel_count
     assert [call.args for call in client.get_order.await_args_list] == [
@@ -948,6 +956,7 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
     assert client.create_order.await_count == 5
     assert client.get_order.await_count == 4
     assert client.cancel_order.await_count == 3
+    _assert_ids_unique_and_well_formed(client, 5)
     lines = _json_lines(capsys)
     assert len(lines) == 12
     assert [line["scenario"] for line in lines if line["step"] == "create"] == scenarios
@@ -958,7 +967,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
         "scenario",
         "expected_side",
         "expected_price",
-        "expected_client_order_id",
         "expected_post_only",
         "expected_steps",
         "expected_get_count",
@@ -969,7 +977,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
             "passive_buy",
             OrderSideEnum.BUY,
             45000.0,
-            "test-pass-buy-1700000000",
             True,
             ("create", "fetch", "cancel", "fetch_after_cancel"),
             2,
@@ -979,7 +986,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
             "passive_sell",
             OrderSideEnum.SELL,
             55110.0,
-            "test-pass-sell-1700000000",
             True,
             ("create", "fetch", "cancel"),
             1,
@@ -989,7 +995,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
             "aggressive_buy",
             OrderSideEnum.BUY,
             50350.5,
-            "test-aggr-buy-1700000000",
             False,
             ("create", "fetch"),
             1,
@@ -999,7 +1004,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
             "aggressive_sell",
             OrderSideEnum.SELL,
             49750.0,
-            "test-aggr-sell-1700000000",
             False,
             ("create", "fetch"),
             1,
@@ -1009,7 +1013,6 @@ async def test_run_kraken_spot_defaults_to_all_scenarios(
             "cancel_inflight",
             OrderSideEnum.BUY,
             45000.0,
-            "test-cancel-1700000000",
             False,
             ("create", "cancel"),
             0,
@@ -1023,7 +1026,6 @@ async def test_run_kraken_futures_scenario_places_expected_order(
     scenario: str,
     expected_side: OrderSideEnum,
     expected_price: float,
-    expected_client_order_id: str,
     expected_post_only: bool,
     expected_steps: tuple[str, ...],
     expected_get_count: int,
@@ -1034,6 +1036,10 @@ async def test_run_kraken_futures_scenario_places_expected_order(
     Given: A mocked Kraken Futures client and one selected scenario.
     When: run_kraken_futures executes the scenario.
     Then: The request, subsequent calls, and emitted fixtures match the scenario.
+
+    The correlation id is asserted by SHAPE — see the Walutomat sibling
+    for why the previous scenario-and-clock literal was itself a
+    collision hazard in a real-money script.
     """
     symbol = "BTC-USD-PERP"
     amount = 0.0001
@@ -1091,7 +1097,7 @@ async def test_run_kraken_futures_scenario_places_expected_order(
     assert request.type == ExchangeOrderTypeEnum.LIMIT
     assert request.amount == amount
     assert request.price == expected_price
-    assert request.client_order_id == expected_client_order_id
+    assert is_uuid7(request.client_order_id)
     assert request.post_only is expected_post_only
     assert client.get_order.await_count == expected_get_count
     assert client.cancel_order.await_count == expected_cancel_count
@@ -1203,6 +1209,7 @@ async def test_run_kraken_futures_defaults_to_all_scenarios(
 
     assert client.create_order.await_count == 5
     assert client.get_order.await_count == 5
+    _assert_ids_unique_and_well_formed(client, 5)
     assert client.cancel_order.await_count == 3
     lines = _json_lines(capsys)
     assert len(lines) == 13
@@ -1287,3 +1294,103 @@ def test_main_emits_runner_exceptions(capsys: pytest.CaptureFixture[str]) -> Non
     assert lines[0]["scenario"] == "ERROR"
     assert lines[0]["step"] == "exception"
     assert lines[0]["data"] == "boom"
+
+
+def _permissive_client(bid: float, ask: float) -> MagicMock:
+    """Build an exchange client double that answers any call count.
+
+    Unlike ``_make_exchange_client`` this uses ``return_value`` rather
+    than a fixed ``side_effect`` list, so one double serves any scenario
+    on any venue without the caller having to know how many fetches or
+    cancels that scenario performs.
+
+    Args:
+        bid: Ticker bid to report.
+        ask: Ticker ask to report.
+
+    Returns:
+        MagicMock implementing the async client context manager protocol.
+    """
+    snapshot = _make_order_snapshot("oid-1", "SYM", OrderSideEnum.BUY, 1.0, bid)
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.get_ticker = AsyncMock(return_value=_make_ticker("SYM", bid, ask))
+    client.create_order = AsyncMock(return_value=snapshot)
+    client.get_order = AsyncMock(return_value=snapshot)
+    client.cancel_order = AsyncMock(return_value=snapshot)
+    return client
+
+
+@pytest.mark.parametrize(
+    ("runner", "patch_target", "credentials", "bid", "ask"),
+    [
+        (
+            run_walutomat,
+            "scripts.test_live_orders.WalutomatExchangeClient",
+            {"walutomat_api_key": "key", "walutomat_private_key": "private"},
+            4.2,
+            4.3,
+        ),
+        (
+            run_kraken_spot,
+            "scripts.test_live_orders.KrakenExchangeClient",
+            {"kraken_api_key": "key", "kraken_api_secret": "secret"},
+            50000.0,
+            50100.0,
+        ),
+        (
+            run_kraken_futures,
+            "scripts.test_live_orders.KrakenFuturesExchangeClient",
+            {"kraken_futures_api_key": "key", "kraken_futures_api_secret": "secret"},
+            50000.0,
+            50100.0,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_repeating_one_scenario_never_reuses_a_correlation_id(
+    runner: LiveRunner,
+    patch_target: str,
+    credentials: dict[str, str],
+    bid: float,
+    ask: float,
+) -> None:
+    """Repeating one scenario on one venue mints a fresh id each time.
+
+    Given: One venue runner and one scenario,
+    When: The runner is invoked twice in immediate succession,
+    Then: Both submits carry uuid7-shaped correlation ids and the two
+        ids differ.
+
+    Regression test for the id scheme this replaced. Every scenario
+    used to mint ``f"test-{scenario}-{int(time.time())}"``, so this
+    exact sequence produced the SAME id twice whenever both runs landed
+    in one wall-clock second — and a venue duplicate-id refusal is a
+    plain ExchangeError, not a NetworkError, so the submit path does not
+    wrap it as ambiguous. It lands in the executor's generic handler as
+    a REJECTED plus a durable order_rejected row that permanently
+    exempts the command from the unresolved-dispatched sweep, for an
+    order that may be live and resting. In a script that places real
+    money orders that is exactly the false-terminal hazard the
+    surrounding change exists to remove.
+
+    The two assertions guard different regressions and both are needed.
+    The SHAPE assertion is what fails against the old scheme: no
+    ``test-...-<epoch>`` label is a uuid7, so a revert to any
+    clock-derived or scenario-derived label cannot pass. The
+    DISTINCTNESS assertion catches the other realistic way to
+    reintroduce the collision — hoisting the mint to a module constant,
+    a default argument, or a single local reused across submits — which
+    would keep the shape valid while restoring the duplicate.
+    """
+    settings = _make_settings(**credentials)
+    ids: list[str] = []
+    for _ in range(2):
+        client = _permissive_client(bid, ask)
+        with patch("scripts.test_live_orders.native_to_ccxt", return_value="PF_XBTUSD"):
+            await _run_with_client(runner, settings, patch_target, client, ["aggressive_buy"])
+        ids.extend(request.client_order_id for request in _created_requests(client))
+    assert len(ids) == 2
+    assert all(is_uuid7(value) for value in ids)
+    assert len(set(ids)) == 2

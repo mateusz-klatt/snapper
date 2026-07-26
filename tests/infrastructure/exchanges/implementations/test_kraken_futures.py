@@ -7147,10 +7147,18 @@ class TestReadNativePositions:
 class TestKrakenFuturesWireCorrelationIdFidelity:
     """The correlation id reaches the Kraken Futures wire on every shape.
 
-    ``cliOrdId`` used to be attached only under
-    ``if request.client_order_id:``. With it absent the venue held the
-    order under no client id, so a client-id lookup answers "not found"
-    — contractually ABSENCE — and the executor fabricates a REJECTED for
+    As with the spot sibling, these tests do NOT prove the omission
+    defect is fixed: with a non-empty id guaranteed by the request
+    contract, the old ``if request.client_order_id:`` guard and the new
+    unconditional assignment are extensionally identical, so these pass
+    against either. The removed branch was unreachable for every
+    constructible input.
+
+    What they guard is the future regression — deleting the ``cliOrdId``
+    line, re-guarding it, or substituting a different value. The failure
+    is silent at the venue: with no client id the venue holds the order
+    under nothing, a client-id lookup answers "not found" —
+    contractually ABSENCE — and the executor fabricates a REJECTED for
     an order that may be live and filling, plus a durable
     ``order_rejected`` row that permanently exempts the command from the
     unresolved-dispatched sweep.

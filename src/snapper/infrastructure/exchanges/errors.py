@@ -30,17 +30,23 @@ class AmbiguousOrderSubmitError(RuntimeError):
 
     Attributes:
         client_order_id: Correlation id the submit was sent with,
-            carried for log and alert context only. It is the same value
-            as the core order's ``client_order_id`` by construction —
-            ``ExchangeOrderRequest`` admits no other, since it requires
-            the field and refuses an empty one, so an adapter has no way
-            to raise this with a divergent id. NOTHING in ``src`` reads
-            this attribute, and in particular the executor does NOT
-            verify against it: ``_verify_ambiguous_submit`` queries the
-            venue with ``order.client_order_id``, taken from the core
-            order it is resolving. Do not treat this field as the thing
-            that decides the order's fate; treating it that way is what
-            made a fabricated venue id look survivable.
+            carried for log and alert context only. Every adapter in
+            this repo passes ``request.client_order_id`` unmodified, and
+            that equality is an ADAPTER INVARIANT — a convention this
+            class does not and cannot enforce. Nothing checks it: the
+            constructor accepts any string, and ``ExchangeOrderRequest``
+            constrains only what an adapter is GIVEN, never what it
+            chooses to raise with. Keep the invariant when adding a
+            venue. NOTHING in ``src`` reads this attribute, and in
+            particular the executor does NOT verify against it:
+            ``_verify_ambiguous_submit`` queries the venue with
+            ``order.client_order_id``, taken from the core order it is
+            resolving. So a divergent value here would not merely be
+            cosmetic-but-harmless — it would be an invisible lie in the
+            logs and alerts an operator reaches for first, pointing at
+            an id the recovery path never used. Do not treat this field
+            as the thing that decides the order's fate; treating it that
+            way is what made a fabricated venue id look survivable.
         instrument: Native instrument symbol of the submit, carried for
             log and alert context.
     """

@@ -20,17 +20,31 @@ Usage:
 
 Output:
     Prints JSON fixtures to stdout, one per scenario. Copy into unit tests.
+
+Correlation ids:
+    Every scenario mints ``str(uuid7())``, the same shape every
+    production producer mints. Do NOT go back to a scenario-and-clock
+    label like ``f"test-{scenario}-{int(time.time())}"``: two concurrent
+    invocations of the same scenario against the same venue within one
+    second reuse the id, and a venue duplicate-id refusal arrives as a
+    plain ``ExchangeError`` that the submit path does not wrap as
+    ambiguous — it lands in the executor's generic handler and produces
+    a REJECTED plus a sweep-exempting ``order_rejected`` row for an
+    order that may be live and resting. That is the exact false-terminal
+    hazard this script exists downstream of, and it trades real money.
+    A uuid7 also fits Walutomat's 36-character ``submitId`` cap exactly,
+    so it must not be prefixed.
 """
 
 import asyncio
 import json
 import sys
-import time
 from dataclasses import asdict
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid7
 
 from loguru import logger
 
@@ -202,7 +216,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=passive_price,
-                client_order_id=f"test-pass-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("walutomat", "passive_buy", "create", snapshot_to_dict(snap))
@@ -224,7 +238,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=passive_price,
-                client_order_id=f"test-pass-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("walutomat", "passive_sell", "create", snapshot_to_dict(snap))
@@ -245,7 +259,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=round(ticker.ask * 1.01, 4),
-                client_order_id=f"test-aggr-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("walutomat", "aggressive_buy", "create", snapshot_to_dict(snap))
@@ -266,7 +280,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=round(ticker.bid * 0.99, 4),
-                client_order_id=f"test-aggr-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("walutomat", "aggressive_sell", "create", snapshot_to_dict(snap))
@@ -287,7 +301,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=round(ticker.bid * 0.95, 4),
-                client_order_id=f"test-cancel-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("walutomat", "cancel_inflight", "create", snapshot_to_dict(snap))
@@ -338,7 +352,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
-                client_order_id=f"test-pass-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -361,7 +375,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
-                client_order_id=f"test-pass-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -383,7 +397,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.ask * 1.005, 1),
-                client_order_id=f"test-aggr-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken", "aggressive_buy", "create", snapshot_to_dict(snap))
@@ -401,7 +415,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.995, 1),
-                client_order_id=f"test-aggr-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken", "aggressive_sell", "create", snapshot_to_dict(snap))
@@ -419,7 +433,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.90, 1),
-                client_order_id=f"test-cancel-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken", "cancel_inflight", "create", snapshot_to_dict(snap))
@@ -475,7 +489,7 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
-                client_order_id=f"test-pass-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -506,7 +520,7 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
-                client_order_id=f"test-pass-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -528,7 +542,7 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.ask * 1.005, 1),
-                client_order_id=f"test-aggr-buy-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken_futures", "aggressive_buy", "create", snapshot_to_dict(snap))
@@ -546,7 +560,7 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.995, 1),
-                client_order_id=f"test-aggr-sell-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken_futures", "aggressive_sell", "create", snapshot_to_dict(snap))
@@ -564,7 +578,7 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.90, 1),
-                client_order_id=f"test-cancel-{int(time.time())}",
+                client_order_id=str(uuid7()),
             )
             snap = await client.create_order(request)
             emit("kraken_futures", "cancel_inflight", "create", snapshot_to_dict(snap))

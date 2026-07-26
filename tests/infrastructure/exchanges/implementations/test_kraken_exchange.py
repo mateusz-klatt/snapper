@@ -8843,15 +8843,28 @@ async def test_subscribe_trade_built_candles_reuses_running_aggregator_task() ->
 class TestKrakenWireCorrelationIdFidelity:
     """The correlation id reaches the Kraken wire on every submit shape.
 
-    These are the tests that would have caught the omission defect. The
-    id used to be attached only under ``if request.client_order_id:``,
-    and with it absent the venue stored no client id at all, so the echo
-    double-check in ``find_order_by_client_id`` could never match and it
-    returned ``None`` — which this client's contract defines as an
-    authoritative statement of ABSENCE. Two of those publish a false
-    REJECTED plus a durable ``order_rejected`` for an order that may be
-    live and filling, and that row is itself sweep-exempting, so the
-    false terminal destroys the backstop that would have caught it.
+    These tests do NOT prove the omission defect is fixed, and should
+    not be read as if they do. Once the request contract guarantees a
+    non-empty id, the old guarded form and the new unconditional form
+    are extensionally identical — the removed ``if
+    request.client_order_id:`` branches were unreachable for every
+    constructible input, verified against the installed ccxt 4.5.68
+    where ``safe_string`` drops ``""`` exactly as it drops ``None``.
+    These tests therefore pass against both versions. That equivalence
+    is what makes the change safe to land, and it is an argument, not an
+    assertion.
+
+    What these tests genuinely guard is the realistic FUTURE
+    regression: someone deleting the wire line, moving it back behind a
+    conditional, or substituting a different value for it. That is a
+    live risk precisely because the failure is silent at the venue — an
+    order the venue holds under no client id makes
+    ``find_order_by_client_id`` answer ``None``, which this client's
+    contract defines as an authoritative statement of ABSENCE. Two of
+    those publish a false REJECTED plus a durable ``order_rejected``
+    for an order that may be live and filling, and that row is itself
+    sweep-exempting, so the false terminal destroys the backstop that
+    would have caught it.
     """
 
     @pytest.fixture

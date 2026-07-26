@@ -2240,13 +2240,13 @@
         "PLR0913": 6
       },
       "test_run_kraken_futures_scenario_places_expected_order": {
-        "PLR0913": 9
+        "PLR0913": 8
       },
       "test_run_kraken_spot_scenario_places_expected_order": {
         "PLR0913": 8
       },
       "test_run_walutomat_scenario_places_expected_order": {
-        "PLR0913": 8
+        "PLR0913": 7
       }
     },
     "tests/server/test_alerts_routes.py": {
