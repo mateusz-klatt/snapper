@@ -29,7 +29,6 @@ import base64
 import contextlib
 import math
 import time
-import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC
@@ -1525,6 +1524,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Create a new FX order on Walutomat.
 
+        The venue's ``submitId`` is ``request.client_order_id``
+        verbatim, never a substitute. It is echoed back as the
+        snapshot's ``client_order_id`` and persisted from there, and it
+        is the value ``_verify_ambiguous_submit`` and the cross-restart
+        dispatched sweep both look the order up by. A fabricated
+        fallback would leave the venue holding the order under an id no
+        recovery path can query. ``ExchangeOrderRequest`` guarantees the
+        id is present and non-empty, so no guard is needed here.
+
         Transport failures are split by safety class:
         connection-setup errors (connection refused, connect timeout, no
         pool slot, SOCKS handshake) provably happened BEFORE the request
@@ -1562,7 +1570,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]
-        submit_id = request.client_order_id or str(uuid.uuid4())
+        submit_id = request.client_order_id
         body_params = {
             "currencyPair": walutomat_rest_symbol,
             "buySell": request.side.value.upper(),

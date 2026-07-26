@@ -191,12 +191,21 @@ class TestPaperOrderClientCoverage:
         await client.disconnect()
 
     @pytest.mark.asyncio
-    async def test_create_order_without_client_order_id(self) -> None:
-        """Test creating order without client order ID.
+    async def test_create_order_carries_client_order_id_onto_snapshot(self) -> None:
+        """Test the paper client echoes the correlation id it was given.
 
         Given: A connected paper exchange client,
-        When: Order is created without client_order_id,
-        Then: Order is created successfully with OPEN status.
+        When: An order is created,
+        Then: The snapshot carries the request's client_order_id
+            verbatim and the order is OPEN.
+
+        This replaced a test that constructed the request with
+        ``client_order_id=None`` to pin that an uncorrelated order still
+        succeeded. That scenario no longer exists: the request contract
+        makes the id required and non-empty, so the paper simulator can
+        only ever be handed a real one. What is worth pinning instead is
+        that it substitutes nothing on the way to the snapshot — the
+        same fidelity property the live venues now enforce.
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
@@ -207,12 +216,13 @@ class TestPaperOrderClientCoverage:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
+            client_order_id="coid-paper-echo",
             price=50000.0,
-            client_order_id=None,
         )
         result = await client.create_order(request)
         assert result.symbol == "BTC-USD"
         assert result.status == ExchangeOrderStatusEnum.OPEN
+        assert result.client_order_id == "coid-paper-echo"
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -444,6 +454,7 @@ class TestPaperOrderClientCoverage:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
+                client_order_id="coid-disconnect-cancels-tasks",
                 price=50000.0,
             )
         )
@@ -469,6 +480,7 @@ class TestPaperOrderClientCoverage:
                     side=OrderSideEnum.BUY,
                     type=ExchangeOrderTypeEnum.MARKET,
                     amount=0.1,
+                    client_order_id="coid-context-manager",
                     price=50000.0,
                 )
             )
@@ -491,6 +503,7 @@ class TestPaperOrderClientCoverage:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
+            client_order_id="coid-create-order-not-connected",
         )
         with pytest.raises(RuntimeError, match="not connected"):
             await client.create_order(request)

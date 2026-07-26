@@ -675,6 +675,7 @@ async def test_not_supported_methods_raise(polygon_client: PolygonExchangeClient
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
+                client_order_id="coid-not-supported-methods-raise",
             )
         )
     with pytest.raises(NotImplementedError):
@@ -906,6 +907,7 @@ class TestPolygonCreateCancelOrder:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
+            client_order_id="coid-create-order-not-supported",
         )
         with pytest.raises(NotImplementedError, match="market data only"):
             await polygon_client.create_order(request)

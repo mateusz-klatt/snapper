@@ -116,6 +116,7 @@ async def test_create_order_requires_running() -> None:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=1.0,
+                client_order_id="coid-create-order-requires-running",
                 price=None,
             )
         )
@@ -530,6 +531,7 @@ async def test_create_order_cancels_when_disconnected_during_db_logging() -> Non
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.01,
+                client_order_id="coid-create-order-cancels-when-disconnected-during-db-logging",
             )
         )
     tracked = next(iter(client._orders.values()))
@@ -862,6 +864,7 @@ class TestPaperOrderValidation:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.1,
+            client_order_id="coid-create-order-requires-connection",
             price=50000.0,
         )
         with pytest.raises(RuntimeError, match="not connected"):
@@ -916,6 +919,7 @@ class TestPaperCancelOrder:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.1,
+            client_order_id="coid-cancel-existing-order-updates-status",
             price=50000.0,
         )
         order = await paper_client.create_order(request)
@@ -1136,6 +1140,7 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
+            client_order_id="coid-create-order-logs-and-executes-with-db-updates",
             price=10.0,
         )
         order = await client.create_order(request)
@@ -1163,6 +1168,7 @@ async def test_get_order_known_and_unknown() -> None:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1,
+            client_order_id="coid-get-order-known-and-unknown",
             price=10,
         )
     )
@@ -1188,6 +1194,7 @@ async def test_get_orders_filters_and_limit() -> None:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1,
+            client_order_id="coid-get-orders-filters-and-limit",
             price=10,
         )
     )
@@ -1197,6 +1204,7 @@ async def test_get_orders_filters_and_limit() -> None:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=2,
+            client_order_id="coid-get-orders-filters-and-limit-2",
             price=20,
         )
     )

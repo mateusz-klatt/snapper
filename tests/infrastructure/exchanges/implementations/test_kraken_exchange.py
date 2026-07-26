@@ -900,6 +900,7 @@ class TestKrakenExchangeClient:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
+                client_order_id="coid-create-order",
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == "test_order_123"
@@ -1059,6 +1060,7 @@ class TestKrakenExchangeClient:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
+            client_order_id="coid-create-order-no-credentials",
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
             await kraken_client.create_order(order_request)
@@ -1113,6 +1115,7 @@ class TestKrakenExchangeClient:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
+                client_order_id="coid-create-order-empty-id-skips-db-logging",
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == ""
@@ -1141,6 +1144,7 @@ class TestKrakenExchangeClient:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
+                client_order_id="coid-create-order-none-id-treated-as-empty",
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == ""
@@ -1154,6 +1158,7 @@ class TestKrakenExchangeClient:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
+            client_order_id="coid-create-order-error",
         )
         with (
             patch.object(
@@ -2278,6 +2283,7 @@ class TestKrakenCoverageImprovement:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
+            client_order_id="coid-create-order-no-api-key",
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
             await kraken_client.create_order(order_request)
@@ -2290,6 +2296,7 @@ class TestKrakenCoverageImprovement:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
+            client_order_id="coid-create-order-no-api-secret",
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
             await kraken_client.create_order(order_request)
@@ -2327,6 +2334,7 @@ class TestKrakenCoverageImprovement:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
+                client_order_id="coid-create-order-exception-handling",
             )
             with pytest.raises(Exception, match="ExchangeOrderSnapshot creation failed"):
                 await kraken_client.create_order(order_request)
@@ -3457,6 +3465,7 @@ class TestCreateOrderNetworkRetryExclusion:
                     side=OrderSideEnum.BUY,
                     type=ExchangeOrderTypeEnum.MARKET,
                     amount=float("0.1"),
+                    client_order_id="coid-unretried-network-failure-feeds-circuit-breaker",
                 )
             )
         assert kraken_client._circuit_failures == kraken_client._max_failures
@@ -3495,6 +3504,7 @@ class TestCreateOrderNetworkRetryExclusion:
                     side=OrderSideEnum.BUY,
                     type=ExchangeOrderTypeEnum.MARKET,
                     amount=float("0.1"),
+                    client_order_id="coid-create-order-still-retries-rate-limit",
                 )
             )
         assert order.id == "order_after_429"
@@ -5414,12 +5424,20 @@ class TestKrakenAdditionalCoverage:
     async def test_create_order_fallback_without_price_or_asset_class(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify create order fallback without price or asset class."""
+        """Verify create order fallback without price or asset class.
+
+        The native fallback still omits ``price`` for a market order and
+        still omits ``asset_class`` for a non-tokenized symbol, but
+        ``extra_params`` is no longer ``None``: ``cl_ord_id`` is always
+        present now that the request contract guarantees a non-empty
+        correlation id, so ``extra_params or None`` can never collapse.
+        """
         order_request = ExchangeOrderRequest(
             symbol="FOO-BAR",
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
+            client_order_id="coid-create-order-fallback-without-price-or-asset-class",
             price=None,
         )
         with (
@@ -5441,7 +5459,9 @@ class TestKrakenAdditionalCoverage:
             order = await kraken_client.create_order(order_request)
             kwargs = trade_client.create_order.call_args.kwargs
             assert "price" not in kwargs
-            assert kwargs["extra_params"] is None
+            assert kwargs["extra_params"] == {
+                "cl_ord_id": "coid-create-order-fallback-without-price-or-asset-class"
+            }
             assert order.id == "OID123"
 
     @pytest.mark.asyncio
@@ -5642,6 +5662,7 @@ class TestKrakenFallbackToNativeAPI:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
+                client_order_id="coid-create-order-no-fallback-for-other-errors",
             )
             with pytest.raises(ValueError, match="Different error"):
                 await kraken_client.create_order(order_request)
@@ -5714,6 +5735,7 @@ class TestKrakenFallbackToNativeAPI:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("10"),
+                client_order_id="coid-create-order-fallback-handles-native-api-error",
                 price=float("150.0"),
             )
             with pytest.raises(Exception, match="Native API error"):
@@ -5797,6 +5819,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
+            client_order_id="coid-create-order-without-credentials",
             price=50000.0,
         )
         with pytest.raises(RuntimeError, match="API credentials required for trading"):
@@ -5818,6 +5841,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.00001,
+            client_order_id="coid-order-creation-edge-cases",
             price=1.0,
         )
         with patch.object(client, "_ccxt_client") as mock_ccxt:
@@ -5954,6 +5978,7 @@ class TestCcxtOrderLeverageAndPostOnly:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
+                client_order_id="coid-ccxt-order-with-leverage",
                 price=50000.0,
                 leverage=3,
             )
@@ -5997,6 +6022,7 @@ class TestCcxtOrderLeverageAndPostOnly:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
+                client_order_id="coid-ccxt-order-with-post-only",
                 price=50000.0,
                 post_only=True,
             )
@@ -6053,6 +6079,7 @@ class TestNativeOrderLeverageAndPostOnly:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
+                client_order_id="coid-native-order-with-leverage",
                 price=150.0,
                 leverage=5,
             )
@@ -6093,6 +6120,7 @@ class TestNativeOrderLeverageAndPostOnly:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
+                client_order_id="coid-native-order-with-post-only",
                 price=150.0,
                 post_only=True,
             )
@@ -6457,6 +6485,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
+                client_order_id="coid-ccxt-topbook-create-post-only",
                 price=58239.1,
                 post_only=True,
             )
@@ -6523,6 +6552,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
+                client_order_id="coid-ccxt-aggressive-create-immediately-filled",
                 price=58238.0,
             )
             snapshot = await client.create_order(request)
@@ -6566,6 +6596,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.0001,
+                client_order_id="coid-ccxt-market-create",
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "OJWE3F"
@@ -6666,6 +6697,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
+                client_order_id="coid-ccxt-cancel-inflight-create-then-cancel",
                 price=29119.5,
             )
             create_snap = await client.create_order(request)
@@ -6757,6 +6789,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
+                client_order_id="coid-native-topbook-create-post-only",
                 price=58239.1,
                 post_only=True,
             )
@@ -6796,6 +6829,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
+                client_order_id="coid-native-aggressive-create",
                 price=58238.0,
             )
             snapshot = await client.create_order(request)
@@ -6834,6 +6868,7 @@ class TestKrakenLiveFixtures:
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.0001,
+                client_order_id="coid-native-market-create",
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "OJWE3F"

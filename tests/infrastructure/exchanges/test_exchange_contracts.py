@@ -1,11 +1,14 @@
 """Unit tests for Kraken exchange OHLC schemas and exchange contracts."""
 
+import re
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 import pytest
 
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -336,3 +339,102 @@ def test_ticker_update_accepts_delay_overrides() -> None:
     )
     assert update.is_delayed is True
     assert update.is_extended_hours is True
+
+
+def test_exchange_order_request_round_trips_the_correlation_id() -> None:
+    """``ExchangeOrderRequest`` keeps the caller's client_order_id.
+
+    Given: a request built with every keyword the executor supplies,
+    When: its fields are inspected,
+    Then: ``client_order_id`` is the exact value passed and every other
+        field landed where it was named.
+
+    This also pins the field REORDER that made ``client_order_id``
+    required: it now sits directly after ``amount``, ahead of ``price``.
+    The move is only safe because no construction anywhere in the repo
+    passes positional arguments — an AST census found 0 of 120. This
+    test is the executable half of that argument: had any position
+    shifted silently, ``price`` and ``client_order_id`` would swap here.
+    """
+    signaled = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+    request = ExchangeOrderRequest(
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=0.5,
+        client_order_id="0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f",
+        price=61000.0,
+        stop_price=None,
+        signaled_at=signaled,
+        leverage=3,
+        reduce_only=True,
+        post_only=True,
+        wallet_public_id="wallet-1",
+        operator_public_id="operator-1",
+    )
+    assert request.client_order_id == "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f"
+    assert request.symbol == "BTC-USD"
+    assert request.side is OrderSideEnum.BUY
+    assert request.type is ExchangeOrderTypeEnum.LIMIT
+    assert request.amount == pytest.approx(0.5)
+    assert request.price == pytest.approx(61000.0)
+    assert request.stop_price is None
+    assert request.signaled_at == signaled
+    assert request.leverage == 3
+    assert request.reduce_only is True
+    assert request.post_only is True
+    assert request.wallet_public_id == "wallet-1"
+    assert request.operator_public_id == "operator-1"
+
+
+def test_exchange_order_request_refuses_empty_correlation_id() -> None:
+    """An empty ``client_order_id`` is refused at construction.
+
+    Given: an otherwise valid order request whose client_order_id is "",
+    When: the request is constructed,
+    Then: ValueError is raised naming the field, before any venue call.
+
+    Requiredness alone does not close this. mypy forbids OMITTING the
+    keyword, but "" is a perfectly typed ``str``, and it is not inert:
+    ``ccxt.safe_string`` drops an empty string from the wire params
+    exactly as it drops ``None``, so an empty id would reach Kraken as
+    no id at all — reproducing the omission defect in full while
+    type-checking cleanly. The guard therefore tests falsiness, never
+    ``is None``.
+
+    It fires at construction, which on the executor path is strictly
+    before the venue submit, so the failure is provably-not-placed and
+    the definitive-reject disposition is honest.
+    """
+    with pytest.raises(ValueError, match="empty client_order_id"):
+        ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=0.5,
+            client_order_id="",
+        )
+
+
+def test_uuid7_fits_the_walutomat_submit_id_ceiling() -> None:
+    """A minted uuid7 fits Walutomat's 36-character submitId cap exactly.
+
+    Given: the id shape every producer in the system mints,
+    When: it is rendered as the string that goes on the wire,
+    Then: it is at most 36 characters and uses only the characters
+        Walutomat's submitId regex admits.
+
+    Pinned as a test rather than a runtime guard deliberately. The
+    ceiling is exactly 36 and uuid7 is exactly 36 — zero headroom — and
+    ``trade_commands.client_order_id`` is ``String(64)``, so the column
+    would not catch an over-length id. A runtime format check in the
+    adapter would be dead code (uuid7 cannot violate it) needing a
+    hand-written test to satisfy the 100% coverage floor, and its only
+    effect would be to move an already-correct failure earlier: an
+    over-length submitId draws a venue 4xx that the adapter re-raises
+    plain as a definitive rejection. This test costs nothing at runtime
+    and fails the moment the id shape changes.
+    """
+    minted = str(uuid7())
+    assert len(minted) <= 36
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,36}", minted) is not None

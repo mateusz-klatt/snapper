@@ -2276,6 +2276,7 @@ class TestOrderMethods:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.ICEBERG,
             amount=1.0,
+            client_order_id="coid-create-order-unsupported-type-is-not-wrapped",
         )
         with (
             patch(
@@ -2758,6 +2759,7 @@ class TestSymbolConversionInOrders:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
+            client_order_id="coid-create-order-converts-symbol",
         )
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
@@ -3015,6 +3017,7 @@ class TestCreateOrderStopPrice:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.STOP_LOSS,
             amount=1.0,
+            client_order_id="coid-create-order-with-stop-price",
             stop_price=60000.0,
         )
         with (
@@ -3049,6 +3052,7 @@ class TestCreateOrderValidation:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.ICEBERG,
             amount=1.0,
+            client_order_id="coid-unsupported-order-type-raises",
             price=60000.0,
         )
         with (
@@ -3081,6 +3085,7 @@ class TestCreateOrderValidation:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
             amount=1.0,
+            client_order_id="coid-stop-loss-limit-maps-to-stp-with-both-prices",
             price=59500.0,
             stop_price=60000.0,
         )
@@ -3118,6 +3123,7 @@ class TestCreateOrderValidation:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.STOP_LOSS,
             amount=1.0,
+            client_order_id="coid-stop-without-trigger-rejected-pre-send",
         )
         with (
             patch(
@@ -3148,6 +3154,7 @@ class TestCreateOrderValidation:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
             amount=1.0,
+            client_order_id="coid-stop-limit-without-limit-leg-rejected-pre-send",
             stop_price=60000.0,
         )
         with (
@@ -3179,6 +3186,7 @@ class TestCreateOrderValidation:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
+            client_order_id="coid-create-order-db-log-returns-none",
         )
         with (
             patch(
@@ -4147,6 +4155,7 @@ class TestCreateOrderPostOnlyAndReduceOnly:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
+            client_order_id="coid-create-order-post-only-limit",
             price=66000.0,
             post_only=True,
         )
@@ -4180,6 +4189,7 @@ class TestCreateOrderPostOnlyAndReduceOnly:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=2.0,
+            client_order_id="coid-create-order-reduce-only",
             reduce_only=True,
         )
         with (
@@ -4623,6 +4633,7 @@ class TestKrakenFuturesLiveFixtures:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
+            client_order_id="coid-topbook-create",
             price=2500.0,
         )
         with (
@@ -4712,6 +4723,7 @@ class TestKrakenFuturesLiveFixtures:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
+            client_order_id="coid-aggressive-create-immediate-fill",
             price=1800.0,
         )
         with (
@@ -4783,6 +4795,7 @@ class TestKrakenFuturesLiveFixtures:
             side=OrderSideEnum.SELL,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=0.01,
+            client_order_id="coid-market-create",
         )
         with (
             patch(
@@ -4854,6 +4867,7 @@ class TestKrakenFuturesLiveFixtures:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
+            client_order_id="coid-cancel-inflight-create-and-cancel",
             price=1000.0,
         )
         with (

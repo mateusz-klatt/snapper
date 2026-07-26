@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -2127,6 +2128,7 @@ async def test_create_order_sets_wake_event() -> None:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
+            client_order_id="coid-create-order-sets-wake-event",
             price=4.28,
         )
         await client.create_order(req)
@@ -2194,6 +2196,7 @@ async def test_create_order_requires_connection() -> None:
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
+        client_order_id="coid-create-order-requires-connection",
         price=4.2,
     )
     with pytest.raises(RuntimeError, match="Not connected"):
@@ -2228,6 +2231,7 @@ async def test_create_order_without_price_does_not_send_limit(
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
+        client_order_id="coid-create-order-without-price-does-not-send-limit",
         price=None,
     )
     await client.create_order(request)
@@ -2251,6 +2255,7 @@ async def test_create_order_requires_authentication() -> None:
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
+        client_order_id="coid-create-order-requires-authentication",
         price=4.2,
     )
     with pytest.raises(RuntimeError, match="provide api_key and private_key"):
@@ -2285,6 +2290,7 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
+        client_order_id="coid-create-order-success",
         price=4.2,
     )
     order = await client.create_order(request)
@@ -3859,6 +3865,7 @@ async def test_create_order_failure_raises(monkeypatch: pytest.MonkeyPatch) -> N
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
+        client_order_id="coid-create-order-failure-raises",
         price=4.2,
     )
     with pytest.raises(RuntimeError):
@@ -4467,6 +4474,7 @@ async def test_place_order_with_limit_price(monkeypatch: pytest.MonkeyPatch) -> 
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
+        client_order_id="coid-place-order-with-limit-price",
         price=4.5000,
     )
     await client.create_order(request)
@@ -5067,14 +5075,25 @@ class TestWalutomatLiveFixtures:
         assert balances["GBP"].total == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_create_order_generates_submit_id(
+    async def test_create_order_sends_caller_submit_id_verbatim(
         self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When no client_order_id is provided, a UUID is generated as submitId.
+        """The caller's client_order_id is the submitId, byte-for-byte.
 
-        Given: ExchangeOrderRequest without client_order_id.
+        Given: ExchangeOrderRequest carrying a known client_order_id.
         When: create_order is called.
-        Then: Snapshot has a non-None client_order_id (auto-generated UUID).
+        Then: The POST body's submitId and the returned snapshot's
+            client_order_id both equal that id exactly.
+
+        This inverts a test that pinned the opposite: the adapter used
+        to substitute ``str(uuid.uuid4())`` whenever the caller supplied
+        nothing, and that test asserted only that *some* non-empty id
+        came back. The fabricated value was sent to the venue as its
+        idempotency key and persisted onto the snapshot, while both
+        recovery paths — ambiguous-submit verification and the
+        cross-restart dispatched sweep — query with the command's own
+        client_order_id. An order submitted under a fabricated id can
+        never be found again by either.
         """
         api_response = {"success": True, "result": {"orderId": "wal-autoid-001"}}
         stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
@@ -5086,12 +5105,14 @@ class TestWalutomatLiveFixtures:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=50.0,
+            client_order_id="0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f",
             price=4.2600,
         )
         snap = await client.create_order(request)
         assert snap.id == "wal-autoid-001"
-        assert snap.client_order_id is not None
-        assert len(snap.client_order_id) > 0
+        body = parse_qs(stub.post_calls[0][1]["content"])
+        assert body["submitId"] == ["0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f"]
+        assert snap.client_order_id == "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f"
 
     @pytest.mark.asyncio
     async def test_create_order_sends_limit_price_in_body(
@@ -5113,6 +5134,7 @@ class TestWalutomatLiveFixtures:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=100.0,
+            client_order_id="coid-create-order-sends-limit-price-in-body",
             price=4.2850,
         )
         await client.create_order(request)
@@ -5434,6 +5456,7 @@ async def test_create_order_rejects_stop_types_before_any_send() -> None:
             side=OrderSideEnum.BUY,
             type=order_type,
             amount=100.0,
+            client_order_id="coid-create-order-rejects-stop-types-before-any-send",
             price=4.2,
             stop_price=4.3,
         )

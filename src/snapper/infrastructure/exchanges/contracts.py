@@ -266,21 +266,83 @@ class NativeBalanceEntry:
 
 @dataclass
 class ExchangeOrderRequest:
-    """Request parameters for placing an order on an exchange."""
+    """Request parameters for placing an order on an exchange.
+
+    ``client_order_id`` is REQUIRED and non-empty, enforced here rather
+    than per-venue, because it is the correlation identity every venue
+    adapter must put on the wire byte-identically. It is the only
+    identity that survives a process death, and the sole key both
+    recovery paths query with: ``_verify_ambiguous_submit`` looks the
+    order up by it after an ambiguous submit, and the cross-restart
+    dispatched sweep looks it up by the same value read off
+    ``trade_commands.client_order_id``. An adapter that substitutes a
+    fabricated id, or omits it, makes the venue hold the order under an
+    identity nothing can query — and a venue lookup that answers "not
+    found" is contractually an authoritative statement of ABSENCE, which
+    converts a live, possibly-filling order into a false REJECTED.
+
+    Requiredness and the ``__post_init__`` guard are complementary, not
+    redundant: the field forbids OMITTING the id (caught statically by
+    mypy across ``src``, ``tests`` and ``scripts``), the guard forbids
+    the empty string (a runtime value the type system admits).
+    ``""`` is not harmless — ``ccxt.safe_string`` drops an empty string
+    from the wire params exactly as it drops ``None``, so without the
+    guard an empty id would reproduce the omission defect in full.
+
+    Note the asymmetry with ``ExchangeOrderSnapshot.client_order_id``,
+    which stays optional: that field holds the venue's ECHO, which can
+    legitimately be absent. This one is what we SEND, and it never can.
+
+    Attributes:
+        symbol: Native instrument symbol of the order.
+        side: Buy or sell.
+        type: Wire order type.
+        amount: Order quantity in base units.
+        client_order_id: Correlation identity of the order; must equal
+            ``trade_commands.client_order_id`` byte-for-byte.
+        price: Limit price, or None for market orders.
+        stop_price: Trigger price for stop-typed orders.
+        signaled_at: Strategy signal timestamp, for latency accounting.
+        leverage: Requested leverage, when the venue supports it.
+        reduce_only: Whether the order may only reduce a position.
+        post_only: Whether the order must not take liquidity.
+        wallet_public_id: Owning wallet, for attribution.
+        operator_public_id: Operator who authored the order, if manual.
+    """
 
     symbol: str
     side: OrderSideEnum
     type: ExchangeOrderTypeEnum
     amount: float
+    client_order_id: str
     price: float | None = None
     stop_price: float | None = None
-    client_order_id: str | None = None
     signaled_at: datetime | None = None
     leverage: int | None = None
     reduce_only: bool = False
     post_only: bool = False
     wallet_public_id: str = ""
     operator_public_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse an order that cannot be correlated back to its command.
+
+        Tests falsiness, not ``is None``: mypy already forbids ``None``,
+        so the value this guard exists to reject is ``""``.
+
+        Raises:
+            ValueError: If ``client_order_id`` is empty. Raised at
+                construction, which on the executor path is strictly
+                BEFORE any network send, so the failure is
+                provably-not-placed.
+        """
+        if not self.client_order_id:
+            raise ValueError(
+                f"ExchangeOrderRequest for {self.symbol} has an empty client_order_id: "
+                f"this id is the only identity that survives a restart and the sole key "
+                f"ambiguous-submit verification and dispatched-order recovery query with. "
+                f"Refusing to submit an order that could never be correlated back."
+            )
 
 
 type ExecType = Literal[
