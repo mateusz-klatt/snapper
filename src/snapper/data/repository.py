@@ -1436,36 +1436,71 @@ def _pnl_fx_symbol_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
 
 
 def _pnl_crypto_usd_spot_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
-    """Prove an eligible spot, non-margin, real-venue crypto→USD price plane.
+    """Prove an eligible spot, venue-certified, real-venue crypto→USD price plane.
 
     Mirrors :func:`_pnl_fx_symbol_proof_filters`: the candle's owner is resolved
     by author-time joins (the ``Symbol`` and ``InstrumentSpec`` active when the
-    candle was written), while eligibility is proven by cross-version unanimity
-    at the knowledge horizon. A read-time active projection would let a later
-    correction reclassify history — a perpetual re-specced to spot after a candle
-    was written would turn that derivative candle into an eligible spot plane, and
-    a symbol re-denomination would redraw ``base``. Author-time ownership plus
-    as-of unanimity forbid both.
+    candle was written), while IDENTITY facts are proven by cross-version
+    unanimity at the knowledge horizon. A read-time active projection would let a
+    later correction reclassify history — a perpetual re-specced to spot after a
+    candle was written would turn that derivative candle into an eligible spot
+    plane, and a symbol re-denomination would redraw ``base``. Author-time
+    ownership plus as-of unanimity forbid both.
 
     The outer author-time ``Symbol`` row must itself be known by ``as_of`` and
     quote exactly ``USD``; the base/quote is proven unanimous, so no ``Symbol``
     version known by ``as_of`` re-denominates the plane. The outer author-time
-    ``InstrumentSpec`` row must classify a ``spot``, non-``spot_margin_rollover``
-    instrument, and that classification is proven unanimous: if ANY spec version
-    for the instrument known by ``as_of`` is non-spot (including a null kind) or
-    carries the spot-margin funding model, the plane is excluded. The venue must
-    be real — paper instruments (``exchange`` equal to ``paper``) never price a
-    live basket, and ``exchange`` is part of the instrument's logical identity so
+    ``InstrumentSpec`` row must classify a ``spot`` instrument, and that
+    classification is proven unanimous: if ANY spec version for the instrument
+    known by ``as_of`` is non-spot (including a null kind) the plane is excluded.
+    That same spec row must be venue-certified, proven by a non-null
+    ``spec_source`` — the schema's atomic ``ck_instrument_specs_provenance``
+    entails a non-null ``spec_version`` and ``spec_observed_at`` alongside it, and
+    the symbol updaters null partial provenance at write time, so ``spec_source``
+    is the structural marker of "this spec block came from venue metadata". It
+    separates a venue's own listing from a market-data-only relay of another
+    venue's book carried under the same ``exchange``, which would otherwise make
+    two instruments price one ``(base, quote, exchange)`` plane. The venue must
+    also be real — paper instruments (``exchange`` equal to ``paper``) never price
+    a live basket, and ``exchange`` is part of the instrument's logical identity so
     the author-time owner row certifies it. Null-safe distinctness is used for
     defence in depth even where a not-null column makes the null branch
     unreachable.
+
+    Certification is proven AUTHOR-TIME ONLY and deliberately stays out of the
+    unanimity EXISTS, which keeps quantifying ``instrument_kind`` alone. Unanimity
+    is reserved for identity facts, where cross-version disagreement means the
+    identity was never trustworthy; provenance and lifecycle legitimately change
+    over time, so quantifying them would let a later metadata refresh or delisting
+    retroactively de-plane every historical candle of an instrument — the exact
+    harm this unanimity proof was built to prevent. The accepted residual is a
+    spec whose certification was fabricated at author time, identical in kind to
+    the author-time-only treatment of ``exchange``.
+
+    Two classifications are deliberately absent and MUST NOT be reintroduced.
+    ``funding_type`` describes position economics, not price provenance: a venue
+    offering margin on its one spot order book records
+    ``funding_type='spot_margin_rollover'`` on that single spot instrument, whose
+    candles are ordinary spot prices, so excluding it withheld every
+    margin-capable crypto plane while protecting no money-safety invariant
+    (derivative exclusion is entirely the job of ``instrument_kind``). ``status``
+    proves lifecycle, not certification, and has no vocabulary contract — no CHECK
+    constraint, writers producing ``active``/``inactive``/null against a column
+    comment suggesting ``online``/``offline`` — so requiring it would exclude the
+    historical candles of legitimately delisted markets and buy nothing.
+
+    Ambiguity is NOT resolved here. Every certified row is returned undeduplicated
+    and the valuator fails closed on a same-venue collision; SQL-level ``GROUP BY``
+    or ``DISTINCT ON`` would respectively erase a real evidentiary condition or
+    silently elect one of two genuinely different order books.
 
     Args:
         as_of: Knowledge horizon for every considered Symbol and spec version.
 
     Returns:
         Correlated filters establishing a unanimous ``USD`` denomination, a
-        unanimous spot non-margin classification, and a real venue.
+        unanimous spot classification, an author-time venue certification, and a
+        real venue.
     """
     symbol_version = aliased(Symbol)
     spec_version = aliased(InstrumentSpec)
@@ -1480,17 +1515,14 @@ def _pnl_crypto_usd_spot_proof_filters(as_of: datetime) -> list[ColumnElement[bo
     classification_conflict = exists().where(
         spec_version.instrument_public_id == InstrumentSpec.instrument_public_id,
         spec_version.timestamp <= as_of,
-        or_(
-            spec_version.instrument_kind.is_distinct_from("spot"),
-            spec_version.funding_type == "spot_margin_rollover",
-        ),
+        spec_version.instrument_kind.is_distinct_from("spot"),
     )
     return [
         Symbol.timestamp <= as_of,
         Symbol.quote == "USD",
         InstrumentSpec.timestamp <= as_of,
         InstrumentSpec.instrument_kind == "spot",
-        InstrumentSpec.funding_type.is_distinct_from("spot_margin_rollover"),
+        InstrumentSpec.spec_source.is_not(None),
         Instrument.exchange != "paper",
         ~denomination_conflict,
         ~classification_conflict,
@@ -3817,16 +3849,26 @@ class Repository(ABC):
         finalized one-minute candle on the currency's spot USD instrument. Like
         ``get_pnl_fx_rate_candles``, each candle is joined to its AUTHOR-TIME
         owning ``Instrument``, ``Symbol`` and ``InstrumentSpec`` (the versions
-        active when the candle was written), and eligibility is proven by
+        active when the candle was written), and its IDENTITY facts are proven by
         cross-version unanimity at ``as_of``: a later correction is never
         back-applied to an earlier candle. Eligibility: the symbol's ``base`` is a
         requested currency and its ``quote`` is unanimously exactly ``USD``; the
-        spec unanimously classifies a ``spot``, non-``spot_margin_rollover``
-        instrument (if any known version disagrees the plane is excluded); and the
-        venue is real (never ``paper``). Rows carry the candle VERSION identity
-        (immutable internal id, public id and version timestamp) so a candle
-        correction that reuses ``public_id`` while changing ``close`` stays
-        attributable to the exact close a sample consumed.
+        spec unanimously classifies a ``spot`` instrument (if any known version
+        disagrees the plane is excluded); that author-time spec is venue-certified
+        (non-null ``spec_source``, which the schema's atomic provenance constraint
+        ties to ``spec_version`` and ``spec_observed_at``), so a market-data-only
+        relay of another venue's book never prices the plane; and the venue is real
+        (never ``paper``). Certification is proven author-time only — later
+        provenance or lifecycle versions can neither admit nor de-plane a
+        historical candle. Funding model and trading ``status`` are deliberately
+        NOT part of the proof: the first describes position economics rather than
+        price provenance, the second lifecycle rather than certification. Rows
+        carry the candle VERSION identity (immutable internal id, public id and
+        version timestamp) so a candle correction that reuses ``public_id`` while
+        changing ``close`` stays attributable to the exact close a sample consumed.
+        Rows are never deduplicated: if two certified instruments price one
+        ``(base, quote, exchange)`` plane, both surface and the valuator fails
+        closed rather than electing a price by row order.
 
         Args:
             currencies: Distinct base currencies to price. Empty input returns
@@ -17654,15 +17696,17 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PnlCryptoUsdPlaneRow]:
         """Load finalized crypto→USD spot closes with candle version identity.
 
-        See the abstract declaration for the spot, non-margin, real-venue
+        See the abstract declaration for the spot, venue-certified, real-venue
         eligibility proof. Mirroring ``get_pnl_fx_rate_candles``, the candle's
         owning instrument, symbol and spec are joined at CANDLE author time
         (the versions active when the candle was written), while the shared
         ``_pnl_crypto_usd_spot_proof_filters`` establishes as-of denomination and
-        classification unanimity. A later correction therefore never reclassifies
-        a historical candle: a perpetual re-specced to spot cannot retroactively
-        become an eligible spot plane, and a redenominated symbol cannot redraw an
-        earlier candle's base.
+        kind unanimity plus the author-time certification. A later correction
+        therefore never reclassifies a historical candle: a perpetual re-specced to
+        spot cannot retroactively become an eligible spot plane, a redenominated
+        symbol cannot redraw an earlier candle's base, and a later certification or
+        decertification cannot admit or de-plane a candle authored under the
+        earlier spec.
 
         Args:
             currencies: Distinct base currencies to price.

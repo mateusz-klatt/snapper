@@ -1048,12 +1048,14 @@ class PnlFxRateRow(TypedDict):
 class PnlCryptoUsdPlaneRow(TypedDict):
     """One finalized crypto→USD candle eligible for Phase-5B basket valuation.
 
-    Returned by ``get_pnl_crypto_usd_plane_candles`` only for an active spot,
-    non-margin instrument on a real (non-paper) venue whose symbol has ``base``
+    Returned by ``get_pnl_crypto_usd_plane_candles`` only for a unanimously
+    ``spot`` instrument whose author-time spec is venue-certified (non-null
+    ``spec_source``) on a real (non-paper) venue, and whose symbol has ``base``
     equal to a requested currency and ``quote`` exactly ``USD`` at the knowledge
-    horizon. ``quote`` is therefore always ``USD``; it is projected so a consumer
-    can pin the ``(base, quote, exchange)`` plane identity uniformly with the FX
-    plane. ``candle_id`` is the row's immutable internal primary key and
+    horizon. The funding model plays no part in the proof: it describes position
+    economics, not price provenance. ``quote`` is therefore always ``USD``; it is
+    projected so a consumer can pin the ``(base, quote, exchange)`` plane identity
+    uniformly with the FX plane. ``candle_id`` is the row's immutable primary key and
     ``candle_timestamp`` its SCD2 version time; with ``candle_public_id`` they pin
     the exact candle VERSION, because a candle correction reuses ``public_id``
     while changing ``close``. ``instrument_public_id`` and ``native_symbol``
