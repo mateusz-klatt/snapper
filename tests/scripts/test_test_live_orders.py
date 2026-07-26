@@ -711,6 +711,21 @@ async def test_run_walutomat_defaults_to_all_scenarios(
     ]
 
 
+_KRAKEN_SPOT_EXPECTED_CLIENT_ORDER_IDS = {
+    "passive_buy": "test-pass-buy-1700000000",
+    "passive_sell": "test-pass-sell-1700000000",
+    "aggressive_buy": "test-aggr-buy-1700000000",
+    "aggressive_sell": "test-aggr-sell-1700000000",
+    "cancel_inflight": "test-cancel-1700000000",
+}
+"""Correlation id ``run_kraken_spot`` must send per scenario.
+
+The suffix is the frozen clock ``_run_with_client`` patches in, so an
+id that silently reverted to being omitted, or that stopped being
+derived from the scenario, fails here rather than against Kraken.
+"""
+
+
 @pytest.mark.parametrize(
     (
         "scenario",
@@ -785,6 +800,15 @@ async def test_run_kraken_spot_scenario_places_expected_order(
     Given: A mocked Kraken Spot client and one selected scenario.
     When: run_kraken_spot executes the scenario.
     Then: The request, subsequent calls, and emitted fixtures match the scenario.
+
+    The client_order_id assertion is the point of this file's change:
+    these five scenarios used to submit with no correlation id at all
+    against a real Kraken account, which is the one place either
+    venue-boundary defect reached a live venue. The expected ids come
+    from a module-level table rather than a parametrize column — the
+    Walutomat and Futures siblings carry theirs as a column, but this
+    signature is already pinned at eight arguments by the complexity
+    ratchet and a ninth would trip PLR0913.
     """
     symbol = "BTC-EUR"
     amount = 0.0001
@@ -829,7 +853,7 @@ async def test_run_kraken_spot_scenario_places_expected_order(
     assert request.amount == amount
     assert request.price == expected_price
     assert request.post_only is expected_post_only
-    assert request.client_order_id is None
+    assert request.client_order_id == _KRAKEN_SPOT_EXPECTED_CLIENT_ORDER_IDS[scenario]
     assert client.get_order.await_count == expected_get_count
     assert client.cancel_order.await_count == expected_cancel_count
     assert [call.args for call in client.get_order.await_args_list] == [

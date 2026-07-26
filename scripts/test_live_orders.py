@@ -338,6 +338,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
+                client_order_id=f"test-pass-buy-{int(time.time())}",
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -360,6 +361,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=passive_price,
+                client_order_id=f"test-pass-sell-{int(time.time())}",
                 post_only=True,
             )
             snap = await client.create_order(request)
@@ -381,6 +383,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.ask * 1.005, 1),
+                client_order_id=f"test-aggr-buy-{int(time.time())}",
             )
             snap = await client.create_order(request)
             emit("kraken", "aggressive_buy", "create", snapshot_to_dict(snap))
@@ -398,6 +401,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.995, 1),
+                client_order_id=f"test-aggr-sell-{int(time.time())}",
             )
             snap = await client.create_order(request)
             emit("kraken", "aggressive_sell", "create", snapshot_to_dict(snap))
@@ -415,6 +419,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=round(ticker.bid * 0.90, 1),
+                client_order_id=f"test-cancel-{int(time.time())}",
             )
             snap = await client.create_order(request)
             emit("kraken", "cancel_inflight", "create", snapshot_to_dict(snap))
