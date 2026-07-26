@@ -960,19 +960,11 @@
       }
     },
     "src/snapper/infrastructure/exchanges/implementations/kraken.py": {
-      "KrakenExchangeClient._create_order_via_native": {
-        "C901": 11
-      },
       "KrakenExchangeClient._subscribe_executions_impl": {
         "PLR0913": 6
       },
       "KrakenExchangeClient.subscribe_executions": {
         "PLR0913": 6
-      }
-    },
-    "src/snapper/infrastructure/exchanges/implementations/kraken_futures.py": {
-      "KrakenFuturesExchangeClient.create_order": {
-        "C901": 11
       }
     },
     "src/snapper/infrastructure/exchanges/implementations/paper.py": {

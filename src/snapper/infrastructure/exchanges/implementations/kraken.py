@@ -902,7 +902,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         rejection (the exhausted 429 cannot have placed the order).
 
         Stop types translate through ccxt's ``stopLossPrice`` param
-        (verified against the pinned ccxt 4.5.57 kraken source,
+        (verified against the pinned ccxt 4.5.68 kraken source,
         ``order_request``): the ccxt type is the BASE type (``market``
         for stop-loss, ``limit`` for stop-loss-limit) and ccxt itself
         derives ``ordertype`` from the param, putting the trigger in
@@ -932,6 +932,18 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> tuple[str, str, dict[str, Any]]:
         """Given an order request, when using CCXT, then build submit arguments.
 
+        ``clientOrderId`` is set UNCONDITIONALLY. The request contract
+        guarantees a non-empty id, so there is nothing to guard against,
+        and guarding was actively harmful: with no id on the wire the
+        venue stores no client id, the echo double-check in
+        ``find_order_by_client_id`` can never match, and it returns
+        ``None`` — which this client's own contract defines as an
+        authoritative statement of ABSENCE. Two of those publish a false
+        REJECTED for an order that may be live and filling. An empty
+        string would be equally fatal: ``ccxt.safe_string`` drops it
+        exactly as it drops ``None``, which is why the contract refuses
+        ``""`` at construction rather than leaving it to this layer.
+
         Args:
             request: Order request from the exchange contract.
 
@@ -942,9 +954,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             ValueError: Propagates symbol mapping or stop-price validation failures.
         """
         ccxt_symbol = native_to_ccxt(request.symbol)
-        ccxt_params: dict[str, Any] = {}
-        if request.client_order_id:
-            ccxt_params["clientOrderId"] = request.client_order_id
+        ccxt_params: dict[str, Any] = {"clientOrderId": request.client_order_id}
         if request.leverage is not None:
             ccxt_params["leverage"] = request.leverage
         if request.post_only:
@@ -997,13 +1007,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise
         except RestPoolDispatchError as e:
             raise AmbiguousOrderSubmitError(
-                client_order_id=request.client_order_id or "",
+                client_order_id=request.client_order_id,
                 instrument=request.symbol,
                 message=f"Kraken Spot create_order pool dispatch failure (order may exist): {e}",
             ) from e
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
             raise AmbiguousOrderSubmitError(
-                client_order_id=request.client_order_id or "",
+                client_order_id=request.client_order_id,
                 instrument=request.symbol,
                 message=f"Kraken Spot create_order network failure (order may exist): {e}",
             ) from e
@@ -1068,6 +1078,19 @@ class KrakenExchangeClient(ExchangeClientBase):
         one: ``price`` carries the STOP TRIGGER and ``price2`` the
         limit leg of ``stop-loss-limit`` (#156).
 
+        ``cl_ord_id`` is set UNCONDITIONALLY, for the reason given on
+        ``_build_ccxt_order_submit``: an order the venue holds under no
+        client id makes ``find_order_by_client_id`` answer ``None``, and
+        that answer is contractually ABSENCE, which fabricates a
+        REJECTED for an order that may be live. No ``str()`` coercion —
+        the contract types the field ``str`` and refuses ``""``, so a
+        coercion could only ever have manufactured a value, and on this
+        path specifically it would have put the literal ``"None"`` on a
+        Kraken wire while the ccxt path silently dropped it.
+        Consequently ``extra_params`` is never empty and the
+        ``extra_params or None`` guard below can no longer collapse to
+        ``None``.
+
         Args:
             request: Order parameters.
 
@@ -1098,9 +1121,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                 kraken_params["leverage"] = str(request.leverage)
             if request.post_only:
                 kraken_params["oflags"] = "post"
-            extra_params: dict[str, Any] = {}
-            if request.client_order_id:
-                extra_params["cl_ord_id"] = str(request.client_order_id)
+            extra_params: dict[str, Any] = {"cl_ord_id": request.client_order_id}
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
             try:
@@ -1115,7 +1136,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                 )
             except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
                 raise AmbiguousOrderSubmitError(
-                    client_order_id=request.client_order_id or "",
+                    client_order_id=request.client_order_id,
                     instrument=request.symbol,
                     message=f"Kraken native create_order transport failure (order may exist): {e}",
                 ) from e

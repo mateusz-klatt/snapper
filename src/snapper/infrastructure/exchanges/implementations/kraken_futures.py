@@ -1081,6 +1081,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         order is a limit order (stop-loss-limit), without it the stop
         executes at market (#156).
 
+        ``cliOrdId`` is set UNCONDITIONALLY. The request contract
+        guarantees a non-empty correlation id, and omitting it left the
+        venue holding the order under no client id, which makes a
+        client-id lookup answer "not found" — contractually ABSENCE, and
+        therefore a fabricated REJECTED for an order that may be live
+        and filling.
+
         Args:
             request: Order parameters.
 
@@ -1136,8 +1143,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         }
         if request.price is not None:
             kwargs["limitPrice"] = request.price
-        if request.client_order_id:
-            kwargs["cliOrdId"] = request.client_order_id
+        kwargs["cliOrdId"] = request.client_order_id
         if request.stop_price is not None:
             kwargs["stopPrice"] = request.stop_price
         if request.reduce_only:
@@ -1153,7 +1159,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             )
         except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
             raise AmbiguousOrderSubmitError(
-                client_order_id=request.client_order_id or "",
+                client_order_id=request.client_order_id,
                 instrument=request.symbol,
                 message=f"Kraken Futures create_order transport failure (order may exist): {e}",
             ) from e

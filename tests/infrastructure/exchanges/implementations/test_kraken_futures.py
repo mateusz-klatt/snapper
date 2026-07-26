@@ -7142,3 +7142,68 @@ class TestReadNativePositions:
         """
         with pytest.raises(RuntimeError, match="API credentials required"):
             await client.read_native_positions()
+
+
+class TestKrakenFuturesWireCorrelationIdFidelity:
+    """The correlation id reaches the Kraken Futures wire on every shape.
+
+    ``cliOrdId`` used to be attached only under
+    ``if request.client_order_id:``. With it absent the venue held the
+    order under no client id, so a client-id lookup answers "not found"
+    — contractually ABSENCE — and the executor fabricates a REJECTED for
+    an order that may be live and filling, plus a durable
+    ``order_rejected`` row that permanently exempts the command from the
+    unresolved-dispatched sweep.
+    """
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {},
+            {"type": ExchangeOrderTypeEnum.LIMIT, "price": 66000.0},
+            {"type": ExchangeOrderTypeEnum.LIMIT, "price": 66000.0, "post_only": True},
+            {"type": ExchangeOrderTypeEnum.MARKET, "reduce_only": True},
+            {"type": ExchangeOrderTypeEnum.STOP_LOSS, "stop_price": 64000.0},
+            {
+                "type": ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+                "price": 63900.0,
+                "stop_price": 64000.0,
+            },
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_cli_ord_id_is_always_sent(
+        self, auth_client: KrakenFuturesExchangeClient, overrides: dict[str, Any]
+    ) -> None:
+        """Every futures submit shape puts cliOrdId on the wire.
+
+        Given: A submit request in each shape the executor can produce,
+        When: create_order dispatches to the Trade SDK,
+        Then: ``cliOrdId`` is present and byte-identical to the
+            request's client_order_id.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-coid", "status": "placed"}}
+        )
+        fields: dict[str, Any] = {
+            "symbol": "BTC-USD-PERP",
+            "side": OrderSideEnum.BUY,
+            "type": ExchangeOrderTypeEnum.MARKET,
+            "amount": 1.0,
+            "client_order_id": "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f",
+        }
+        fields.update(overrides)
+        request = ExchangeOrderRequest(**fields)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            snapshot = await auth_client.create_order(request)
+        call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
+        assert call_kwargs["cliOrdId"] == request.client_order_id
+        assert snapshot.client_order_id == request.client_order_id

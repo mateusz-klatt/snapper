@@ -21,6 +21,7 @@ from unittest.mock import call
 from unittest.mock import patch
 from unittest.mock import patch as mock_patch
 
+import ccxt
 import pytest
 import zmq
 
@@ -7119,6 +7120,121 @@ class TestAmbiguousVerification:
         assert call_order == ["orphan-fill", "reconcile"]
         assert "ex-ver-4" not in ex.orphaned_executions
 
+    @pytest.mark.asyncio
+    async def test_verification_queries_the_core_order_id_not_the_error_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The venue is queried with the command's id, never the error's.
+
+        Given: An ambiguous submit whose error object carries a
+            DIFFERENT client_order_id from the core order — the exact
+            shape a venue adapter produced when it substituted a
+            fabricated idempotency key for a caller-supplied one,
+        When: The verification round runs,
+        Then: find_order_by_client_id is called with the CORE order's
+            client_order_id and its instrument, never the error's id.
+
+        This is the assertion that would have caught the substitution
+        defect. The id on the error is context only; the executor
+        resolves the order's fate by querying order.client_order_id, so
+        an adapter that puts anything else on the wire leaves the venue
+        holding an order under an identity nothing can ever look up.
+        The two-consecutive-absence path then publishes a false
+        REJECTED plus a sweep-exempting order_rejected row for an order
+        that may be live and filling.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-ver-fid", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order(client_order_id="core-id-1", instrument="BTC-USD")
+        divergent = AmbiguousOrderSubmitError(
+            client_order_id="fabricated-uuid4",
+            instrument="BTC-USD",
+            message="boom",
+        )
+        await ex._handle_ambiguous_submit(order, divergent)
+        ex.exchange_client.find_order_by_client_id.assert_awaited_once_with("core-id-1", "BTC-USD")
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["accepted"]
+
+    @pytest.mark.asyncio
+    async def test_echoed_client_id_adopts_instead_of_rejecting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue that echoes the id we sent gets adopted, not rejected.
+
+        Given: A Kraken-shaped ambiguous submit where the correlation id
+            DID reach the wire, so the venue lookup matches on the echo
+            and returns the live order,
+        When: The verification round runs,
+        Then: The order is ADOPTED — accepted, exchange id mapped,
+            ambiguous flag cleared — and no REJECTED is published and no
+            durable order_rejected written.
+
+        The regression pin for the omission defect. With no id on the
+        wire the venue stores none, the echo double-check can never
+        match, and the lookup answers None — contractually ABSENCE —
+        which after two rounds fabricates a REJECTED for a live order
+        and writes the very row that exempts the command from the
+        unresolved-dispatched sweep.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-kraken-live", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order(client_order_id="core-id-2")
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert "rejected" not in statuses
+        assert statuses == ["accepted"]
+        assert ex.client_by_exchange["ex-kraken-live"] == "core-id-2"
+        assert ex.pending_orders["core-id-2"].submit_ambiguous is False
+        recorded = [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
+        assert "order_rejected" not in recorded
+
+    @pytest.mark.asyncio
+    async def test_active_only_lookup_miss_still_parks_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue that cannot answer absence parks the order, unchanged.
+
+        Given: A Walutomat-shaped lookup that raises NotImplementedError
+            on any miss, because it can only scan ACTIVE orders and
+            therefore cannot distinguish "never placed" from "placed and
+            already filled",
+        When: The verification round runs,
+        Then: Verification returns False, the order parks UNKNOWN, and
+            nothing terminal is published or written.
+
+        This behaviour is DELIBERATELY unchanged by the correlation fix
+        and the test documents that. Parking is the safe answer for a
+        venue that cannot prove absence, but it is not self-healing: the
+        engine holds its in-flight guard with no timeout valve, the park
+        dies with the process, and the cross-restart sweep re-fails
+        identically every cycle. An ambiguous Walutomat submit that
+        filled therefore leaves a real unaccounted FX position. Closing
+        that needs account-history plumbing and a scoping decision about
+        what history can prove, which is a separate task — not something
+        this fix should be read as having addressed.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=NotImplementedError("active-set scan only")
+        )
+        order = make_order(client_order_id="core-id-3")
+        pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
+        ex.pending_orders["core-id-3"] = pending
+        resolved = await ex._verify_ambiguous_submit(order, pending)
+        assert resolved is False
+        assert ex.pending_orders["core-id-3"] is pending
+        ex._record_venue_event.assert_not_awaited()
+        ex._publish_order_status.assert_not_awaited()
+
 
 class TestDuplicateSubmitGuard:
     """Replayed dispatches never reach the venue twice."""
@@ -11102,3 +11218,66 @@ class TestReplayOriginGuard:
         ex._reject_if_stale.assert_not_awaited()
         ex._execute_live_order.assert_not_awaited()
         assert "replay-3" not in ex.pending_orders
+
+
+class TestVenueDuplicateIdRejectionDisposition:
+    """Characterization of how a venue duplicate-id error is disposed of.
+
+    NOT AN ENDORSEMENT. This class pins present behaviour so a follow-up
+    task provably changes it, without needing a coverage pragma.
+
+    A Kraken rejection of a duplicate ``cl_ord_id`` arrives as a plain
+    ``ExchangeError``, not a ``NetworkError``, so the ccxt submit path
+    does not wrap it in ``AmbiguousOrderSubmitError``. It therefore
+    lands in the generic handler, which publishes REJECTED and writes a
+    durable ``order_rejected`` row. Both are wrong for this input: a
+    venue saying "you already have an order with this id" is the
+    STRONGEST possible evidence the order EXISTS. The publish releases
+    the engine's in-flight intent so it may re-emit, and the durable row
+    is a member of the order-resolving event types, permanently
+    exempting the command from the unresolved-dispatched sweep — for a
+    live resting order.
+
+    The reachability window is real but narrow and PRE-EXISTING, not
+    widened by the correlation fix: production already sent
+    ``cl_ord_id`` on every order (the omission was only in the live
+    test script), and ``_is_duplicate_submit`` catches most replays
+    before the venue is reached. Manual orders support limit and stop
+    types, so resting Kraken orders under a client id do exist. The
+    correct disposition is adoption, or at minimum
+    ``AmbiguousOrderSubmitError`` and UNKNOWN — never REJECTED. Kraken's
+    exact error code for this case is documented nowhere in the repo and
+    must be confirmed against the venue before the fix is designed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_venue_exchange_error_currently_publishes_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue ExchangeError on submit becomes a durable rejection.
+
+        Given: The venue submit raising a plain ExchangeError, the shape
+            a duplicate-client-id refusal takes,
+        When: _process_order runs,
+        Then: SUBMITTED then REJECTED are published, a durable
+            order_rejected row carrying the venue text is written, and
+            the pending entry is popped.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        _enable_live_trading(ex)
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        ex._execute_live_order = AsyncMock(
+            side_effect=ccxt.ExchangeError("EOrder:Order already exists")
+        )
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        order = make_order(client_order_id="dup-cl-ord-id")
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "rejected"]
+        event = ex._record_venue_event.await_args_list[-1].args[0]
+        assert event["event_type"] == "order_rejected"
+        assert event["client_order_id"] == "dup-cl-ord-id"
+        assert "Order already exists" in event["error"]
+        assert "dup-cl-ord-id" not in ex.pending_orders

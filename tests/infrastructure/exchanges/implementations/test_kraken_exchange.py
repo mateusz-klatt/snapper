@@ -3605,7 +3605,8 @@ class TestAmbiguousSubmitClassification:
             beneath the native Trade API send,
         When: _create_order_via_native is called,
         Then: AmbiguousOrderSubmitError surfaces with the dispatch error
-            chained and the original venue call never re-executed.
+            chained, the caller's correlation id attached verbatim, and
+            the original venue call never re-executed.
         """
         trade_client = MagicMock()
 
@@ -3619,6 +3620,7 @@ class TestAmbiguousSubmitClassification:
         ):
             await kraken_client._create_order_via_native(self._request())
         assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
+        assert exc_info.value.client_order_id == "client_tax"
         trade_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3693,7 +3695,9 @@ class TestAmbiguousSubmitClassification:
             Kraken),
         When: _create_order_via_native is called,
         Then: AmbiguousOrderSubmitError surfaces with the original
-            error chained.
+            error chained and the caller's correlation id attached
+            verbatim — the same id the venue was told, so the executor's
+            verification query can find the order if it exists.
         """
         trade_client = MagicMock()
         trade_client.create_order.side_effect = requests.exceptions.ConnectionError(
@@ -3705,6 +3709,7 @@ class TestAmbiguousSubmitClassification:
         ):
             await kraken_client._create_order_via_native(self._request())
         assert isinstance(exc_info.value.__cause__, requests.exceptions.ConnectionError)
+        assert exc_info.value.client_order_id == "client_tax"
 
 
 class TestStatusBranchInSubscriptions:
@@ -8833,3 +8838,105 @@ async def test_subscribe_trade_built_candles_reuses_running_aggregator_task() ->
     assert client._trade_built_candle_aggregator_task is running
     await gen.aclose()
     assert running.cancelled() or running.done()
+
+
+class TestKrakenWireCorrelationIdFidelity:
+    """The correlation id reaches the Kraken wire on every submit shape.
+
+    These are the tests that would have caught the omission defect. The
+    id used to be attached only under ``if request.client_order_id:``,
+    and with it absent the venue stored no client id at all, so the echo
+    double-check in ``find_order_by_client_id`` could never match and it
+    returned ``None`` — which this client's contract defines as an
+    authoritative statement of ABSENCE. Two of those publish a false
+    REJECTED plus a durable ``order_rejected`` for an order that may be
+    live and filling, and that row is itself sweep-exempting, so the
+    false terminal destroys the backstop that would have caught it.
+    """
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide a credentialed client."""
+        return KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+
+    @staticmethod
+    def _request(**overrides: Any) -> ExchangeOrderRequest:
+        """Build a submit request with the given shape overrides.
+
+        Args:
+            overrides: Fields to override on the base market request.
+
+        Returns:
+            The order request.
+        """
+        fields: dict[str, Any] = {
+            "symbol": "BTC-USD",
+            "side": OrderSideEnum.BUY,
+            "type": ExchangeOrderTypeEnum.MARKET,
+            "amount": 0.1,
+            "client_order_id": "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f",
+        }
+        fields.update(overrides)
+        return ExchangeOrderRequest(**fields)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {},
+            {"type": ExchangeOrderTypeEnum.LIMIT, "price": 61000.0},
+            {"type": ExchangeOrderTypeEnum.LIMIT, "price": 61000.0, "post_only": True},
+            {"type": ExchangeOrderTypeEnum.LIMIT, "price": 61000.0, "leverage": 3},
+            {"type": ExchangeOrderTypeEnum.STOP_LOSS, "stop_price": 58000.0},
+            {
+                "type": ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+                "price": 57900.0,
+                "stop_price": 58000.0,
+            },
+        ],
+    )
+    def test_ccxt_params_always_carry_the_client_order_id(
+        self, kraken_client: KrakenExchangeClient, overrides: dict[str, Any]
+    ) -> None:
+        """Every ccxt submit shape puts clientOrderId in the params.
+
+        Given: A submit request in each shape the executor can produce —
+            market, limit, post-only, leveraged, stop and stop-limit,
+        When: The ccxt submit arguments are built,
+        Then: ``clientOrderId`` is present and byte-identical to the
+            request's id in all of them.
+        """
+        request = self._request(**overrides)
+        _, _, ccxt_params = kraken_client._build_ccxt_order_submit(request)
+        assert ccxt_params["clientOrderId"] == request.client_order_id
+
+    @pytest.mark.asyncio
+    async def test_native_extra_params_always_carry_cl_ord_id(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """The native submit always sends cl_ord_id and never a null extra_params.
+
+        Given: A native-path submit for a plain (non-tokenized) symbol,
+        When: create_order goes through the native Trade API,
+        Then: ``cl_ord_id`` equals the request id, is not coerced
+            through ``str()`` (which on the old code could only have
+            manufactured the literal "None"), and ``extra_params`` is a
+            real dict — the ``extra_params or None`` fallback can no
+            longer collapse now that the key is unconditional.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.return_value = {"txid": ["ONATIVE1"]}
+        request = self._request()
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(kraken_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="XBT/USD",
+            ),
+        ):
+            mock_log.return_value = None
+            await kraken_client._create_order_via_native(request)
+        extra_params = trade_client.create_order.call_args.kwargs["extra_params"]
+        assert extra_params is not None
+        assert extra_params["cl_ord_id"] == request.client_order_id
+        assert extra_params["cl_ord_id"] == "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f"

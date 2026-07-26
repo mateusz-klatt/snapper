@@ -29,9 +29,18 @@ class AmbiguousOrderSubmitError(RuntimeError):
     error is chained as ``__cause__`` via ``raise ... from``.
 
     Attributes:
-        client_order_id: Idempotency identity of the submit; the
-            executor verifies this id against the venue before deciding
-            the order's fate.
+        client_order_id: Correlation id the submit was sent with,
+            carried for log and alert context only. It is the same value
+            as the core order's ``client_order_id`` by construction —
+            ``ExchangeOrderRequest`` admits no other, since it requires
+            the field and refuses an empty one, so an adapter has no way
+            to raise this with a divergent id. NOTHING in ``src`` reads
+            this attribute, and in particular the executor does NOT
+            verify against it: ``_verify_ambiguous_submit`` queries the
+            venue with ``order.client_order_id``, taken from the core
+            order it is resolving. Do not treat this field as the thing
+            that decides the order's fate; treating it that way is what
+            made a fabricated venue id look survivable.
         instrument: Native instrument symbol of the submit, carried for
             log and alert context.
     """

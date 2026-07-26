@@ -5361,11 +5361,13 @@ class TestWalutomatAmbiguousSubmitClassification:
         Given: The venue answering 502 (a gateway may have forwarded
             the request to the backend before failing),
         When: create_order is called,
-        Then: AmbiguousOrderSubmitError surfaces.
+        Then: AmbiguousOrderSubmitError surfaces carrying the caller's
+            correlation id, never a fabricated or empty one.
         """
         client = self._client(monkeypatch, [cast(Any, _StatusErrorResponse(502))])
-        with pytest.raises(AmbiguousOrderSubmitError):
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
             await client.create_order(self._request())
+        assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio()
     async def test_client_4xx_is_not_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5388,11 +5390,13 @@ class TestWalutomatAmbiguousSubmitClassification:
         Given: A 200 response whose body fails JSON decoding (the venue
             likely accepted but the confirmation is unusable),
         When: create_order is called,
-        Then: AmbiguousOrderSubmitError surfaces.
+        Then: AmbiguousOrderSubmitError surfaces carrying the caller's
+            correlation id, never a fabricated or empty one.
         """
         client = self._client(monkeypatch, [cast(Any, _UnparseableResponse())])
-        with pytest.raises(AmbiguousOrderSubmitError):
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
             await client.create_order(self._request())
+        assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio()
     async def test_success_without_order_id_is_wrapped(
@@ -5403,11 +5407,14 @@ class TestWalutomatAmbiguousSubmitClassification:
         Given: A success body lacking result.orderId (accepted but the
             id was lost),
         When: create_order is called,
-        Then: AmbiguousOrderSubmitError surfaces.
+        Then: AmbiguousOrderSubmitError surfaces carrying the caller's
+            correlation id — the only handle left on an order the venue
+            accepted and whose venue id we never learned.
         """
         client = self._client(monkeypatch, [StubResponse({"success": True, "result": {}})])
-        with pytest.raises(AmbiguousOrderSubmitError):
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
             await client.create_order(self._request())
+        assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio()
     async def test_success_with_empty_order_id_is_wrapped(
@@ -5416,13 +5423,15 @@ class TestWalutomatAmbiguousSubmitClassification:
         """success=true with an empty orderId wraps as ambiguous.
 
         A falsy id passed downstream would be misread as a definitive
-        venue rejection while the order may be live.
+        venue rejection while the order may be live. The error carries
+        the caller's correlation id, never a fabricated or empty one.
         """
         client = self._client(
             monkeypatch, [StubResponse({"success": True, "result": {"orderId": ""}})]
         )
-        with pytest.raises(AmbiguousOrderSubmitError):
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
             await client.create_order(self._request())
+        assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio()
     async def test_success_with_null_order_id_is_wrapped(
