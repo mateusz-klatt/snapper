@@ -25,6 +25,7 @@ from snapper.application.ai_researchers.service import ResearcherService
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.data.models import KNOWN_TO_MAX
@@ -189,7 +190,9 @@ class TestResearcherProvisioning:
             _csrf=None,
         )
         researcher = response.payload.researcher
-        outcome = await manager.verify_token_with_reason(response.payload.access_token, repo)
+        outcome = await manager.verify_token_with_reason(
+            response.payload.access_token, repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
         assert outcome.claims is not None
         assert outcome.rejection_reason is None
         assert outcome.claims.role == UserRole.AI_RESEARCHER
@@ -283,7 +286,9 @@ class TestResearcherProvisioning:
                 permissions=[Permission.READ_MARKET_VIEWS],
             ),
         )
-        outcome = await manager.verify_token_with_reason(payload.access_token, repo)
+        outcome = await manager.verify_token_with_reason(
+            payload.access_token, repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
         assert outcome.claims is not None
         assert outcome.claims.permissions == [Permission.READ_MARKET_VIEWS.value]
         assert service._tracker is tracker

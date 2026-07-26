@@ -40,6 +40,7 @@ from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
@@ -210,7 +211,9 @@ class TestCreateDelegate:
         service = DelegateService(repository=repo, token_manager=manager)
         body = DelegateCreateBody(label="verified", caps=DelegateCapsBody())
         payload = await service.create_delegate(owner=_make_owner_principal("owner-2"), body=body)
-        outcome = await manager.verify_token_with_reason(payload.access_token, repo)
+        outcome = await manager.verify_token_with_reason(
+            payload.access_token, repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
         assert outcome.claims is not None
         assert outcome.rejection_reason is None
 

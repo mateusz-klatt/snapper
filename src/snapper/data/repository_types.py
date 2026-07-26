@@ -1620,12 +1620,28 @@ class UserActiveTokenVerificationRow(TypedDict):
     ``revoked_at IS NOT NULL`` or ``user_is_active is False`` →
     verify fails. Both states are cached in the 30-second LRU to
     keep the hot path O(1).
+
+    ``token_type`` and ``jti`` carry the credential's PURPOSE. The
+    signed JWT distinguishes a refresh credential from an access
+    credential only by a ``refresh_`` prefix on its ``jti``, and
+    nothing on the wire is authenticated as a purpose claim — the
+    long-lived delegate tokens minted before purpose was ever
+    considered carry no such claim at all. The hash-bound inventory
+    row, written by the issuer, is therefore the authority: it says
+    what the credential WAS MINTED AS, works identically for tokens
+    minted before and after this projection widened, and the signed
+    ``jti`` must corroborate it. A verifier that projects lifecycle
+    without purpose cannot tell a 30-day refresh credential from a
+    15-minute access credential, so both fields are part of the
+    minimum a caller needs to decide acceptance.
     """
 
     user_public_id: str
     revoked_at: datetime | None
     expires_at: datetime
     user_is_active: bool
+    token_type: str
+    jti: str
 
 
 class InstrumentSourceResolution(TypedDict):

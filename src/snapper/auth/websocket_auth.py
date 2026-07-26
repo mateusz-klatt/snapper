@@ -29,6 +29,7 @@ from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
 from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
@@ -282,7 +283,11 @@ class WebSocketAuthManager:
         token = self._extract_ws_bearer_token(websocket) or websocket.cookies.get("access_token")
         if not token:
             return None
-        token_data = await self.token_manager.verify_token_with_db(token, repository)
+        token_data = await self.token_manager.verify_token_with_db(
+            token,
+            repository,
+            expected_token_type=TOKEN_TYPE_ACCESS,
+        )
         if not token_data:
             return None
         delegate_public_id: str | None = None

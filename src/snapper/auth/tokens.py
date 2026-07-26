@@ -42,6 +42,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserActiveTokenInsertRow
+from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
@@ -57,7 +58,14 @@ BLACKLIST_CLEANUP_BATCH_SIZE: Final[int] = 64
 """Maximum stale blacklist heap entries processed during one cleanup pass."""
 
 VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
-"""Seconds a verify_token_with_db verdict is reused from the LRU."""
+"""Seconds one inventory read is reused from the LRU before re-reading.
+
+Deliberately NOT "seconds a verdict is reused": the LRU holds
+:class:`_InventoryFacts`, and every hit re-runs the full acceptance
+predicate with the current caller's ``expected_token_type``. What this
+window bounds is the staleness of the DB read, not the reuse of an
+answer.
+"""
 
 VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 """Upper bound on the verify-cache size before an opportunistic prune runs."""
@@ -100,20 +108,88 @@ _ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
 """Backoff after a non-cancellation recv error so the loop cannot tight-spin."""
 
 
-@dataclass(slots=True, frozen=True)
-class _VerifyCacheEntry:
-    """Frozen verdict returned by the DB-backed verify path.
+TOKEN_TYPE_ACCESS: Final[str] = "access"
+"""Inventory ``token_type`` of a credential mintable as a bearer."""
 
-    Shape carries ``user_public_id`` so the admin-bus subscriber can evict
-    every cached token for a deactivated user without scanning the
-    raw JWTs (which we never retain). ``expires_at_ts`` holds the
-    JWT ``exp`` claim as a unix timestamp so expired entries are
-    short-circuited on lookup even if they linger past the TTL.
+TOKEN_TYPE_REFRESH: Final[str] = "refresh"
+"""Inventory ``token_type`` of a credential redeemable ONLY at refresh rotation."""
+
+REFRESH_JTI_PREFIX: Final[str] = "refresh_"
+"""Prefix :meth:`TokenManager.create_tokens` stamps on a refresh JWT's ``jti``.
+
+The prefix is the ONLY purpose marker that has ever been signed, and it
+was never consulted at verification. It is now required to CORROBORATE
+the inventory row rather than to decide on its own: a signed ``jti``
+that disagrees with the row's ``token_type`` means the two records of
+one credential's purpose disagree, and a credential whose purpose is
+ambiguous is rejected.
+"""
+
+TOKEN_PURPOSE_MISMATCH_EVENT: Final[str] = "token_purpose_mismatch"
+"""Structured security-log event name for every purpose rejection."""
+
+PURPOSE_MISMATCH_JTI: Final[str] = "jti_mismatch"
+"""Reported ``actual`` when the row's ``jti`` differs from the signed ``jti``."""
+
+PURPOSE_MISMATCH_JTI_PREFIX: Final[str] = "jti_prefix_mismatch"
+"""Reported ``actual`` when the signed ``jti`` prefix contradicts the row type."""
+
+
+@dataclass(slots=True, frozen=True)
+class _InventoryFacts:
+    """What ``user_active_tokens`` says about one hash, and nothing more.
+
+    Deliberately holds FACTS, never a verdict. A verdict computed for
+    one caller's purpose ("this token is valid") is context-free the
+    moment it is stored: reused by a caller asking a DIFFERENT
+    question it launders a refresh credential into an access grant.
+    Storing the facts instead forces every consumer — cache hit and
+    cache miss alike — through the same acceptance predicate with its
+    own ``expected_token_type`` in hand.
+
+    ``row_exists`` distinguishes an absent row (no such credential was
+    ever issued, or it has been cleaned up) from a present-but-dead
+    row, which is what separates the ``invalid`` and
+    ``user_deactivated`` rejection reasons.
     """
 
-    is_valid: bool
+    row_exists: bool
+    is_revoked: bool
+    row_expires_at_ts: float
     user_is_active: bool
     user_public_id: str
+    token_type: str
+    jti: str
+
+
+_ABSENT_INVENTORY_FACTS: Final[_InventoryFacts] = _InventoryFacts(
+    row_exists=False,
+    is_revoked=True,
+    row_expires_at_ts=0.0,
+    user_is_active=False,
+    user_public_id="",
+    token_type="",
+    jti="",
+)
+"""Facts for a hash with no inventory row — fails every gate by construction."""
+
+
+@dataclass(slots=True, frozen=True)
+class _VerifyCacheEntry:
+    """Frozen inventory facts memoised by the DB-backed verify path.
+
+    Shape carries ``facts.user_public_id`` so the admin-bus subscriber
+    can evict every cached token for a deactivated user without
+    scanning the raw JWTs (which we never retain). ``expires_at_ts``
+    holds the JWT ``exp`` claim as a unix timestamp so expired entries
+    are short-circuited on lookup even if they linger past the TTL.
+
+    The entry stores :class:`_InventoryFacts` rather than a boolean
+    verdict precisely so a hit cannot answer a question the miss was
+    never asked. See that class for why.
+    """
+
+    facts: _InventoryFacts
     expires_at_ts: float
     cached_at_ts: float
 
@@ -139,6 +215,222 @@ class VerifyOutcome:
 
     claims: TokenClaims | None
     rejection_reason: str | None
+
+
+def _inventory_facts(row: UserActiveTokenVerificationRow | None) -> _InventoryFacts:
+    """Project one inventory read into the facts the verifier reasons over.
+
+    Args:
+        row: The ``user_active_tokens`` verification projection, or
+            ``None`` when the presented hash matched no row at all.
+
+    Returns:
+        :data:`_ABSENT_INVENTORY_FACTS` for a missing row, otherwise
+        the row's lifecycle and purpose fields as plain values.
+    """
+    if row is None:
+        return _ABSENT_INVENTORY_FACTS
+    return _InventoryFacts(
+        row_exists=True,
+        is_revoked=row["revoked_at"] is not None,
+        row_expires_at_ts=row["expires_at"].timestamp(),
+        user_is_active=row["user_is_active"],
+        user_public_id=row["user_public_id"],
+        token_type=row["token_type"],
+        jti=row["jti"],
+    )
+
+
+def _log_purpose_mismatch(
+    expected_token_type: str,
+    actual: str,
+    token_data: TokenClaims,
+) -> None:
+    """Emit the structured ``token_purpose_mismatch`` security event.
+
+    Names the expected and the actual purpose so an operator can tell
+    a refresh-as-bearer replay from a corrupted inventory row. Never
+    names the credential: the raw JWT and its hash stay out of logs,
+    and the ``jti`` recorded here is the public correlation id the
+    inventory and the blacklist already key by.
+
+    Unlike :func:`_log_inventory_rejection` this fires on the cache-hit
+    path too, and that asymmetry is deliberate rather than an oversight.
+    A lifecycle rejection is a property of the ROW, identical for every
+    caller, so damping it to the DB-read path still logs each distinct
+    rejection once. A purpose rejection is a property of the CALLER: the
+    entry that a refresh rotation legitimately populated is first
+    mismatched by the bearer replay that hits it, so the same damping
+    would silence precisely the first occurrence of the attack this
+    gate exists to catch. The flood risk it trades away is bounded —
+    :meth:`TokenManager.verify_token` rejects unsigned, expired and
+    blacklisted tokens before this is reachable, so an attacker must
+    already hold a genuinely valid credential to emit even one line.
+
+    Args:
+        expected_token_type: Purpose the caller demanded.
+        actual: Purpose the inventory row asserts, or one of
+            :data:`PURPOSE_MISMATCH_JTI` /
+            :data:`PURPOSE_MISMATCH_JTI_PREFIX` when the row and the
+            signed ``jti`` disagree about the same credential.
+        token_data: Verified claims of the presented JWT.
+
+    Returns:
+        None.
+    """
+    logger.bind(
+        event=TOKEN_PURPOSE_MISMATCH_EVENT,
+        expected_token_type=expected_token_type,
+        actual_token_type=actual,
+        user_public_id=token_data.user_public_id,
+        jti=token_data.jti,
+    ).warning(
+        "{}: expected={} actual={} user={} jti={}",
+        TOKEN_PURPOSE_MISMATCH_EVENT,
+        expected_token_type,
+        actual,
+        token_data.user_public_id,
+        token_data.jti,
+    )
+
+
+def _purpose_accepted(
+    facts: _InventoryFacts,
+    token_data: TokenClaims,
+    expected_token_type: str,
+) -> bool:
+    """Decide whether one live inventory row may answer for ``expected_token_type``.
+
+    Three independent agreements are required, and each is checked
+    because the others cannot stand in for it:
+
+        1. The row's ``token_type`` is the purpose the caller asked
+           for. This is the load-bearing check — the row is written by
+           the issuer and bound to the token hash, so it is positive
+           evidence of what the credential was minted as, and it is
+           already populated for every credential minted since the
+           inventory gained the column.
+        2. The row's ``jti`` is the ``jti`` that was actually signed.
+           Without it the hash bond alone would let a row be trusted
+           to describe a token it does not name.
+        3. The signed ``jti``'s ``refresh_`` prefix agrees with the
+           row's type. The prefix is the historical purpose marker;
+           if the two disagree, one of the two records has been
+           tampered with or the issuer is inconsistent, and neither
+           outcome may be resolved in the credential's favour.
+
+    Deliberately NOT checked: any purpose CLAIM inside the JWT. No such
+    claim has ever been signed, and requiring one would reject every
+    long-lived delegate credential minted before it existed.
+
+    Args:
+        facts: Inventory facts for the presented token hash.
+        token_data: Verified claims of the presented JWT.
+        expected_token_type: Purpose the call site demands, either
+            :data:`TOKEN_TYPE_ACCESS` or :data:`TOKEN_TYPE_REFRESH`.
+
+    Returns:
+        ``True`` only when all three agreements hold. Every ``False``
+        return has already emitted the security event.
+    """
+    if facts.token_type != expected_token_type:
+        _log_purpose_mismatch(expected_token_type, facts.token_type, token_data)
+        return False
+    if facts.jti != token_data.jti:
+        _log_purpose_mismatch(expected_token_type, PURPOSE_MISMATCH_JTI, token_data)
+        return False
+    if facts.jti.startswith(REFRESH_JTI_PREFIX) != (facts.token_type == TOKEN_TYPE_REFRESH):
+        _log_purpose_mismatch(expected_token_type, PURPOSE_MISMATCH_JTI_PREFIX, token_data)
+        return False
+    return True
+
+
+def _outcome_for(
+    facts: _InventoryFacts,
+    token_data: TokenClaims,
+    expected_token_type: str,
+    now_ts: float,
+) -> VerifyOutcome:
+    """Apply the full acceptance predicate to one set of inventory facts.
+
+    The single funnel every verify path runs through, cache hit and
+    cache miss alike, so a memoised read can never skip a gate the
+    fresh read applied.
+
+    Args:
+        facts: Inventory facts for the presented token hash.
+        token_data: Verified claims of the presented JWT.
+        expected_token_type: Purpose the call site demands.
+        now_ts: The caller's single clock sample.
+
+    Returns:
+        Claims on acceptance, otherwise ``claims=None`` with
+        :data:`REJECTION_REASON_USER_DEACTIVATED` when a real row's
+        owner is inactive and :data:`REJECTION_REASON_INVALID`
+        otherwise. A purpose rejection reports ``invalid`` on purpose:
+        the caller is told the credential does not work here, not what
+        it would have worked for.
+    """
+    alive = facts.row_exists and not facts.is_revoked and facts.row_expires_at_ts > now_ts
+    if not alive or not facts.user_is_active:
+        reason = (
+            REJECTION_REASON_USER_DEACTIVATED
+            if facts.user_public_id and not facts.user_is_active
+            else REJECTION_REASON_INVALID
+        )
+        return VerifyOutcome(claims=None, rejection_reason=reason)
+    if not _purpose_accepted(facts, token_data, expected_token_type):
+        return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
+    return VerifyOutcome(claims=token_data, rejection_reason=None)
+
+
+def _log_inventory_rejection(
+    facts: _InventoryFacts,
+    token_data: TokenClaims,
+    now_ts: float,
+) -> None:
+    """Log the lifecycle reason a freshly-read inventory row was refused.
+
+    Runs only on the DB-read path so a 30-second burst of replays does
+    not multiply one rejection into a log flood. Every lifecycle gate
+    that can refuse is represented: a rejection nobody can see in the
+    log is indistinguishable from a client that simply stopped calling.
+
+    Args:
+        facts: Inventory facts just read for the presented hash.
+        token_data: Verified claims of the presented JWT.
+        now_ts: The caller's single clock sample.
+
+    Returns:
+        None.
+    """
+    if not facts.row_exists:
+        logger.warning(
+            "verify_token_with_db: token not in inventory — user={} jti={}",
+            token_data.user_public_id,
+            token_data.jti,
+        )
+        return
+    if facts.is_revoked:
+        logger.info(
+            "verify_token_with_db: token revoked — user={} jti={}",
+            token_data.user_public_id,
+            token_data.jti,
+        )
+        return
+    if facts.row_expires_at_ts <= now_ts:
+        logger.info(
+            "verify_token_with_db: inventory row expired — user={} jti={}",
+            token_data.user_public_id,
+            token_data.jti,
+        )
+        return
+    if not facts.user_is_active:
+        logger.info(
+            "verify_token_with_db: user deactivated — user={} jti={}",
+            token_data.user_public_id,
+            token_data.jti,
+        )
 
 
 LONG_LIVED_TOKEN_EXPIRE_DAYS: Final[int] = 90
@@ -385,7 +677,7 @@ class TokenManager:
             permission_scope_version=PERMISSION_SCOPE_VERSION,
             exp=int((now + refresh_token_expires).timestamp()),
             iat=issued_at,
-            jti=f"refresh_{jti}",
+            jti=f"{REFRESH_JTI_PREFIX}{jti}",
             sid=session_identifier,
             user_public_id=user.user_public_id,
             operator_public_ids=user.operator_public_ids,
@@ -555,7 +847,7 @@ class TokenManager:
                 user_public_id=user_public_id,
                 jti=access_claims.jti,
                 token_hash=hash_token(pair.access_token),
-                token_type="access",
+                token_type=TOKEN_TYPE_ACCESS,
                 issued_at=issued_at,
                 expires_at=access_exp,
             ),
@@ -564,7 +856,7 @@ class TokenManager:
                 user_public_id=user_public_id,
                 jti=refresh_claims.jti,
                 token_hash=hash_token(pair.refresh_token),
-                token_type="refresh",
+                token_type=TOKEN_TYPE_REFRESH,
                 issued_at=issued_at,
                 expires_at=refresh_exp,
             ),
@@ -844,6 +1136,8 @@ class TokenManager:
         self,
         token: str,
         repository: Repository,
+        *,
+        expected_token_type: str,
     ) -> TokenClaims | None:
         """Return only ``claims`` from :meth:`verify_token_with_reason`.
 
@@ -859,19 +1153,30 @@ class TokenManager:
             token: JWT string presented by the client.
             repository: Active :class:`Repository` for the DB-backed
                 verify path.
+            expected_token_type: Purpose this call site accepts. Has
+                NO default deliberately — a transport that forgets to
+                state what it accepts must fail to typecheck rather
+                than silently accept anything, which is exactly the
+                defect this argument exists to close.
 
         Returns:
             The :class:`TokenClaims` on success, ``None`` on any
             rejection (signature, expiry, blacklist, not-in-inventory
-            revoked, user deactivated).
+            revoked, user deactivated, wrong purpose).
         """
-        outcome = await self.verify_token_with_reason(token, repository)
+        outcome = await self.verify_token_with_reason(
+            token,
+            repository,
+            expected_token_type=expected_token_type,
+        )
         return outcome.claims
 
     async def verify_token_with_reason(
         self,
         token: str,
         repository: Repository,
+        *,
+        expected_token_type: str,
     ) -> VerifyOutcome:
         """DB-backed verify with 30s LRU cache.
 
@@ -884,17 +1189,20 @@ class TokenManager:
                circuits so we never touch the DB or the cache for
                malformed / forged / blacklisted tokens.
             2. Hash the token and consult the 30-second LRU cache.
-               A hit within TTL returns immediately; a cached
-               negative verdict also short-circuits with ``None``
-               so repeated replays don't amplify DB load.
+               A hit within TTL reuses the memoised INVENTORY FACTS —
+               never a verdict — and re-runs the full acceptance
+               predicate, ``expected_token_type`` included, against
+               them. A cached dead-row fact set short-circuits the DB
+               read so repeated replays don't amplify load.
             3. On cache miss, call
                meth:`Repository.get_active_token_by_hash` which
                joins ``user_active_tokens`` with the SCD2-active
                ``users`` row. The projection carries
                ``user_is_active`` so the deactivated-user state
-               surfaces in one round-trip.
-            4. Cache the verdict for ``VERIFY_CACHE_TTL_SECONDS``
-               (positive AND negative — bounded cost for replayed
+               surfaces in one round-trip, and ``token_type`` +
+               ``jti`` so the credential's purpose does too.
+            4. Cache the facts for ``VERIFY_CACHE_TTL_SECONDS``
+               (live AND dead rows — bounded cost for replayed
                invalid tokens) and return the claims when every
                gate passes.
         Cross-instance invariant: the DB-backed deactivation
@@ -903,6 +1211,12 @@ class TokenManager:
         ``admin.user_deactivated`` so kill-switch latency collapses
         to one bus-message round trip when the broker is healthy.
 
+        Purpose invariant: the cache is keyed by token hash alone and
+        is shared by every transport, so a refresh rotation and a REST
+        request can hit the same entry within one TTL. Storing facts
+        rather than a verdict is what makes that safe — see
+        :class:`_InventoryFacts`.
+
         Args:
             token: JWT string presented by the client.
             repository: Active :class:`Repository` bound to the
@@ -910,6 +1224,10 @@ class TokenManager:
                 under the route handler's DB dep; the MCP
                 middleware and WS auth pass the same singleton so
                 connection-pool semantics match REST.
+            expected_token_type: Purpose this call site accepts,
+                either :data:`TOKEN_TYPE_ACCESS` or
+                :data:`TOKEN_TYPE_REFRESH`. No default: see
+                :meth:`verify_token_with_db`.
 
         Returns:
             A :class:`VerifyOutcome` with ``claims`` populated on
@@ -928,86 +1246,38 @@ class TokenManager:
         now_ts = datetime.now(UTC).timestamp()
         cached = self._verify_cache.get(th)
         if cached is not None and cached.cached_at_ts + VERIFY_CACHE_TTL_SECONDS > now_ts:
-            if cached.is_valid and cached.user_is_active:
-                return VerifyOutcome(claims=token_data, rejection_reason=None)
-            reason = (
-                REJECTION_REASON_USER_DEACTIVATED
-                if cached.user_public_id and not cached.user_is_active
-                else REJECTION_REASON_INVALID
-            )
-            return VerifyOutcome(claims=None, rejection_reason=reason)
+            return _outcome_for(cached.facts, token_data, expected_token_type, now_ts)
         claim_sample_key = token_data.user_public_id
         gen_before = (
             self._user_cache_generations.get(claim_sample_key, 0) if claim_sample_key else 0
         )
-        row = await repository.get_active_token_by_hash(th)
-        if row is None:
-            self._cache_verdict(
-                th,
-                is_valid=False,
-                user_is_active=False,
-                user_public_id="",
-                token_data=token_data,
-                now_ts=now_ts,
-                gen_before=gen_before,
-            )
-            logger.warning(
-                "verify_token_with_db: token not in inventory — user={} jti={}",
-                token_data.user_public_id,
-                token_data.jti,
-            )
-            return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
-        is_valid = row["revoked_at"] is None
-        user_is_active = row["user_is_active"]
-        row_user_id = row["user_public_id"]
-        self._cache_verdict(
+        facts = _inventory_facts(await repository.get_active_token_by_hash(th))
+        self._cache_inventory_facts(
             th,
-            is_valid=is_valid,
-            user_is_active=user_is_active,
-            user_public_id=row_user_id,
+            facts=facts,
             token_data=token_data,
             now_ts=now_ts,
             gen_before=gen_before,
         )
-        if not is_valid:
-            logger.info(
-                "verify_token_with_db: token revoked — user={} jti={}",
-                token_data.user_public_id,
-                token_data.jti,
-            )
-            reason = (
-                REJECTION_REASON_USER_DEACTIVATED
-                if not user_is_active
-                else REJECTION_REASON_INVALID
-            )
-            return VerifyOutcome(claims=None, rejection_reason=reason)
-        if not user_is_active:
-            logger.info(
-                "verify_token_with_db: user deactivated — user={} jti={}",
-                token_data.user_public_id,
-                token_data.jti,
-            )
-            return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_USER_DEACTIVATED)
-        return VerifyOutcome(claims=token_data, rejection_reason=None)
+        _log_inventory_rejection(facts, token_data, now_ts)
+        return _outcome_for(facts, token_data, expected_token_type, now_ts)
 
-    def _cache_verdict(
+    def _cache_inventory_facts(
         self,
         token_hash: str,
         *,
-        is_valid: bool,
-        user_is_active: bool,
-        user_public_id: str,
+        facts: _InventoryFacts,
         token_data: TokenClaims,
         now_ts: float,
         gen_before: int,
     ) -> None:
-        """Insert a verdict row, prune on overflow, and skip on stale generation.
+        """Memoise one read's inventory facts, prune on overflow, skip on stale generation.
 
         The ``gen_before`` parameter guards against a race:
         if the caller sampled the per-user generation
         before the DB read and a concurrent
         :meth:`invalidate_user_cache` incremented it during that
-        read, the verdict we are about to cache may reflect a user
+        read, the facts we are about to cache may reflect a user
         state that an admin event has already superseded. In that
         case we do NOT cache — the next verify hit re-reads the DB
         rather than serving a stale positive from the LRU.
@@ -1035,10 +1305,10 @@ class TokenManager:
 
         Args:
             token_hash: SHA-256 hex digest of the token (cache key).
-            is_valid: ``revoked_at IS NULL`` on the inventory row.
-            user_is_active: SCD2-active ``users.is_active`` value.
-            user_public_id: Owner user's UUID7 (empty when the row
-                is absent entirely).
+            facts: Inventory facts just read for ``token_hash``,
+                including the row's purpose. Facts and not a verdict,
+                so a hit can be re-judged under a different
+                ``expected_token_type`` than the miss was.
             token_data: Verified :class:`TokenClaims` used for the
                 cache entry's expiry stamp.
             now_ts: Monotonic-ish "now" the caller also used to read
@@ -1064,9 +1334,7 @@ class TokenManager:
             )
             return
         self._verify_cache[token_hash] = _VerifyCacheEntry(
-            is_valid=is_valid,
-            user_is_active=user_is_active,
-            user_public_id=user_public_id,
+            facts=facts,
             expires_at_ts=float(token_data.exp),
             cached_at_ts=now_ts,
         )
@@ -1127,7 +1395,7 @@ class TokenManager:
         The user's
         generation counter is bumped FIRST so any ``verify_token_with_reason``
         that is mid-flight on this user (already past the DB read)
-        sees a generation mismatch in :meth:`_cache_verdict` and
+        sees a generation mismatch in :meth:`_cache_inventory_facts` and
         skips the cache write. Without the bump, a concurrent
         verify could repopulate a freshly-evicted entry with a
         stale positive verdict and admit a deactivated user for up
@@ -1149,7 +1417,7 @@ class TokenManager:
         matching_keys = [
             key
             for key, entry in self._verify_cache.items()
-            if entry.user_public_id == user_public_id
+            if entry.facts.user_public_id == user_public_id
         ]
         for key in matching_keys:
             del self._verify_cache[key]
@@ -1175,7 +1443,7 @@ class TokenManager:
         token_data = self.verify_token(refresh_token)
         if not token_data:
             return None
-        if not token_data.jti.startswith("refresh_"):
+        if not token_data.jti.startswith(REFRESH_JTI_PREFIX):
             logger.warning("Attempted to refresh with non-refresh token")
             return None
         self.blacklist_token(token_data.jti)
@@ -1486,7 +1754,11 @@ class TokenManager:
     async def _scan_deactivated_cached_users_once(self) -> None:
         """Cross-check cached user ids against the DB-backed deactivation registry."""
         user_public_ids = sorted(
-            {entry.user_public_id for entry in self._verify_cache.values() if entry.user_public_id}
+            {
+                entry.facts.user_public_id
+                for entry in self._verify_cache.values()
+                if entry.facts.user_public_id
+            }
         )
         inactive_user_public_ids = await list_inactive_user_public_ids(
             self._deactivation_repository_factory,

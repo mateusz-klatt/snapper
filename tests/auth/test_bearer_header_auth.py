@@ -33,6 +33,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import _extract_refresh_bearer_token
 from snapper.auth.routes import _should_return_tokens
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.websocket_auth import WebSocketAuthManager
 
 
@@ -122,7 +123,9 @@ class TestGetCurrentUserBearer:
             principal = await get_current_user(request, repo)
         assert principal is not None
         assert principal.username == "alice"
-        mgr.verify_token_with_db.assert_awaited_once_with("h.e.ader-jwt", repo)
+        mgr.verify_token_with_db.assert_awaited_once_with(
+            "h.e.ader-jwt", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_bearer_header_takes_precedence_over_cookie(self) -> None:
@@ -142,7 +145,9 @@ class TestGetCurrentUserBearer:
             mgr.verify_token_with_db = AsyncMock(return_value=claims)
             mock_get.return_value = mgr
             await get_current_user(request, repo)
-        mgr.verify_token_with_db.assert_awaited_once_with("header.jwt", repo)
+        mgr.verify_token_with_db.assert_awaited_once_with(
+            "header.jwt", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
 
 class TestValidateCsrfTokenBearerSkip:
@@ -257,7 +262,9 @@ class TestWebSocketBearerAuth:
         assert result is not None
         principal, _claims = result
         assert principal.username == "ai-delegate-1"
-        token_manager_mock.verify_token_with_db.assert_awaited_once_with("ws.jwt", repo)
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with(
+            "ws.jwt", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_ai_delegate_principal_carries_delegate_public_id(self) -> None:
@@ -420,7 +427,9 @@ class TestWebSocketBearerAuth:
             token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
             await manager.verify_session_cookie(ws, repo)
 
-        token_manager_mock.verify_token_with_db.assert_awaited_once_with("ws.header", repo)
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with(
+            "ws.header", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
     @pytest.mark.asyncio
     async def test_both_missing_returns_none(self) -> None:
@@ -457,7 +466,9 @@ class TestWebSocketBearerAuth:
         with patch.object(manager, "token_manager") as token_manager_mock:
             token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
             await manager.verify_session_cookie(ws, repo)
-        token_manager_mock.verify_token_with_db.assert_awaited_once_with("cookie.jwt", repo)
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with(
+            "cookie.jwt", repo, expected_token_type=TOKEN_TYPE_ACCESS
+        )
 
 
 class TestCsrfStillRequiredWithoutBearer:

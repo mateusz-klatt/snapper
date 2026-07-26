@@ -21,7 +21,9 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TokenManager
+from snapper.auth.tokens import _InventoryFacts
 from snapper.auth.tokens import _VerifyCacheEntry
 from snapper.data.repository import Repository
 from snapper.messaging.schemas.data import UserDeactivatedData
@@ -47,9 +49,15 @@ def _seed_cache_entry(manager: TokenManager, token_hash: str, user_public_id: st
     """Plant one active positive-verdict entry for ``user_public_id``."""
     now_ts = datetime.now(UTC).timestamp()
     manager._verify_cache[token_hash] = _VerifyCacheEntry(
-        is_valid=True,
-        user_is_active=True,
-        user_public_id=user_public_id,
+        facts=_InventoryFacts(
+            row_exists=True,
+            is_revoked=False,
+            row_expires_at_ts=now_ts + 900,
+            user_is_active=True,
+            user_public_id=user_public_id,
+            token_type=TOKEN_TYPE_ACCESS,
+            jti=f"jti-{user_public_id}",
+        ),
         expires_at_ts=now_ts + 900,
         cached_at_ts=now_ts,
     )

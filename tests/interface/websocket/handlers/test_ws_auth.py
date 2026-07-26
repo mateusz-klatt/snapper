@@ -55,6 +55,8 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
+from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
@@ -3277,6 +3279,7 @@ class StubTokenManager:
         self.last_permissions: set[Permission | str] | None = None
         self.create_tokens_error: PermissionScopeError | None = None
         self.last_verified_token: str | None = None
+        self.last_expected_token_type: str | None = None
         self.last_session_id: str | None = None
         self.persisted_pairs: list[tuple[TokenPair, str]] = []
         self.rotated_old_jtis: list[str] = []
@@ -3327,9 +3330,12 @@ class StubTokenManager:
         self,
         token: str,
         repository: object,
+        *,
+        expected_token_type: str,
     ) -> TokenClaims | None:
-        """DB-backed verify stub: delegates to the sync ``verify_token`` verdict."""
+        """DB-backed verify stub: records the demanded purpose, echoes the verdict."""
         self.last_verified_token = token
+        self.last_expected_token_type = expected_token_type
         return self.verify_response
 
     def blacklist_token(self, jti: str) -> None:
@@ -3672,7 +3678,11 @@ def test_refresh_token_success(
     Then: Returns rotated tokens and ws_token, AND the principal handed
         to ``token_manager.create_tokens`` carries the same
         ``active_wallet_public_id`` value (round-trips through the
-        refresh path so the user's wallet selection survives a refresh).
+        refresh path so the user's wallet selection survives a refresh),
+        AND the route demanded the refresh purpose — rotation is the
+        only consumer entitled to redeem a refresh credential, and
+        asking for ``access`` here would let a stolen bearer mint an
+        endless succession of fresh pairs.
     """
     client, user_service, token_manager, csrf_manager = auth_app
     token_manager.verify_response = TokenClaims(
@@ -3717,6 +3727,7 @@ def test_refresh_token_success(
     response = client.post("/auth/refresh")
     assert response.status_code == 200
     assert token_manager.last_verified_token == "existing-refresh"
+    assert token_manager.last_expected_token_type == TOKEN_TYPE_REFRESH
     assert token_manager.blacklisted == ["refresh_jti"]
     assert response.cookies.get("access_token") == "rotated-access"
     assert response.cookies.get("refresh_token") == "rotated-refresh"
@@ -5401,11 +5412,15 @@ class TestWebSocketAuthManager:
         websocket = MagicMock(spec=WebSocket)
         websocket.cookies = {"access_token": tokens.access_token}
 
+        access_claims = token_manager.verify_token(tokens.access_token)
+        assert access_claims is not None
         row = UserActiveTokenVerificationRow(
             user_public_id=user.user_public_id,
             revoked_at=None,
             expires_at=datetime.now(UTC) + timedelta(minutes=15),
             user_is_active=True,
+            token_type=TOKEN_TYPE_ACCESS,
+            jti=access_claims.jti,
         )
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=row)

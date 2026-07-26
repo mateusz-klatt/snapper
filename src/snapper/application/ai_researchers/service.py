@@ -24,6 +24,7 @@ from snapper.api.schemas.ai_researchers import ResearcherCreatedPayload
 from snapper.api.schemas.ai_researchers import ResearcherRead
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.data.models import User
@@ -166,7 +167,7 @@ class ResearcherService:
                     user_public_id=researcher_user.public_id,
                     jti=token.jti,
                     token_hash=hash_token(token.access_token),
-                    token_type="access",
+                    token_type=TOKEN_TYPE_ACCESS,
                     issued_at=now,
                     expires_at=token.expires_at,
                 )

@@ -35,6 +35,7 @@ from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.core.json_types import JsonObject
@@ -172,7 +173,7 @@ class DelegateService:
         owner: AuthPrincipal,
         body: DelegateCreateBody,
     ) -> DelegateCreatedPayload:
-        """Atomically mint a new AI delegate + trading caps + token pair.
+        """Atomically mint a new AI delegate + trading caps + access token.
 
         Steps (all in one transaction)
             1. Resolve + validate the target operator binding via
@@ -197,16 +198,24 @@ class DelegateService:
                canonical operator scope — the refresh round-trip
                can later re-resolve identical
                ``operator_public_ids`` from DB.
-            6. Mint an access+refresh pair via
-               :meth:`TokenManager.create_tokens`. The principal
-               passed in carries ``operator_public_ids=[bound]``
-               so the minted JWT decodes with populated operator
-               scope and
+            6. Mint a single long-lived personal access token via
+               :meth:`TokenManager.create_delegate_access_token`.
+               A delegate gets NO refresh credential: it cannot
+               run a browser rotation round-trip, and a refresh
+               token in a bridge config would be a second
+               long-lived credential with frozen claims. The
+               principal passed in carries
+               ``operator_public_ids=[bound]`` so the minted JWT
+               decodes with populated operator scope and
                :func:`~snapper.mcp.auth.validate_user_wallet_scope`
                admits the delegate's first write call.
-            7. Insert both ``user_active_tokens`` rows so
-               ``verify_token_with_db`` admits them on the next
-               request.
+            7. Insert the one ``user_active_tokens`` row, typed
+               :data:`~snapper.auth.tokens.TOKEN_TYPE_ACCESS`, so
+               ``verify_token_with_db`` admits it on the next
+               request. That row is the ONLY record of what this
+               credential was minted as — the JWT carries no
+               purpose claim — so the type written here is what
+               every transport later enforces.
         If any step raises, the outer ``async with session`` rolls
         back — no partial User row, no orphan caps, no membership
         without a User, no phantom tokens.
@@ -326,7 +335,7 @@ class DelegateService:
                     user_public_id=delegate_user.public_id,
                     jti=pat.jti,
                     token_hash=hash_token(pat.access_token),
-                    token_type="access",
+                    token_type=TOKEN_TYPE_ACCESS,
                     issued_at=now,
                     expires_at=pat.expires_at,
                 )

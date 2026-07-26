@@ -39,6 +39,7 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.tokens import BLACKLIST_CLEANUP_BATCH_SIZE
 from snapper.auth.tokens import BLACKLIST_GRACE_PERIOD_SECONDS
 from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
@@ -1687,7 +1688,9 @@ class TestGetCurrentUser:
             assert result.permissions == ["read:market_data", "create:orders"]
             assert request.state.user == result
             assert request.state.token_data == token_data
-            mock_token_manager.verify_token_with_db.assert_awaited_once_with("valid_token", repo)
+            mock_token_manager.verify_token_with_db.assert_awaited_once_with(
+                "valid_token", repo, expected_token_type=TOKEN_TYPE_ACCESS
+            )
 
     async def test_get_current_user_populates_delegate_public_id_for_downscoped_ai_delegate(
         self,

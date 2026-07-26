@@ -11,23 +11,33 @@ Covers :meth:`TokenManager.verify_token_with_db`:
 """
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Final
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
+from snapper.auth.tokens import PURPOSE_MISMATCH_JTI
+from snapper.auth.tokens import PURPOSE_MISMATCH_JTI_PREFIX
 from snapper.auth.tokens import REJECTION_REASON_INVALID
 from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
+from snapper.auth.tokens import TOKEN_PURPOSE_MISMATCH_EVENT
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
+from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import VERIFY_CACHE_MAX_ENTRIES
 from snapper.auth.tokens import VERIFY_CACHE_TTL_SECONDS
 from snapper.auth.tokens import TokenManager
+from snapper.auth.tokens import _inventory_facts
 from snapper.auth.tokens import _VerifyCacheEntry
 from snapper.auth.tokens import hash_token
 from snapper.data.repository_types import UserActiveTokenVerificationRow
@@ -45,18 +55,48 @@ def _fresh_manager() -> TokenManager:
     return manager
 
 
+_ACCESS: Final[str] = TOKEN_TYPE_ACCESS
+"""Local alias so the mandatory purpose argument fits the line budget."""
+
+
+def _signed_jti(manager: TokenManager, token: str) -> str:
+    """Return the ``jti`` the presented JWT was actually signed with."""
+    claims = manager.verify_token(token)
+    assert claims is not None
+    return claims.jti
+
+
 def _make_verification_row(
     *,
+    jti: str,
     revoked: bool = False,
     user_is_active: bool = True,
     user_public_id: str = "user-verify",
+    token_type: str = TOKEN_TYPE_ACCESS,
 ) -> UserActiveTokenVerificationRow:
+    """Inventory projection that names ``jti`` and records ``token_type``."""
     now = datetime.now(UTC)
     return UserActiveTokenVerificationRow(
         user_public_id=user_public_id,
         revoked_at=now if revoked else None,
         expires_at=now + timedelta(minutes=15),
         user_is_active=user_is_active,
+        token_type=token_type,
+        jti=jti,
+    )
+
+
+def _entry(
+    row: UserActiveTokenVerificationRow | None,
+    *,
+    cached_at_ts: float,
+    expires_at_ts: float,
+) -> _VerifyCacheEntry:
+    """Cache entry holding exactly the facts one inventory read would yield."""
+    return _VerifyCacheEntry(
+        facts=_inventory_facts(row),
+        expires_at_ts=expires_at_ts,
+        cached_at_ts=cached_at_ts,
     )
 
 
@@ -70,6 +110,43 @@ def _mint_access_token(manager: TokenManager, *, user_public_id: str = "user-ver
     return manager.create_tokens(principal).access_token
 
 
+def _mint_refresh_token(manager: TokenManager, *, user_public_id: str = "user-verify") -> str:
+    """Produce a fresh refresh JWT — the credential a bearer must never be."""
+    principal = AuthPrincipal(
+        username="verify-user",
+        role=UserRole.VIEWER,
+        user_public_id=user_public_id,
+    )
+    return manager.create_tokens(principal).refresh_token
+
+
+@contextmanager
+def _purpose_events() -> Iterator[list[tuple[str, str]]]:
+    """Capture ``(expected, actual)`` from every structured purpose-mismatch record.
+
+    Renders the BOUND fields rather than the interpolated sentence, so
+    the assertions fail if the event stops carrying its structure even
+    when the human-readable text still reads correctly.
+    """
+    captured: list[tuple[str, str]] = []
+
+    def _sink(message: str) -> None:
+        """Collect one rendered record's expected/actual purpose pair."""
+        expected, actual = message.strip().split("|")
+        captured.append((expected, actual))
+
+    handler_id = logger.add(
+        _sink,
+        level="WARNING",
+        format="{extra[expected_token_type]}|{extra[actual_token_type]}",
+        filter=lambda record: record["extra"].get("event") == TOKEN_PURPOSE_MISMATCH_EVENT,
+    )
+    try:
+        yield captured
+    finally:
+        logger.remove(handler_id)
+
+
 class TestVerifyTokenWithDB:
     """DB + cache gates in sequence."""
 
@@ -79,15 +156,19 @@ class TestVerifyTokenWithDB:
         manager = _fresh_manager()
         token = _mint_access_token(manager)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
-        claims = await manager.verify_token_with_db(token, repo)
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        claims = await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS)
         assert claims is not None
         assert claims.username == "verify-user"
         assert hash_token(token) in manager._verify_cache
         entry = manager._verify_cache[hash_token(token)]
-        assert entry.is_valid is True
-        assert entry.user_is_active is True
-        assert entry.user_public_id == "user-verify"
+        assert entry.facts.row_exists is True
+        assert entry.facts.is_revoked is False
+        assert entry.facts.user_is_active is True
+        assert entry.facts.user_public_id == "user-verify"
+        assert entry.facts.token_type == TOKEN_TYPE_ACCESS
 
     @pytest.mark.asyncio
     async def test_cache_hit_avoids_second_db_call(self) -> None:
@@ -95,9 +176,15 @@ class TestVerifyTokenWithDB:
         manager = _fresh_manager()
         token = _mint_access_token(manager)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
-        assert await manager.verify_token_with_db(token, repo) is not None
-        assert await manager.verify_token_with_db(token, repo) is not None
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        assert (
+            await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is not None
+        )
+        assert (
+            await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is not None
+        )
         assert repo.get_active_token_by_hash.await_count == 1
 
     @pytest.mark.asyncio
@@ -107,12 +194,12 @@ class TestVerifyTokenWithDB:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        assert await manager.verify_token_with_db(token, repo) is None
-        assert await manager.verify_token_with_db(token, repo) is None
+        assert await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is None
+        assert await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is None
         assert repo.get_active_token_by_hash.await_count == 1
         entry = manager._verify_cache[hash_token(token)]
-        assert entry.is_valid is False
-        assert entry.user_is_active is False
+        assert entry.facts.row_exists is False
+        assert entry.facts.user_is_active is False
 
     @pytest.mark.asyncio
     async def test_revoked_row_returns_none(self) -> None:
@@ -120,10 +207,12 @@ class TestVerifyTokenWithDB:
         manager = _fresh_manager()
         token = _mint_access_token(manager)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row(revoked=True))
-        assert await manager.verify_token_with_db(token, repo) is None
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token), revoked=True)
+        )
+        assert await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is None
         entry = manager._verify_cache[hash_token(token)]
-        assert entry.is_valid is False
+        assert entry.facts.is_revoked is True
 
     @pytest.mark.asyncio
     async def test_deactivated_user_returns_none(self) -> None:
@@ -132,9 +221,11 @@ class TestVerifyTokenWithDB:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(
-            return_value=_make_verification_row(user_is_active=False)
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), user_is_active=False
+            )
         )
-        assert await manager.verify_token_with_db(token, repo) is None
+        assert await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is None
 
     @pytest.mark.asyncio
     async def test_invalid_jwt_never_touches_db(self) -> None:
@@ -142,7 +233,10 @@ class TestVerifyTokenWithDB:
         manager = _fresh_manager()
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        assert await manager.verify_token_with_db("not.a.jwt", repo) is None
+        assert (
+            await manager.verify_token_with_db("not.a.jwt", repo, expected_token_type=_ACCESS)
+            is None
+        )
         repo.get_active_token_by_hash.assert_not_awaited()
 
 
@@ -162,7 +256,9 @@ class TestVerifyTokenWithReasonBranches:
         manager = _fresh_manager()
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        outcome = await manager.verify_token_with_reason("not.a.jwt", repo)
+        outcome = await manager.verify_token_with_reason(
+            "not.a.jwt", repo, expected_token_type=_ACCESS
+        )
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
         repo.get_active_token_by_hash.assert_not_awaited()
@@ -176,8 +272,10 @@ class TestVerifyTokenWithReasonBranches:
         assert token_data is not None
         manager.blacklist_token_immediately(token_data.jti)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
-        outcome = await manager.verify_token_with_reason(token, repo)
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=token_data.jti)
+        )
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
         repo.get_active_token_by_hash.assert_not_awaited()
@@ -188,8 +286,10 @@ class TestVerifyTokenWithReasonBranches:
         manager = _fresh_manager()
         token = _mint_access_token(manager)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
-        outcome = await manager.verify_token_with_reason(token, repo)
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is not None
         assert outcome.rejection_reason is None
 
@@ -200,7 +300,7 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
 
@@ -211,9 +311,11 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(
-            return_value=_make_verification_row(revoked=True, user_is_active=True)
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), revoked=True, user_is_active=True
+            )
         )
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
 
@@ -229,9 +331,11 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(
-            return_value=_make_verification_row(revoked=True, user_is_active=False)
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), revoked=True, user_is_active=False
+            )
         )
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
 
@@ -242,9 +346,11 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(
-            return_value=_make_verification_row(user_is_active=False)
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), user_is_active=False
+            )
         )
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
 
@@ -255,16 +361,18 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         th = hash_token(token)
         now_ts = datetime.now(UTC).timestamp()
-        manager._verify_cache[th] = _VerifyCacheEntry(
-            is_valid=False,
-            user_is_active=False,
-            user_public_id="user-cached-deactivated",
-            expires_at_ts=now_ts + 900,
+        manager._verify_cache[th] = _entry(
+            _make_verification_row(
+                jti=_signed_jti(manager, token),
+                user_is_active=False,
+                user_public_id="user-cached-deactivated",
+            ),
             cached_at_ts=now_ts,
+            expires_at_ts=now_ts + 900,
         )
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
         repo.get_active_token_by_hash.assert_not_awaited()
 
@@ -280,16 +388,14 @@ class TestVerifyTokenWithReasonBranches:
         token = _mint_access_token(manager)
         th = hash_token(token)
         now_ts = datetime.now(UTC).timestamp()
-        manager._verify_cache[th] = _VerifyCacheEntry(
-            is_valid=False,
-            user_is_active=False,
-            user_public_id="",
-            expires_at_ts=now_ts + 900,
+        manager._verify_cache[th] = _entry(
+            None,
             cached_at_ts=now_ts,
+            expires_at_ts=now_ts + 900,
         )
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
-        outcome = await manager.verify_token_with_reason(token, repo)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
         repo.get_active_token_by_hash.assert_not_awaited()
 
@@ -312,12 +418,10 @@ class TestInvalidateUserCache:
             ("hash-a2", "target"),
             ("hash-b1", "bystander"),
         ]:
-            manager._verify_cache[th] = _VerifyCacheEntry(
-                is_valid=True,
-                user_is_active=True,
-                user_public_id=uid,
-                expires_at_ts=now_ts + 900,
+            manager._verify_cache[th] = _entry(
+                _make_verification_row(jti=f"jti-{uid}", user_public_id=uid),
                 cached_at_ts=now_ts,
+                expires_at_ts=now_ts + 900,
             )
         evicted = manager.invalidate_user_cache("target")
         assert evicted == 2
@@ -347,20 +451,20 @@ class TestVerifyCachePrune:
         manager = _fresh_manager()
         base_ts = datetime.now(UTC).timestamp()
         for i in range(VERIFY_CACHE_MAX_ENTRIES):
-            manager._verify_cache[f"fresh-{i}"] = _VerifyCacheEntry(
-                is_valid=True,
-                user_is_active=True,
-                user_public_id=f"user-{i}",
-                expires_at_ts=base_ts + 900,
+            manager._verify_cache[f"fresh-{i}"] = _entry(
+                _make_verification_row(jti=f"jti-{i}", user_public_id=f"user-{i}"),
                 cached_at_ts=base_ts + i * 0.001,
+                expires_at_ts=base_ts + 900,
             )
         assert len(manager._verify_cache) == VERIFY_CACHE_MAX_ENTRIES
         token = _mint_access_token(manager, user_public_id="burst-user")
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(
-            return_value=_make_verification_row(user_public_id="burst-user")
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), user_public_id="burst-user"
+            )
         )
-        await manager.verify_token_with_db(token, repo)
+        await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS)
         assert len(manager._verify_cache) <= VERIFY_CACHE_MAX_ENTRIES
         assert "fresh-0" not in manager._verify_cache
         assert hash_token(token) in manager._verify_cache
@@ -371,24 +475,24 @@ class TestVerifyCachePrune:
 
         Seed the cache over the max-entries threshold with stale
         timestamps. The next verify call triggers
-        :meth:`_prune_verify_cache` via :meth:`_cache_verdict` when
+        :meth:`_prune_verify_cache` via :meth:`_cache_inventory_facts` when
         size > ``VERIFY_CACHE_MAX_ENTRIES``.
         """
         manager = _fresh_manager()
         stale_ts = datetime.now(UTC).timestamp() - (VERIFY_CACHE_TTL_SECONDS * 2)
         for i in range(VERIFY_CACHE_MAX_ENTRIES + 1):
-            manager._verify_cache[f"stale-{i}"] = _VerifyCacheEntry(
-                is_valid=False,
-                user_is_active=False,
-                user_public_id="",
-                expires_at_ts=stale_ts,
+            manager._verify_cache[f"stale-{i}"] = _entry(
+                None,
                 cached_at_ts=stale_ts,
+                expires_at_ts=stale_ts,
             )
         assert len(manager._verify_cache) == VERIFY_CACHE_MAX_ENTRIES + 1
         token = _mint_access_token(manager)
         repo = MagicMock()
-        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
-        await manager.verify_token_with_db(token, repo)
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS)
         stale_keys_remaining = [k for k in manager._verify_cache if k.startswith("stale-")]
         assert stale_keys_remaining == []
 
@@ -409,10 +513,10 @@ class TestVerifyCacheGenerationRace:
         Given: a verify call that has passed the sync ``verify_token``
             gate and is about to read the DB,
         When: :meth:`invalidate_user_cache` runs for the same user
-            BEFORE the verify call reaches :meth:`_cache_verdict`
+            BEFORE the verify call reaches :meth:`_cache_inventory_facts`
             (simulated by bumping the generation manually after
             sampling),
-        Then: :meth:`_cache_verdict` sees the mismatched generation
+        Then: :meth:`_cache_inventory_facts` sees the mismatched generation
             and skips the write — the cache stays empty rather than
             storing a positive verdict the admin event has already
             invalidated.
@@ -424,11 +528,11 @@ class TestVerifyCacheGenerationRace:
         assert token_data is not None
         gen_before = manager._user_cache_generations.get("race-user", 0)
         manager.invalidate_user_cache("race-user")
-        manager._cache_verdict(
+        manager._cache_inventory_facts(
             th,
-            is_valid=True,
-            user_is_active=True,
-            user_public_id="race-user",
+            facts=_inventory_facts(
+                _make_verification_row(jti=token_data.jti, user_public_id="race-user")
+            ),
             token_data=token_data,
             now_ts=datetime.now(UTC).timestamp(),
             gen_before=gen_before,
@@ -440,7 +544,7 @@ class TestVerifyCacheGenerationRace:
         """Quiescent path — no racing bump → verdict lands in cache.
 
         Given: a verify call with no competing admin event,
-        When: :meth:`_cache_verdict` is called with the generation
+        When: :meth:`_cache_inventory_facts` is called with the generation
             sampled at entry,
         Then: the cache entry IS written (the guard must not
             regress the normal path).
@@ -451,11 +555,11 @@ class TestVerifyCacheGenerationRace:
         token_data = manager.verify_token(token)
         assert token_data is not None
         gen_before = manager._user_cache_generations.get("quiet-user", 0)
-        manager._cache_verdict(
+        manager._cache_inventory_facts(
             th,
-            is_valid=True,
-            user_is_active=True,
-            user_public_id="quiet-user",
+            facts=_inventory_facts(
+                _make_verification_row(jti=token_data.jti, user_public_id="quiet-user")
+            ),
             token_data=token_data,
             now_ts=datetime.now(UTC).timestamp(),
             gen_before=gen_before,
@@ -468,7 +572,7 @@ class TestVerifyCacheGenerationRace:
 
         Given: a token whose claim ``user_public_id=""`` (legacy
             issuance shape) and a successful DB-row lookup,
-        When: :meth:`_cache_verdict` runs,
+        When: :meth:`_cache_inventory_facts` runs,
         Then: the cache is NOT written — the race guard needs a
             pre-DB-read sample keyed off the same identifier the
             admin-bus listener bumps, but a blank claim has no such
@@ -493,11 +597,11 @@ class TestVerifyCacheGenerationRace:
             sid="legacy-sid",
             user_public_id="",
         )
-        manager._cache_verdict(
+        manager._cache_inventory_facts(
             "legacy-hash",
-            is_valid=True,
-            user_is_active=True,
-            user_public_id="legacy-row-id",
+            facts=_inventory_facts(
+                _make_verification_row(jti="legacy-jti", user_public_id="legacy-row-id")
+            ),
             token_data=legacy_claims,
             now_ts=datetime.now(UTC).timestamp(),
             gen_before=0,
@@ -510,7 +614,7 @@ class TestVerifyCacheGenerationRace:
 
         Given: a token whose claim is blank AND the DB lookup
             returned a row without a ``user_public_id``,
-        When: :meth:`_cache_verdict` runs,
+        When: :meth:`_cache_inventory_facts` runs,
         Then: nothing is cached — the race guard has no
             authoritative key to compare against, so fail-closed.
         """
@@ -527,11 +631,9 @@ class TestVerifyCacheGenerationRace:
             sid="sid",
             user_public_id="",
         )
-        manager._cache_verdict(
+        manager._cache_inventory_facts(
             "orphan-hash",
-            is_valid=False,
-            user_is_active=False,
-            user_public_id="",
+            facts=_inventory_facts(None),
             token_data=blank_claims,
             now_ts=datetime.now(UTC).timestamp(),
             gen_before=0,
@@ -555,11 +657,13 @@ class TestVerifyCacheGenerationRace:
         async def _slow_lookup(_hash: str) -> UserActiveTokenVerificationRow:
             await asyncio.sleep(0)
             manager.invalidate_user_cache("concurrent-user")
-            return _make_verification_row(user_public_id="concurrent-user")
+            return _make_verification_row(
+                jti=_signed_jti(manager, token), user_public_id="concurrent-user"
+            )
 
         repo = MagicMock()
         repo.get_active_token_by_hash = _slow_lookup
-        await manager.verify_token_with_reason(token, repo)
+        await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
         assert hash_token(token) not in manager._verify_cache
 
 
@@ -618,3 +722,232 @@ class TestBlacklistHardCap:
         manager.blacklist_token_immediately("imm-fresh")
         assert len(manager._blacklisted_tokens) == BLACKLIST_MAX_ENTRIES
         assert "imm-000000" not in manager._blacklisted_tokens
+
+
+class TestTokenPurposeGate:
+    """The inventory row decides what a live credential may be used AS.
+
+    Every case here holds the lifecycle gates constant — unrevoked
+    row, unexpired row, active user — so the only thing under test is
+    whether purpose is enforced. Before this gate existed each of these
+    tokens authenticated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refresh_row_rejected_for_an_access_check(self) -> None:
+        """A refresh credential presented as a bearer is refused.
+
+        Given: a live ``refresh`` inventory row whose ``jti`` matches
+            the presented refresh JWT and whose owner is active,
+        When: a transport that accepts only access bearers verifies it,
+        Then: verification fails and the structured security event
+            names the expected and the actual purpose.
+        """
+        manager = _fresh_manager()
+        token = _mint_refresh_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), token_type=TOKEN_TYPE_REFRESH
+            )
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=_ACCESS
+            )
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
+        assert events == [(TOKEN_TYPE_ACCESS, TOKEN_TYPE_REFRESH)]
+
+    @pytest.mark.asyncio
+    async def test_refresh_row_accepted_for_a_refresh_check(self) -> None:
+        """The same credential still works where it is supposed to.
+
+        Given: the live ``refresh`` row and JWT of the previous case,
+        When: refresh rotation verifies it as a refresh credential,
+        Then: the claims come back and no security event is emitted.
+        """
+        manager = _fresh_manager()
+        token = _mint_refresh_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), token_type=TOKEN_TYPE_REFRESH
+            )
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=TOKEN_TYPE_REFRESH
+            )
+        assert outcome.claims is not None
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_access_token_rejected_at_a_refresh_check(self) -> None:
+        """An access bearer cannot be redeemed for a new token pair.
+
+        Given: a live ``access`` row and its matching access JWT,
+        When: refresh rotation verifies it,
+        Then: verification fails with the purpose event.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=TOKEN_TYPE_REFRESH
+            )
+        assert outcome.claims is None
+        assert events == [(TOKEN_TYPE_REFRESH, TOKEN_TYPE_ACCESS)]
+
+    @pytest.mark.asyncio
+    async def test_row_naming_a_different_jti_is_rejected(self) -> None:
+        """The row must name the credential it is being trusted to describe.
+
+        Given: an ``access`` row whose ``jti`` is not the signed one,
+        When: an access check runs,
+        Then: verification fails and the event reports the jti
+            disagreement rather than a type disagreement.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti="some-other-credential")
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=_ACCESS
+            )
+        assert outcome.claims is None
+        assert events == [(TOKEN_TYPE_ACCESS, PURPOSE_MISMATCH_JTI)]
+
+    @pytest.mark.asyncio
+    async def test_access_row_with_a_refresh_prefixed_jti_is_rejected(self) -> None:
+        """The signed prefix must corroborate the row, not contradict it.
+
+        Given: a refresh JWT whose row was recorded as ``access`` — the
+            two records of one credential's purpose disagree,
+        When: an access check runs,
+        Then: verification fails on the prefix contradiction. Trusting
+            the row alone here would admit the refresh credential.
+        """
+        manager = _fresh_manager()
+        token = _mint_refresh_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=_ACCESS
+            )
+        assert outcome.claims is None
+        assert events == [(TOKEN_TYPE_ACCESS, PURPOSE_MISMATCH_JTI_PREFIX)]
+
+    @pytest.mark.asyncio
+    async def test_refresh_row_with_a_bare_jti_is_rejected(self) -> None:
+        """The contradiction is refused in the other direction too.
+
+        Given: an access JWT whose row was recorded as ``refresh``,
+        When: refresh rotation verifies it,
+        Then: verification fails on the prefix contradiction rather
+            than accepting it because the row's type matched.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), token_type=TOKEN_TYPE_REFRESH
+            )
+        )
+        with _purpose_events() as events:
+            outcome = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=TOKEN_TYPE_REFRESH
+            )
+        assert outcome.claims is None
+        assert events == [(TOKEN_TYPE_REFRESH, PURPOSE_MISMATCH_JTI_PREFIX)]
+
+    @pytest.mark.asyncio
+    async def test_a_cached_refresh_verdict_cannot_satisfy_an_access_check(self) -> None:
+        """The 30-second cache must not launder purpose across transports.
+
+        Given: a refresh credential that has just been accepted at
+            refresh rotation, leaving a fresh entry in the shared
+            hash-keyed cache,
+        When: the same credential is presented as a bearer within the
+            TTL, so the DB is never re-read,
+        Then: the cached entry is re-judged under the access purpose
+            and rejected. A cache that stored the rotation's verdict
+            instead of the row's facts would return the claims here.
+        """
+        manager = _fresh_manager()
+        token = _mint_refresh_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token), token_type=TOKEN_TYPE_REFRESH
+            )
+        )
+        accepted = await manager.verify_token_with_reason(
+            token, repo, expected_token_type=TOKEN_TYPE_REFRESH
+        )
+        assert accepted.claims is not None
+        assert hash_token(token) in manager._verify_cache
+        with _purpose_events() as events:
+            replayed = await manager.verify_token_with_reason(
+                token, repo, expected_token_type=_ACCESS
+            )
+        assert replayed.claims is None
+        assert replayed.rejection_reason == REJECTION_REASON_INVALID
+        assert events == [(TOKEN_TYPE_ACCESS, TOKEN_TYPE_REFRESH)]
+        assert repo.get_active_token_by_hash.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_cached_access_verdict_still_serves_an_access_check(self) -> None:
+        """Re-judging a hit must not cost the cache its purpose.
+
+        Given: an access credential accepted once, leaving a cache
+            entry,
+        When: it is presented again within the TTL,
+        Then: it is accepted from the cache with no second DB read —
+            the re-evaluation is a gate, not a cache bypass.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        assert (
+            await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
+        ).claims is not None
+        assert (
+            await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
+        ).claims is not None
+        assert repo.get_active_token_by_hash.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_expired_inventory_row_is_refused(self) -> None:
+        """A row past its own ``expires_at`` is dead regardless of the JWT.
+
+        Given: an unrevoked ``access`` row whose ``expires_at`` is in
+            the past, owned by an active user,
+        When: an access check runs,
+        Then: verification fails — acceptance requires the row to be
+            unexpired, not merely unrevoked.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        stale = datetime.now(UTC) - timedelta(minutes=5)
+        row = _make_verification_row(jti=_signed_jti(manager, token))
+        row["expires_at"] = stale
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=row)
+        outcome = await manager.verify_token_with_reason(token, repo, expected_token_type=_ACCESS)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID

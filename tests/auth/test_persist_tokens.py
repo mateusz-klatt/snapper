@@ -439,6 +439,8 @@ class TestGetActiveTokenByHash:
         assert projection["user_public_id"] == "user-join"
         assert projection["revoked_at"] is None
         assert projection["user_is_active"] is True
+        assert projection["token_type"] == "access"
+        assert projection["jti"] == "jti-join"
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unknown_hash(self, repo: SQLAlchemyRepository) -> None:
@@ -606,6 +608,9 @@ class TestPersistTokens:
         assert refresh_row["user_public_id"] == "user-persist"
         assert access_row["revoked_at"] is None
         assert refresh_row["revoked_at"] is None
+        assert access_row["token_type"] == "access"
+        assert refresh_row["token_type"] == "refresh"
+        assert refresh_row["jti"] == f"refresh_{access_row['jti']}"
 
     @pytest.mark.asyncio
     async def test_persist_tokens_records_expires_at_from_jwt_claims(

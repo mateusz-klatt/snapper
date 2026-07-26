@@ -50,6 +50,8 @@ from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
+from snapper.auth.tokens import REFRESH_JTI_PREFIX
+from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import get_token_manager
@@ -479,8 +481,12 @@ async def _load_refresh_identity(
             detail="Refresh token not found",
         )
     token_manager = get_token_manager()
-    token_data = await token_manager.verify_token_with_db(refresh_token_value, repo)
-    if not token_data or not token_data.jti.startswith("refresh_"):
+    token_data = await token_manager.verify_token_with_db(
+        refresh_token_value,
+        repo,
+        expected_token_type=TOKEN_TYPE_REFRESH,
+    )
+    if not token_data or not token_data.jti.startswith(REFRESH_JTI_PREFIX):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",

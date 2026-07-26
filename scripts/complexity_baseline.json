@@ -597,11 +597,6 @@
         "PLR0913": 7
       }
     },
-    "src/snapper/auth/tokens.py": {
-      "TokenManager._cache_verdict": {
-        "PLR0913": 7
-      }
-    },
     "src/snapper/auth/websocket_auth.py": {
       "WebSocketAuthManager._drop_unscoped_subscriptions": {
         "PLR0913": 6

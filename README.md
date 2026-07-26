@@ -360,6 +360,24 @@ snapper list-users          # List users
 snapper reset-password      # Reset password
 ```
 
+### Credentials
+
+```bash
+snapper token preflight --token-file PATH   # Read-only: would this credential still authenticate?
+```
+
+`preflight` answers, before a deploy that tightens token acceptance,
+whether a live credential's hash still resolves to an active unrevoked
+`access` row naming the same `jti` it was signed with. It accepts the MCP
+bridge `--config=PATH` JSON envelope or a file holding the raw JWT, exits
+`1` when the running server would reject the credential, and prints
+neither the token nor its hash.
+
+Run it on the deployment's own host, against the deployment's own `.env`:
+it reads the JWT signing algorithm and the inventory row from that
+database, and the signing key is derived from `MASTER_PASSWORD`, so a
+foreign environment reports a false rejection on a credential that works.
+
 ### Local AI delegate PAT (for `@mateusz-klatt/snapper-mcp` bridge)
 
 After `make dev-backend` is running and the seed has provisioned the `admin`

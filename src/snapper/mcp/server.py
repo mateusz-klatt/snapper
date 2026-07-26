@@ -34,6 +34,7 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import _extract_bearer_token
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
 from snapper.mcp.rate_limiting import PrincipalRateLimitMiddleware
@@ -299,7 +300,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 },
             )
         token_manager = get_token_manager()
-        outcome = await token_manager.verify_token_with_reason(token, repository)
+        outcome = await token_manager.verify_token_with_reason(
+            token,
+            repository,
+            expected_token_type=TOKEN_TYPE_ACCESS,
+        )
         if outcome.claims is None:
             return _build_rejection_response(outcome.rejection_reason)
         claims = outcome.claims

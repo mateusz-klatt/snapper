@@ -23,6 +23,7 @@ from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.permissions import is_ai_review_decision_capable
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -107,7 +108,11 @@ async def get_current_user(
     if not access_token:
         return None
     token_manager = get_token_manager()
-    token_data: TokenClaims | None = await token_manager.verify_token_with_db(access_token, repo)
+    token_data: TokenClaims | None = await token_manager.verify_token_with_db(
+        access_token,
+        repo,
+        expected_token_type=TOKEN_TYPE_ACCESS,
+    )
     if not token_data:
         return None
     delegate_public_id: str | None = None

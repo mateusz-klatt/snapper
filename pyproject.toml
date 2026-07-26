@@ -246,7 +246,6 @@ max-statements = 50
 "src/snapper/application/updaters/symbols/polygon.py" = ["PLR0913"]
 "src/snapper/application/updaters/underlying_updater.py" = ["PLR0913"]
 "src/snapper/auth/scope_grant_service.py" = ["PLR0913"]
-"src/snapper/auth/tokens.py" = ["PLR0913"]
 "src/snapper/auth/websocket_auth.py" = ["PLR0913"]
 "src/snapper/cli/app.py" = ["PLR0913", "PLR0915"]
 "src/snapper/cli/dev_pat.py" = ["PLR0913"]

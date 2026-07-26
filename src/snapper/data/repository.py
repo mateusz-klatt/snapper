@@ -5485,6 +5485,15 @@ class Repository(ABC):
         SCD2 row with ``is_active=False``) is visible immediately
         without a second SELECT.
 
+        The projection also carries ``token_type`` and ``jti`` so the
+        verifier can decide what the credential IS, not merely that
+        it is live. Without them a refresh JWT presented as a bearer
+        satisfies every lifecycle gate and buys weeks of frozen role,
+        permission and operator authority from a single stolen
+        cookie. The issuer writes ``token_type`` on the same row it
+        writes ``token_hash``, so purpose travels with the hash bond
+        rather than with an unauthenticated wire claim.
+
         Args:
             token_hash: SHA-256 HEX of the presented JWT. Callers
                 must compute the hash; this method does NOT accept
@@ -18949,6 +18958,8 @@ class SQLAlchemyRepository(Repository):
                     UserActiveToken.revoked_at,
                     UserActiveToken.expires_at,
                     User.is_active,
+                    UserActiveToken.token_type,
+                    UserActiveToken.jti,
                 )
                 .join(
                     User,
@@ -18962,12 +18973,14 @@ class SQLAlchemyRepository(Repository):
             row = result.first()
             if row is None:
                 return None
-            user_public_id, revoked_at, expires_at, user_is_active = row
+            user_public_id, revoked_at, expires_at, user_is_active, token_type, jti = row
             return UserActiveTokenVerificationRow(
                 user_public_id=user_public_id,
                 revoked_at=revoked_at,
                 expires_at=expires_at,
                 user_is_active=bool(user_is_active),
+                token_type=token_type,
+                jti=jti,
             )
 
     async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:

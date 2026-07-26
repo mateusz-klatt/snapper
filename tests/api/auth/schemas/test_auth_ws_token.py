@@ -13,6 +13,7 @@ from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import ConnectionState
 from snapper.auth.websocket_auth import WebSocketAuthManager
@@ -40,14 +41,22 @@ class DummyTokenManager:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.verify_response: TokenClaims | None = None
+        self.last_expected_token_type: str | None = None
 
     def verify_token(self, token: str) -> TokenClaims | None:
         """Return preconfigured token claims (sync JWT+blacklist layer)."""
         return self.verify_response
 
-    async def verify_token_with_db(self, token: str, repository: object) -> TokenClaims | None:
-        """DB-backed verify stub: yields once then returns the sync verdict."""
+    async def verify_token_with_db(
+        self,
+        token: str,
+        repository: object,
+        *,
+        expected_token_type: str,
+    ) -> TokenClaims | None:
+        """DB-backed verify stub: records the demanded purpose, echoes the verdict."""
         await asyncio.sleep(0)
+        self.last_expected_token_type = expected_token_type
         return self.verify_response
 
 
@@ -89,7 +98,9 @@ async def test_verify_session_cookie_success() -> None:
 
     Given: A websocket with valid access_token cookie,
     When: verify_session_cookie is called,
-    Then: User profile and token claims are returned.
+    Then: User profile and token claims are returned, and the upgrade
+        demanded the access purpose — a WebSocket that accepted a
+        refresh credential would hand a 7-30 day token a live socket.
     """
     manager, token_manager = _create_manager()
     token_manager.verify_response = _token_data()
@@ -100,6 +111,7 @@ async def test_verify_session_cookie_success() -> None:
     user, token_data = result
     assert user.username == "alice"
     assert token_data.sid == "session-123"
+    assert token_manager.last_expected_token_type == TOKEN_TYPE_ACCESS
 
 
 @pytest.mark.asyncio

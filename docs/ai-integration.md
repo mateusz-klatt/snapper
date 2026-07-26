@@ -789,6 +789,29 @@ valid?". Every mint persists a row; every verify consults it via a
 and fans out a bus event so every cross-instance LRU evicts the
 matching entry on receipt.
 
+### Inventory-based token purpose
+
+The same row is also the ground truth for "what is this JWT FOR?".
+Every DB-backed verify entry point takes a required
+`expected_token_type` — `access` at REST, MCP and the WebSocket
+upgrade; `refresh` only at refresh rotation — and a credential is
+accepted only when its row is unrevoked, unexpired, owned by an
+active user, typed as the caller demanded, and naming the same `jti`
+the JWT was signed with (with the `refresh_` `jti` prefix agreeing
+with the row's type). A mismatch fails closed and emits the
+structured `token_purpose_mismatch` security event naming the
+expected and actual purpose, never the credential.
+
+No purpose CLAIM is required inside the JWT, and none may be added:
+the long-lived delegate tokens already in the field predate the idea
+and carry a bare UUID `jti` with no `permission_scope_version`.
+The issuer has written `token_type` on the hash-bound row since
+before those tokens were minted, so the row works identically for old
+and new credentials. `snapper token preflight --token-file PATH`
+confirms, read-only and before a deploy, that a given live credential
+still resolves to an active unrevoked `access` row with a matching
+`jti`; it prints neither the token nor its hash.
+
 ### No secrets leaked at rest
 
 Delegate password hashes are bcrypt-derived from 32 bytes of
