@@ -69,12 +69,12 @@ from uuid import uuid7
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
+from snapper.application.portfolio.pnl_snapshot_planner import SELF_HEAL_LOOKBACK
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkPlan
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
-from snapper.application.portfolio.pnl_snapshot_planner import SampleReasonCode
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
 from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_chunks
 from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_window
@@ -517,7 +517,7 @@ class PortfolioPnlSnapshotter:
         """Return the earliest retryable incomplete minute in the lookback (D10)."""
         if ctx.last_minute is None:
             return None
-        cutoff = ctx.as_of.replace(second=0, microsecond=0) - timedelta(minutes=15)
+        cutoff = ctx.as_of.replace(second=0, microsecond=0) - SELF_HEAL_LOOKBACK
         incompletes = await repo.get_portfolio_pnl_samples(
             ctx.query, cutoff, ctx.last_minute, status="incomplete"
         )
@@ -985,8 +985,15 @@ def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]
     return currencies
 
 
-def _extract_reason_codes(audit_json: str) -> frozenset[SampleReasonCode]:
-    """Extract the canonical reason codes from a persisted sample's audit JSON.
+def _extract_reason_codes(audit_json: str) -> frozenset[str]:
+    """Extract the reason codes from a persisted sample's audit JSON, verbatim.
+
+    Tokens are returned exactly as persisted, never narrowed to a canonical
+    member: a row this binary did not write may carry a code a newer writer
+    introduced, and the eligibility decision belongs to
+    :func:`plan_self_heal_minutes`' FINAL deny-list, not to this reader. Mapping
+    an unrecognised token onto a terminal code here would silently strand every
+    minute a newer writer produced.
 
     Args:
         audit_json: The ``incomplete`` sample's audit envelope.
@@ -1004,37 +1011,4 @@ def _extract_reason_codes(audit_json: str) -> frozenset[SampleReasonCode]:
     raw = payload.get("reason_codes", [])
     if not isinstance(raw, list):
         return frozenset()
-    codes: set[SampleReasonCode] = set()
-    for code in raw:
-        if isinstance(code, str):
-            codes.add(_narrow_reason_code(code))
-    return frozenset(codes)
-
-
-_VALID_REASON_CODES: Final[frozenset[str]] = frozenset(
-    {
-        "missing_mark",
-        "missing_fx_rate",
-        "basket_stale",
-        "basket_missing_venue",
-        "fill_gap_evidence",
-        "non_finite",
-        "future_clock",
-        "pnl_untrusted",
-    }
-)
-
-
-def _narrow_reason_code(code: str) -> SampleReasonCode:
-    """Return a canonical reason code, mapping any unknown token to ``non_finite``.
-
-    Args:
-        code: A raw reason string read from persisted audit JSON.
-
-    Returns:
-        The token when canonical, else the terminal ``non_finite`` fallback so a
-        corrupt code never widens the retryable self-heal set.
-    """
-    if code in _VALID_REASON_CODES:
-        return cast(SampleReasonCode, code)
-    return "non_finite"
+    return frozenset(code for code in raw if isinstance(code, str))

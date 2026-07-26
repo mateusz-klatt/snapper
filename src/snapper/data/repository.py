@@ -256,6 +256,9 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AiDelegateRow
@@ -2192,25 +2195,6 @@ def _resolve_disposable_engine(engine: object) -> _DisposableEngine | None:
         return None
     return cast(_DisposableEngine, engine)
 
-
-_PNL_SAMPLE_RETRYABLE_REASONS: frozenset[str] = frozenset(
-    {"missing_mark", "missing_fx_rate", "basket_stale", "basket_missing_venue"}
-)
-"""Canonical retryable reason codes (R9): a self-heal supersede may replace an
-``incomplete`` sample carrying only these when its evidence later lands."""
-
-_PNL_SAMPLE_FINAL_REASONS: frozenset[str] = frozenset(
-    {"fill_gap_evidence", "non_finite", "future_clock", "pnl_untrusted"}
-)
-"""Canonical final reason codes (R9): an ``incomplete`` sample carrying any of
-these is honest and terminal; self-heal never retries it."""
-
-_PNL_SAMPLE_REASON_CODES: frozenset[str] = _PNL_SAMPLE_RETRYABLE_REASONS | _PNL_SAMPLE_FINAL_REASONS
-"""Every canonical persisted reason code the sample validator accepts."""
-
-_PNL_SAMPLE_NEVER_PERSIST_REASONS: frozenset[str] = frozenset({"pnl_untrusted"})
-"""A ``pnl_untrusted`` minute writes NO row at all (R1); the validator rejects one
-defensively if ever handed it."""
 
 _PNL_SAMPLE_AUDIT_KEYS: frozenset[str] = frozenset(
     {"valuation", "observations", "reason_codes", "coverage"}
@@ -13718,9 +13702,9 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("portfolio P&L incomplete sample must carry at least one reason code")
         if len(set(codes)) != len(codes):
             raise ValueError("portfolio P&L sample reason codes must not repeat")
-        if any(code not in _PNL_SAMPLE_REASON_CODES for code in codes):
+        if any(code not in PNL_SAMPLE_REASON_CODES for code in codes):
             raise ValueError("portfolio P&L sample reason codes must be canonical")
-        if any(code in _PNL_SAMPLE_NEVER_PERSIST_REASONS for code in codes):
+        if any(code in PNL_SAMPLE_NEVER_PERSIST_REASONS for code in codes):
             raise ValueError(
                 "portfolio P&L sample carrying 'pnl_untrusted' must never be persisted"
             )
@@ -14356,7 +14340,19 @@ class SQLAlchemyRepository(Repository):
         *,
         late_fill_correction: bool,
     ) -> None:
-        """Refuse a supersede that crosses epochs or self-heals a non-retryable row."""
+        """Refuse a supersede that crosses epochs or self-heals a non-retryable row.
+
+        Eligibility is decided by a FINAL **deny-list**, not a retryable
+        allow-list: the row is refused when it carries a code known to be
+        terminal, so a token this binary does not recognise reads as NOT final
+        and stays healable. The two readings coincide for every canonical code,
+        because ``PNL_SAMPLE_RETRYABLE_REASONS`` and ``PNL_SAMPLE_FINAL_REASONS``
+        partition the canonical set; they diverge only for a code written by a
+        newer binary, and there refusing would be permanent while retrying is
+        bounded by the planner's self-heal lookback. See
+        :data:`snapper.data.repository_types.SampleReasonCode` for the
+        deploy-ordering rule this inversion imposes on new FINAL codes.
+        """
         if existing.epoch_public_id != scope.epoch_public_id:
             raise PortfolioPnlSampleSupersedeError(
                 "portfolio P&L sample supersede must stay within the same epoch"
@@ -14369,7 +14365,7 @@ class SQLAlchemyRepository(Repository):
             )
         audit = self._parse_portfolio_pnl_sample_audit(existing.opening_basket_json)
         codes = self._portfolio_pnl_sample_reason_codes(audit)
-        if not codes or any(code not in _PNL_SAMPLE_RETRYABLE_REASONS for code in codes):
+        if not codes or any(code in PNL_SAMPLE_FINAL_REASONS for code in codes):
             raise PortfolioPnlSampleSupersedeError(
                 "self-heal supersede refuses a sample with a final reason code"
             )
@@ -14391,7 +14387,9 @@ class SQLAlchemyRepository(Repository):
         the caller read and planned against — or the close-and-insert is refused
         with :class:`PortfolioPnlSampleConflictError` (optimistic CAS, never
         last-writer-wins). Without ``late_fill_correction`` the active row must be
-        ``incomplete`` and carry only retryable reason codes. The SCD2 bus time is
+        ``incomplete`` and carry at least one reason code, none of them a known
+        terminal one (a FINAL deny-list, so an unrecognised newer token stays
+        eligible rather than being stranded). The SCD2 bus time is
         clamped up to the closed row's timestamp so the close interval stays valid.
         """
         canonical_scope = self._normalize_portfolio_pnl_sample_scope(scope)

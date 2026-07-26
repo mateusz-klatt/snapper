@@ -16,7 +16,6 @@ from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter import _extract_reason_codes
-from snapper.application.portfolio.pnl_snapshotter import _narrow_reason_code
 from snapper.application.portfolio.pnl_snapshotter import _observed_currencies
 from snapper.application.portfolio.pnl_snapshotter import _parse_baseline
 from snapper.application.portfolio.pnl_snapshotter import _sample_values_equal
@@ -224,6 +223,7 @@ class _FakeRepo:
         self.retracted: list[tuple[datetime, str, datetime]] = []
         self.peak_before: list[datetime] = []
         self.observation_cuts: list[datetime] = []
+        self.sample_windows: list[tuple[datetime, datetime, str | None]] = []
 
     async def list_active_wallet_credentials(self, as_of: datetime) -> list[WalletCredentialRow]:
         """Return the canned active credentials."""
@@ -253,6 +253,7 @@ class _FakeRepo:
     ) -> list[PortfolioPnlSampleRow]:
         """Return persisted rows in the window filtered by status."""
         del query
+        self.sample_windows.append((start, end, status))
         return [
             row
             for row in self.persisted
@@ -800,6 +801,72 @@ class TestCatchupAndCorrections:
         assert _minute(2) in healed
 
     @pytest.mark.asyncio
+    async def test_final_reason_minute_opens_no_self_heal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A span whose only incomplete minute is terminal opens no self-heal.
+
+        The companion to the retryable case above: without it the recompute
+        assertion there would also pass if self-heal opened unconditionally.
+        """
+        latest = _persisted_sample(_minute(3), reasons=("non_finite",))
+        persisted = [_persisted_sample(_minute(2), reasons=("non_finite",)), latest]
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
+        )
+        snap = _snapshotter(repo, _minute(5))
+        _install_series(monkeypatch, first=_meta(seq=4))
+        await snap._tick_once()
+        assert repo.superseded == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_reason_minute_still_self_heals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persisted unrecognised reason code still opens self-heal, end to end.
+
+        The forward-compatibility property the two-release rollout rests on,
+        driven through the real seam rather than either half of it: the persisted
+        row's audit envelope, :func:`_extract_reason_codes`, ``_self_heal_start``
+        and :func:`plan_self_heal_minutes`, all the way to an actual supersede.
+        Pinning only the reader and the gate separately leaves the composition
+        untested — a reader that narrowed the token back to a terminal code would
+        satisfy both unit tests' neighbours and still strand the minute here.
+
+        The positive counterpart of the terminal case above: that one proves a
+        final code opens nothing, this one proves an unknown code is not treated
+        as final.
+        """
+        latest = _persisted_sample(_minute(3), reasons=("a_future_code",))
+        persisted = [_persisted_sample(_minute(2), reasons=("a_future_code",)), latest]
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
+        )
+        snap = _snapshotter(repo, _minute(5))
+        _install_series(monkeypatch, first=_meta(seq=4))
+        await snap._tick_once()
+        assert repo.recorded == []
+        healed = {row["point_time"] for row, _late, _pid in repo.superseded}
+        assert _minute(2) in healed
+
+    @pytest.mark.asyncio
+    async def test_self_heal_start_uses_the_shared_lookback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The self-heal read window is the planner's constant, not a local copy.
+
+        Pins the deduplication: the service used to hardcode its own 15 minutes
+        beside :data:`SELF_HEAL_LOOKBACK`, so the two could drift apart silently.
+        """
+        latest = _persisted_sample(_minute(3))
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), latest=latest)
+        snap = _snapshotter(repo, _minute(5))
+        monkeypatch.setattr(pnl_snapshotter, "SELF_HEAL_LOOKBACK", timedelta(minutes=7))
+        _install_series(monkeypatch, first=_meta(seq=4))
+        await snap._tick_once()
+        assert (_minute(5) - timedelta(minutes=7), _minute(3), "incomplete") in repo.sample_windows
+
+    @pytest.mark.asyncio
     async def test_identical_recompute_is_skip_idempotent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1142,21 +1209,35 @@ class TestBudgetSplitAndHelpers:
         assert _extract_reason_codes(audit) == frozenset({"missing_mark"})
 
     @pytest.mark.parametrize(
-        "audit", ["{bad", "[1,2]", '{"reason_codes":"x"}', '{"reason_codes":[1]}']
+        ("audit", "expected"),
+        [
+            ("{bad", frozenset()),
+            ("[1,2]", frozenset()),
+            ('{"reason_codes":"x"}', frozenset()),
+            ('{"reason_codes":[1]}', frozenset()),
+            ('{"reason_codes":["basket_stale",7]}', frozenset({"basket_stale"})),
+        ],
     )
-    def test_extract_reason_codes_tolerates_malformed(self, audit: str) -> None:
-        """A malformed audit envelope or non-string token yields no reason codes."""
-        assert _extract_reason_codes(audit) == frozenset()
+    def test_extract_reason_codes_tolerates_malformed(
+        self, audit: str, expected: frozenset[str]
+    ) -> None:
+        """A malformed envelope yields nothing; a mixed list keeps its string tokens.
 
-    def test_narrow_reason_code_maps_unknown_to_non_finite(self) -> None:
-        """An unknown token narrows to the terminal fallback."""
-        assert _narrow_reason_code("mystery") == "non_finite"
-        assert _narrow_reason_code("basket_stale") == "basket_stale"
+        The last parameter is the positive control: without it every case asserts
+        an empty result and an unconditional ``frozenset()`` return would pass.
+        """
+        assert _extract_reason_codes(audit) == expected
 
-    def test_extract_reason_codes_narrows_unknown_token(self) -> None:
-        """An unknown persisted token is narrowed, never widening self-heal."""
+    def test_extract_reason_codes_preserves_unknown_token(self) -> None:
+        """An unrecognised persisted token is returned verbatim, never narrowed.
+
+        Narrowing it to a canonical member here is what previously stamped an
+        unknown code as terminal ``non_finite`` and stranded every minute a newer
+        writer produced. The eligibility verdict belongs to the planner's FINAL
+        deny-list, which reads this token and finds it absent from the deny-list.
+        """
         assert _extract_reason_codes(json.dumps({"reason_codes": ["mystery"]})) == frozenset(
-            {"non_finite"}
+            {"mystery"}
         )
 
 

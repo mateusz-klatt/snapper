@@ -6,6 +6,8 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
+from typing import get_args
 from uuid import uuid7
 
 import pytest
@@ -17,13 +19,13 @@ from snapper.application.portfolio.basket_valuation import PositionInventoryEntr
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
-from snapper.application.portfolio.pnl_snapshot_planner import FINAL_REASONS
-from snapper.application.portfolio.pnl_snapshot_planner import RETRYABLE_REASONS
+from snapper.application.portfolio.pnl_snapshot_planner import _POINT_REASON_TO_SAMPLE_CODE
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
+from snapper.application.portfolio.pnl_snapshot_planner import _incomplete_audit_json
 from snapper.application.portfolio.pnl_snapshot_planner import _PartitionOutcome
 from snapper.application.portfolio.pnl_snapshot_planner import assemble_minute_sample
 from snapper.application.portfolio.pnl_snapshot_planner import evaluate_basket
@@ -34,18 +36,22 @@ from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_re
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
 from snapper.application.portfolio.pnl_snapshot_planner import resolve_drawdown
 from snapper.application.portfolio.pnl_snapshot_planner import value_basket
+from snapper.application.portfolio.pnl_snapshotter import _extract_reason_codes
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import VenueAccountObservation
-from snapper.data.repository import _PNL_SAMPLE_FINAL_REASONS
-from snapper.data.repository import _PNL_SAMPLE_RETRYABLE_REASONS
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
+from snapper.data.repository_types import PNL_SAMPLE_RETRYABLE_REASONS
 from snapper.data.repository_types import PortfolioPnlSampleRow
+from snapper.data.repository_types import SampleReasonCode
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
 
 _T0 = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -369,6 +375,41 @@ class TestPlanSelfHeal:
             SelfHealCandidate(point_time=_M2, reason_codes=frozenset({"missing_fx_rate"})),
         ]
         assert plan_self_heal_minutes(candidates, now) == (_M2, _M3)
+
+    def test_unknown_code_stays_eligible(self) -> None:
+        """An unrecognised code is NOT final, so its minute stays eligible.
+
+        The executable statement of forward compatibility, and the property the
+        whole two-release rollout rests on: this reader must keep healing a minute
+        a newer writer stamped with a code it has never heard of. The gate is a
+        FINAL deny-list precisely so this case answers "retry", because refusing
+        is permanent while retrying costs at most the bounded lookback.
+        """
+        now = _M3 + timedelta(minutes=1)
+        candidate = SelfHealCandidate(point_time=_M2, reason_codes=frozenset({"a_future_code"}))
+        assert plan_self_heal_minutes([candidate], now) == (_M2,)
+
+    def test_mixed_unknown_and_final_excluded(self) -> None:
+        """A known terminal code still excludes the minute beside an unknown one."""
+        now = _M3
+        candidate = SelfHealCandidate(
+            point_time=_M2, reason_codes=frozenset({"a_future_code", "non_finite"})
+        )
+        assert plan_self_heal_minutes([candidate], now) == ()
+
+    @pytest.mark.parametrize("code", sorted(PNL_SAMPLE_RETRYABLE_REASONS))
+    def test_every_retryable_code_is_eligible_alone(self, code: str) -> None:
+        """Every retryable code on its own makes its minute eligible."""
+        now = _M3 + timedelta(minutes=1)
+        candidate = SelfHealCandidate(point_time=_M2, reason_codes=frozenset({code}))
+        assert plan_self_heal_minutes([candidate], now) == (_M2,)
+
+    @pytest.mark.parametrize("code", sorted(PNL_SAMPLE_FINAL_REASONS))
+    def test_every_final_code_is_excluded_alone(self, code: str) -> None:
+        """Every final code on its own excludes its minute."""
+        now = _M3 + timedelta(minutes=1)
+        candidate = SelfHealCandidate(point_time=_M2, reason_codes=frozenset({code}))
+        assert plan_self_heal_minutes([candidate], now) == ()
 
 
 class TestResolveDrawdown:
@@ -802,15 +843,61 @@ class TestPlanChunkSamples:
 
 
 class TestReasonCodeContract:
-    """The planner's reason-code sets mirror the S2 validator's canonical sets."""
+    """The single canonical reason-code declaration and its partition.
 
-    def test_retryable_matches_repository(self) -> None:
-        """The retryable set equals the repository's private canonical set."""
-        assert set(RETRYABLE_REASONS) == set(_PNL_SAMPLE_RETRYABLE_REASONS)
+    These assertions carry the whole contract on their own: a frozenset member and
+    a Literal member are DATA, not branches, so coverage exerts no pressure on
+    them whatsoever. A code added to one declaration and forgotten in another is
+    caught here or nowhere.
+    """
 
-    def test_final_matches_repository(self) -> None:
-        """The final set equals the repository's private canonical set."""
-        assert set(FINAL_REASONS) == set(_PNL_SAMPLE_FINAL_REASONS)
+    def test_literal_matches_the_partition_union(self) -> None:
+        """The Literal's members are exactly the union of the two partitions.
+
+        ``SampleReasonCode`` is a PEP-695 alias, so ``get_args`` on the alias
+        object itself returns ``()`` and this assertion would pass vacuously
+        against an empty left-hand side; ``.__value__`` unwraps it to the real
+        ``Literal`` whose args are the members.
+        """
+        assert set(get_args(SampleReasonCode.__value__)) == (
+            PNL_SAMPLE_RETRYABLE_REASONS | PNL_SAMPLE_FINAL_REASONS
+        )
+
+    def test_partitions_are_disjoint(self) -> None:
+        """No code is both retryable and final."""
+        assert PNL_SAMPLE_RETRYABLE_REASONS.isdisjoint(PNL_SAMPLE_FINAL_REASONS)
+
+    def test_contract_cardinality(self) -> None:
+        """The canonical set and the final partition have their declared sizes.
+
+        Guards the tests parametrized off these frozensets: pytest's
+        ``empty_parameter_set_mark`` is unset, so a regression that emptied a set
+        would silently SKIP every case rather than fail.
+        """
+        assert len(PNL_SAMPLE_REASON_CODES) == 8
+        assert len(PNL_SAMPLE_FINAL_REASONS) == 4
+
+    def test_never_persist_is_final(self) -> None:
+        """A never-persisted code is terminal, never retryable."""
+        assert PNL_SAMPLE_NEVER_PERSIST_REASONS <= PNL_SAMPLE_FINAL_REASONS
+
+    def test_mapped_codes_are_canonical(self) -> None:
+        """Every code the 5A reason map can emit is writable by the validator."""
+        assert set(_POINT_REASON_TO_SAMPLE_CODE.values()) <= PNL_SAMPLE_REASON_CODES
+
+    @pytest.mark.parametrize("code", sorted(PNL_SAMPLE_REASON_CODES))
+    def test_every_code_round_trips_its_partition(self, code: str) -> None:
+        """Each canonical code survives write-then-read and lands in its partition.
+
+        Parametrized off the real frozenset rather than ``get_args`` so a
+        ``get_args`` regression cannot empty the parameter set. The path exercised
+        is the production one end to end: the planner's audit envelope, the
+        service's reader, and the planner's eligibility gate.
+        """
+        audit = _incomplete_audit_json(frozenset({cast(SampleReasonCode, code)}))
+        candidate = SelfHealCandidate(point_time=_M2, reason_codes=_extract_reason_codes(audit))
+        expected = (_M2,) if code in PNL_SAMPLE_RETRYABLE_REASONS else ()
+        assert plan_self_heal_minutes([candidate], _M3 + timedelta(minutes=1)) == expected
 
 
 def _to_row(sample: PlannedSample) -> PortfolioPnlSampleRow:

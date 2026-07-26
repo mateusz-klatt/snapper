@@ -59,29 +59,9 @@ from snapper.application.portfolio.basket_valuation import attribute_position_in
 from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import SampleReasonCode
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
-
-type SampleReasonCode = Literal[
-    "missing_mark",
-    "missing_fx_rate",
-    "basket_stale",
-    "basket_missing_venue",
-    "fill_gap_evidence",
-    "non_finite",
-    "future_clock",
-    "pnl_untrusted",
-]
-"""Canonical persisted reason code (R9), mirroring the S2 sample validator."""
-
-RETRYABLE_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
-    {"missing_mark", "missing_fx_rate", "basket_stale", "basket_missing_venue"}
-)
-"""Reason codes whose ``incomplete`` sample a bounded self-heal may supersede."""
-
-FINAL_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
-    {"fill_gap_evidence", "non_finite", "future_clock", "pnl_untrusted"}
-)
-"""Reason codes whose ``incomplete`` sample is terminal; self-heal never retries."""
 
 _POINT_REASON_TO_SAMPLE_CODE: Final[dict[str, SampleReasonCode]] = {
     "mark_unavailable": "missing_mark",
@@ -156,10 +136,17 @@ class PlannedSample:
 
 @dataclass(frozen=True, slots=True)
 class SelfHealCandidate:
-    """One persisted ``incomplete`` sample considered for a self-heal retry."""
+    """One persisted ``incomplete`` sample considered for a self-heal retry.
+
+    ``reason_codes`` is deliberately ``frozenset[str]`` and not the canonical
+    Literal: these tokens were read back off a persisted row that some other
+    binary may have written, so the reader must be able to represent a code it
+    does not know. Narrowing them at the read boundary is what previously turned
+    an unrecognised token into the terminal ``non_finite``.
+    """
 
     point_time: datetime
-    reason_codes: frozenset[SampleReasonCode]
+    reason_codes: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,10 +301,22 @@ def plan_self_heal_minutes(
 ) -> tuple[datetime, ...]:
     """Select retryable ``incomplete`` minutes still inside the self-heal window.
 
-    A minute is eligible only when every one of its reason codes is retryable
-    (decision R9) and it lies within ``lookback`` of the floored ``now``; a minute
-    carrying any terminal reason, or older than the lookback, is honest and left
-    untouched.
+    A minute is eligible when it carries at least one reason code, none of them a
+    known terminal one (decision R9), and it lies within ``lookback`` of the
+    floored ``now``; a minute carrying any terminal reason, a minute carrying no
+    code at all, or one older than the lookback is honest and left untouched.
+
+    The terminal test is a **deny-list** — ``isdisjoint(PNL_SAMPLE_FINAL_REASONS)``
+    — not the equivalent-looking allow-list ``codes <= RETRYABLE``. For every
+    canonical code the two agree exactly, because the retryable and final sets are
+    disjoint and their union is the whole canonical set. They differ only for a
+    token this binary does not recognise, which means the row was written by a
+    newer binary, and there the deny-list deliberately keeps the minute eligible:
+    treating an unknown code as terminal is a permanent verdict passed on evidence
+    this process cannot read, whereas treating it as retryable costs at most the
+    bounded lookback of re-attempts. The corresponding obligation on the writer —
+    deploy a new FINAL code's deny-list entry before emitting it — is recorded on
+    :data:`snapper.data.repository_types.SampleReasonCode`.
 
     Args:
         candidates: Persisted ``incomplete`` samples with their reason codes.
@@ -333,7 +332,7 @@ def plan_self_heal_minutes(
         for candidate in candidates
         if candidate.point_time >= cutoff
         and bool(candidate.reason_codes)
-        and candidate.reason_codes <= RETRYABLE_REASONS
+        and candidate.reason_codes.isdisjoint(PNL_SAMPLE_FINAL_REASONS)
     ]
     return tuple(sorted(eligible))
 

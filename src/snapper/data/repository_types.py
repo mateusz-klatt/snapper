@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from typing import Final
 from typing import Literal
 from typing import NotRequired
 from typing import TypedDict
@@ -795,6 +796,86 @@ read back (peak re-derivation, progress, equity overlay) when its
 samples instead of silently mixing shapes. Hosted in the cycle-free data-layer
 types module so the repository validator can compare against the REAL constant
 (never a caller-echoed scope value); ``pnl_timeline_service`` re-exposes it."""
+
+
+type SampleReasonCode = Literal[
+    "missing_mark",
+    "missing_fx_rate",
+    "basket_stale",
+    "basket_missing_venue",
+    "fill_gap_evidence",
+    "non_finite",
+    "future_clock",
+    "pnl_untrusted",
+]
+"""Canonical persisted Phase-5B sample reason code (R9) — single source of truth.
+
+Every producer (the tick planner), every validator (the sample writer) and every
+consumer (the bounded self-heal selector) reads this one declaration and the two
+partition frozensets below. There is deliberately no second copy: a divergent
+copy is how a code becomes emittable but unwritable, or writable but silently
+unhealable.
+
+The partition is total and disjoint —
+``PNL_SAMPLE_RETRYABLE_REASONS | PNL_SAMPLE_FINAL_REASONS`` is exactly the set of
+members named above and the two share no member — which is what makes the
+runtime deny-list gate below equivalent to an allow-list for every code that
+exists at the time the gate runs.
+
+Two standing invariants govern changes to this contract.
+
+**1. Deploy-ordering rule (expand-then-migrate).** The runtime eligibility gate
+is a FINAL *deny-list*: a persisted minute is retried unless one of its codes is
+a known member of ``PNL_SAMPLE_FINAL_REASONS``. An unrecognised token therefore
+reads as NOT final, which is the deliberate forward-compatible default — a newer
+writer's code stays healable on an older reader, and refusing to retry would be
+permanent whereas retrying is bounded by the self-heal lookback. The consequence
+is a hard ordering rule: a new RETRYABLE code may be emitted the moment it is
+declared, but a new FINAL code MUST have its deny-list entry deployed to every
+reader BEFORE any binary emits it. Emitting first and denying later leaves a
+window in which the older reader treats a terminal minute as retryable and spins
+on it. The symmetric hazard is a rollback: rolling a reader back past the
+release that taught it a FINAL code re-opens that same window.
+
+**2. Healability invariant (V2).** RETRYABLE does not promise that a retry can
+succeed; it promises only that the minute MAY be re-attempted. The distinction
+is load-bearing because the two evidence planes have different time semantics.
+Codes derived from the venue balance observation attempt — today
+``basket_stale``, ``basket_missing_venue`` and ``future_clock``, and any future
+code read off the same attempt — are computed from evidence selected as-of the
+minute, and that attempt set is frozen for a past minute: no later observation
+can enter it, so such a minute can never become authoritative however often it
+is re-attempted. Codes derived from price evidence (marks, forex rates, crypto
+price planes) are read as-of now, so corrected or late-arriving candles do
+genuinely heal them. Classify a new code by whether re-attempting the minute is
+*honest*, not by whether it will work, and expect basket-attempt codes to
+consume retries without converging until a retry budget exists."""
+
+PNL_SAMPLE_RETRYABLE_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
+    {"missing_mark", "missing_fx_rate", "basket_stale", "basket_missing_venue"}
+)
+"""Canonical retryable reason codes (R9): a self-heal supersede may replace an
+``incomplete`` sample carrying only these when its evidence later lands. Typed
+against :data:`SampleReasonCode` rather than ``frozenset[str]`` so a member added
+here without being declared in the Literal fails type-checking instead of
+becoming a code the writer refuses at runtime."""
+
+PNL_SAMPLE_FINAL_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
+    {"fill_gap_evidence", "non_finite", "future_clock", "pnl_untrusted"}
+)
+"""Canonical final reason codes (R9): an ``incomplete`` sample carrying any of
+these is honest and terminal; self-heal never retries it. This is the set the
+runtime deny-list consults, so adding a member here is subject to the
+deploy-ordering rule recorded on :data:`SampleReasonCode`."""
+
+PNL_SAMPLE_REASON_CODES: Final[frozenset[SampleReasonCode]] = (
+    PNL_SAMPLE_RETRYABLE_REASONS | PNL_SAMPLE_FINAL_REASONS
+)
+"""Every canonical persisted reason code the sample validator accepts."""
+
+PNL_SAMPLE_NEVER_PERSIST_REASONS: Final[frozenset[SampleReasonCode]] = frozenset({"pnl_untrusted"})
+"""A ``pnl_untrusted`` minute writes NO row at all (R1); the validator rejects one
+defensively if ever handed it."""
 
 
 class PortfolioPnlSampleRow(TypedDict):

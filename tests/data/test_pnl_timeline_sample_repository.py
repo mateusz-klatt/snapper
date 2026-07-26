@@ -28,6 +28,8 @@ from snapper.data.repository import PortfolioPnlSampleScopeError
 from snapper.data.repository import PortfolioPnlSampleSupersedeError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
 from snapper.data.repository_types import PortfolioPnlSampleRow
 
 _T0 = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -807,12 +809,64 @@ async def test_supersede_self_heal_refuses_a_complete_sample(
         )
 
 
+@pytest.mark.parametrize("code", sorted(PNL_SAMPLE_REASON_CODES - PNL_SAMPLE_NEVER_PERSIST_REASONS))
+async def test_incomplete_sample_accepts_every_canonical_code(
+    repository: SQLAlchemyRepository, code: str
+) -> None:
+    """Every canonical, persistable reason code is writable by the validator.
+
+    Parametrized off the shared declaration, so a code added to the contract but
+    unreachable through the writer fails here instead of at the first production
+    row that tries to carry it.
+    """
+    await repository.record_portfolio_pnl_samples(
+        [_incomplete_sample(_M1, reasons=(code,))], _scope()
+    )
+    rows = await repository.get_portfolio_pnl_samples(_query(), _M1, _M1)
+    assert json.loads(rows[0]["audit_json"])["reason_codes"] == [code]
+
+
+async def test_supersede_self_heal_accepts_an_unknown_code(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An incomplete row carrying an unrecognised code is still self-healable.
+
+    The guard is a FINAL deny-list, not a retryable allow-list, so a token this
+    binary does not know reads as NOT terminal and the minute keeps healing. The
+    row is inserted through the ORM because the write validator refuses a
+    non-canonical code — which is precisely why the only rows that can carry one
+    were written by a newer binary. Without this test the "final", "unknown" and
+    "codeless" refusals below are indistinguishable (they share one message) and
+    an inversion regression could hide among them.
+    """
+    async with repository.session() as s:
+        s.add(
+            PortfolioPnlPoint(
+                **SQLAlchemyRepository._portfolio_pnl_sample_orm_kwargs(
+                    _mutate(
+                        _incomplete_sample(_M1, public_id=_ORIG),
+                        audit_json=_incomplete_audit(("a_future_code",)),
+                    )
+                ),
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await s.commit()
+    healed = await repository.supersede_portfolio_pnl_sample(
+        _scope(),
+        _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
+        late_fill_correction=False,
+        expected_public_id=_ORIG,
+    )
+    assert healed["valuation_status"] == "complete"
+
+
 async def test_supersede_self_heal_refuses_a_final_reason_row(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Self-heal refuses an incomplete row carrying a final reason code."""
     await repository.record_portfolio_pnl_samples(
-        [_incomplete_sample(_M1, public_id=_ORIG, reasons=("fill_gap_evidence",))], _scope()
+        [_incomplete_sample(_M1, public_id=_ORIG, reasons=("non_finite",))], _scope()
     )
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="final reason code"):
         await repository.supersede_portfolio_pnl_sample(
