@@ -47,6 +47,7 @@ from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import MarketDataTypeEnum
+from snapper.core.types import PriceBasis
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
@@ -1684,6 +1685,24 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return "native"
 
+    def _candle_price_basis_for(self, timeframe: str) -> PriceBasis | None:
+        """Which price this publisher's bars are marked on, for the row label.
+
+        ``_candle_source_for`` names the MECHANISM; this names the PRICE.
+        Returning ``None`` writes NULL, which is the honest label for a venue
+        whose convention has never been declared - every existing publisher
+        keeps that default, so this hook adds no fan-out. Walutomat overrides
+        it with ``quote_mid`` because its bars are marked on the midpoint of
+        the venue's two-sided top-of-book quote rather than on trade prints.
+
+        Args:
+            timeframe: The candle timeframe label (e.g. ``"1m"``).
+
+        Returns:
+            The ``price_basis`` tag for the row, or ``None`` for unlabelled.
+        """
+        return None
+
     def _subscribe_candle_stream(
         self, symbols: list[str], timeframe: str
     ) -> AsyncIterator[CandleUpdate]:
@@ -3037,6 +3056,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             instrument_public_id,
             source=self._candle_source_for(timeframe),
             complete=candle_msg.complete,
+            price_basis=self._candle_price_basis_for(timeframe),
         )
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
@@ -3111,6 +3131,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             instrument_public_id,
             source="synthesized",
             complete=candle.complete,
+            price_basis=self._candle_price_basis_for(timeframe),
         )
         await self._publish_message(topic, candle_msg)
         if self._should_persist_row("candles", exchange, native_symbol):
@@ -4027,6 +4048,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         *,
         source: str = "native",
         complete: bool = True,
+        price_basis: str | None = None,
     ) -> CandleUpsertRow:
         """Build a CandleUpsertRow from a published CandleData message.
 
@@ -4039,6 +4061,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 carries the window-closed flag (False for an in-progress minute,
                 True once elapsed / when sealed by the finalizer); for synthesized
                 bars it carries the aggregator bucket's trustworthy-boundary flag.
+            price_basis: Which price the bar was marked on
+                (:data:`snapper.core.types.PriceBasis`). ``None`` writes NULL,
+                the honest label for a venue whose convention is undeclared.
 
         Returns:
             Fully materialized row dict ready for repository upsert.
@@ -4058,6 +4083,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "trades": candle_msg.trades if candle_msg.trades is not None else 0,
             "source": source,
             "complete": complete,
+            "price_basis": price_basis,
             "session_id": candle_msg.session_id,
             "sequence_id": candle_msg.sequence_id,
         }

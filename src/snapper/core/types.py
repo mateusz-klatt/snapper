@@ -26,6 +26,7 @@ Type Aliases:
     UpsertResult: Outcome of an upsert operation.
     AssetType: Financial asset class category.
     MarketDataType: Market data type for ZMQ topic routing.
+    PriceBasis: Which venue evidence a persisted bar's prices were marked on.
     SubscriptionAction: WebSocket subscription action.
     SubscriptionStatus: WebSocket subscription result status.
     SpawnerProcessStatus: Subprocess-level process status.
@@ -799,6 +800,16 @@ MarketDataType = Literal[
     MarketDataTypeEnum.TICKS, MarketDataTypeEnum.TRADES, MarketDataTypeEnum.CANDLES
 ]
 """Market data type for ZMQ topic routing (market.{exchange}.{instrument}.{type})."""
+
+type PriceBasis = Literal["trade", "quote_mid", "reference"]
+"""Which venue evidence a persisted bar's price columns were marked on.
+
+``trade`` = the venue's own trade prints; ``quote_mid`` = the midpoint of the
+venue's two-sided top-of-book quote; ``reference`` = an externally-sourced
+reference or index rate (never a valid basis for a mark - the vocabulary
+carries it so a legacy row can be labelled honestly if one is ever found).
+``None`` on a stored row means the bar predates the labelling convention.
+Only ``quote_mid`` is emitted today, by the Walutomat publisher."""
 
 SubscriptionAction = Literal[SubscriptionActionEnum.SUBSCRIBE, SubscriptionActionEnum.UNSUBSCRIBE]
 """WebSocket subscription action: subscribe to or unsubscribe from topics."""

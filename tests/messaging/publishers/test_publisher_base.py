@@ -2323,6 +2323,22 @@ async def test_build_candle_row_materializes_fields() -> None:
     assert row["volume"] == pytest.approx(1.0)
     assert row["session_id"] == "sess-1"
     assert row["sequence_id"] == 5
+    assert "price_basis" in row
+    assert row["price_basis"] is None
+    labelled = pub._build_candle_row(candle, "inst-pub-1", price_basis="quote_mid")
+    assert labelled["price_basis"] == "quote_mid"
+
+
+def test_candle_price_basis_for_defaults_to_none() -> None:
+    """Verify the base publisher declares no price basis.
+
+    Given: A publisher that does not override the hook,
+    When: _candle_price_basis_for is called,
+    Then: It returns None so every existing publisher keeps writing NULL and
+        the discriminator is emitted by exactly one venue.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._candle_price_basis_for("1m") is None
 
 
 @pytest.mark.asyncio

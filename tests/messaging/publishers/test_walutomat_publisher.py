@@ -128,6 +128,22 @@ class TestWalutomatPublisher:
         assert publisher._candle_source_for("1m") == "calculated"
 
     @patch("snapper.config.settings.get_settings")
+    def test_candle_price_basis_for_returns_quote_mid(self, mock_get_settings: MagicMock) -> None:
+        """Verify Walutomat bars declare the top-of-book mid as their basis.
+
+        Given a WalutomatMarketDataPublisher instance,
+        When _candle_price_basis_for is called for 1m and for a rollup frame,
+        Then both return 'quote_mid' — a rollup of these bars inherits the
+        basis of the bars it rolls up.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        assert publisher._candle_price_basis_for("1m") == "quote_mid"
+        assert publisher._candle_price_basis_for("1h") == "quote_mid"
+
+    @patch("snapper.config.settings.get_settings")
     def test_supports_public_trades_false(self, mock_get_settings: MagicMock) -> None:
         """Verify Walutomat reports no public trade feed.
 

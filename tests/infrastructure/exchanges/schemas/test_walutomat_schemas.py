@@ -98,6 +98,11 @@ class TestWalutomatMarketResponse:
         response = WalutomatMarketResponse.from_api_response(api_data)
         assert len(response.pairs) == 1
         assert response.pairs[0].pair == "EUR_PLN"
+        offer = response.pairs[0].best_offers
+        assert offer.bid_now is not None
+        assert offer.ask_now is not None
+        assert offer.forex_now == pytest.approx(4.219)
+        assert offer.forex_now != pytest.approx((offer.bid_now + offer.ask_now) / 2.0)
 
     def test_to_dict(self) -> None:
         """Verify market response converts to dict keyed by pair.
@@ -158,3 +163,31 @@ class TestWalutomatMarketResponse:
         response = WalutomatMarketResponse.from_api_response(api_data)
         assert len(response.pairs) == 1
         assert response.pairs[0].pair == "EUR_PLN"
+
+    def test_missing_forex_now_does_not_kill_the_poll_cycle(self) -> None:
+        """Verify an absent forex_now parses and never drops sibling pairs.
+
+        Given API data where one pair omits forex_now entirely,
+        When from_api_response is called,
+        Then that pair validates with forex_now None and the other pairs
+        survive — a required field nothing reads would otherwise turn one
+        malformed pair into the loss of the whole ~44-pair poll cycle.
+        """
+        api_data = [
+            {
+                "pair": "EUR_PLN",
+                "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157},
+            },
+            {
+                "pair": "USD_PLN",
+                "bestOffers": {
+                    "bid_now": 3.9512,
+                    "ask_now": 3.9556,
+                    "forex_now": 3.9571,
+                },
+            },
+        ]
+        response = WalutomatMarketResponse.from_api_response(api_data)
+        assert [pair.pair for pair in response.pairs] == ["EUR_PLN", "USD_PLN"]
+        assert response.pairs[0].best_offers.forex_now is None
+        assert response.pairs[1].best_offers.forex_now == pytest.approx(3.9571)

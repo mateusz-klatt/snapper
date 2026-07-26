@@ -72,7 +72,14 @@ class TickData(StrictDataSchema[Literal["tick"]]):
         volume: Trading volume for the current period.
         bid: Best bid price (highest buy order).
         ask: Best ask price (lowest sell order).
-        last: Last traded price.
+        last: The venue's best available estimate of the executable price at
+            that instant, from the evidence that venue actually delivers: the
+            venue's own trade print where the feed delivers prints; the
+            midpoint of the venue's two-sided top-of-book quote where the feed
+            delivers a book and no usable print. Never an externally-sourced
+            reference rate, an index, a mark price, or a previous-session
+            close. Where a venue publishes a reference or index alongside the
+            book it belongs in its own named field, never here.
         is_delayed: Whether the feed delivers ticks with an exchange-mandated
             delay (Kraken FCM / TradFi index futures = ~10 min). Strategies
             must gate on this flag before treating the price as current.
@@ -109,7 +116,13 @@ class CandleData(StrictDataSchema[Literal["candle"]]):
         open: Opening price of the candle.
         high: Highest price during the candle.
         low: Lowest price during the candle.
-        close: Closing price of the candle.
+        close: Closing price of the candle — the venue's best available
+            estimate of the executable price at the bar boundary, from the
+            evidence that venue actually delivers: trade prints where the feed
+            delivers prints, otherwise the midpoint of the venue's two-sided
+            top-of-book quote. Never an externally-sourced reference rate, an
+            index, a mark price, or a previous-session close, and never mixed
+            with a different convention across the bar's other price columns.
         volume: Total traded volume during the candle.
         vwap: Volume-weighted average price (optional).
         trades: Number of trades in the candle (optional).

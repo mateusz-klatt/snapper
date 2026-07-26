@@ -189,7 +189,19 @@ def is_lifecycle_only(execution: ExecutionUpdate) -> bool:
 
 @dataclass
 class TickerSnapshot:
-    """Snapshot of ticker data for a trading symbol."""
+    """Snapshot of ticker data for a trading symbol.
+
+    ``last`` carries the venue's best available estimate of the executable
+    price at that instant, from the evidence that venue actually delivers:
+    the venue's own trade print where the feed delivers prints; the midpoint
+    of the venue's two-sided top-of-book quote where the feed delivers a book
+    and no usable print. It is never an externally-sourced reference rate, an
+    index, a mark price, or a previous-session close. Where a venue publishes
+    a reference or index alongside the book it belongs in its own named field
+    and never in ``last`` — the established shape is
+    ``KrakenFuturesTickerSchema.mark_price`` / ``index_price``, which the
+    adapter deliberately does not route into ``last``.
+    """
 
     symbol: str
     bid: float
@@ -422,6 +434,21 @@ class ExchangeOrderSnapshot:
 class TickerUpdate:
     """Real-time ticker update with full market data.
 
+    ``last`` carries the venue's best available estimate of the executable
+    price at that instant, from the evidence that venue actually delivers:
+    the venue's own trade print where the feed delivers prints; the midpoint
+    of the venue's two-sided top-of-book quote where the feed delivers a book
+    and no usable print. It is never an externally-sourced reference rate, an
+    index, a mark price, or a previous-session close. Where a venue publishes
+    a reference or index alongside the book it belongs in its own named field
+    and never in ``last`` — the established shape is
+    ``KrakenFuturesTickerSchema.mark_price`` / ``index_price``, which the
+    adapter deliberately does not route into ``last``.
+
+    ``vwap``, ``low`` and ``high`` are 24-hour aggregates. A venue that does
+    not report them sets them to ``0.0``; an instantaneous price in a
+    24h-extreme column is a fabrication under any convention.
+
     ``is_delayed`` marks feeds that deliver ticks with an exchange-mandated
     delay (Kraken FCM / TradFi index futures publishes ~10-minute-delayed
     prices to non-subscribed users). Strategies subscribing via ZMQ must
@@ -451,6 +478,16 @@ class TickerUpdate:
 @dataclass
 class CandleUpdate:
     """Real-time candle update with OHLCV data.
+
+    ``close`` (and the ``open``/``high``/``low`` of the same bar) carries the
+    venue's best available estimate of the executable price, from the evidence
+    that venue actually delivers: the venue's own trade prints where the feed
+    delivers prints; the midpoint of the venue's two-sided top-of-book quote
+    where the feed delivers a book and no usable print. It is never an
+    externally-sourced reference rate, an index, a mark price, or a
+    previous-session close, and a bar never mixes conventions across its four
+    price columns — a high taken from asks and a low taken from bids is a
+    spread envelope, not a price series.
 
     ``complete`` is the trustworthy-boundary flag for higher-TF synthesis: True
     for native frames and for synthesized bars whose window was seeded from the

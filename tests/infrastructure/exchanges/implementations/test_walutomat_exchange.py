@@ -35,6 +35,7 @@ from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.implementations.walutomat import WALUTOMAT_MAX_RELATIVE_SPREAD
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.walutomat import _active_execution_status
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_decimal
@@ -48,6 +49,9 @@ from snapper.infrastructure.exchanges.implementations.walutomat import _snapshot
 from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
 from snapper.infrastructure.exchanges.implementations.walutomat import _walutomat_exec_id
 from snapper.infrastructure.exchanges.implementations.walutomat import _walutomat_operation_detail
+from snapper.infrastructure.exchanges.implementations.walutomat import walutomat_quote
+from snapper.infrastructure.exchanges.implementations.walutomat import walutomat_quote_refusal
+from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatBestOffer
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 
@@ -171,7 +175,7 @@ async def test_connect_success(monkeypatch: pytest.MonkeyPatch) -> None:
     response_payload: list[dict[str, Any]] = [
         {
             "pair": "EUR_PLN",
-            "bestOffers": {"bid_now": 4.2, "ask_now": 4.3, "forex_now": 4.25},
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
         }
     ]
     stub_client = StubAsyncClient(get_responses=[StubResponse(response_payload)])
@@ -312,16 +316,19 @@ async def test_fetch_market_data_requires_connection() -> None:
 
 @pytest.mark.asyncio()
 async def test_get_ticker_success() -> None:
-    """Verify get_ticker returns ticker data.
+    """Verify get_ticker marks on the top-of-book mid, not on forex_now.
 
-    Given: A connected client with market data,
+    Given: A connected client holding the production quote shape measured on
+        2026-07-25 15:58 (bid 4.3107 / ask 4.3157 / forex_now 4.3166, which
+        sat ABOVE the ask),
     When: get_ticker() is called for a symbol,
-    Then: TickerSnapshot with bid/ask/last is returned.
+    Then: TickerSnapshot.last is the mid 4.3132, differs from forex_now, and
+        sits strictly inside the tradable spread.
     """
     payload: list[dict[str, Any]] = [
         {
             "pair": "EUR_PLN",
-            "bestOffers": {"bid_now": 4.2, "ask_now": 4.3, "forex_now": 4.25},
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
         }
     ]
     client = WalutomatExchangeClient()
@@ -329,9 +336,11 @@ async def test_get_ticker_success() -> None:
     client._http_client = cast(httpx.AsyncClient, stub_client)
     ticker = await client.get_ticker("EUR-PLN")
     assert ticker.symbol == "EUR-PLN"
-    assert math.isclose(ticker.bid, 4.2, rel_tol=1e-9)
-    assert math.isclose(ticker.ask, 4.3, rel_tol=1e-9)
-    assert math.isclose(ticker.last, 4.25, rel_tol=1e-9)
+    assert math.isclose(ticker.bid, 4.3107, rel_tol=1e-9)
+    assert math.isclose(ticker.ask, 4.3157, rel_tol=1e-9)
+    assert math.isclose(ticker.last, 4.3132, rel_tol=1e-9)
+    assert not math.isclose(ticker.last, 4.3166, rel_tol=1e-9)
+    assert ticker.bid < ticker.last < ticker.ask
 
 
 @pytest.mark.asyncio()
@@ -345,7 +354,7 @@ async def test_get_ticker_missing_symbol() -> None:
     payload: list[dict[str, Any]] = [
         {
             "pair": "USD_PLN",
-            "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05},
+            "bestOffers": {"bid_now": 3.9512, "ask_now": 3.9556, "forex_now": 3.9571},
         }
     ]
     client = WalutomatExchangeClient()
@@ -379,13 +388,13 @@ def test_get_supported_pairs_returns_symbols() -> None:
         "EUR_PLN": WalutomatMarketPair.model_validate(
             {
                 "pair": "EUR_PLN",
-                "bestOffers": {"bid_now": 4.23, "ask_now": 4.24, "forex_now": 4.235},
+                "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
             }
         ),
         "USD_PLN": WalutomatMarketPair.model_validate(
             {
                 "pair": "USD_PLN",
-                "bestOffers": {"bid_now": 3.95, "ask_now": 3.96, "forex_now": 3.955},
+                "bestOffers": {"bid_now": 3.9512, "ask_now": 3.9556, "forex_now": 3.9571},
             }
         ),
     }
@@ -410,9 +419,12 @@ async def test_subscribe_instruments_yields_pairs(monkeypatch: pytest.MonkeyPatc
             [
                 {
                     "pair": "EUR_PLN",
-                    "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05},
+                    "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
                 },
-                {"pair": "BAD", "bestOffers": {"bid_now": 1, "ask_now": 2, "forex_now": 1.5}},
+                {
+                    "pair": "BAD",
+                    "bestOffers": {"bid_now": 1.9012, "ask_now": 1.9044, "forex_now": 1.9061},
+                },
             ]
         ).to_dict()
         return response
@@ -952,15 +964,15 @@ async def test_subscribe_ticks_yields_queue_data() -> None:
     client._polling_task = cast(Any, SimpleNamespace(done=lambda: False))
     ticker = TickerUpdate(
         symbol="EUR-PLN",
-        bid=4.2,
+        bid=4.3107,
         bid_qty=0.0,
-        ask=4.3,
+        ask=4.3157,
         ask_qty=0.0,
-        last=4.25,
+        last=4.3132,
         volume=0.0,
-        vwap=4.25,
-        low=4.25,
-        high=4.25,
+        vwap=0.0,
+        low=0.0,
+        high=0.0,
         change=0.0,
         change_pct=0.0,
     )
@@ -975,11 +987,12 @@ async def test_subscribe_ticks_yields_queue_data() -> None:
 
 @pytest.mark.asyncio()
 async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify polling loop enqueues tick updates.
+    """Verify polling loop enqueues tick updates buffered at the mid.
 
-    Given: A running client with market data,
+    Given: A running client with the production quote shape,
     When: Polling loop fetches data,
-    Then: TickerUpdate is enqueued and buffer is updated.
+    Then: TickerUpdate is enqueued and the tick buffer — the single input to
+        every candle price — holds the mid 4.3132, never forex_now 4.3166.
     """
     client = WalutomatExchangeClient(polling_interval=0.0)
     client._running = True
@@ -990,7 +1003,7 @@ async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatc
             "EUR_PLN": WalutomatMarketPair.model_validate(
                 {
                     "pair": "EUR_PLN",
-                    "bestOffers": {"bid_now": 4.2, "ask_now": 4.3, "forex_now": 4.25},
+                    "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
                 }
             )
         }
@@ -999,8 +1012,10 @@ async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatc
     task = asyncio.create_task(client._polling_loop(["EUR-PLN"]))
     ticker = await asyncio.wait_for(client._tick_queue.get(), timeout=0.1)
     assert ticker.symbol == "EUR-PLN"
-    assert math.isclose(ticker.bid, 4.2, rel_tol=1e-9)
-    assert math.isclose(client._tick_buffers["EUR-PLN"][0][1], 4.25, rel_tol=1e-9)
+    assert math.isclose(ticker.bid, 4.3107, rel_tol=1e-9)
+    assert math.isclose(ticker.last, 4.3132, rel_tol=1e-9)
+    assert math.isclose(client._tick_buffers["EUR-PLN"][0][1], 4.3132, rel_tol=1e-9)
+    assert not math.isclose(client._tick_buffers["EUR-PLN"][0][1], 4.3166, rel_tol=1e-9)
     await asyncio.wait_for(task, timeout=0.1)
 
 
@@ -1051,7 +1066,7 @@ async def test_candle_builder_loop_emits_candles(monkeypatch: pytest.MonkeyPatch
     assert candle.symbol == "EUR-PLN"
     assert math.isclose(candle.open, 4.10, rel_tol=1e-9)
     assert math.isclose(candle.close, 4.30, rel_tol=1e-9)
-    assert candle.trades == 2
+    assert candle.trades == 0
     assert client._tick_buffers["EUR-PLN"] == [(75.0, 4.50)]
 
 
@@ -1130,15 +1145,15 @@ async def test_subscribe_ticks_wildcard_starts_polling_queue(
     monkeypatch.setattr(client, "_polling_loop", fake_polling)
     ticker = TickerUpdate(
         symbol="EUR-PLN",
-        bid=4.2,
+        bid=4.3107,
         bid_qty=0.0,
-        ask=4.3,
+        ask=4.3157,
         ask_qty=0.0,
-        last=4.25,
+        last=4.3132,
         volume=0.0,
-        vwap=4.25,
-        low=4.25,
-        high=4.25,
+        vwap=0.0,
+        low=0.0,
+        high=0.0,
         change=0.0,
         change_pct=0.0,
     )
@@ -1185,7 +1200,7 @@ async def test_subscribe_candles_unsupported_timeframe(monkeypatch: pytest.Monke
     response_payload = [
         {
             "pair": "EUR_PLN",
-            "bestOffers": {"bid_now": 4.2, "ask_now": 4.3, "forex_now": 4.25},
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
         }
     ]
     stub_client = StubAsyncClient(get_responses=[StubResponse(response_payload)])
@@ -3640,7 +3655,10 @@ async def test_polling_loop_skips_missing_symbol(monkeypatch: pytest.MonkeyPatch
     client = WalutomatExchangeClient()
     client._running = True
     pair = WalutomatMarketPair.model_validate(
-        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
     )
     fetch_calls: list[dict[str, WalutomatMarketPair]] = []
 
@@ -4053,9 +4071,9 @@ async def test_polling_loop_adds_to_new_tick_buffer(monkeypatch: pytest.MonkeyPa
         {
             "pair": "EUR_PLN",
             "bestOffers": {
-                "bid_now": 4.2,
-                "ask_now": 4.3,
-                "forex_now": 4.25,
+                "bid_now": 4.3107,
+                "ask_now": 4.3157,
+                "forex_now": 4.3166,
             },
         }
     ]
@@ -4230,7 +4248,10 @@ async def test_polling_loop_wakeup_event_breaks_sleep_early() -> None:
     client._backoff_attempts = 1
     client._backoff_until = walutomat_mod.time.monotonic() + 60.0
     pair = WalutomatMarketPair.model_validate(
-        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
     )
 
     async def fake_fetch() -> dict[str, WalutomatMarketPair]:
@@ -4264,7 +4285,10 @@ async def test_polling_loop_sleeps_during_backoff(monkeypatch: pytest.MonkeyPatc
     client._backoff_attempts = 1
     client._backoff_until = walutomat_mod.time.monotonic() + 60.0
     pair = WalutomatMarketPair.model_validate(
-        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
     )
     real_sleep = asyncio.sleep
 
@@ -4316,7 +4340,10 @@ async def test_successful_poll_after_backoff_resets_consecutive_and_attempt_coun
     client._consecutive_error_count = 3
     client._backoff_attempts = 2
     pair = WalutomatMarketPair.model_validate(
-        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
     )
 
     async def fake_fetch() -> dict[str, WalutomatMarketPair]:
@@ -4341,7 +4368,10 @@ async def test_polling_loop_handles_http_error_without_breaking() -> None:
     client._running = True
     client._max_consecutive_errors = 5
     pair = WalutomatMarketPair.model_validate(
-        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
     )
     calls = 0
 
@@ -4404,7 +4434,7 @@ async def test_subscribe_candles_restarts_done_builder_task(
     market_data = [
         {
             "pair": "EUR_PLN",
-            "bestOffers": {"bid_now": 4.35, "ask_now": 4.36, "forex_now": 4.355},
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
         }
     ]
     stub_client = StubAsyncClient(get_responses=[StubResponse(market_data)])
@@ -6411,3 +6441,313 @@ def test_parse_walutomat_history_item_correcting_entry_flag() -> None:
     flagged = dict(_history_row(7), correctingEntry=True)
     assert _parse_walutomat_history_item(flagged).correcting_entry is True
     assert _parse_walutomat_history_item(_history_row(8)).correcting_entry is False
+
+
+def _best_offer(
+    bid: float | None = 4.3107,
+    ask: float | None = 4.3157,
+    forex: float | None = 4.3166,
+) -> WalutomatBestOffer:
+    """Build a bestOffers payload defaulting to the production quote shape.
+
+    Args:
+        bid: Value for ``bid_now``.
+        ask: Value for ``ask_now``.
+        forex: Value for the unread ``forex_now`` reference rate.
+
+    Returns:
+        A WalutomatBestOffer carrying exactly those three values.
+    """
+    return WalutomatBestOffer(bid_now=bid, ask_now=ask, forex_now=forex)
+
+
+def _market_pair(offer: WalutomatBestOffer, pair: str = "EUR_PLN") -> WalutomatMarketPair:
+    """Wrap a bestOffers payload in a market pair without going through the API filter.
+
+    Args:
+        offer: The bestOffers payload to carry.
+        pair: Walutomat-format pair name.
+
+    Returns:
+        A WalutomatMarketPair built directly, below the one-sided-pair filter.
+    """
+    return WalutomatMarketPair(pair=pair, bestOffers=offer)
+
+
+@pytest.mark.asyncio()
+async def test_production_shape_marks_the_same_mid_at_all_three_sites() -> None:
+    """Given: The production quote shape measured on 2026-07-25 15:58.
+
+    When: The ticker builder, the polling path and get_ticker each run on it,
+    Then: All three carry the mid 4.3132 with no drift, and none carries the
+        reference rate 4.3166 that used to occupy every price slot.
+    """
+    offer = _best_offer()
+    quote = walutomat_quote(offer)
+    assert quote is not None
+    assert math.isclose(quote.mark, 4.3132, rel_tol=1e-9)
+
+    client = WalutomatExchangeClient()
+    built = client._build_ticker_from_pair("EUR-PLN", quote)
+    assert math.isclose(built.last, 4.3132, rel_tol=1e-9)
+
+    await client._process_polling_data({"EUR_PLN": _market_pair(offer)}, {"EUR_PLN": "EUR-PLN"})
+    assert math.isclose(client._tick_buffers["EUR-PLN"][0][1], 4.3132, rel_tol=1e-9)
+
+    rest = WalutomatExchangeClient()
+    payload: list[dict[str, Any]] = [
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3107, "ask_now": 4.3157, "forex_now": 4.3166},
+        }
+    ]
+    rest._http_client = cast(
+        httpx.AsyncClient, StubAsyncClient(get_responses=[StubResponse(payload)])
+    )
+    snapshot = await rest.get_ticker("EUR-PLN")
+    assert math.isclose(snapshot.last, 4.3132, rel_tol=1e-9)
+    assert not math.isclose(snapshot.last, 4.3166, rel_tol=1e-9)
+
+
+@pytest.mark.asyncio()
+async def test_mark_moves_when_the_book_moves_and_forex_now_is_frozen() -> None:
+    """Given: Four polls whose bid/ask move while forex_now never changes.
+
+    When: The polling path processes each of them,
+    Then: The tick buffer holds four DISTINCT marks and none equals the frozen
+        reference rate. This is the unit-level form of the six-hour production
+        measurement where bid took 14 values, ask 18, and last exactly one.
+    """
+    client = WalutomatExchangeClient()
+    books = [(4.3107, 4.3157), (4.3111, 4.3161), (4.3098, 4.3148), (4.3120, 4.3170)]
+    for bid, ask in books:
+        offer = _best_offer(bid=bid, ask=ask, forex=4.3166)
+        await client._process_polling_data({"EUR_PLN": _market_pair(offer)}, {"EUR_PLN": "EUR-PLN"})
+    marks = [price for _, price in client._tick_buffers["EUR-PLN"]]
+    assert len(marks) == len(books)
+    assert len(set(marks)) == len(books)
+    assert all(not math.isclose(mark, 4.3166, rel_tol=1e-9) for mark in marks)
+
+
+@pytest.mark.asyncio()
+async def test_mark_is_frozen_when_the_book_is_frozen_and_forex_now_moves() -> None:
+    """Given: Four polls whose bid/ask never change while forex_now varies.
+
+    When: The polling path processes each of them,
+    Then: The tick buffer holds exactly ONE distinct mark. A dispersion count
+        alone would still pass if the mark were re-derived from a moving
+        forex_now; this is the assertion that would not.
+    """
+    client = WalutomatExchangeClient()
+    for forex in (4.3166, 4.3201, 4.3050, 4.3312):
+        offer = _best_offer(bid=4.3107, ask=4.3157, forex=forex)
+        await client._process_polling_data({"EUR_PLN": _market_pair(offer)}, {"EUR_PLN": "EUR-PLN"})
+    marks = {price for _, price in client._tick_buffers["EUR-PLN"]}
+    assert marks == {4.3132}
+
+
+def test_from_api_response_drops_a_one_sided_pair() -> None:
+    """Given: A payload whose EUR_PLN entry has a null bid.
+
+    When: from_api_response parses it,
+    Then: The one-sided pair is dropped and the two-sided pair survives.
+    """
+    response = WalutomatMarketResponse.from_api_response(
+        [
+            {"pair": "EUR_PLN", "bestOffers": {"bid_now": None, "ask_now": 4.3157}},
+            {
+                "pair": "USD_PLN",
+                "bestOffers": {"bid_now": 3.9512, "ask_now": 3.9556, "forex_now": 3.9571},
+            },
+        ]
+    )
+    assert [pair.pair for pair in response.pairs] == ["USD_PLN"]
+
+
+@pytest.mark.asyncio()
+async def test_one_sided_book_below_the_upstream_filter_emits_nothing() -> None:
+    """Given: A market pair built DIRECTLY with a null bid, bypassing the filter.
+
+    When: The polling path processes it,
+    Then: No ticker is enqueued, no tick buffer entry is created, no exception
+        escapes, and no fabricated 0.0 reaches any price slot.
+    """
+    client = WalutomatExchangeClient()
+    offer = _best_offer(bid=None)
+    await client._process_polling_data({"EUR_PLN": _market_pair(offer)}, {"EUR_PLN": "EUR-PLN"})
+    assert client._tick_queue.empty()
+    assert client._tick_buffers == {}
+    assert client._refused_marks == {"EUR-PLN"}
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask"),
+    [
+        (0.0, 4.3157),
+        (-4.3107, 4.3157),
+        (float("nan"), 4.3157),
+        (float("inf"), 4.3157),
+        (None, 4.3157),
+        (4.3107, 0.0),
+        (4.3107, -4.3157),
+        (4.3107, float("nan")),
+        (4.3107, float("inf")),
+        (4.3107, None),
+    ],
+)
+def test_walutomat_quote_refuses_non_positive_finite_sides(
+    bid: float | None, ask: float | None
+) -> None:
+    """Given: A book whose bid or ask is zero, negative, NaN, infinite or absent.
+
+    When: walutomat_quote inspects it,
+    Then: It refuses. is_positive_finite is strictly stronger than the upstream
+        `is not None` filter, so these are new holes relative to the old code.
+    """
+    assert walutomat_quote(_best_offer(bid=bid, ask=ask)) is None
+
+
+def test_walutomat_quote_refuses_crossed_book_and_accepts_locked_book() -> None:
+    """Given: One crossed book (bid > ask) and one locked book (bid == ask).
+
+    When: walutomat_quote inspects each,
+    Then: The crossed book is refused because its midpoint is not a price, and
+        the locked book is accepted with the mark equal to both sides.
+    """
+    assert walutomat_quote(_best_offer(bid=4.3157, ask=4.3107)) is None
+    locked = walutomat_quote(_best_offer(bid=4.3132, ask=4.3132))
+    assert locked is not None
+    assert locked.mark == locked.bid == locked.ask == 4.3132
+
+
+def test_walutomat_quote_relative_spread_ceiling_is_a_boundary_not_a_major_filter() -> None:
+    """Given: Books whose relative spread straddles the degenerate-book ceiling.
+
+    When: walutomat_quote inspects each,
+    Then: Just under the ceiling is accepted and just over is refused, while
+        the production EUR-PLN spread of 11.6 bps passes with room to spare.
+    """
+    mid = 1.0
+    under_half = mid * WALUTOMAT_MAX_RELATIVE_SPREAD * 0.499
+    over_half = mid * WALUTOMAT_MAX_RELATIVE_SPREAD * 0.501
+    assert walutomat_quote(_best_offer(bid=mid - under_half, ask=mid + under_half)) is not None
+    assert walutomat_quote(_best_offer(bid=mid - over_half, ask=mid + over_half)) is None
+    assert walutomat_quote(_best_offer()) is not None
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask"),
+    [
+        (None, 4.3157),
+        (4.3107, None),
+        (4.3157, 4.3107),
+        (0.9, 1.1),
+        (4.3107, 4.3157),
+        (4.3132, 4.3132),
+    ],
+)
+def test_quote_refusal_reason_agrees_with_the_quote_decision(
+    bid: float | None, ask: float | None
+) -> None:
+    """Given: Books spanning every refusal and two accepted shapes.
+
+    When: walutomat_quote and walutomat_quote_refusal both inspect them,
+    Then: A reason is present exactly when a quote is absent, so the logged
+        message can never describe a decision that was not taken.
+    """
+    offer = _best_offer(bid=bid, ask=ask)
+    assert (walutomat_quote(offer) is None) is (walutomat_quote_refusal(offer) is not None)
+
+
+@pytest.mark.asyncio()
+async def test_refusal_logs_once_on_entry_and_once_on_recovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Given: Three polls — refused, still refused, then recovered.
+
+    When: The polling path processes them in order,
+    Then: Exactly one refusal warning is emitted (not one per poll across 44
+        pairs), one recovery info is emitted, and the latch is released.
+    """
+    client = WalutomatExchangeClient()
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            for offer in (_best_offer(bid=None), _best_offer(bid=None), _best_offer()):
+                await client._process_polling_data(
+                    {"EUR_PLN": _market_pair(offer)}, {"EUR_PLN": "EUR-PLN"}
+                )
+    finally:
+        logger.remove(sink_id)
+    refusals = [r for r in caplog.records if "mark refused" in r.message]
+    recoveries = [r for r in caplog.records if "mark recovered" in r.message]
+    assert len(refusals) == 1
+    assert refusals[0].levelname == "WARNING"
+    assert "bid_now=None" in refusals[0].message
+    assert "not a positive finite number" in refusals[0].message
+    assert len(recoveries) == 1
+    assert recoveries[0].levelname == "INFO"
+    assert client._refused_marks == set()
+
+
+@pytest.mark.asyncio()
+async def test_get_ticker_refuses_an_unusable_quote_with_a_distinct_message() -> None:
+    """Given: A connected client whose only pair carries a crossed book.
+
+    When: get_ticker is called for it,
+    Then: ValueError names the unusable quote rather than a missing symbol, and
+        no snapshot with a fabricated price is returned.
+    """
+    payload: list[dict[str, Any]] = [
+        {
+            "pair": "EUR_PLN",
+            "bestOffers": {"bid_now": 4.3157, "ask_now": 4.3107, "forex_now": 4.3166},
+        }
+    ]
+    client = WalutomatExchangeClient()
+    client._http_client = cast(
+        httpx.AsyncClient, StubAsyncClient(get_responses=[StubResponse(payload)])
+    )
+    with pytest.raises(ValueError, match="has no usable two-sided quote"):
+        await client.get_ticker("EUR-PLN")
+
+
+def test_ticker_reports_honest_zeros_for_unreported_fields() -> None:
+    """Given: An accepted production-shaped quote.
+
+    When: The ticker is built from it,
+    Then: The 24-hour columns and the size/volume columns are honest zeros —
+        an instantaneous price in a 24h-extreme column is a fabrication.
+    """
+    quote = walutomat_quote(_best_offer())
+    assert quote is not None
+    ticker = WalutomatExchangeClient()._build_ticker_from_pair("EUR-PLN", quote)
+    assert ticker.vwap == 0.0
+    assert ticker.low == 0.0
+    assert ticker.high == 0.0
+    assert ticker.volume == 0.0
+    assert ticker.bid_qty == 0.0
+    assert ticker.ask_qty == 0.0
+    assert ticker.change == 0.0
+    assert ticker.change_pct == 0.0
+
+
+@pytest.mark.asyncio()
+async def test_candle_from_moving_mids_is_not_flat_and_reports_no_trades() -> None:
+    """Given: A tick buffer holding four distinct mids inside one minute.
+
+    When: The 1m candle is built from it,
+    Then: Open, high, low and close are four distinct values — O==H==L==C is no
+        longer structural — and trades is 0 because polls are not trades.
+    """
+    client = WalutomatExchangeClient()
+    ticks = [(1.0, 4.3132), (2.0, 4.3145), (3.0, 4.3121), (4.0, 4.3138)]
+    await client._build_candle_for_symbol("EUR-PLN", ticks, 0, 60)
+    candle = client._candle_queue.get_nowait()
+    assert {candle.open, candle.high, candle.low, candle.close} == {
+        4.3132,
+        4.3145,
+        4.3121,
+        4.3138,
+    }
+    assert candle.trades == 0

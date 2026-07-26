@@ -43,6 +43,7 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecisionOutbox
 from snapper.data.models import InstrumentOrderCapability
@@ -813,6 +814,7 @@ def test_candle_row_matches_returns_true_when_all_business_columns_equal() -> No
         trades=10,
         source="native",
         complete=True,
+        price_basis=None,
     )
 
     assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
@@ -830,6 +832,7 @@ def test_candle_row_matches_returns_true_when_all_business_columns_equal() -> No
         ("trades", 11),
         ("source", "synthesized"),
         ("complete", False),
+        ("price_basis", "quote_mid"),
     ],
 )
 def test_candle_row_matches_returns_false_when_any_business_column_differs(
@@ -838,10 +841,12 @@ def test_candle_row_matches_returns_false_when_any_business_column_differs(
     """Verify the guard rejects a match when any single business column differs.
 
     Given: An existing candle differing from the incoming row in one column
-        (OHLCV/vwap/trades OR the provenance source/complete),
+        (OHLCV/vwap/trades OR the provenance source/complete/price_basis),
     When: _candle_row_matches is called,
     Then: It returns False so a real correction (incl. a provenance change such
-        as a synthesized re-roll or a completeness flip) still creates a new version.
+        as a synthesized re-roll, a completeness flip, or a re-mark that changes
+        only which price the numbers were derived from) still creates a new
+        version.
     """
     row = _candle_match_row()
     existing_values: dict[str, Any] = {
@@ -854,6 +859,7 @@ def test_candle_row_matches_returns_false_when_any_business_column_differs(
         "trades": 10,
         "source": "native",
         "complete": True,
+        "price_basis": None,
     }
     existing_values[column] = changed
     existing = SimpleNamespace(**existing_values)
@@ -879,6 +885,7 @@ def test_candle_row_matches_handles_none_vwap() -> None:
         trades=10,
         source="native",
         complete=True,
+        price_basis=None,
     )
 
     assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
@@ -910,6 +917,7 @@ async def test_upsert_candles_skips_identical_batch_row() -> None:
         trades=10,
         source="native",
         complete=True,
+        price_basis=None,
     )
     execute_calls = 0
     added_objects: list[Any] = []
@@ -953,6 +961,7 @@ async def test_upsert_candles_skips_identical_sequential_row() -> None:
         trades=10,
         source="native",
         complete=True,
+        price_basis=None,
     )
     call_count = 0
     added_objects: list[Any] = []
@@ -1002,6 +1011,7 @@ async def test_upsert_candles_caller_session_skips_identical_sequential_row() ->
         trades=10,
         source="native",
         complete=True,
+        price_basis=None,
     )
     added_objects: list[Any] = []
 
@@ -11827,3 +11837,54 @@ async def test_get_order_by_command_public_id_survives_symbol_rename(tmp_path: P
     found = await r.get_order_by_command_public_id(cmd_pid, as_of=rename_at + timedelta(seconds=1))
     assert found is not None
     assert found["instrument"] == "XBT-USD"
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_round_trips_price_basis(tmp_path: Path) -> None:
+    """Verify the price-basis label survives a real persist and read back.
+
+    Given: Two candles — one tagged ``quote_mid`` and one omitting the key,
+    When: They are upserted and read back from the candles table,
+    Then: The tagged row carries its label and the untagged row is NULL, which
+        is the F6-honest encoding of a bar written before the convention was
+        named. No history is rewritten to give it a value.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    labelled: CandleUpsertRow = {
+        "instrument_public_id": inst_pid,
+        "open_at": ts,
+        "timestamp": ts,
+        "timeframe": "1m",
+        "open": 4.3132,
+        "high": 4.3145,
+        "low": 4.3121,
+        "close": 4.3138,
+        "volume": 0.0,
+        "vwap": 4.3134,
+        "trades": 0,
+        "source": "calculated",
+        "session_id": "s1",
+        "sequence_id": 10,
+        "price_basis": "quote_mid",
+    }
+    unlabelled: CandleUpsertRow = {
+        "instrument_public_id": inst_pid,
+        "open_at": ts + timedelta(minutes=1),
+        "timestamp": ts + timedelta(minutes=1),
+        "timeframe": "1m",
+        "open": 4.3132,
+        "high": 4.3145,
+        "low": 4.3121,
+        "close": 4.3138,
+        "volume": 0.0,
+        "vwap": 4.3134,
+        "trades": 0,
+        "source": "calculated",
+        "session_id": "s1",
+        "sequence_id": 11,
+    }
+    assert await r.upsert_candles([labelled, unlabelled]) == 2
+    async with r.session() as s:
+        stored = (await s.execute(_sa_select(Candle).order_by(Candle.open_at))).scalars().all()
+    assert [row.price_basis for row in stored] == ["quote_mid", None]

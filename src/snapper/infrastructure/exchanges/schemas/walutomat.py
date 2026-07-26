@@ -30,7 +30,16 @@ class WalutomatBestOffer(ExchangeResponse):
 
     bid_now: float | None = Field(default=None, description="Current best bid price")
     ask_now: float | None = Field(default=None, description="Current best ask price")
-    forex_now: float = Field(description="Mid-market forex rate")
+    forex_now: float | None = Field(
+        default=None,
+        description=(
+            "Venue-published external reference rate. NOT the bid/ask mid - "
+            "the repo's own fixture has bid 4.2161 / ask 4.2199 (mid 4.2180) "
+            "with forex_now 4.2190, and in production 2026-07-25 15:58 it "
+            "stood ABOVE the ask. Not a traded price. Parsed for "
+            "completeness; never used as a price."
+        ),
+    )
     bid_old: float | None = Field(default=None, description="Previous best bid price")
     ask_old: float | None = Field(default=None, description="Previous best ask price")
     forex_old: float | None = Field(default=None, description="Previous forex rate")

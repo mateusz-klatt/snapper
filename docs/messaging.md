@@ -939,7 +939,23 @@ Key properties:
     upstream OHLC (Kraken spot `ohlc:1m`, Polygon history, Kraken
     futures/equities 1m REST-aggregate backfills); `calculated` = Snapper-built
     live 1m from the trade/quote stream (Kraken futures/equities, Walutomat —
-    tagged from migration 0012 forward); `synthesized` = higher-TF rollups. The candle READ path single-source cutover
+    tagged from migration 0012 forward); `synthesized` = higher-TF rollups.
+    `source` names the MECHANISM that produced the bar, NOT the price it was
+    marked on; the `candles.price_basis` column (migration 0040, nullable, no
+    CHECK, vocabulary `snapper.core.types.PriceBasis`) names the price.
+    Walutomat 1m bars are marked on the venue's top-of-book mid
+    `(bid + ask) / 2`, carry no trade print (`trades = 0`) and no volume, and
+    are tagged `price_basis = 'quote_mid'`. That convention changed
+    FORWARD-ONLY at the cutover: before it those bars carried the venue's
+    externally-sourced `forex_now` reference rate, which sat outside the
+    tradable spread and could stay frozen for hours. No history is rewritten,
+    so a Walutomat row with `price_basis IS NULL` is a pre-cutover
+    reference-rate bar and the series is discontinuous at the cutover minute —
+    that exact UTC minute is stamped in the deploy note for this change. The
+    step was measured before deploy against production quotes: EUR-PLN −8.0
+    bps and USD-PLN −4.0 bps, ≈ −0.014 USD on 1520.29 equity, i.e. a phantom
+    drawdown of ≈ 1e-5 against the 0.01 threshold that would have forced an
+    explicit peak decision, so no risk peak was re-seeded. The candle READ path single-source cutover
     is gated by the `candle_single_source` setting (default OFF): while OFF, the
     `/api/candles` smart route still derives `5m/15m/30m` on-read from the 1m
     cache; when ON, those frames serve single-source from the persisted plane

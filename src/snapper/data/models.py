@@ -685,6 +685,13 @@ class Candle(TemporalMixin, Base):
     ``Integer`` on SQLite (where INTEGER PRIMARY KEY is already 64-bit
     rowid). High-write tables would otherwise overflow the INT4
     sequence at production write rates.
+
+    ``source`` names the MECHANISM that produced the bar; ``price_basis``
+    names WHICH PRICE it was marked on
+    (:data:`snapper.core.types.PriceBasis`). ``price_basis`` deliberately
+    carries no CHECK constraint - the ``source`` CHECK is exactly what makes
+    ``source`` unable to absorb a new provenance value without a migration -
+    and is NULL on every row written before the convention was labelled.
     """
 
     __tablename__ = "candles"
@@ -727,6 +734,7 @@ class Candle(TemporalMixin, Base):
     trades: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(16), server_default="native")
     complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    price_basis: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class ShadowCandle(TemporalMixin, Base):

@@ -9238,9 +9238,11 @@ class SQLAlchemyRepository(Repository):
 
         Used to make a re-upsert of identical data a true no-op: when the
         active version already carries the same OHLCV/vwap/trade values AND the
-        same provenance (``source``/``complete``), the SCD2 close-old +
-        insert-new churn is skipped. Comparing provenance means a synthesized
-        re-roll that corrects an OHLCV-equal row's completeness still versions.
+        same provenance (``source``/``complete``/``price_basis``), the SCD2
+        close-old + insert-new churn is skipped. Comparing provenance means a
+        synthesized re-roll that corrects an OHLCV-equal row's completeness
+        still versions, and so does a re-mark that changes only which price
+        the identical-looking numbers were derived from.
 
         The stored layer types these columns as ``Float`` (open, high, low,
         close, volume, vwap) and ``Integer`` (trades), so the incoming
@@ -9260,6 +9262,7 @@ class SQLAlchemyRepository(Repository):
             and existing.trades == row["trades"]
             and existing.source == row.get("source", "native")
             and existing.complete == row.get("complete", True)
+            and existing.price_basis == row.get("price_basis")
         )
 
     @classmethod

@@ -17,6 +17,12 @@ Features:
     - Candle building from tick data
     - Support for both public and authenticated endpoints
 
+Mark convention: every price this module publishes as ``last`` (and every
+1m candle price derived from it) is the midpoint of the venue's own two-sided
+top-of-book quote, computed once in :func:`walutomat_quote`. The venue's
+``forex_now`` field is an externally-sourced reference rate, is not a traded
+price, and is never routed into a price slot.
+
 Note: Walutomat does not provide WebSocket API, so real-time data is
 obtained through periodic HTTP polling at configurable intervals.
 
@@ -36,6 +42,7 @@ from datetime import datetime
 from decimal import Decimal
 from decimal import InvalidOperation
 from typing import Any
+from typing import Final
 from urllib.parse import urlencode
 
 import httpx
@@ -44,6 +51,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from loguru import logger
 
+from snapper.core.numeric import is_positive_finite
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -65,6 +73,7 @@ from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatBestOffer
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
@@ -584,6 +593,102 @@ def _append_history_page(
     return cursor, False
 
 
+WALUTOMAT_MAX_RELATIVE_SPREAD: Final[float] = 0.02
+"""Widest ``(ask - bid) / mid`` whose midpoint is still accepted as a mark.
+
+``0.02`` is 17x the EUR-PLN spread measured in production on 2026-07-25 15:58
+(0.0050 / 4.3132 = 11.6 bps). The ceiling exists to stop a nonsensical exotic
+book from becoming an FX conversion plane for the whole portfolio; it must
+never fire on a major. Do not tighten it without measurement - a tighter gate
+manufactures candle holes, and holes flip PnL plane election."""
+
+
+@dataclass(frozen=True)
+class WalutomatQuote:
+    """A Walutomat top-of-book quote that passed every usability refusal.
+
+    Carrying ``bid`` and ``ask`` alongside ``mark`` is load-bearing rather than
+    stylistic: :func:`snapper.core.numeric.is_positive_finite` returns
+    ``TypeIs[float]``, so the narrowing performed inside :func:`walutomat_quote`
+    cannot reach a caller that receives only the mark. Returning the narrowed
+    sides with the mark is what lets every call site drop the ``or 0.0``
+    fallbacks instead of re-adding them to satisfy the type checker.
+    """
+
+    bid: float
+    ask: float
+    mark: float
+
+
+def walutomat_quote(offer: WalutomatBestOffer) -> WalutomatQuote | None:
+    """Derive the marked quote for one Walutomat pair, or refuse it.
+
+    The mark is the midpoint of the venue's own two-sided top-of-book quote.
+    ``forex_now`` is an externally-sourced reference rate that is not a traded
+    price and is never read here. Refusals return ``None`` - the caller emits
+    no tick, appends nothing to the tick buffer and therefore builds no bar.
+    No substituted number is ever produced.
+
+    Refusals, in order:
+
+    1. ``bid_now`` is not positive and finite (covers ``None``, ``0.0``,
+       negatives, NaN and infinities).
+    2. ``ask_now`` is not positive and finite.
+    3. The book is crossed (``bid_now > ask_now``) - a venue data
+       inconsistency whose midpoint is not a price. A LOCKED book
+       (``bid == ask``) is accepted: spread 0, mark equal to both sides,
+       and refusing it would create holes for no gain.
+    4. The relative spread exceeds :data:`WALUTOMAT_MAX_RELATIVE_SPREAD`.
+
+    Args:
+        offer: The venue's ``bestOffers`` payload for one pair.
+
+    Returns:
+        The narrowed sides plus their midpoint, or ``None`` when the book
+        carries no usable two-sided quote.
+    """
+    bid = offer.bid_now
+    ask = offer.ask_now
+    if not is_positive_finite(bid):
+        return None
+    if not is_positive_finite(ask):
+        return None
+    if bid > ask:
+        return None
+    mark = (bid + ask) / 2.0
+    if (ask - bid) / mark > WALUTOMAT_MAX_RELATIVE_SPREAD:
+        return None
+    return WalutomatQuote(bid=bid, ask=ask, mark=mark)
+
+
+def walutomat_quote_refusal(offer: WalutomatBestOffer) -> str | None:
+    """Name the refusal :func:`walutomat_quote` would apply to ``offer``.
+
+    Logging-only companion to :func:`walutomat_quote`, which returns ``None``
+    without a reason so that its narrowing stays exact. The two agree by
+    construction: this returns ``None`` exactly when :func:`walutomat_quote`
+    returns a quote, and a regression test pins that equivalence so the
+    message can never describe a decision that was not taken.
+
+    Args:
+        offer: The venue's ``bestOffers`` payload for one pair.
+
+    Returns:
+        A short reason label, or ``None`` when the quote is usable.
+    """
+    bid = offer.bid_now
+    ask = offer.ask_now
+    if not is_positive_finite(bid):
+        return "bid_now is not a positive finite number"
+    if not is_positive_finite(ask):
+        return "ask_now is not a positive finite number"
+    if bid > ask:
+        return "crossed book"
+    if (ask - bid) / ((bid + ask) / 2.0) > WALUTOMAT_MAX_RELATIVE_SPREAD:
+        return f"relative spread above {WALUTOMAT_MAX_RELATIVE_SPREAD}"
+    return None
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -665,6 +770,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._backoff_wakeup_event: asyncio.Event | None = None
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
+        self._refused_marks: set[str] = set()
         self._execution_poll_interval = execution_poll_interval
         self._execution_idle_interval = 30.0
         self._execution_wake: asyncio.Event = asyncio.Event()
@@ -820,40 +926,87 @@ class WalutomatExchangeClient(ExchangeClientBase):
             headers["X-API-Timestamp"] = timestamp
         return headers
 
-    def _build_ticker_from_pair(
-        self, native_symbol: str, pair_data: WalutomatMarketPair
-    ) -> TickerUpdate:
-        """Build a TickerUpdate from Walutomat pair data.
+    def _build_ticker_from_pair(self, native_symbol: str, quote: WalutomatQuote) -> TickerUpdate:
+        """Build a TickerUpdate from an accepted Walutomat quote.
+
+        ``last`` carries the top-of-book mid. ``vwap``, ``low`` and ``high`` are
+        contractually 24-hour aggregates (``vwap_24h`` / ``low_24h`` /
+        ``high_24h`` downstream) that ``marketBrief`` does not report, so they
+        are honest zeros rather than an instantaneous price wearing a 24h
+        label - the same choice the Kraken futures adapter makes for ``vwap``.
+        ``volume`` and the two quantity fields are zero for the same reason:
+        the payload carries no sizes and no volume.
 
         Args:
             native_symbol: Native symbol string.
-            pair_data: Walutomat market pair data.
+            quote: Accepted top-of-book quote carrying the narrowed sides.
 
         Returns:
             TickerUpdate with current market data.
         """
-        offer = pair_data.best_offers
-        bid = offer.bid_now if offer.bid_now is not None else 0.0
-        ask = offer.ask_now if offer.ask_now is not None else 0.0
         return TickerUpdate(
             symbol=native_symbol,
-            bid=bid,
+            bid=quote.bid,
             bid_qty=0.0,
-            ask=ask,
+            ask=quote.ask,
             ask_qty=0.0,
-            last=offer.forex_now,
+            last=quote.mark,
             volume=0.0,
-            vwap=offer.forex_now,
-            low=offer.forex_now,
-            high=offer.forex_now,
+            vwap=0.0,
+            low=0.0,
+            high=0.0,
             change=0.0,
             change_pct=0.0,
         )
+
+    def _note_refused_mark(self, native_symbol: str, offer: WalutomatBestOffer) -> None:
+        """Warn once on entry into the refused-mark state for a symbol.
+
+        A refusal is a hole in the tick and candle planes, so it must be
+        observable; but the poller sweeps ~44 pairs every interval, so a
+        per-poll warning would be spam. The symbol is therefore latched in
+        ``_refused_marks`` and only the transition is logged.
+
+        Args:
+            native_symbol: Native symbol whose mark was refused.
+            offer: The raw ``bestOffers`` payload that was refused.
+
+        Returns:
+            None.
+        """
+        if native_symbol in self._refused_marks:
+            return
+        self._refused_marks.add(native_symbol)
+        logger.warning(
+            "Walutomat {} mark refused ({}) — raw bid_now={} ask_now={}",
+            native_symbol,
+            walutomat_quote_refusal(offer),
+            offer.bid_now,
+            offer.ask_now,
+        )
+
+    def _note_recovered_mark(self, native_symbol: str) -> None:
+        """Log once when a previously refused symbol produces a usable quote.
+
+        Args:
+            native_symbol: Native symbol whose mark became usable again.
+
+        Returns:
+            None.
+        """
+        if native_symbol not in self._refused_marks:
+            return
+        self._refused_marks.discard(native_symbol)
+        logger.info("Walutomat {} mark recovered — two-sided quote usable again", native_symbol)
 
     async def _process_polling_data(
         self, data: dict[str, WalutomatMarketPair], symbol_map: dict[str, str]
     ) -> None:
         """Process fetched market data and enqueue tickers.
+
+        A pair whose book carries no usable two-sided quote is skipped
+        entirely: no ticker is enqueued and nothing is appended to the tick
+        buffer, so the minute simply has no bar rather than a fabricated one.
 
         Args:
             data: Fetched market data keyed by Walutomat symbol.
@@ -864,13 +1017,17 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 logger.debug(f"Symbol {wal_symbol} not in Walutomat data")
                 continue
             pair_data = data[wal_symbol]
-            ticker = self._build_ticker_from_pair(native_symbol, pair_data)
+            quote = walutomat_quote(pair_data.best_offers)
+            if quote is None:
+                self._note_refused_mark(native_symbol, pair_data.best_offers)
+                continue
+            self._note_recovered_mark(native_symbol)
+            ticker = self._build_ticker_from_pair(native_symbol, quote)
             await self._tick_queue.put(ticker)
             ts = time.time()
-            mid_price = pair_data.best_offers.forex_now
             if native_symbol not in self._tick_buffers:
                 self._tick_buffers[native_symbol] = []
-            self._tick_buffers[native_symbol].append((ts, mid_price))
+            self._tick_buffers[native_symbol].append((ts, quote.mark))
             logger.debug(f"{native_symbol}: bid={ticker.bid:.4f} ask={ticker.ask:.4f}")
 
     def _handle_http_error(self, error: httpx.HTTPError) -> None:
@@ -1017,6 +1174,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
     ) -> None:
         """Build and emit a 1-minute candle for a single symbol.
 
+        ``trades`` is zero, not the tick count: the buffer holds polls of the
+        top-of-book quote, and no trade is observed on this feed. Counting
+        polls would publish a trade count the venue never reported.
+
         Args:
             symbol: Native symbol string.
             ticks: List of (timestamp, price) tick tuples.
@@ -1036,7 +1197,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 close=prices[-1],
                 volume=0.0,
                 vwap=sum(prices) / len(prices),
-                trades=len(prices),
+                trades=0,
                 interval_begin=datetime.fromtimestamp(prev_minute_start, UTC),
                 interval=1,
             )
@@ -1078,7 +1239,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If not connected.
-            ValueError: If symbol not found.
+            ValueError: If symbol not found, or if the symbol's book carries
+                no usable two-sided quote (a distinct message - a snapshot is
+                never returned with a fabricated price).
         """
         self._require_connected()
         data = await self._fetch_market_data()
@@ -1087,14 +1250,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
             available = ", ".join(data.keys())
             raise ValueError(f"Symbol {symbol} not found. Available: {available}")
         pair_data = data[wal_symbol]
-        offer = pair_data.best_offers
-        bid = offer.bid_now if offer.bid_now is not None else 0.0
-        ask = offer.ask_now if offer.ask_now is not None else 0.0
+        quote = walutomat_quote(pair_data.best_offers)
+        if quote is None:
+            raise ValueError(f"Symbol {symbol} has no usable two-sided quote")
         return TickerSnapshot(
             symbol=symbol,
-            bid=bid,
-            ask=ask,
-            last=offer.forex_now,
+            bid=quote.bid,
+            ask=quote.ask,
+            last=quote.mark,
             timestamp=time.time(),
         )
 

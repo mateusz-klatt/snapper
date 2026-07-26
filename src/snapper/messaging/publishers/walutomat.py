@@ -12,6 +12,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
+from snapper.core.types import PriceBasis
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
@@ -63,6 +64,15 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
     def _candle_source_for(self, timeframe: str) -> str:
         """Walutomat builds its 1m bars from REST quote polling.
 
+        ``source`` names the MECHANISM only, and ``calculated`` therefore spans
+        more than one price convention (Kraken futures/equities build theirs
+        from trade prints). Which price is polled here — the midpoint of the
+        venue's two-sided top-of-book quote — is carried by
+        :meth:`_candle_price_basis_for`, not by this tag. Do not invent a
+        fourth ``source`` value: the ``candles`` CHECK permits only
+        ``native``/``calculated``/``synthesized`` and the grouped candle
+        loader branches on it.
+
         Args:
             timeframe: The candle timeframe label.
 
@@ -71,6 +81,20 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
             quotes, not venue-precomputed OHLC.
         """
         return "calculated"
+
+    def _candle_price_basis_for(self, timeframe: str) -> PriceBasis | None:
+        """Walutomat bars are marked on the top-of-book mid.
+
+        Args:
+            timeframe: The candle timeframe label.
+
+        Returns:
+            ``quote_mid`` — the venue delivers a two-sided book and no usable
+            trade print, so ``(bid + ask) / 2`` is the best available estimate
+            of the executable price. Higher-TF rollups of these bars inherit
+            the same basis, which is correct.
+        """
+        return "quote_mid"
 
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.
