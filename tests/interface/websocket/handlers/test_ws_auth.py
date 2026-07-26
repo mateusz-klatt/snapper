@@ -2452,7 +2452,7 @@ async def test_handle_subscribe_success_for_viewer_signals() -> None:
             side_effect=fake_validate,
         ),
         patch(
-            "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
+            "snapper.interface.websocket.topic_authorization.get_allowed_topics_for_role",
             return_value=["market.kraken.BTC-USD.candles.1m"],
         ),
     ):

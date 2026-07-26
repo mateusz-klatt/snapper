@@ -28,9 +28,9 @@ import pytest
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.interface.websocket.handlers.subscribe import _enforce_ai_delegate_wallet_scope
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.schemas import WSSubscribeRequest
+from snapper.interface.websocket.topic_authorization import _enforce_ai_delegate_wallet_scope
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 

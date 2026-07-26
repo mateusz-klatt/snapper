@@ -277,11 +277,11 @@ class TestHandleSubscribeEdgeCases:
         )
         with (
             patch(
-                "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
+                "snapper.interface.websocket.topic_authorization.get_allowed_topics_for_role",
                 return_value=[valid_topic],
             ),
             patch(
-                "snapper.interface.websocket.handlers.subscribe.filter_topics",
+                "snapper.interface.websocket.topic_authorization.filter_topics",
                 return_value=([valid_topic], []),
             ),
         ):

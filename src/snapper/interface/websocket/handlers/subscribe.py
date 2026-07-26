@@ -10,24 +10,21 @@ from uuid import uuid7
 
 from fastapi import WebSocket
 
-from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
 from snapper.core.types import SubscriptionStatusEnum
 from snapper.data.repository import Repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
-from snapper.interface.websocket.helpers import filter_topics
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
-from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
-from snapper.interface.websocket.helpers import role_allowed_categories
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSSubscriptionsListResponse
 from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
+from snapper.interface.websocket.topic_authorization import BACKTEST_PREFIX
+from snapper.interface.websocket.topic_authorization import partition_authorized_topics
 from snapper.messaging.topics.schemas import REGISTRY_ROOTS
 from snapper.messaging.topics.validation import validate_subscription_pattern
 
@@ -38,42 +35,11 @@ __all__ = [
 ]
 
 
-_BACKTEST_PREFIX = "backtest."
-
-
-def _extract_backtest_wallet_public_id(topic: str) -> str | None:
-    """Extract the wallet public id from a backtest topic.
-
-    Returns ``None`` for the bare ``backtest.`` root or malformed
-    walletless bodies.
-    """
-    body = topic[len(_BACKTEST_PREFIX) :].removesuffix(".")
-    if not body:
-        return None
-    wallet_public_id, _, _remainder = body.partition(".")
-    return wallet_public_id or None
-
-
-def _is_backtest_topic_allowed(topic: str, principal: AuthPrincipal) -> bool:
-    """Return whether the principal may subscribe to a backtest topic."""
-    if has_effective_permission(
-        principal.role,
-        principal.permissions,
-        principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
-    ):
-        return True
-    active_wallet = principal.active_wallet_public_id
-    if active_wallet is None:
-        return False
-    return _extract_backtest_wallet_public_id(topic) == active_wallet
-
-
 def _invalid_registry_root_error(topic: str) -> str | None:
     """Return the registry-root validation error for prefix topics."""
     if not topic.endswith("."):
         return None
-    if topic in REGISTRY_ROOTS or topic.startswith(_BACKTEST_PREFIX):
+    if topic in REGISTRY_ROOTS or topic.startswith(BACKTEST_PREFIX):
         return None
     registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
     return (
@@ -122,102 +88,6 @@ def _validate_ws_topics(
     return valid, invalid
 
 
-async def _enforce_ai_delegate_wallet_scope(
-    topics: list[str],
-    principal: AuthPrincipal,
-    repository: Repository | None,
-    as_of: datetime,
-) -> tuple[list[str], list[str]]:
-    """Split wallet-scoped topics for an AI review principal.
-
-    Subscribe-time filter. Fast-paths any principal without a delegate
-    identity. For a principal backed by an ``ai_delegates`` row the filter:
-
-    1. Computes the delegate's allowed ``(exchange, native_symbol)``
-       pairs via ``repository.list_scope_grant_instrument_pairs`` (one
-       read per subscribe call — no caching so scope changes
-       take effect immediately).
-    2. Decomposes every topic with
-       :func:`parse_wallet_scoped_topic`.
-    3. Passes non-wallet-scoped topics through unchanged (market,
-       system, backtest, accruals, admin, and the ``signals.paper.*``
-       sandbox).
-    4. Allows wallet-scoped topics whose pair is in the delegate's
-       set; denies everything else so they surface as
-       ``topic_outside_scope`` in the response envelope.
-
-    Raising on missing ``repository`` is intentional for the
-    AI review-principal path: a principal reaching this filter
-    without a live repository reference indicates a runtime wiring
-    bug, and silently passing topics through would leak wallet scope.
-
-    Args:
-        topics: Already shape-validated topic list.
-        principal: Authenticated caller; delegate state gates the whole filter.
-        repository: Repository for the scope-grant pair projection.
-            Ignored when ``delegate_public_id`` is absent and required
-            when it is populated.
-        as_of: Bus time for the temporal scope read.
-
-    Returns:
-        Tuple of (allowed, denied) in original input order.
-    """
-    if principal.delegate_public_id is None:
-        return topics, []
-    if repository is None:
-        raise RuntimeError(
-            "AI review principal reached the wallet-scope filter without a "
-            "repository reference; dispatch table wiring is broken"
-        )
-    allowed_pairs = await repository.list_scope_grant_instrument_pairs(
-        principal.operator_public_ids, as_of
-    )
-    allowed: list[str] = []
-    denied: list[str] = []
-    for topic in topics:
-        pair = parse_wallet_scoped_topic(topic)
-        if pair is None:
-            allowed.append(topic)
-            continue
-        if pair in allowed_pairs:
-            allowed.append(topic)
-        else:
-            denied.append(topic)
-    return allowed, denied
-
-
-def _enforce_backtest_wallet_scope(
-    topics: list[str], principal: AuthPrincipal
-) -> tuple[list[str], list[str]]:
-    """Split ``backtest.*`` topics into (allowed, denied) by wallet RBAC.
-
-    A caller granted ``IMPERSONATE_OPERATOR`` may subscribe to any
-    backtest topic. Other callers may subscribe only to the topic for
-    their active wallet and cannot subscribe to the bare root.
-    Wallet segment is extracted from the second dotted segment (the
-    topic validator has already proven it is a UUID7). Non-backtest
-    topics pass through unchanged on the allowed side.
-
-    Args:
-        topics: Already-validated topics (shape-correct but scope
-            unchecked).
-        principal: Authenticated caller. Permissions determine global
-            scope; ``principal.active_wallet_public_id`` is the only
-            wallet a caller without global scope may subscribe to.
-
-    Returns:
-        Tuple of (wallet_allowed, wallet_denied) in original order.
-    """
-    wallet_allowed: list[str] = []
-    wallet_denied: list[str] = []
-    for topic in topics:
-        if not topic.startswith(_BACKTEST_PREFIX) or _is_backtest_topic_allowed(topic, principal):
-            wallet_allowed.append(topic)
-            continue
-        wallet_denied.append(topic)
-    return wallet_allowed, wallet_denied
-
-
 async def handle_subscribe(
     websocket: WebSocket,
     message: WSSubscribeRequest,
@@ -247,7 +117,6 @@ async def handle_subscribe(
             filter. Required when ``delegate_public_id`` is populated;
             optional otherwise because the filter fast-paths it.
     """
-    role = principal.role
     topics, invalid_topics = _validate_ws_topics(message.topics)
     if invalid_topics:
         error_details = [f"{topic}: {error}" for topic, error in invalid_topics]
@@ -260,27 +129,12 @@ async def handle_subscribe(
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
-    topics, wallet_denied = _enforce_backtest_wallet_scope(topics, principal)
-    now = datetime.now(UTC)
-    topics, ai_delegate_denied = await _enforce_ai_delegate_wallet_scope(
-        topics, principal, repository, now
+    allowed, denied = await partition_authorized_topics(
+        topics=topics,
+        principal=principal,
+        repository=repository,
+        as_of=datetime.now(UTC),
     )
-    if ai_delegate_denied:
-        wallet_denied = [*wallet_denied, *ai_delegate_denied]
-    allowed_topics = get_allowed_topics_for_role(
-        role,
-        principal.permissions,
-        principal.permission_scope_version,
-    )
-    allowed_set = set(allowed_topics)
-    allowed_categories = role_allowed_categories(
-        role,
-        principal.permissions,
-        principal.permission_scope_version,
-    )
-    allowed, denied = filter_topics(topics, allowed_set, allowed_categories)
-    if wallet_denied:
-        denied = [*denied, *wallet_denied]
     if not allowed and denied:
         response = WSSubscriptionSuccessResponse(
             action=SubscriptionActionEnum.SUBSCRIBE,
