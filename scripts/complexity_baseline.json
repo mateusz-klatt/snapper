@@ -1042,9 +1042,6 @@
       "_record_ws_control": {
         "PLR0913": 6
       },
-      "dispatch_messages": {
-        "PLR0913": 6
-      },
       "send_auth_complete": {
         "PLR0913": 6
       }

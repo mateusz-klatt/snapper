@@ -59,9 +59,19 @@ def _wire_flow(
     monkeypatch.setattr("snapper.server.authenticated_websocket.dispatch_messages", dispatch)
 
 
-def _auth_manager() -> MagicMock:
-    """Build an auth-manager mock with recordable lifecycle hooks."""
-    return MagicMock(on_authenticate=AsyncMock(), on_disconnect=AsyncMock())
+def _auth_manager(current_principal: Any = None) -> MagicMock:
+    """Build an auth-manager mock with recordable lifecycle hooks.
+
+    ``current_principal`` is what the registry hands back when the endpoint
+    resolves the connection's live principal for the disconnect hook. The
+    default of ``None`` models an entry already removed, which is the case
+    the fallback to the initial principal exists for.
+    """
+    return MagicMock(
+        on_authenticate=AsyncMock(),
+        on_disconnect=AsyncMock(),
+        get_authenticated_user=MagicMock(return_value=current_principal),
+    )
 
 
 @pytest.mark.asyncio
@@ -96,6 +106,39 @@ async def test_success_pairs_authenticate_and_disconnect_hooks(
     assert order == ["on_authenticate", "dispatch", "on_disconnect"]
     ws_auth_manager.on_authenticate.assert_awaited_once_with(websocket, user)
     ws_auth_manager.on_disconnect.assert_awaited_once_with(websocket, user)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_hook_uses_the_replaced_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the disconnect hook fires with the CURRENT principal.
+
+    Given: A connection authenticated as one principal whose registry entry
+        has since been replaced by in-place re-authentication,
+    When: _authenticate_and_dispatch reaches its disconnect hook,
+    Then: The hook receives the replacement, not the principal captured when
+        the connection opened.
+
+    Without this, an authority reduction applied mid-session would still be
+    reported under the pre-reduction identity.
+    """
+    initial = object()
+    replacement = object()
+    auth_result = SimpleNamespace(success=True, user=initial, ws_payload=None)
+    _wire_flow(monkeypatch, auth_result=auth_result, dispatch=AsyncMock())
+    ws_auth_manager = _auth_manager(replacement)
+    websocket = cast(WebSocket, object())
+    await _authenticate_and_dispatch(
+        websocket,
+        cast(WebSocketConnectionManager, ManagerStub()),
+        ws_auth_manager,
+        MagicMock(),
+        MagicMock(),
+        [False],
+    )
+    ws_auth_manager.on_authenticate.assert_awaited_once_with(websocket, initial)
+    ws_auth_manager.on_disconnect.assert_awaited_once_with(websocket, replacement)
 
 
 @pytest.mark.asyncio

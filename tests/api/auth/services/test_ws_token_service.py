@@ -50,7 +50,19 @@ class DummyManager:
 
 
 class DummyWsAuthManager:
-    """Placeholder WebSocket auth manager for tests."""
+    """Placeholder WebSocket auth manager for tests.
+
+    Carries the connection's principal because ``dispatch_messages`` resolves
+    it from the manager once per message rather than taking it as an argument.
+    """
+
+    def __init__(self, principal: AuthPrincipal | None = None) -> None:
+        """Store the principal this stub hands back to the dispatch loop."""
+        self.principal = principal
+
+    def get_authenticated_user(self, websocket: Any) -> AuthPrincipal | None:
+        """Return the principal currently registered for the connection."""
+        return self.principal
 
     async def on_client_ping(self, principal: Any) -> None:
         """No-op liveness hook matching the real manager's ping interface."""
@@ -72,13 +84,12 @@ async def test_dispatch_messages_handles_unknown_type() -> None:
     """
     websocket = DummyWebSocket(messages=[json.dumps({"type": "unknown"})])
     manager = DummyManager()
-    ws_auth_manager = DummyWsAuthManager()
-    token_service = DummyTokenService()
     user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
+    ws_auth_manager = DummyWsAuthManager(user)
+    token_service = DummyTokenService()
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
-        user,
         cast(WebSocketAuthManager, ws_auth_manager),
         cast(WsTokenService, token_service),
     )
@@ -110,13 +121,12 @@ async def test_dispatch_messages_handles_disconnect() -> None:
     """
     websocket = DisconnectingWebSocket()
     manager = DummyManager()
-    ws_auth_manager = DummyWsAuthManager()
-    token_service = DummyTokenService()
     user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
+    ws_auth_manager = DummyWsAuthManager(user)
+    token_service = DummyTokenService()
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
-        user,
         cast(WebSocketAuthManager, ws_auth_manager),
         cast(WsTokenService, token_service),
     )
@@ -148,13 +158,12 @@ async def test_dispatch_messages_handles_unexpected_exception() -> None:
     """
     websocket = ErroringWebSocket()
     manager = DummyManager()
-    ws_auth_manager = DummyWsAuthManager()
-    token_service = DummyTokenService()
     user = AuthPrincipal(username="bob", role=UserRole.VIEWER)
+    ws_auth_manager = DummyWsAuthManager(user)
+    token_service = DummyTokenService()
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
-        user,
         cast(WebSocketAuthManager, ws_auth_manager),
         cast(WsTokenService, token_service),
     )
@@ -230,13 +239,12 @@ async def test_dispatch_messages_loop_continues_after_ping() -> None:
         ]
     )
     manager = MockConnectionManager()
-    ws_auth_manager = DummyWsAuthManager()
-    token_service = DummyTokenService()
     user = AuthPrincipal(username="alice", role=UserRole.VIEWER)
+    ws_auth_manager = DummyWsAuthManager(user)
+    token_service = DummyTokenService()
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
-        user,
         cast(WebSocketAuthManager, ws_auth_manager),
         cast(WsTokenService, token_service),
     )

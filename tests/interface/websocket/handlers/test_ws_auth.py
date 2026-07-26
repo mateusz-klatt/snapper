@@ -1761,6 +1761,19 @@ class AuthManagerStub:
         """Register a WebSocket connection."""
         self.registered.append((websocket, user, token_data, ws_payload))
 
+    def get_authenticated_user(self, websocket: Any) -> Any:
+        """Return the principal most recently registered for the connection.
+
+        Mirrors the real manager, where ``register_connection`` writes into
+        ``authenticated_connections`` and this is the read side. The dispatch
+        loop resolves through here once per message instead of holding a
+        principal captured when the connection opened.
+        """
+        for registered_ws, user, _token_data, _ws_payload in reversed(self.registered):
+            if registered_ws is websocket:
+                return user
+        return None
+
     def get_connection_expiration(self, websocket: Any) -> Any:
         """Return connection expiration time."""
         return self.expiration

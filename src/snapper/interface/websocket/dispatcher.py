@@ -261,12 +261,12 @@ def _try_parse_message(
 async def _handle_one_message(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: AuthPrincipal,
+    principal: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     raw_message: str,
     client_gap_detector: WsClientGapDetector,
-    dispatch_table: dict[type, Callable[[Any], Awaitable[None]]],
+    dispatch_table: dict[type, Callable[[Any, AuthPrincipal], Awaitable[None]]],
     db_url: str | None = None,
 ) -> bool:
     """Process a single incoming WebSocket message.
@@ -274,7 +274,9 @@ async def _handle_one_message(
     Args:
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
-        user: Authenticated user profile.
+        principal: The principal resolved for THIS message by
+            :func:`dispatch_messages`. Never a value captured when the
+            connection opened — see that function's note.
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
         raw_message: Raw JSON string received from the client.
@@ -301,7 +303,7 @@ async def _handle_one_message(
     msg_type = type(parsed).__name__
     if isinstance(parsed, WSReauthRequest):
         success = await handle_reauth(
-            websocket, parsed, user, ws_auth_manager, ws_token_service, manager.tracker
+            websocket, parsed, principal, ws_auth_manager, ws_token_service, manager.tracker
         )
         await _record_ws_control(
             db_url,
@@ -311,7 +313,7 @@ async def _handle_one_message(
             raw_payload=raw_message,
         )
         return success
-    await _dispatch_single_message(parsed, dispatch_table)
+    await _dispatch_single_message(parsed, principal, dispatch_table)
     if isinstance(parsed, WSPingRequest):
         await _record_ws_telemetry(
             db_url,
@@ -333,7 +335,6 @@ async def _handle_one_message(
 async def dispatch_messages(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     db_url: str | None = None,
@@ -343,27 +344,45 @@ async def dispatch_messages(
     Receives messages, validates them, and routes to appropriate handlers.
     Handles re-authentication, subscriptions, and pings.
 
+    **The principal is resolved once per message from the auth manager, and
+    is deliberately NOT a parameter.** ``authenticated_connections`` is the
+    single registry of live per-connection authority; anything that captures
+    an ``AuthPrincipal`` for the lifetime of a connection survives an
+    authority reduction, which is the defect this shape exists to prevent.
+    Taking no principal argument means a future edit cannot quietly
+    reintroduce a long-lived capture — there is no stale value in scope.
+
+    Resolving to ``None`` means the connection is no longer authenticated, so
+    the loop ends fail-closed rather than reusing the previous message's
+    authority.
+
     The dispatch table is built once per connection (not per message) to
     avoid repeated ``get_settings()``/``get_repository()`` calls and
-    closure allocations in the hot path.
+    closure allocations in the hot path; its handlers take the
+    freshly-resolved principal as an argument.
 
     Args:
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
-        user: Authenticated user profile.
-        ws_auth_manager: Manager for WebSocket authentication state.
+        ws_auth_manager: Manager for WebSocket authentication state and the
+            authoritative source of this connection's current principal.
         ws_token_service: Service for verifying ws_tokens.
         db_url: Optional database URL for control recording.
     """
     client_gap_detector = WsClientGapDetector()
-    dispatch_table = _build_dispatch_table(websocket, manager, user, ws_auth_manager)
+    dispatch_table = _build_dispatch_table(websocket, manager, ws_auth_manager)
+    username = "unauthenticated"
     try:
         while True:
             raw_message = await websocket.receive_text()
+            principal = ws_auth_manager.get_authenticated_user(websocket)
+            if principal is None:
+                break
+            username = principal.username
             should_continue = await _handle_one_message(
                 websocket,
                 manager,
-                user,
+                principal,
                 ws_auth_manager,
                 ws_token_service,
                 raw_message,
@@ -374,7 +393,7 @@ async def dispatch_messages(
             if not should_continue:
                 break
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for user {user.username}")
+        logger.info(f"WebSocket disconnected for user {username}")
     except Exception as exc:
         logger.exception("WebSocket error: {}", exc)
         error_msg = WSErrorResponse(
@@ -397,36 +416,42 @@ async def dispatch_messages(
 def _build_dispatch_table(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
-) -> dict[type, Callable[[Any], Awaitable[None]]]:
+) -> dict[type, Callable[[Any, AuthPrincipal], Awaitable[None]]]:
     """Build a message-type-to-handler dispatch table.
+
+    The table is built once per connection, so it must not close over an
+    ``AuthPrincipal``: that value would outlive an authority reduction. Each
+    handler therefore takes the principal the dispatch loop resolved for the
+    message being served.
 
     Args:
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
-        user: Authenticated user profile.
         ws_auth_manager: Auth manager whose ping hook refreshes AI-delegate
             liveness (``ai_delegates.last_seen_at``) so admission control
             keeps a connected delegate inside its heartbeat window.
 
     Returns:
-        Dictionary mapping message types to async handler callables.
+        Dictionary mapping message types to async handler callables that
+        accept ``(message, principal)``.
     """
     settings = get_settings()
     repository = get_repository(settings.db_url)
     return {
-        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user, repository),
-        WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
-        WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
+        WSSubscribeRequest: lambda msg, principal: handle_subscribe(
+            websocket, msg, manager, principal, repository
+        ),
+        WSUnsubscribeRequest: lambda msg, principal: handle_unsubscribe(websocket, msg, manager),
+        WSGetSubscriptionsRequest: lambda msg, principal: handle_get_subscriptions(
             websocket,
             manager,
-            user.role,
-            user.permissions,
-            user.permission_scope_version,
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
         ),
-        WSPingRequest: lambda msg: _handle_ping_with_liveness(
-            websocket, manager, user, ws_auth_manager
+        WSPingRequest: lambda msg, principal: _handle_ping_with_liveness(
+            websocket, manager, principal, ws_auth_manager
         ),
     }
 
@@ -434,7 +459,7 @@ def _build_dispatch_table(
 async def _handle_ping_with_liveness(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
-    user: AuthPrincipal,
+    principal: AuthPrincipal,
     ws_auth_manager: WebSocketAuthManager,
 ) -> None:
     """Answer a client ping, then refresh delegate liveness.
@@ -447,23 +472,27 @@ async def _handle_ping_with_liveness(
     Args:
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
-        user: Authenticated principal for this connection.
+        principal: Principal resolved for the message being served, so a
+            liveness bump after an authority change reports the current
+            identity rather than the one captured at connect time.
         ws_auth_manager: Auth manager owning the liveness hook.
     """
     await handle_ping(websocket, manager)
-    await ws_auth_manager.on_client_ping(user)
+    await ws_auth_manager.on_client_ping(principal)
 
 
 async def _dispatch_single_message(
     message: WSClientMessage,
-    dispatch_table: dict[type, Callable[[Any], Awaitable[None]]],
+    principal: AuthPrincipal,
+    dispatch_table: dict[type, Callable[[Any, AuthPrincipal], Awaitable[None]]],
 ) -> None:
     """Route a validated message to its handler.
 
     Args:
         message: Validated client message.
+        principal: Principal resolved for this message.
         dispatch_table: Pre-built handler dispatch table (one per connection).
     """
     handler = dispatch_table.get(type(message))
     assert handler is not None, f"Unhandled message type: {type(message).__name__}"
-    await handler(message)
+    await handler(message, principal)

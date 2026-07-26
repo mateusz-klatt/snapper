@@ -125,11 +125,13 @@ async def test_dispatch_ping_routes_through_liveness_hook() -> None:
     websocket = RecordingWebSocket(messages=[_ping_payload()])
     manager = StubConnectionManager()
     user = _delegate_principal()
-    ws_auth_manager = MagicMock(on_client_ping=AsyncMock())
+    ws_auth_manager = MagicMock(
+        on_client_ping=AsyncMock(),
+        get_authenticated_user=MagicMock(return_value=user),
+    )
     await dispatch_messages(
         cast(WebSocket, websocket),
         cast(WebSocketConnectionManager, manager),
-        user,
         cast(WebSocketAuthManager, ws_auth_manager),
         cast(WsTokenService, MagicMock()),
     )

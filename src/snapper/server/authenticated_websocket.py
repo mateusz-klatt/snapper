@@ -111,6 +111,13 @@ async def _authenticate_and_dispatch(
     ``bus.delegate_offline`` publish. Non-delegate principals short-circuit
     inside both hooks.
 
+    The disconnect hook resolves the CURRENT principal rather than the one
+    captured at authentication, because in-place re-authentication can replace
+    it. The fallback to the initial principal is deliberate: by the time this
+    runs the registry entry may already be gone, and the hook still has to fire
+    for the right delegate identity — which is tied to the user row and so
+    cannot change across a re-authentication.
+
     Args:
         websocket: Accepted WebSocket connection.
         manager: WebSocket connection manager.
@@ -140,9 +147,11 @@ async def _authenticate_and_dispatch(
                 ws_auth_manager,
                 db_url,
             )
-        await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service, db_url)
+        await dispatch_messages(websocket, manager, ws_auth_manager, ws_token_service, db_url)
     finally:
-        await ws_auth_manager.on_disconnect(websocket, user)
+        await ws_auth_manager.on_disconnect(
+            websocket, ws_auth_manager.get_authenticated_user(websocket) or user
+        )
 
 
 def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -> APIRouter:

@@ -133,6 +133,7 @@ class TestDispatcherReauthFailure:
         mock_user.username = "testuser"
         mock_user.role = "admin"
         mock_ws_auth_manager = MagicMock()
+        mock_ws_auth_manager.get_authenticated_user = MagicMock(return_value=mock_user)
         mock_ws_token_service = MagicMock()
         mock_manager.tracker.session_id = "test-session"
         mock_manager.tracker.next_sequence.return_value = 1
@@ -154,7 +155,6 @@ class TestDispatcherReauthFailure:
             await dispatch_messages(
                 mock_websocket,
                 mock_manager,
-                mock_user,
                 mock_ws_auth_manager,
                 mock_ws_token_service,
             )
