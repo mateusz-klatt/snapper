@@ -86,6 +86,36 @@ def _ping_payload() -> str:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_stops_when_the_principal_is_gone() -> None:
+    """Verify the loop ends fail-closed once the registry no longer holds a principal.
+
+    Given: A connection whose auth-manager entry has been removed, with a ping
+        frame still queued,
+    When: dispatch_messages receives that frame,
+    Then: The frame is NOT dispatched and the loop ends.
+
+    The dispatcher deliberately takes no principal argument, so a resolution of
+    None is the only signal that authority is gone. Continuing would mean
+    serving the message under whatever authority the previous message carried,
+    which is the exact defect the per-message resolution exists to prevent.
+    """
+    websocket = RecordingWebSocket(messages=[_ping_payload()])
+    manager = StubConnectionManager()
+    ws_auth_manager = MagicMock(
+        on_client_ping=AsyncMock(),
+        get_authenticated_user=MagicMock(return_value=None),
+    )
+    await dispatch_messages(
+        cast(WebSocket, websocket),
+        cast(WebSocketConnectionManager, manager),
+        cast(WebSocketAuthManager, ws_auth_manager),
+        cast(WsTokenService, MagicMock()),
+    )
+    assert websocket.sent == []
+    ws_auth_manager.on_client_ping.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ping_wrapper_answers_pong_then_bumps_liveness() -> None:
     """Verify pong is sent before the liveness hook runs.
 
