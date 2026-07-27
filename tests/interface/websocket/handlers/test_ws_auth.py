@@ -3968,7 +3968,7 @@ def test_refresh_ws_ticket_preserves_a_full_role_scope(
 
 def test_refresh_ws_ticket_carries_a_still_readable_wallet(
     auth_app: AuthAppFixture,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A wallet the user can still read reaches the ticket.
 
@@ -3990,7 +3990,7 @@ def test_refresh_ws_ticket_carries_a_still_readable_wallet(
     """
     wallet = "019e873c-d062-720f-85df-fd4d7fce5bdf"
 
-    async def _readable(_principal: AuthPrincipal, _repo: Any) -> set[str]:
+    async def _readable(_principal: AuthPrincipal, _repo: object) -> set[str]:
         """Admit exactly the carried wallet."""
         return {wallet}
 
@@ -4311,6 +4311,107 @@ def test_refresh_token_concurrent_replay_reserves_winner_pair(
     body = response.json()
     assert body["payload"]["ws_token"]
     assert body["payload"]["user"]["active_wallet_public_id"] == "winner-wallet"
+
+
+def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
+    auth_app: AuthAppFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CAS loser signs a ws_token from the WINNER's scope and version.
+
+    Given: A concurrently redeemed refresh whose winner carries a NARROWED
+        permission set and a NON-current scope version, while this losing
+        request's own claims carry neither,
+    When: The response's ws_token is decoded,
+    Then: It carries the winner's permissions and the winner's version.
+
+    Two mutations survive every other test in this slice and die here, both
+    only in the concurrency path where the two sources finally differ:
+
+    - Hard-coding the ticket's version to the CURRENT constant. Under ordinary
+      rotation the current constant IS the right answer, so every non-CAS test
+      agrees with the mutant. Only a winner carrying a stale version separates
+      "read the rotation" from "stamp today's value" — and stamping it would
+      reinterpret an older scope under today's compatibility rules.
+    - Signing from this request's pre-rotation permissions instead of the
+      rotation's. Ordinary fixtures make the two identical; here the loser's
+      are None, meaning the FULL role grant, while the winner's are narrowed.
+      The mutant would hand out a full-role ws ticket alongside cookies that
+      carry the winner's narrowed tokens.
+    """
+
+    class _ScopedGraceTokenManager(StubTokenManager):
+        """Replay a concurrent redeem whose winner is narrowed and stale."""
+
+        winner_pair = TokenPair(
+            access_token="winner-access",
+            refresh_token="winner-refresh",
+            expires_in=999,
+        )
+
+        async def rotate_tokens(
+            self,
+            pair: TokenPair,
+            user_public_id: str,
+            old_refresh_jti: str,
+            repository: object,
+        ) -> TokenPair | None:
+            """Report the JTI as already redeemed and serve the winner."""
+            self.rotated_old_jtis.append(old_refresh_jti)
+            return self.winner_pair
+
+        def verify_token(self, token: str) -> TokenClaims | None:
+            """Give the winner a narrowed scope at a deliberately stale version."""
+            if token == "winner-access":
+                return TokenClaims(
+                    sub="123",
+                    username="bob",
+                    role=UserRole.OPERATOR,
+                    permissions=[Permission.READ_MARKET_DATA.value],
+                    permission_scope_version=1,
+                    exp=999999999,
+                    iat=123456,
+                    jti="access-winner-scoped",
+                    sid="session-scoped-race",
+                )
+            return super().verify_token(token)
+
+    client, user_service, _token_manager, _csrf_manager = auth_app
+    grace_manager = _ScopedGraceTokenManager()
+    grace_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=None,
+        permission_scope_version=None,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_scoped_race-jti",
+        sid="session-scoped-race",
+    )
+    monkeypatch.setattr(routes, "get_token_manager", lambda: grace_manager)
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "scoped-raced-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-scoped-race"),
+    )
+    assert ticket.permissions == [Permission.READ_MARKET_DATA.value]
+    assert ticket.permission_scope_version == 1
+    assert ticket.permission_scope_version != PERMISSION_SCOPE_VERSION
 
 
 def test_refresh_grace_replay_with_unverifiable_winner_keeps_loser_principal(
