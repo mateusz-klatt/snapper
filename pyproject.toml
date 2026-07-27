@@ -34,7 +34,7 @@ typer = {extras = ["all"], version = "^0.27.0"}
 python-dotenv = "^1.2.2"
 loguru = "^0.7.3"
 alembic = "^1.18.5"
-fastapi = "^0.140.3"
+fastapi = "^0.140.7"
 uvicorn = {extras = ["standard"], version = "^0.51.0"}
 pyzmq = "^27.1.0"
 pyjwt = "^2.13.0"
