@@ -3859,6 +3859,87 @@ def test_refresh_ws_ticket_carries_the_rotation_scope_not_the_principal(
     assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
 
 
+def test_refresh_ws_ticket_carries_the_migrated_v2_scope_not_the_raw_claim(
+    auth_app: AuthAppFixture,
+) -> None:
+    """A version-2 scope reaches the ticket MIGRATED, not as the raw claim.
+
+    Given: An ordinary (non-raced) refresh whose claims carry a narrowed
+        operator grant at scope version 2,
+    When: The response's ws_token is decoded,
+    Then: It carries the full v3 capability set that grant migrates to, at the
+        current version.
+
+    The sibling test above cannot catch a wrong-source substitution, and that
+    is a property of its FIXTURE rather than its assertions: it carries version
+    1, where ``get_effective_permissions`` returns the claim intersected with
+    the role and nothing is added. Normalized and raw are then equal, so
+    ``permission_values = identity.claims.permissions`` — a valid, in-scope
+    wrong source — produces an identical ticket and survives.
+
+    Version 2 is the only version where the two sources genuinely diverge.
+    A v2 operator holding MANAGE_PROCESSES migrates by capability equivalence
+    to the six permissions that replaced it, and READ_SIGNALS pulls in
+    READ_AI_REVIEWS: two claimed permissions become nine. The mutant would
+    label that raw pair as version 3, and the successor access token, the WS
+    ticket and the response profile would then disagree about what the session
+    may do — while every one of them still looked internally consistent.
+
+    Asserted against a literal expected set rather than by calling
+    ``get_effective_permissions`` again, because re-deriving the expectation
+    from the function under test would agree with any migration the code
+    happened to perform.
+    """
+    raw_scope = [Permission.MANAGE_PROCESSES.value, Permission.READ_SIGNALS.value]
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=raw_scope,
+        permission_scope_version=2,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_v2_scope_jti",
+        sid="session-v2-scope",
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "v2-scoped-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-v2-scope"),
+    )
+    assert ticket.permissions is not None
+    assert sorted(ticket.permissions) == sorted(
+        [
+            Permission.CONFIGURE_STRATEGIES.value,
+            Permission.MANAGE_AI_INTEGRATION.value,
+            Permission.MANAGE_PROCESSES.value,
+            Permission.READ_AI_INTEGRATION.value,
+            Permission.READ_AI_REVIEWS.value,
+            Permission.READ_PROCESSES.value,
+            Permission.READ_SIGNALS.value,
+            Permission.START_STRATEGIES.value,
+            Permission.STOP_STRATEGIES.value,
+        ]
+    )
+    assert sorted(ticket.permissions) != sorted(raw_scope)
+    assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
+
+
 def test_refresh_ws_ticket_preserves_an_empty_permission_scope(
     auth_app: AuthAppFixture,
 ) -> None:
