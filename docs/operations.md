@@ -524,7 +524,11 @@ is the guard working as intended, not a regression.
 On every venue (Kraken Spot ccxt + native, Kraken Futures, Walutomat)
 an order submit that fails *after the request may have left the
 process* (request timeout, connection reset, gateway 5xx, unparseable
-success body) no longer fabricates a REJECTED event. The executor
+success body) no longer fabricates a REJECTED event. On the Kraken Spot
+ccxt path the same treatment covers a submit whose placement is simply
+*unproven*: a venue error ccxt could not classify — the bare
+`ccxt.ExchangeError` type — parks and verifies rather than rejecting,
+because "not proven safe to reject" is not the same as "rejected". The executor
 first verifies against venue truth — up to three lookups by client id
 (`cl_ord_id` on Kraken Spot via open+closed orders, `cliOrdId` on
 Futures via order status; 2s/5s/10s backoff, 15s bound each). A found
@@ -545,7 +549,15 @@ venue unreachable or lookup unsupported (Walutomat active-order miss)
 - failures that provably happened *before* any send (circuit breaker
   open, credentials, symbol/order-type validation) and authoritative
   venue answers (4xx, `success=false`, exhausted 429) still reject
-  immediately on every venue — only genuine ambiguity parks. A
+  immediately on every venue — only genuine ambiguity parks. On the
+  Kraken Spot ccxt path "authoritative" means ccxt *classified* the
+  error into a typed `ExchangeError` subclass (`InvalidOrder`,
+  `InsufficientFunds`, `BadSymbol`, `PermissionDenied`, `BadRequest`,
+  …); those still reject at once. An error ccxt left unclassified is
+  matched on runtime TYPE, never on the venue's error text — Kraken
+  documents no duplicate-`cl_ord_id` error and ccxt maps none, so the
+  wire text for the motivating case is unknown and a string match would
+  be a guess. A
   breaker-open refusal additionally lands a durable terminal
   disposition before its REJECTED — a venue event recording the
   refusal plus the command row moved to FAILED — and publishes the

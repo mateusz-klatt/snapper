@@ -900,6 +900,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         ``RateLimitExceeded`` is re-raised plain FIRST because it
         subclasses ``NetworkError`` while being a definitive venue-side
         rejection (the exhausted 429 cannot have placed the order).
+        A venue error ccxt could NOT classify (the exact
+        ``ccxt.ExchangeError`` type) is treated the same way as a lost
+        response: unproven placement is not a licence to reject. See
+        ``_submit_ccxt_order`` for why that is decided by runtime type
+        and never by matching the venue's error text.
 
         Stop types translate through ccxt's ``stopLossPrice`` param
         (verified against the pinned ccxt 4.5.68 kraken source,
@@ -976,6 +981,51 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> dict[str, Any]:
         """Given prepared CCXT arguments, when submitting, then map ambiguous failures.
 
+        The governing invariant is that NO failure whose placement
+        outcome is unproven may publish REJECTED. A bare
+        ``ccxt.ExchangeError`` — the exact runtime type, carrying a venue
+        string ccxt could not classify — does not mean "possibly
+        accepted"; it means "not proven safe to reject", and that is
+        enough to keep it off the rejection path. The asymmetry is
+        deliberate: a false REJECTED on a resting order releases the
+        engine's in-flight intent (it may re-emit and double exposure)
+        and writes an ``order_rejected`` row that PERMANENTLY exempts the
+        command from the unresolved-dispatched sweep, while a spurious
+        UNKNOWN is merely noisy and self-heals through verification.
+
+        NO ERROR-STRING MATCHING, deliberately, and a later maintainer
+        must not "improve" this into one. The motivating case is a
+        duplicate ``cl_ord_id`` (reachable because the outbox can publish
+        the same client order id twice and Kraken's ``cl_ord_id`` dedupe
+        covers only OPEN orders, so a resting limit or stop order
+        genuinely collides). Kraken documents no duplicate-``cl_ord_id``
+        error at all: its ``EOrder:`` catalogue has no such entry and its
+        ``cl_ord_id`` guide states the uniqueness rule while saying
+        nothing about collision behaviour. The pinned ccxt 4.5.68 kraken
+        exception map has no ``exact`` or ``broad`` entry for it either,
+        so ``handle_errors`` falls through to ``raise ExchangeError(...)``
+        with raw venue text nobody here has ever observed. Matching on
+        that text would be guessing, and a wrong guess restores the exact
+        defect this method exists to prevent.
+
+        The subclass test is ``type(e) is ccxt.ExchangeError`` and NOT
+        ``isinstance``. Every definitive venue refusal ccxt DID classify
+        — ``InvalidOrder``, ``InsufficientFunds``, ``BadSymbol``,
+        ``PermissionDenied``, ``BadRequest`` and friends — subclasses
+        ``ExchangeError``. An ``isinstance`` test would swallow all of
+        them into the ambiguous path, turning every ordinary rejection
+        into a ~62s blocking verification round before the same REJECTED
+        it could have published immediately. Only the UNCLASSIFIED error
+        is ambiguous; a classified one is venue truth.
+
+        Classification stops here. This method must not call
+        ``find_order_by_client_id`` or adopt anything: verification
+        timing, absence-confidence policy, publishing and durable-event
+        ordering all live in the executor's ``_handle_ambiguous_submit``,
+        and duplicating them here would additionally force a submit
+        method to fabricate a create-order response for an order it
+        discovered independently.
+
         Args:
             request: Original order request used for error identity.
             ccxt_symbol: CCXT trading pair.
@@ -986,8 +1036,11 @@ class KrakenExchangeClient(ExchangeClientBase):
             Raw CCXT order payload.
 
         Raises:
-            AmbiguousOrderSubmitError: If the send failed ambiguously.
+            AmbiguousOrderSubmitError: If the send failed ambiguously, or
+                failed with an error ccxt could not classify.
             ccxt.RateLimitExceeded: Propagated unchanged for definitive venue rejection.
+            ccxt.ExchangeError: Typed subclasses propagate unchanged for
+                definitive venue rejection.
         """
         try:
             order_data = await self._with_retry(
@@ -1016,6 +1069,17 @@ class KrakenExchangeClient(ExchangeClientBase):
                 client_order_id=request.client_order_id,
                 instrument=request.symbol,
                 message=f"Kraken Spot create_order network failure (order may exist): {e}",
+            ) from e
+        except ccxt.ExchangeError as e:
+            if type(e) is not ccxt.ExchangeError:
+                raise
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message=(
+                    f"Kraken Spot create_order unclassified venue error "
+                    f"(placement unproven, order may exist): {e}"
+                ),
             ) from e
         return cast(dict[str, Any], order_data)
 

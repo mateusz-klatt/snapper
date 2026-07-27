@@ -200,7 +200,11 @@ never fabricates a rejection: the executor verifies venue truth via
 order in the non-terminal UNKNOWN state — the engine holds its
 in-flight guard, the recon loop re-verifies the order each cycle until
 resolved, and the `order_unknown` notification rule alerts the
-operator.
+operator. "Ambiguous" covers any failure whose placement outcome is
+unproven, not only a lost response: on Kraken Spot's ccxt path a venue
+error ccxt could not classify (the bare `ccxt.ExchangeError` type)
+takes the same verification route, while every classified subclass
+still rejects immediately.
 
 Replayed submits of an already-evidenced `client_order_id` (outbox
 re-publishes after a crash between publish and the dispatched commit)

@@ -3668,19 +3668,103 @@ class TestAmbiguousSubmitClassification:
         mock_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_exchange_error_is_not_wrapped(self, kraken_client: KrakenExchangeClient) -> None:
+    @pytest.mark.parametrize(
+        "definitive_error",
+        [
+            ccxt.InsufficientFunds("no funds"),
+            ccxt.InvalidOrder("volume below minimum"),
+            ccxt.BadSymbol("unknown pair"),
+            ccxt.PermissionDenied("key lacks trade permission"),
+        ],
+    )
+    async def test_exchange_error_is_not_wrapped(
+        self, kraken_client: KrakenExchangeClient, definitive_error: ccxt.ExchangeError
+    ) -> None:
         """A definitive venue rejection keeps its native ExchangeError type.
 
-        Given: CCXT create_order raising InsufficientFunds (the venue
-            answered authoritatively — no order was placed),
+        Given: CCXT create_order raising an error ccxt CLASSIFIED — a
+            typed ExchangeError subclass, meaning the venue answered
+            authoritatively and no order was placed,
         When: create_order is called,
-        Then: The ExchangeError propagates plain.
+        Then: That exact type propagates plain, never wrapped as
+            ambiguous, and the client never looks the order up by client
+            id.
+
+        This is the boundary guard for the exact-type test in
+        ``_submit_ccxt_order``. Widening ``type(e) is ccxt.ExchangeError``
+        to ``isinstance`` would capture every one of these subclasses and
+        route ordinary rejections through a ~62s verification round
+        before publishing the same REJECTED they could have had at once.
         """
         mock_client = AsyncMock()
-        mock_client.create_order.side_effect = ccxt.InsufficientFunds("no funds")
+        mock_client.create_order.side_effect = definitive_error
+        lookup = AsyncMock()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            pytest.raises(ccxt.InsufficientFunds),
+            patch.object(kraken_client, "find_order_by_client_id", lookup),
+            pytest.raises(type(definitive_error)),
+        ):
+            await kraken_client.create_order(self._request())
+        lookup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bare_exchange_error_is_wrapped_as_ambiguous(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An UNCLASSIFIED venue error is ambiguous, not a rejection.
+
+        Given: CCXT create_order raising the exact ``ExchangeError``
+            type — what ``handle_errors`` raises for any Kraken
+            ``EOrder:`` string its exception map does not know, the
+            duplicate-``cl_ord_id`` refusal among them,
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces with the venue error
+            chained and the caller's correlation id attached verbatim,
+            and the client itself performs no lookup — classification is
+            all it owes; verification is the executor's job.
+
+        Placement is unproven here, and unproven is not a licence to
+        reject: an order resting on the venue that gets a REJECTED
+        published for it releases the engine's in-flight intent and
+        writes a sweep-exempting ``order_rejected`` row.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.ExchangeError(
+            'kraken {"error":["EOrder:Order already exists"]}'
+        )
+        lookup = AsyncMock()
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(kraken_client, "find_order_by_client_id", lookup),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client.create_order(self._request())
+        assert type(exc_info.value.__cause__) is ccxt.ExchangeError
+        assert exc_info.value.client_order_id == "client_tax"
+        assert exc_info.value.instrument == "BTC-USD"
+        lookup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bare_exchange_error_classification_ignores_venue_text(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Wrapping is decided by runtime type, never by the error string.
+
+        Given: A bare ExchangeError whose text resembles nothing anyone
+            has recorded — Kraken documents no duplicate-``cl_ord_id``
+            error and the pinned ccxt kraken exception map has no entry
+            for one, so the real wire text is unknown,
+        When: create_order is called,
+        Then: It still wraps as ambiguous.
+
+        A future string match would have to guess that text, and a wrong
+        guess silently restores the false-REJECTED defect.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.ExchangeError("EGeneral:Internal error")
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(AmbiguousOrderSubmitError),
         ):
             await kraken_client.create_order(self._request())
 

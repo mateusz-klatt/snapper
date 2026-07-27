@@ -575,10 +575,12 @@ async def test_run_walutomat_scenario_places_expected_order(
     a frozen clock — which is precisely what made the collision
     invisible: two concurrent runs of the same scenario within one
     second mint the same id, and a venue duplicate-id refusal is a plain
-    ExchangeError that the submit path does not wrap as ambiguous, so it
-    becomes a false REJECTED plus a sweep-exempting order_rejected row
-    for a possibly-live order. A uuid7 has no such collision mode, and
-    there is no literal left to pin. Uniqueness across a whole run is
+    ExchangeError. Kraken spot now treats that unclassified shape as
+    ambiguous (#100) rather than as a rejection, but this Walutomat path
+    carries no such classification, so the collision still resolves
+    through whatever the venue client decides — a barrier not worth
+    leaning on when a unique id removes the question. A uuid7 has no
+    such collision mode, and there is no literal left to pin. Uniqueness across a whole run is
     pinned separately by the all-scenarios test.
     """
     symbol = "EUR-PLN"
@@ -1367,13 +1369,16 @@ async def test_repeating_one_scenario_never_reuses_a_correlation_id(
     used to mint ``f"test-{scenario}-{int(time.time())}"``, so this
     exact sequence produced the SAME id twice whenever both runs landed
     in one wall-clock second — and a venue duplicate-id refusal is a
-    plain ExchangeError, not a NetworkError, so the submit path does not
-    wrap it as ambiguous. It lands in the executor's generic handler as
-    a REJECTED plus a durable order_rejected row that permanently
+    plain ExchangeError, not a NetworkError. Kraken spot now classifies
+    that UNCLASSIFIED error as ambiguous (#100), so it no longer
+    fabricates a REJECTED, but the collision is still not free: it costs
+    a blocking verification round and, on a venue whose client has no
+    such classification, still lands in the executor's generic handler
+    as a REJECTED plus a durable order_rejected row that permanently
     exempts the command from the unresolved-dispatched sweep, for an
     order that may be live and resting. In a script that places real
-    money orders that is exactly the false-terminal hazard the
-    surrounding change exists to remove.
+    money orders, minting a unique id is the cheap barrier that keeps
+    the question from being asked at all.
 
     The two assertions guard different regressions and both are needed.
     The SHAPE assertion is what fails against the old scheme: no

@@ -39,6 +39,7 @@ from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
@@ -11221,57 +11222,190 @@ class TestReplayOriginGuard:
 
 
 class TestVenueDuplicateIdRejectionDisposition:
-    """Characterization of how a venue duplicate-id error is disposed of.
+    """Disposition of an UNCLASSIFIED venue error on a real Kraken submit.
 
-    NOT AN ENDORSEMENT. This class pins present behaviour so a follow-up
-    task provably changes it, without needing a coverage pragma.
+    HISTORY (#93 characterized, #100 changed it). This class was born as
+    a characterization and said so: NOT AN ENDORSEMENT, pinning present
+    behaviour so a follow-up task provably changed it. The superseded
+    test was ``test_venue_exchange_error_currently_publishes_rejected``
+    and it asserted, for a submit failing with a bare
+    ``ccxt.ExchangeError``, that ``statuses == ["submitted", "rejected"]``
+    and that a durable ``order_rejected`` row carrying the venue text was
+    written. Both assertions are now INVERTED below, deliberately and
+    visibly: for that input the executor must publish no REJECTED and
+    write no ``order_rejected`` row until venue truth says it may.
 
-    A Kraken rejection of a duplicate ``cl_ord_id`` arrives as a plain
-    ``ExchangeError``, not a ``NetworkError``, so the ccxt submit path
-    does not wrap it in ``AmbiguousOrderSubmitError``. It therefore
-    lands in the generic handler, which publishes REJECTED and writes a
-    durable ``order_rejected`` row. Both are wrong for this input: a
-    venue saying "you already have an order with this id" is the
-    STRONGEST possible evidence the order EXISTS. The publish releases
-    the engine's in-flight intent so it may re-emit, and the durable row
-    is a member of the order-resolving event types, permanently
-    exempting the command from the unresolved-dispatched sweep — for a
-    live resting order.
+    Why the old disposition was wrong. A Kraken refusal of a duplicate
+    ``cl_ord_id`` is the STRONGEST possible evidence the order EXISTS,
+    yet it arrives as a plain ``ExchangeError`` rather than a
+    ``NetworkError``, so the unfixed submit path let it fall into the
+    generic reject handler. That publish releases the engine's in-flight
+    intent so it may re-emit a replacement while the original is live,
+    and the durable row is a member of ``_ORDER_RESOLVING_EVENT_TYPES``,
+    permanently exempting the command from the unresolved-dispatched
+    sweep — destroying the backstop for a resting order. Recon's
+    ``_resurrect_falsely_rejected`` only rescues such an order if it
+    eventually FILLS; a resting limit order that never fills would stay
+    falsely REJECTED forever.
 
-    The reachability window is real but narrow and PRE-EXISTING, not
-    widened by the correlation fix: production already sent
-    ``cl_ord_id`` on every order (the omission was only in the live
-    test script), and ``_is_duplicate_submit`` catches most replays
-    before the venue is reached. Manual orders support limit and stop
-    types, so resting Kraken orders under a client id do exist. The
-    correct disposition is adoption, or at minimum
-    ``AmbiguousOrderSubmitError`` and UNKNOWN — never REJECTED. Kraken's
-    exact error code for this case is documented nowhere in the repo and
-    must be confirmed against the venue before the fix is designed.
+    The reachability window is real and PRE-EXISTING: the outbox can
+    publish the same ``client_order_id`` twice, ``_is_duplicate_submit``
+    is only a cheap first barrier and admits a residual window, and
+    Kraken's ``cl_ord_id`` dedupe covers only OPEN orders — while manual
+    orders support limit and stop, so resting Kraken orders under a
+    client id genuinely exist.
+
+    These tests deliberately run the REAL ``KrakenExchangeClient``
+    classification underneath the REAL executor disposition, because the
+    fix is the seam between them: the client decides only whether the
+    failure is proven, and the executor owns verification, adoption and
+    publishing. A test that mocked ``_execute_live_order`` (as the
+    superseded one did) could not tell the two apart.
     """
 
-    @pytest.mark.asyncio
-    async def test_venue_exchange_error_currently_publishes_rejected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A venue ExchangeError on submit becomes a durable rejection.
+    def _bare_venue_error(self) -> ccxt.ExchangeError:
+        """Build the exact ExchangeError type ccxt raises when unclassified."""
+        return ccxt.ExchangeError('kraken {"error":["EOrder:Order already exists"]}')
 
-        Given: The venue submit raising a plain ExchangeError, the shape
-            a duplicate-client-id refusal takes,
-        When: _process_order runs,
-        Then: SUBMITTED then REJECTED are published, a durable
-            order_rejected row carrying the venue text is written, and
-            the pending entry is popped.
-        """
+    def _executor(self, monkeypatch: pytest.MonkeyPatch, venue_error: BaseException) -> Any:
+        """Build a live executor whose real Kraken client fails with venue_error."""
         ex: Any = MergedDummyExecutor()
         ex.running = True
         _enable_live_trading(ex)
         ex._publish_order_status = AsyncMock(return_value=True)
         ex._record_venue_event = AsyncMock()
-        ex._execute_live_order = AsyncMock(
-            side_effect=ccxt.ExchangeError("EOrder:Order already exists")
-        )
+        ex._reconcile_disappeared_order = AsyncMock()
+        client = KrakenExchangeClient(api_key="test_key", api_secret="test_secret", sandbox=False)
+        ccxt_client = AsyncMock()
+        ccxt_client.create_order.side_effect = venue_error
+        client._ccxt_client = ccxt_client
+        client.find_order_by_client_id = AsyncMock()
+        ex.exchange_client = client
         monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        monkeypatch.setattr(base_module.asyncio, "sleep", AsyncMock())
+        return ex
+
+    @staticmethod
+    def _recorded_event_types(ex: Any) -> list[str]:
+        """List the durable venue-event types the executor wrote."""
+        return [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
+
+    @pytest.mark.asyncio
+    async def test_bare_venue_error_with_order_resting_adopts_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resting order behind an unclassified error is adopted, not rejected.
+
+        Given: The Kraken submit failing with a bare ExchangeError while
+            the order the collision refers to is OPEN on the venue,
+        When: _process_order runs,
+        Then: SUBMITTED then ACCEPTED are published — the ACCEPTED
+            carrying the ``adopted`` re-arm reason — the venue id is
+            correlated, and NO rejection of any kind is emitted.
+
+        This is the assertion that inverts #93: the superseded test
+        demanded REJECTED plus a durable order_rejected row for exactly
+        this input.
+        """
+        ex = self._executor(monkeypatch, self._bare_venue_error())
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-dup-1", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order(client_order_id="dup-cl-ord-id")
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+        assert ex._publish_order_status.await_args.kwargs.get("reason") == "adopted"
+        assert self._recorded_event_types(ex) == ["order_accepted"]
+        assert ex.client_by_exchange["ex-dup-1"] == "dup-cl-ord-id"
+        pending = ex.pending_orders["dup-cl-ord-id"]
+        assert pending.submit_ambiguous is False
+        assert pending.exchange_order_id == "ex-dup-1"
+
+    @pytest.mark.asyncio
+    async def test_bare_venue_error_rejects_only_after_two_absences(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rejection returns only once venue truth proves the order absent.
+
+        Given: The Kraken submit failing with a bare ExchangeError and
+            the venue answering authoritative-absent twice in a row,
+        When: _process_order runs,
+        Then: REJECTED is published and a durable order_rejected row is
+            written — but sourced from verified absence, not from the
+            unclassified error — and the pending entry is popped.
+
+        The rejection is not removed by this change, only made earned.
+        """
+        ex = self._executor(monkeypatch, self._bare_venue_error())
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        order = make_order(client_order_id="dup-cl-ord-id")
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "rejected"]
+        assert ex.exchange_client.find_order_by_client_id.await_count == 2
+        event = ex._record_venue_event.await_args_list[-1].args[0]
+        assert event["event_type"] == "order_rejected"
+        assert event["client_order_id"] == "dup-cl-ord-id"
+        assert "venue verified order absent" in event["error"]
+        assert "dup-cl-ord-id" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_bare_venue_error_with_unresolvable_lookup_parks_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An inconclusive verification parks UNKNOWN and writes no rejection.
+
+        Given: The Kraken submit failing with a bare ExchangeError and
+            every verification lookup raising,
+        When: _process_order runs,
+        Then: UNKNOWN is published, an order_submit_unknown row is
+            written, NO order_rejected row exists, and the pending entry
+            stays parked with submit_ambiguous set.
+
+        A lone order_submit_unknown does not resolve the command, so the
+        unresolved-dispatched sweep still owns it — the backstop the old
+        durable rejection destroyed.
+        """
+        ex = self._executor(monkeypatch, self._bare_venue_error())
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=ccxt.NetworkError("venue unreachable")
+        )
+        order = make_order(client_order_id="dup-cl-ord-id")
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "unknown"]
+        assert self._recorded_event_types(ex) == ["order_submit_unknown"]
+        assert ex.pending_orders["dup-cl-ord-id"].submit_ambiguous is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "definitive_error",
+        [
+            ccxt.InvalidOrder("EOrder:Invalid price"),
+            ccxt.InsufficientFunds("EOrder:Insufficient funds"),
+        ],
+    )
+    async def test_classified_venue_error_still_rejects_directly(
+        self, monkeypatch: pytest.MonkeyPatch, definitive_error: ccxt.ExchangeError
+    ) -> None:
+        """A classified venue refusal keeps the immediate rejection path.
+
+        Given: The Kraken submit failing with a TYPED ExchangeError
+            subclass — venue truth that no order was placed,
+        When: _process_order runs,
+        Then: SUBMITTED then REJECTED are published, a durable
+            order_rejected row carries the venue text, the pending entry
+            is popped, and the client-id lookup is never invoked.
+
+        This is the boundary test for the exact-type check. Relaxing
+        ``type(e) is ccxt.ExchangeError`` to ``isinstance`` would capture
+        both of these subclasses, replacing an immediate correct
+        rejection with a blocking verification round.
+        """
+        ex = self._executor(monkeypatch, definitive_error)
         order = make_order(client_order_id="dup-cl-ord-id")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
@@ -11279,5 +11413,6 @@ class TestVenueDuplicateIdRejectionDisposition:
         event = ex._record_venue_event.await_args_list[-1].args[0]
         assert event["event_type"] == "order_rejected"
         assert event["client_order_id"] == "dup-cl-ord-id"
-        assert "Order already exists" in event["error"]
+        assert str(definitive_error) in event["error"]
         assert "dup-cl-ord-id" not in ex.pending_orders
+        ex.exchange_client.find_order_by_client_id.assert_not_awaited()
