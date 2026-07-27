@@ -172,6 +172,60 @@ class TestWsTokenRouteHappyPath:
         assert verified.purpose == "ws_connect"
         client.close()
 
+    def test_ticket_carries_the_access_scope_not_the_principal(self) -> None:
+        """The minted ticket's context comes from the verified access claims.
+
+        Given: Access claims carrying ``["read:signals"]`` while the principal
+            carries no permissions at all,
+        When: A ws_token is minted,
+        Then: The ticket carries the CLAIMS' scope.
+
+        The two sources diverge on purpose. ``AuthPrincipal`` leaves
+        ``permissions`` at ``None``, which downstream means the FULL role grant
+        — so a route that reads the principal instead of the claims would widen
+        a deliberately narrowed token, and would do it silently. Asserting the
+        narrow value is what distinguishes the two code paths; asserting merely
+        "some context is present" would pass either way.
+        """
+        claims = _claims()
+        client = _create_client(principal=_principal(), claims=claims)
+        response = client.post("/api/auth/ws_token")
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.authorization_context_version == 1
+        assert verified.permissions == ["read:signals"]
+        assert verified.permissions != _principal().permissions
+        client.close()
+
+    def test_ticket_carries_the_wallet_selection(self) -> None:
+        """The client-selected wallet round-trips into the ticket.
+
+        Given: Access claims carrying an active wallet,
+        When: A ws_token is minted,
+        Then: The ticket carries that wallet.
+
+        This value has no other route into a rebuilt principal — the database
+        deliberately does not store it — so if the ticket drops it, a
+        reconnecting client silently loses its wallet selection.
+        """
+        claims = _claims().model_copy(
+            update={"active_wallet_public_id": "019e873c-d062-720f-85df-fd4d7fce5bdf"}
+        )
+        client = _create_client(principal=_principal(), claims=claims)
+        response = client.post("/api/auth/ws_token")
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.active_wallet_public_id == "019e873c-d062-720f-85df-fd4d7fce5bdf"
+        client.close()
+
 
 class TestWsTokenRouteAuthChain:
     """Auth-chain failure surfaces from ``require_authentication``."""

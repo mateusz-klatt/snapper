@@ -19,6 +19,7 @@ from fastapi import Response
 from fastapi import status
 from loguru import logger
 
+from snapper.api.auth.schemas.ws_token import WsAuthorizationContext
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.base import MessageResponse
 from snapper.auth.dependencies import get_csrf_manager
@@ -680,7 +681,13 @@ async def refresh_token(
     ws_token_service = get_ws_token_service()
     session_id = identity.claims.sid
     ws_token_result = ws_token_service.generate(
-        user_id=identity.user.username, session_id=session_id
+        user_id=identity.user.username,
+        session_id=session_id,
+        context=WsAuthorizationContext(
+            active_wallet_public_id=rotation.principal.active_wallet_public_id,
+            permissions=rotation.permission_values,
+            permission_scope_version=rotation.permission_scope_version,
+        ),
     )
     sid, seq, _pid, ts = _mint_provenance(request)
     user = _authenticated_session_profile(
@@ -790,6 +797,11 @@ async def issue_ws_token(
     ws_token_result = ws_token_service.generate(
         user_id=current_user.username,
         session_id=token_claims.sid,
+        context=WsAuthorizationContext(
+            active_wallet_public_id=token_claims.active_wallet_public_id,
+            permissions=token_claims.permissions,
+            permission_scope_version=token_claims.permission_scope_version,
+        ),
     )
     sid, seq, _pid, ts = _mint_provenance(request)
     expires_in = max(0, int((ws_token_result.expires_at - ts).total_seconds()))

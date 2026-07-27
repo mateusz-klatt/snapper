@@ -24,6 +24,8 @@ from pydantic import ValidationError
 
 from snapper.api.auth.errors.ws_token import WsTokenAlreadyUsedError
 from snapper.api.auth.errors.ws_token import WsTokenError
+from snapper.api.auth.schemas.ws_token import WS_AUTHORIZATION_CONTEXT_VERSION
+from snapper.api.auth.schemas.ws_token import WsAuthorizationContext
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.schemas.ws_token import WsTokenResult
 from snapper.api.auth.services.ws_token_store import WsTokenStore
@@ -117,7 +119,13 @@ class WsTokenService:
         """
         return datetime.now(UTC)
 
-    def generate(self, *, user_id: str, session_id: str) -> WsTokenResult:
+    def generate(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        context: WsAuthorizationContext | None = None,
+    ) -> WsTokenResult:
         """Generate a new WebSocket authentication token.
 
         Creates a short-lived, single-use JWT bound to the user and session.
@@ -125,6 +133,13 @@ class WsTokenService:
         Args:
             user_id: The user ID to include in the token.
             session_id: The session ID to bind the token to.
+            context: Authorization state the database cannot reconstruct —
+                wallet selection and token permission scope. Omitting it mints
+                a LEGACY ticket with no context version, which consumers treat
+                as "rebuild scope from the verified bearer" rather than as an
+                empty scope. Callers that HAVE the context must pass it;
+                passing None to mean "no permissions" would read as the full
+                role grant.
 
         Returns:
             WsTokenResult containing the token, expiration, and payload.
@@ -140,6 +155,14 @@ class WsTokenService:
             iat=issued_at,
             exp=int(expires_at.timestamp()),
             jti=uuid.uuid4().hex,
+            authorization_context_version=(
+                None if context is None else WS_AUTHORIZATION_CONTEXT_VERSION
+            ),
+            active_wallet_public_id=(None if context is None else context.active_wallet_public_id),
+            permissions=(None if context is None else context.permissions),
+            permission_scope_version=(
+                None if context is None else context.permission_scope_version
+            ),
         )
         token = jwt.encode(
             payload.model_dump(),

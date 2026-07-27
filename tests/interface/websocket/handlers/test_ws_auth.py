@@ -29,6 +29,7 @@ import snapper.server.authenticated_websocket as auth_ws
 from snapper.api.auth.errors.ws_token import WsTokenAlreadyUsedError
 from snapper.api.auth.errors.ws_token import WsTokenError
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
+from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.auth import routes
@@ -55,6 +56,7 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
+from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
 from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import PermissionScopeError
@@ -3798,6 +3800,63 @@ def test_refresh_token_preserves_versioned_permission_scope(
 
     assert response.status_code == 200
     assert token_manager.last_permissions == {Permission.READ_MARKET_DATA}
+
+
+def test_refresh_ws_ticket_carries_the_rotation_scope_not_the_principal(
+    auth_app: AuthAppFixture,
+) -> None:
+    """The ws_token minted by /refresh carries the ROTATION's narrowed scope.
+
+    Given: A refresh carrying a narrowed permission scope,
+    When: The response's ws_token is decoded,
+    Then: It carries that narrow scope, not None.
+
+    The two available sources diverge and only one is correct.
+    ``rotation.permission_values`` holds the normalized successor scope;
+    ``rotation.principal.permissions`` is ``None`` because
+    ``build_auth_principal`` never populates it — and ``None`` downstream means
+    the FULL role grant. Minting from the principal therefore turns a
+    deliberately narrowed session into an unrestricted one, silently.
+
+    The sibling test above asserts the successor ACCESS token's scope and would
+    pass with the WS ticket left empty or widened; this one decodes the ticket
+    itself, which is the only thing that distinguishes the two sources.
+    """
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=[Permission.READ_MARKET_DATA.value],
+        permission_scope_version=1,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_ticket_scope_jti",
+        sid="session-ticket-scope",
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "scoped-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-ticket-scope"),
+    )
+    assert ticket.authorization_context_version == 1
+    assert ticket.permissions == [Permission.READ_MARKET_DATA.value]
+    assert ticket.permissions is not None
+    assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
 
 
 def test_get_current_user_profile_returns_user(
