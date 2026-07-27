@@ -531,7 +531,18 @@ ccxt path the same treatment covers a submit whose placement is simply
 because "not proven safe to reject" is not the same as "rejected". The executor
 first verifies against venue truth — up to three lookups by client id
 (`cl_ord_id` on Kraken Spot via open+closed orders, `cliOrdId` on
-Futures via order status; 2s/5s/10s backoff, 15s bound each). A found
+Futures via order status; 15s bound each). The spacing before each
+lookup depends on which kind of ambiguity produced it. A *lost
+response* backs off 2s/5s/10s, because the venue may still be
+materializing an order the request just created and its listings lag
+the write. An *unclassified venue error* takes its first lookup
+immediately and then 2s/5s, because the venue answered synchronously
+and is healthy: nothing is in flight, so a collision can only be
+against an order already resting from an earlier delivery. That
+matters operationally — verification runs inline on the executor's
+single order-command loop, so a delay there also delays a queued
+cancel for an unrelated live order. The two-consecutive-absence rule
+is identical on both schedules. A found
 order finalizes as accepted (an already-terminal one additionally
 projects its fills through the disappeared-order reconciler); two
 consecutive authoritative not-found answers make the rejection
@@ -557,7 +568,17 @@ venue unreachable or lookup unsupported (Walutomat active-order miss)
   matched on runtime TYPE, never on the venue's error text — Kraken
   documents no duplicate-`cl_ord_id` error and ccxt maps none, so the
   wire text for the motivating case is unknown and a string match would
-  be a guess. A
+  be a guess. **This unclassified-error protection covers the Kraken
+  Spot ccxt path only.** Kraken Spot's *native* submit fallback (used
+  for instruments with no ccxt mapping) still has the defect: for a
+  venue error python-kraken-sdk does not recognise it raises nothing at
+  all — the error payload comes back as the result, the order snapshot
+  is built with an empty id, and the executor's empty-id branch
+  publishes a REJECTED plus a sweep-exempting `order_rejected` row for
+  an order that may be resting. Walutomat likewise has no such
+  classification. If you see a REJECTED with reason `rejected by
+  exchange` on a native-symbol Kraken order, treat it as UNPROVEN and
+  check the venue before assuming flat. Tracked as task #103. A
   breaker-open refusal additionally lands a durable terminal
   disposition before its REJECTED — a venue event recording the
   refusal plus the command row moved to FAILED — and publishes the

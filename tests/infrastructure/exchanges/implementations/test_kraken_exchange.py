@@ -3578,8 +3578,14 @@ class TestAmbiguousSubmitClassification:
             freed worker),
         When: create_order is called,
         Then: AmbiguousOrderSubmitError surfaces with the dispatch error
-            chained and the submit identity attached — never a definitive
-            reject for a possibly-live order.
+            chained, the submit identity attached — never a definitive
+            reject for a possibly-live order — and ``venue_answered``
+            False, because no answer came back at all.
+
+        The ``venue_answered`` assertion is the counterpart to the
+        bare-error test below: a lost response is the case where the
+        venue may still be materializing the order, so the executor must
+        keep its delayed first lookup here.
         """
         mock_client = MagicMock()
 
@@ -3594,6 +3600,7 @@ class TestAmbiguousSubmitClassification:
             await kraken_client.create_order(self._request())
         assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
         assert exc_info.value.client_order_id == "client_tax"
+        assert exc_info.value.venue_answered is False
 
     @pytest.mark.asyncio
     async def test_native_pool_dispatch_failure_is_wrapped(
@@ -3719,14 +3726,23 @@ class TestAmbiguousSubmitClassification:
             duplicate-``cl_ord_id`` refusal among them,
         When: create_order is called,
         Then: AmbiguousOrderSubmitError surfaces with the venue error
-            chained and the caller's correlation id attached verbatim,
-            and the client itself performs no lookup — classification is
-            all it owes; verification is the executor's job.
+            chained, the caller's correlation id attached verbatim, the
+            venue's own words carried in the message, and
+            ``venue_answered`` True; the client itself performs no
+            lookup — classification is all it owes; verification is the
+            executor's job.
 
         Placement is unproven here, and unproven is not a licence to
         reject: an order resting on the venue that gets a REJECTED
         published for it releases the engine's in-flight intent and
         writes a sweep-exempting ``order_rejected`` row.
+
+        ``venue_answered`` is the one piece of timing-relevant venue
+        FACT this client is entitled to state: the venue replied and is
+        healthy, so nothing is in flight to materialize and the executor
+        may take its first verification lookup immediately instead of
+        blocking its sequential command loop for 2s first. Dropping the
+        flag would silently reinstate that stall.
         """
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.ExchangeError(
@@ -3742,6 +3758,8 @@ class TestAmbiguousSubmitClassification:
         assert type(exc_info.value.__cause__) is ccxt.ExchangeError
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.instrument == "BTC-USD"
+        assert exc_info.value.venue_answered is True
+        assert "EOrder:Order already exists" in str(exc_info.value)
         lookup.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -3750,23 +3768,42 @@ class TestAmbiguousSubmitClassification:
     ) -> None:
         """Wrapping is decided by runtime type, never by the error string.
 
-        Given: A bare ExchangeError whose text resembles nothing anyone
-            has recorded — Kraken documents no duplicate-``cl_ord_id``
-            error and the pinned ccxt kraken exception map has no entry
-            for one, so the real wire text is unknown,
+        Given: A bare ExchangeError carrying a REAL Kraken ``EOrder:``
+            string that the pinned ccxt kraken map genuinely does not
+            classify, so this is a shape that can actually arrive,
         When: create_order is called,
         Then: It still wraps as ambiguous.
 
-        A future string match would have to guess that text, and a wrong
-        guess silently restores the false-REJECTED defect.
+        The premise is asserted rather than asserted-by-comment, against
+        the pinned map itself: absent from ``exceptions['exact']`` and
+        matched by no ``exceptions['broad']`` fragment is exactly the
+        condition under which kraken's ``handle_errors`` falls through
+        to ``raise ExchangeError(...)``. An earlier revision used
+        ``EGeneral:Internal error`` as the "unrecorded" example, which
+        was wrong in a way no assertion could catch: that string IS in
+        the exact map (to ``ExchangeNotAvailable``), so it can never
+        reach the bare-error branch at all. Checking the map here means
+        a ccxt upgrade that starts classifying this string fails the
+        test instead of quietly making the fixture unreachable.
+
+        A future string match would have to guess text nobody here has
+        observed, and a wrong guess silently restores the false-REJECTED
+        defect.
         """
+        unmapped_venue_text = "EOrder:Insufficient margin"
+        pinned_map = ccxt.kraken().exceptions
+        assert unmapped_venue_text not in pinned_map["exact"]
+        assert not [f for f in pinned_map["broad"] if f in unmapped_venue_text]
         mock_client = AsyncMock()
-        mock_client.create_order.side_effect = ccxt.ExchangeError("EGeneral:Internal error")
+        mock_client.create_order.side_effect = ccxt.ExchangeError(
+            f'kraken {{"error":["{unmapped_venue_text}"]}}'
+        )
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            pytest.raises(AmbiguousOrderSubmitError),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
             await kraken_client.create_order(self._request())
+        assert unmapped_venue_text in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_native_fallback_transport_failure_is_wrapped(

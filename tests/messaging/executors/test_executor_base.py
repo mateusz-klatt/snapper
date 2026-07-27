@@ -7230,7 +7230,7 @@ class TestAmbiguousVerification:
         order = make_order(client_order_id="core-id-3")
         pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
         ex.pending_orders["core-id-3"] = pending
-        resolved = await ex._verify_ambiguous_submit(order, pending)
+        resolved = await ex._verify_ambiguous_submit(order, pending, None)
         assert resolved is False
         assert ex.pending_orders["core-id-3"] is pending
         ex._record_venue_event.assert_not_awaited()
@@ -9990,7 +9990,7 @@ class TestTerminalSectionsCancelSafety:
             patch.object(base_module.asyncio, "sleep", new=AsyncMock()),
             pytest.raises(RuntimeError, match="cut mid-write"),
         ):
-            await ex._verify_ambiguous_submit(order, pending)
+            await ex._verify_ambiguous_submit(order, pending, None)
         assert "amb-cut" in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -10015,7 +10015,7 @@ class TestTerminalSectionsCancelSafety:
         ex._publish_order_status = AsyncMock(return_value=False)
         ex._record_venue_event = AsyncMock()
         with patch.object(base_module.asyncio, "sleep", new=AsyncMock()):
-            resolved = await ex._verify_ambiguous_submit(order, pending)
+            resolved = await ex._verify_ambiguous_submit(order, pending, None)
         assert resolved is False
         assert "amb-pubfail" in ex.pending_orders
         ex._record_venue_event.assert_not_awaited()
@@ -11268,7 +11268,12 @@ class TestVenueDuplicateIdRejectionDisposition:
         return ccxt.ExchangeError('kraken {"error":["EOrder:Order already exists"]}')
 
     def _executor(self, monkeypatch: pytest.MonkeyPatch, venue_error: BaseException) -> Any:
-        """Build a live executor whose real Kraken client fails with venue_error."""
+        """Build a live executor whose real Kraken client fails with venue_error.
+
+        The patched ``asyncio.sleep`` is kept on the executor as
+        ``verify_sleeps`` so the tests can read the verification
+        SCHEDULE, not merely the lookup count.
+        """
         ex: Any = MergedDummyExecutor()
         ex.running = True
         _enable_live_trading(ex)
@@ -11282,13 +11287,20 @@ class TestVenueDuplicateIdRejectionDisposition:
         client.find_order_by_client_id = AsyncMock()
         ex.exchange_client = client
         monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
-        monkeypatch.setattr(base_module.asyncio, "sleep", AsyncMock())
+        sleeps = AsyncMock()
+        monkeypatch.setattr(base_module.asyncio, "sleep", sleeps)
+        ex.verify_sleeps = sleeps
         return ex
 
     @staticmethod
     def _recorded_event_types(ex: Any) -> list[str]:
         """List the durable venue-event types the executor wrote."""
         return [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
+
+    @staticmethod
+    def _slept_delays(ex: Any) -> list[float]:
+        """List the delays the verification round actually waited."""
+        return [c.args[0] for c in ex.verify_sleeps.await_args_list]
 
     @pytest.mark.asyncio
     async def test_bare_venue_error_with_order_resting_adopts_it(
@@ -11301,11 +11313,23 @@ class TestVenueDuplicateIdRejectionDisposition:
         When: _process_order runs,
         Then: SUBMITTED then ACCEPTED are published — the ACCEPTED
             carrying the ``adopted`` re-arm reason — the venue id is
-            correlated, and NO rejection of any kind is emitted.
+            correlated, NO rejection of any kind is emitted, and the
+            single lookup that settled it waited ZERO seconds.
 
         This is the assertion that inverts #93: the superseded test
         demanded REJECTED plus a durable order_rejected row for exactly
         this input.
+
+        The zero-delay assertion is not a micro-optimisation pin. This
+        verification runs INLINE on ``_order_handler``, the one
+        sequential loop that serves submits AND cancels, so any delay
+        here is a delay on a queued cancel for an unrelated live order.
+        The response-lost schedule's leading 2s buys time for the venue
+        to materialize an order whose response was lost — neither half
+        of which applies to a synchronous refusal from a healthy venue
+        colliding with an order that has been resting since an earlier
+        outbox delivery. Restoring a leading delay would tax the common
+        case for a rationale that does not cover it.
         """
         ex = self._executor(monkeypatch, self._bare_venue_error())
         ex.exchange_client.find_order_by_client_id = AsyncMock(
@@ -11323,6 +11347,39 @@ class TestVenueDuplicateIdRejectionDisposition:
         pending = ex.pending_orders["dup-cl-ord-id"]
         assert pending.submit_ambiguous is False
         assert pending.exchange_order_id == "ex-dup-1"
+        assert self._slept_delays(ex) == [0.0]
+        assert ex.exchange_client.find_order_by_client_id.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_lost_response_still_waits_before_its_first_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The delayed schedule survives for the failure shape that needs it.
+
+        Given: The Kraken submit failing with a NetworkError — the send
+            may have landed and the response was lost — with the order
+            found on the venue,
+        When: _process_order runs,
+        Then: The first lookup is taken only after the 2s response-lost
+            delay, not immediately.
+
+        This is the boundary test for the schedule split. A lost
+        response may have created an order microseconds ago, and
+        Kraken's open/closed listings lag the write, so an immediate
+        ``None`` here could become half of a false rejection. Collapsing
+        both callers onto the fast schedule would trade a real safety
+        margin for latency that only the venue-answered case can spare.
+        """
+        ex = self._executor(monkeypatch, ccxt.NetworkError("connection reset after send"))
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-lost-1", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order(client_order_id="lost-cl-ord-id")
+        await ex._process_order(order)
+        assert self._slept_delays(ex) == [2.0]
+        assert ex.pending_orders["lost-cl-ord-id"].exchange_order_id == "ex-lost-1"
 
     @pytest.mark.asyncio
     async def test_bare_venue_error_rejects_only_after_two_absences(
@@ -11330,14 +11387,31 @@ class TestVenueDuplicateIdRejectionDisposition:
     ) -> None:
         """Rejection returns only once venue truth proves the order absent.
 
-        Given: The Kraken submit failing with a bare ExchangeError and
-            the venue answering authoritative-absent twice in a row,
+        Given: The Kraken submit failing with a bare ExchangeError
+            carrying a REAL unmapped Kraken refusal, and the venue
+            answering authoritative-absent twice in a row,
         When: _process_order runs,
         Then: REJECTED is published and a durable order_rejected row is
-            written — but sourced from verified absence, not from the
-            unclassified error — and the pending entry is popped.
+            written — sourced from verified absence, which leads the
+            reason string — and that row ALSO carries the venue's own
+            words, and the pending entry is popped.
 
         The rejection is not removed by this change, only made earned.
+
+        The venue-text assertion closes a real hole rather than
+        decorating the row. When verification resolves INLINE no
+        ``order_submit_unknown`` row is ever written, so this
+        ``order_rejected`` row is the ONLY durable place the venue's
+        reason can land; without it the reason survives only in
+        transient logs. That matters most for the case this whole path
+        exists to handle safely: an unmapped but perfectly genuine
+        refusal. ccxt 4.5.68 classifies none of ``EOrder:Insufficient
+        margin``, ``EOrder:Cannot open position`` or ``EOrder:Margin
+        allowance exceeded``, so all of them arrive here as bare
+        ``ExchangeError`` and all of them are things an operator reading
+        a REJECTED at 2 AM needs to see without grepping logs. Pinning
+        only the absence clause — as the first revision of this test did
+        — cements that gap.
         """
         ex = self._executor(monkeypatch, self._bare_venue_error())
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
@@ -11346,10 +11420,13 @@ class TestVenueDuplicateIdRejectionDisposition:
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "rejected"]
         assert ex.exchange_client.find_order_by_client_id.await_count == 2
+        assert self._slept_delays(ex) == [0.0, 2.0]
         event = ex._record_venue_event.await_args_list[-1].args[0]
         assert event["event_type"] == "order_rejected"
         assert event["client_order_id"] == "dup-cl-ord-id"
         assert "venue verified order absent" in event["error"]
+        assert "EOrder:Order already exists" in event["error"]
+        assert len(event["error"]) <= 512
         assert "dup-cl-ord-id" not in ex.pending_orders
 
     @pytest.mark.asyncio

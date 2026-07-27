@@ -157,6 +157,31 @@ unbounded venue call here would silently extend the UNKNOWN window. A
 timed-out attempt counts as could-not-verify, never as absence.
 """
 
+_AMBIGUOUS_VERIFY_DELAYS_RESPONSE_LOST_S = (2.0, 5.0, 10.0)
+"""Verification schedule when the submit's response never came back.
+
+The leading 2s is not politeness, it is correctness: the request may
+have created an order microseconds ago and Kraken's open/closed
+listings lag the write, so an immediate lookup could answer ``None``
+for an order that exists. Two of those answers publish a REJECTED, so
+the first read must not be taken before the venue can have caught up.
+"""
+
+_AMBIGUOUS_VERIFY_DELAYS_VENUE_ANSWERED_S = (0.0, 2.0, 5.0)
+"""Verification schedule when the venue refused in words we cannot decode.
+
+Neither half of the response-lost rationale survives here. The venue
+answered synchronously and is healthy, so nothing is in flight to
+materialize; and the order this failure can collide with — a duplicate
+``cl_ord_id`` against an order left resting by an earlier outbox
+delivery — has been on the book long enough to be listed. The first
+lookup is therefore taken with no delay at all, which is what keeps
+the sequential ``_order_handler`` from stalling a queued cancel behind
+the common case. The later steps stay spaced because a venue that
+answers ``None`` once still deserves the lag margin before the second
+absence turns into a rejection.
+"""
+
 _EXEC_STREAM_BACKOFF_INITIAL_S = 1.0
 """Supervisor backoff after the first execution-stream death."""
 
@@ -2705,13 +2730,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
 
     async def _verify_ambiguous_submit(
-        self, order: OrderRequestData, pending: PendingOrderState
+        self,
+        order: OrderRequestData,
+        pending: PendingOrderState,
+        error: AmbiguousOrderSubmitError | None,
     ) -> bool:
         """Resolve an ambiguous submit against venue truth by client id.
 
-        Up to three lookups (after 2s/5s/10s — the venue needs a moment
-        to materialize an order whose response was lost), each bounded
-        to 15s. Outcomes:
+        Up to three lookups, each bounded to 15s. Outcomes:
 
         - FOUND: the order is live or was — finalize as accepted; an
           already-terminal snapshot is additionally routed through
@@ -2724,17 +2750,46 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         - Anything else (lookup unsupported, venue unreachable, mixed
           answers): unresolved — the caller parks the order UNKNOWN.
 
-        Blocking is a known, accepted tradeoff: the sequential order
-        handler can spend up to ~62s here (3 sleeps + 3 bounded
-        lookups) before parking, delaying queued commands for this
-        executor. During the outages that produce ambiguity those
-        commands would fail venue-side anyway, and resolving the
-        current order's truth first is worth more than dispatching the
-        next one into the same outage.
+        WHICH CALLER GETS WHICH SCHEDULE, and why the two differ. This
+        routine runs INLINE on ``_order_handler``, the single sequential
+        loop that serves submits AND cancels, so every second spent here
+        is a second a queued cancel for an unrelated live order waits.
+        That cost is only defensible where the delay buys something.
+
+        - Response lost (``venue_answered`` False, or no originating
+          error at all — every transport failure, and the recon-cycle
+          re-verification of an already-parked entry):
+          ``_AMBIGUOUS_VERIFY_DELAYS_RESPONSE_LOST_S``, worst case ~62s
+          of blocking. Two rationales carry it, and BOTH are specific to
+          a lost response. The venue needs a moment to materialize an
+          order this request may have just created, which is why the
+          first lookup waits; and during the outages that produce a lost
+          response the queued commands behind us would fail venue-side
+          anyway, so resolving the current order's truth first is worth
+          more than dispatching the next one into the same outage.
+        - Venue answered but unclassifiable (``venue_answered`` True —
+          today only Kraken Spot's bare ``ccxt.ExchangeError``):
+          ``_AMBIGUOUS_VERIFY_DELAYS_VENUE_ANSWERED_S``, first lookup
+          immediate. NEITHER rationale above transfers. The venue is
+          healthy and answered synchronously, so the queued cancel
+          behind us would have succeeded, and there is nothing in flight
+          to materialize — an order under this id is one left resting by
+          an earlier outbox delivery, already listed. The common case
+          therefore resolves on lookup one with no delay at all.
+
+        The two-consecutive-absence rule is identical on both schedules;
+        only the spacing before each read changes. Nothing here is
+        allowed to reject on a single ``None``.
 
         Args:
             order: The original order request.
             pending: The parked pending entry for the order.
+            error: The failure that made the submit ambiguous, or None
+                when re-verifying an already-parked entry. It supplies
+                the schedule hint and the venue's own words for the
+                rejection row; None takes the conservative schedule, and
+                loses nothing durable because a parked entry already has
+                an ``order_submit_unknown`` row carrying that text.
 
         Returns:
             True when the order was resolved (accepted or rejected);
@@ -2744,7 +2799,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.exchange_client is None:
             return False
         not_found_streak = 0
-        for delay_s in (2.0, 5.0, 10.0):
+        for delay_s in self._ambiguous_verify_delays(error):
             await asyncio.sleep(delay_s)
             try:
                 async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
@@ -2793,13 +2848,69 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "instrument": order.instrument,
                         "client_order_id": order.client_order_id,
                         "side": order.side,
-                        "error": "ambiguous submit; venue verified order absent",
+                        "error": self._ambiguous_rejection_reason(error),
                         "strategy_tag": order.strategy_tag,
                     }
                 )
                 self.pending_orders.pop(order.client_order_id, None)
                 return True
         return False
+
+    @staticmethod
+    def _ambiguous_verify_delays(
+        error: AmbiguousOrderSubmitError | None,
+    ) -> tuple[float, ...]:
+        """Pick the verification spacing the originating failure earns.
+
+        See ``_verify_ambiguous_submit`` for the full argument. In
+        short: a lost response may still be materializing an order, so
+        the first read waits; a synchronous refusal from a healthy venue
+        has nothing to wait for and blocks the sequential command loop
+        for no gain.
+
+        Args:
+            error: The failure that made the submit ambiguous, or None.
+
+        Returns:
+            Per-attempt sleep durations, in order.
+        """
+        if error is not None and error.venue_answered:
+            return _AMBIGUOUS_VERIFY_DELAYS_VENUE_ANSWERED_S
+        return _AMBIGUOUS_VERIFY_DELAYS_RESPONSE_LOST_S
+
+    @staticmethod
+    def _ambiguous_rejection_reason(error: AmbiguousOrderSubmitError | None) -> str:
+        """Build the durable reason for a verified-absent ambiguous submit.
+
+        The verified absence is what AUTHORIZES the rejection, so it
+        leads. The originating failure's message is appended because on
+        this path it is the only place the venue's own words are ever
+        written down: when verification resolves inline, no
+        ``order_submit_unknown`` row is produced, and for an unmapped
+        but genuine refusal (Kraken returns plenty ccxt 4.5.68 does not
+        classify — ``EOrder:Insufficient margin``, ``EOrder:Cannot open
+        position``, ``EOrder:Margin allowance exceeded``) the reason
+        would otherwise survive only in transient logs. An operator
+        reading a REJECTED row at 2 AM must not have to grep for why the
+        venue refused. The adapter's message already embeds its
+        ``__cause__`` text, so no chain walk is needed.
+
+        Args:
+            error: The failure that made the submit ambiguous, or None
+                when re-verifying an already-parked entry, whose venue
+                text is already durable in its ``order_submit_unknown``
+                row.
+
+        Returns:
+            Reason string for the ``order_rejected`` venue event,
+            truncated to the 512-char column width. The verified-absence
+            clause leads so a truncation can only ever cost the tail of
+            the venue text, never the authorization for the rejection.
+        """
+        reason = "ambiguous submit; venue verified order absent"
+        if error is not None:
+            reason = f"{reason}; originating failure: {error}"
+        return reason[:512]
 
     async def _adopt_found_order(
         self,
@@ -2821,6 +2932,45 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         TERMINAL snapshots keep the plain reason-less ACCEPTED — marking
         them would re-arm an engine for a cancelled/expired order with
         no clearing publish behind it.
+
+        WHY NO OWNERSHIP CHECK IS NEEDED, and why the obvious version of
+        that reassurance is wrong. It is NOT true that a
+        ``client_order_id`` identifies one command:
+        ``trade_commands.client_order_id`` carries a plain non-unique
+        index (``ix_trade_commands_client_order_id``), and CANCEL
+        commands deliberately reuse the target order's cid — the paired
+        guard scanner, both plan-cancel routes, the shared plan cancel
+        service and the stranded-cancel re-emit all insert a distinct
+        command row under an existing cid on purpose, so the venue can
+        be told which order to pull. Anyone writing "cids are unique per
+        command" here would be documenting something false.
+
+        The narrower claim is the one that holds and the one adoption
+        actually rests on: no two distinct CREATE/SUBMIT commands ever
+        share a cid, and only a create/submit can have placed the order
+        this snapshot describes. Every mint site issues a fresh uuid7
+        per command row (engine emit, plan evaluator, paired-guard
+        flatten, the REST and MCP manual-order surfaces — none of which
+        lets a caller supply a cid; their replay handle is
+        ``idempotency_key``, which is uniquely indexed). No retry mints
+        a second row: outbox redelivery re-publishes the SAME row,
+        recon redispatch and the unresolved-dispatched sweep advance the
+        SAME ``public_id``, and SCD2 successors copy the cid precisely
+        because they ARE that one logical command. Replace cannot
+        contribute either — ``_process_replace`` is a hard-reject stub
+        and nothing in the system inserts a ``replace`` row.
+
+        Cancels are then kept away from adoption structurally rather
+        than by luck. A cancel is routed to ``_process_cancel`` and
+        never reaches ``_process_order``, so it cannot enter the
+        ambiguous-submit verifier at all; and every OTHER caller of this
+        method resolves its owning command through
+        ``get_active_create_command_by_client_order_id``, which filters
+        to create/submit, scopes to the exchange and the active SCD2
+        row, and RAISES rather than guessing when more than one matches.
+        That raise is the tripwire for the only state that could make
+        this adoption wrong, so re-deriving ownership here would add a
+        second, weaker copy of a check that already fails closed.
 
         Args:
             order: The original order request.
@@ -2886,7 +3036,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"[{exchange_name}] Order {order.client_order_id} submit AMBIGUOUS "
             f"(order may exist on venue): {error} (cause: {error.__cause__!r})"
         )
-        if await self._verify_ambiguous_submit(order, pending):
+        if await self._verify_ambiguous_submit(order, pending, error):
             return
         await self._record_submit_unknown(order, error, exchange_name)
         await self._publish_unknown_until_confirmed(order, pending, exchange_name)
@@ -4861,12 +5011,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         failed), one publish retry per cycle keeps working toward
         holding the engine guard.
 
+        No originating error is passed. The entry only reached this
+        loop by parking, which means ``_record_submit_unknown`` already
+        wrote the venue's own words to a durable
+        ``order_submit_unknown`` row, so a rejection decided here loses
+        no evidence — and this cycle runs on the recon task, minutes
+        after the submit, where the conservative spacing costs nothing
+        that the sequential command loop would feel.
+
         Args:
             pending: The parked ambiguous pending entry.
         """
         order = pending.request
         exchange_name = self._get_exchange_name()
-        if await self._verify_ambiguous_submit(order, pending):
+        if await self._verify_ambiguous_submit(order, pending, None):
             logger.info(
                 f"[{exchange_name}] Recon resolved parked ambiguous order {order.client_order_id}"
             )

@@ -1026,6 +1026,18 @@ class KrakenExchangeClient(ExchangeClientBase):
         method to fabricate a create-order response for an order it
         discovered independently.
 
+        The unclassified raise carries ``venue_answered=True`` while the
+        two transport raises above do not, and that is a statement of
+        venue fact rather than a timing preference. A transport failure
+        means the response was LOST, so the venue may still be
+        materializing an order this very request created and its
+        listings need a moment. An unclassified error is a synchronous
+        refusal from a HEALTHY venue: nothing is in flight, and any
+        order standing under this client id has been resting since an
+        earlier delivery. The executor turns that fact into an
+        immediate first lookup so the common duplicate-``cl_ord_id``
+        collision resolves without holding its sequential command loop.
+
         Args:
             request: Original order request used for error identity.
             ccxt_symbol: CCXT trading pair.
@@ -1080,6 +1092,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     f"Kraken Spot create_order unclassified venue error "
                     f"(placement unproven, order may exist): {e}"
                 ),
+                venue_answered=True,
             ) from e
         return cast(dict[str, Any], order_data)
 

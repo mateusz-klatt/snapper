@@ -27,13 +27,20 @@ Correlation ids:
     label like ``f"test-{scenario}-{int(time.time())}"``: two concurrent
     invocations of the same scenario against the same venue within one
     second reuse the id, and a venue duplicate-id refusal arrives as a
-    plain ``ExchangeError`` that the submit path does not wrap as
-    ambiguous — it lands in the executor's generic handler and produces
-    a REJECTED plus a sweep-exempting ``order_rejected`` row for an
-    order that may be live and resting. That is the exact false-terminal
+    plain ``ExchangeError``. Kraken Spot's ccxt path now classifies that
+    unclassified shape as ambiguous (#100), so there it verifies against
+    venue truth instead of fabricating a rejection — but that is one
+    path on one venue. The Walutomat client carries no such
+    classification, and neither does Kraken's native submit fallback
+    (#103), where an unknown venue error does not raise at all: the SDK
+    returns the error payload as the result, the snapshot comes back
+    with an empty id, and the executor's falsy-id branch publishes a
+    REJECTED plus a sweep-exempting ``order_rejected`` row for an order
+    that may be live and resting. That is the exact false-terminal
     hazard this script exists downstream of, and it trades real money.
-    A uuid7 also fits Walutomat's 36-character ``submitId`` cap exactly,
-    so it must not be prefixed.
+    A unique id is the cheap barrier that keeps the question from being
+    asked at all. A uuid7 also fits Walutomat's 36-character
+    ``submitId`` cap exactly, so it must not be prefixed.
 """
 
 import asyncio

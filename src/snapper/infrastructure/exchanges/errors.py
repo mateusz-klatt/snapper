@@ -49,19 +49,44 @@ class AmbiguousOrderSubmitError(RuntimeError):
             way is what made a fabricated venue id look survivable.
         instrument: Native instrument symbol of the submit, carried for
             log and alert context.
+        venue_answered: Whether the venue returned a synchronous answer
+            that simply could not be classified, as opposed to no usable
+            answer arriving at all. This is a statement about the SHAPE
+            of the failure, not a timing policy: the executor owns the
+            timing and maps this flag to a verification schedule in
+            ``_verify_ambiguous_submit``. False (the default, and what
+            every transport failure raises) means the response was lost,
+            so the venue may still be materializing an order the request
+            created and an immediate lookup could read a listing that
+            has not caught up. True means a healthy venue replied and
+            refused in words this adapter could not decode: nothing is
+            in flight, and any order under this client id has been
+            resting since an earlier delivery, so the first lookup is
+            already meaningful. Adapters must not set True for a failure
+            whose response never arrived.
     """
 
-    def __init__(self, client_order_id: str, instrument: str, message: str) -> None:
+    def __init__(
+        self,
+        client_order_id: str,
+        instrument: str,
+        message: str,
+        venue_answered: bool = False,
+    ) -> None:
         """Initialize the ambiguous-submit error.
 
         Args:
             client_order_id: Client order id the submit was sent with.
             instrument: Native instrument symbol of the order.
             message: Human-readable description of the failure.
+            venue_answered: True when the venue replied synchronously
+                with an unclassifiable refusal; False when no usable
+                response came back.
         """
         super().__init__(message)
         self.client_order_id = client_order_id
         self.instrument = instrument
+        self.venue_answered = venue_answered
 
 
 class RestPoolDispatchError(RuntimeError):

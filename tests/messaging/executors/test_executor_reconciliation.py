@@ -623,7 +623,7 @@ class TestAmbiguousReconResolution:
         ex.pending_orders["cid-1"] = pending
         ex._verify_ambiguous_submit = AsyncMock(return_value=True)
         await ex._reconcile_with_exchange()
-        ex._verify_ambiguous_submit.assert_awaited_once_with(pending.request, pending)
+        ex._verify_ambiguous_submit.assert_awaited_once_with(pending.request, pending, None)
 
     @pytest.mark.asyncio
     async def test_plain_no_id_entry_is_still_skipped(self) -> None:
