@@ -275,6 +275,32 @@ class TestWsTokenRouteHappyPath:
         )
         assert verified.permission_scope_version == 2
 
+    def test_route_preserves_a_full_role_scope_as_none(self) -> None:
+        """A full-role access token mints a ticket carrying None, not `[]`.
+
+        Given: Access claims whose permissions are None — the full role grant,
+        When: A ws_token is minted through the route,
+        Then: The ticket carries None.
+
+        This is the MIRROR of the empty-scope test, and it needs saying because
+        a distinction has two directions and defending one is not defending it.
+        `permissions or []` here narrows a full-role session to zero scope. It
+        is the less alarming direction — it denies rather than grants — but it
+        would break every legacy and full-role session the moment a reader
+        starts consuming the context, and nothing else in the suite catches it.
+        """
+        claims = _claims().model_copy(update={"permissions": None})
+        client = _create_client(principal=_principal(), claims=claims)
+        response = client.post("/api/auth/ws_token")
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.permissions is None
+        assert verified.authorization_context_version == 1
+
 
 class TestWsTokenRouteAuthChain:
     """Auth-chain failure surfaces from ``require_authentication``."""

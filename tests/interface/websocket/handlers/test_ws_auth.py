@@ -3909,6 +3909,63 @@ def test_refresh_ws_ticket_preserves_an_empty_permission_scope(
     assert ticket.permissions is not None
 
 
+def test_refresh_ws_ticket_preserves_a_full_role_scope(
+    auth_app: AuthAppFixture,
+) -> None:
+    """A full-role refresh mints a ticket carrying None, not `[]`.
+
+    Given: A refresh whose scope is None — the full role grant,
+    When: The response's ws_token is decoded,
+    Then: Permissions are None.
+
+    This kills `rotation.permission_values or []`, which the empty-scope test
+    cannot see because its fixture is already `[]`. A distinction has two
+    directions and defending one is not defending it: `[] -> None` widens a
+    zero-scope session to everything, and `None -> []` narrows a full-role
+    session to nothing. Both are silent.
+
+    The ticket's wallet is asserted to be None here, and that is the CORRECT
+    answer rather than a lost value: the refresh path revalidates the carried
+    wallet against the read plane and drops it when the user can no longer read
+    it, and this fixture's user has no readable wallets. The same drop-to-None
+    resolver is what slice 3 will reuse at the WebSocket handshake.
+    """
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=None,
+        permission_scope_version=None,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_full_role_jti",
+        sid="session-full-role",
+        active_wallet_public_id="019e873c-d062-720f-85df-fd4d7fce5bdf",
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "full-role-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-full-role"),
+    )
+    assert ticket.permissions is None
+    assert ticket.active_wallet_public_id is None
+
+
 def test_get_current_user_profile_returns_user(
     auth_app: AuthAppFixture,
 ) -> None:
