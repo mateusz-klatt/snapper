@@ -201,20 +201,32 @@ class TestWsTokenRouteHappyPath:
         assert verified.permissions != _principal().permissions
         client.close()
 
-    def test_ticket_carries_the_wallet_selection(self) -> None:
+    @pytest.mark.parametrize(
+        "claim_wallet",
+        ["019e873c-d062-720f-85df-fd4d7fce5bdf", None],
+        ids=["selected", "none-selected"],
+    )
+    def test_ticket_carries_the_wallet_selection(self, claim_wallet: str | None) -> None:
         """The client-selected wallet round-trips into the ticket.
 
-        Given: Access claims carrying an active wallet,
+        Given: Access claims carrying an active wallet, or carrying none,
         When: A ws_token is minted,
-        Then: The ticket carries that wallet.
+        Then: The ticket carries that same value.
 
         This value has no other route into a rebuilt principal — the database
         deliberately does not store it — so if the ticket drops it, a
         reconnecting client silently loses its wallet selection.
+
+        **Parametrised over a set and an unset wallet on purpose.** With only
+        the set case, ``claims.active_wallet_public_id or <anything>`` returns
+        the wallet unchanged and the mutant passes; the ``none-selected`` case
+        is the only one that can tell "pass the selection through" apart from
+        "substitute a default". That distinction matters more here than on the
+        scope fields: an unset wallet means the client has deliberately chosen
+        no wallet, and a substituted default would hand the socket a wallet
+        scope its own session never selected.
         """
-        claims = _claims().model_copy(
-            update={"active_wallet_public_id": "019e873c-d062-720f-85df-fd4d7fce5bdf"}
-        )
+        claims = _claims().model_copy(update={"active_wallet_public_id": claim_wallet})
         client = _create_client(principal=_principal(), claims=claims)
         response = client.post("/api/auth/ws_token")
         assert response.status_code == 200
@@ -223,7 +235,7 @@ class TestWsTokenRouteHappyPath:
             expected_sub=_TEST_USERNAME,
             expected_sid_hash=compute_sid_hash(claims.sid),
         )
-        assert verified.active_wallet_public_id == "019e873c-d062-720f-85df-fd4d7fce5bdf"
+        assert verified.active_wallet_public_id == claim_wallet
         client.close()
 
     def test_route_preserves_an_empty_permission_scope(self) -> None:
@@ -251,20 +263,31 @@ class TestWsTokenRouteHappyPath:
         assert verified.permissions == []
         assert verified.permissions is not None
 
-    def test_route_passes_through_the_scope_version(self) -> None:
+    @pytest.mark.parametrize("claim_version", [2, None], ids=["stale", "unversioned"])
+    def test_route_passes_through_the_scope_version(self, claim_version: int | None) -> None:
         """The access token's scope version reaches the ticket unchanged.
 
-        Given: Access claims carrying an explicit scope version,
+        Given: Access claims carrying a scope version, whether stale or absent,
         When: A ws_token is minted,
-        Then: The ticket carries that same version.
+        Then: The ticket carries that same value.
 
         This path does not reproject permissions, so it must NOT stamp the
         current constant: doing so would reinterpret an older scope under
-        today's compatibility rules. The other route fixtures leave the version
-        unset, so without this assertion, replacing it with None or with the
-        current constant would pass unnoticed.
+        today's compatibility rules.
+
+        **Parametrised over a truthy and a falsy version on purpose**, and for
+        the same reason as the CAS test in the ws_auth suite. A single stale
+        version pins only half of it: ``claims.version or PERMISSION_SCOPE_VERSION``
+        returns 2 unchanged when the fixture is 2, so the mutant passes. Only
+        the ``unversioned`` case separates "pass the value through" from "fill
+        in today's constant", and filling it in would silently relabel a scope
+        that was never versioned at all as current.
+
+        This is the sibling mint site of the refresh route. Covering the axis
+        at one site and leaving the other on a single truthy value is how this
+        mutation survived four review rounds.
         """
-        claims = _claims().model_copy(update={"permission_scope_version": 2})
+        claims = _claims().model_copy(update={"permission_scope_version": claim_version})
         client = _create_client(principal=_principal(), claims=claims)
         response = client.post("/api/auth/ws_token")
         assert response.status_code == 200
@@ -273,7 +296,7 @@ class TestWsTokenRouteHappyPath:
             expected_sub=_TEST_USERNAME,
             expected_sid_hash=compute_sid_hash(claims.sid),
         )
-        assert verified.permission_scope_version == 2
+        assert verified.permission_scope_version == claim_version
 
     def test_route_preserves_a_full_role_scope_as_none(self) -> None:
         """A full-role access token mints a ticket carrying None, not `[]`.

@@ -4314,10 +4314,10 @@ def test_refresh_token_concurrent_replay_reserves_winner_pair(
 
 
 @pytest.mark.parametrize(
-    ("winner_permissions", "winner_version"),
+    ("winner_permissions", "winner_version", "winner_wallet"),
     [
-        ([Permission.READ_MARKET_DATA.value], 1),
-        ([], None),
+        ([Permission.READ_MARKET_DATA.value], 1, "winner-wallet-scoped"),
+        ([], None, None),
     ],
     ids=["narrowed-and-stale", "zero-scope-and-unversioned"],
 )
@@ -4326,6 +4326,7 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
     monkeypatch: pytest.MonkeyPatch,
     winner_permissions: list[str],
     winner_version: int | None,
+    winner_wallet: str | None,
 ) -> None:
     """A CAS loser signs a ws_token from the WINNER's scope and version.
 
@@ -4349,10 +4350,18 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
 
     - ``narrowed-and-stale``: a non-empty scope at an old version, which pins
       "read the rotation" against "stamp today's constant".
-    - ``zero-scope-and-unversioned``: a deliberate ``[]`` with no version,
-      which pins the ``or``-fallback mutations. The loser here holds
-      IMPERSONATE_OPERATOR, so falling back to it would widen the winner's
-      zero grant to the broadest permission in the system.
+    - ``zero-scope-and-unversioned``: a deliberate ``[]`` with no version and
+      NO wallet, which pins the ``or``-fallback mutations. The loser here holds
+      IMPERSONATE_OPERATOR, so falling back to it would widen the winner's zero
+      grant to the broadest permission in the system.
+
+    The wallet rides the same axis for a different reason. The CAS branch
+    OVERWRITES the loser's wallet with the winner's, and the existing
+    replay test only proves that when the winner's wallet is set. Give the
+    loser a readable wallet of its own and let the winner carry none, and the
+    overwrite becomes load-bearing: drop it and the socket silently keeps a
+    wallet selection the winning session had abandoned. Nothing else in the
+    suite pins that direction.
     """
 
     class _ScopedGraceTokenManager(StubTokenManager):
@@ -4388,6 +4397,7 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
                     iat=123456,
                     jti="access-winner-scoped",
                     sid="session-scoped-race",
+                    active_wallet_public_id=winner_wallet,
                 )
             return super().verify_token(token)
 
@@ -4403,8 +4413,20 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
         iat=123456,
         jti="refresh_scoped_race-jti",
         sid="session-scoped-race",
+        active_wallet_public_id="loser-wallet-scoped",
     )
     monkeypatch.setattr(routes, "get_token_manager", lambda: grace_manager)
+
+    async def _readable(principal: AuthPrincipal, repo: object) -> set[str]:
+        """Keep the loser's own wallet readable so the hint cannot drop it.
+
+        Without this the hint revalidates the loser's wallet away before the
+        rotation runs, both sides of the overwrite become None, and the CAS
+        branch's wallet assignment stops being observable at all.
+        """
+        return {"loser-wallet-scoped", "winner-wallet-scoped"}
+
+    monkeypatch.setattr(routes, "_readable_wallet_ids", _readable)
     user_service.user_by_id = UserProfile(
         session_id="test-sid",
         sequence_id=1,
@@ -4426,6 +4448,7 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
     )
     assert ticket.permissions == winner_permissions
     assert ticket.permission_scope_version == winner_version
+    assert ticket.active_wallet_public_id == winner_wallet
 
 
 def test_refresh_grace_replay_with_unverifiable_winner_keeps_loser_principal(
