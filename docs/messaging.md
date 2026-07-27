@@ -955,7 +955,12 @@ Key properties:
     step was measured before deploy against production quotes: EUR-PLN −8.0
     bps and USD-PLN −4.0 bps, ≈ −0.014 USD on 1520.29 equity, i.e. a phantom
     drawdown of ≈ 1e-5 against the 0.01 threshold that would have forced an
-    explicit peak decision, so no risk peak was re-seeded. The candle READ path single-source cutover
+    explicit peak decision, so no risk peak was re-seeded. That measurement
+    covered ONLY the majors the wallet basket touches: the exotic pairs' own
+    `forex_now`-to-mid step was NOT measured, and on a book as wide as
+    TRY-PLN (1197 bps) it may be percent-scale rather than bps-scale. The
+    `phantom_dd` ≈ 1e-5 conclusion stands for the basket; it says nothing
+    about the exotic series. The candle READ path single-source cutover
     is gated by the `candle_single_source` setting (default OFF): while OFF, the
     `/api/candles` smart route still derives `5m/15m/30m` on-read from the 1m
     cache; when ON, those frames serve single-source from the persisted plane
@@ -1059,6 +1064,87 @@ rest of the batch.  The repository `upsert_candles()` contract is unchanged.
 Per-stream flush error counters (`_flush_errors`) drive the heartbeat
 `status` field: `"warning"` if any stream has errors, `"healthy"` otherwise.
 Counters reset to zero on the next successful flush of that same stream.
+
+A feed heartbeat also carries whatever venue-specific health its publisher
+contributes through `_venue_feed_health()` (base: nothing). The venue's keys
+are nested under `meta.venue` — never merged flat — so no venue contribution
+can shadow the standard `symbols`, `symbol_count` or `running` keys; the key
+is omitted entirely when a publisher contributes nothing. Its degraded flag
+escalates `status` to `"warning"` alongside the flush-error condition.
+
+Walutomat uses it for the fail-closed mark refusals:
+
+- `meta.venue.refused_marks` — symbols whose top-of-book quote is currently
+    unusable, or which have vanished from the venue payload altogether (an
+    absent pair produces the same frozen mark and the same candle hole as an
+    unusable book, so it is latched the same way).
+- `meta.venue.refused_mark_counts` — cumulative refused-poll count per symbol,
+    never reset on recovery.
+- `meta.venue.refused_mark_seconds` — how long each currently-refused symbol
+    has been *continuously* refused.
+- `meta.venue.refused_mark_fractions` — the refused share of each symbol's
+    polls over a one-hour rolling window, published only for symbols with at
+    least 60 polls in the window and at least one refusal among them.
+
+The feed degrades to `"warning"` when either escalation rule fires: a symbol
+refused continuously for `WALUTOMAT_REFUSAL_WARNING_SECONDS` (600 s = 60
+consecutive refused polls at the default 10 s cadence), or a symbol whose
+windowed refusal fraction exceeds `WALUTOMAT_REFUSAL_FRACTION_CEILING` (0.5).
+The second rule exists because recovery pops the streak clock, so a book that
+is unusable on almost every poll but flickers usable once in a while would
+never satisfy the first. Neither bound is measured — no distribution of
+refusal durations exists yet — so both are conservative operational choices to
+be revisited against real `refused_mark_seconds` history. Note that the bound
+is about *refusal* duration, not about tick cadence: the refusal latch clears
+on the first usable poll and per-symbol lag is refreshed before tick
+deduplication, so a healthy pair with an unchanged book is refusal-free and
+lag-fresh at every poll no matter how long it goes without emitting a tick.
+
+Transition logs (`mark refused` / `mark recovered`) are rate-limited to one
+line per kind per symbol per 5 minutes, with the suppressed count carried on
+the next line that gets through. Without that bound a flapping pair emits
+thousands of lines a day on its own.
+
+All of this exists because fail-closed is fail-STALE on the ticker plane: it
+applies no age gate, so a chronically refused pair keeps serving its frozen
+last-good mark.
+
+**Restart semantics.** The refusal counts, the continuous-refusal clock, the
+rolling poll window and the notifier's own "3 consecutive WARNING heartbeats
+in 10 minutes" window are all in-memory, and every feed publisher runs under
+`restart_policy=ALWAYS`. Two consequences follow. A publisher restart cadence
+shorter than the 600 s escalation bound means a chronic refusal is never
+visible long enough to escalate — the clock restarts from zero on every
+respawn. And during incident review, post-restart counts describe only the
+current process lifetime, so they understate a days-long condition. The
+durable signal is the candle plane: a refused pair writes no bar, so the holes
+persist in the database across every restart and are the record to reconcile
+against when the in-memory counters disagree with the operator's memory.
+
+`lag_ms` is the worst lag across the union of the concrete subscribed symbols
+and every symbol that has been seeded or has ever delivered. Every subscribed
+symbol is seeded into `_last_data_timestamps` at subscribe time, so a symbol
+that has never delivered reports the time since subscription; a symbol that
+delivered and then went dark reports its real growing lag. Without both halves
+such a symbol fell back to the FEED-level dark interval, which is near zero
+whenever the venue's other symbols are healthy — a permanently dark pair read
+as fresh forever after every restart.
+
+The subscribe-all sentinel `"*"` is never a key in per-symbol state: it is a
+request, never a delivery key. A publisher that forwards it verbatim instead
+resolves it to concrete symbols at seed time through
+`_wildcard_symbol_universe()` (Walutomat: the connected client's pair list),
+so never-delivered pairs are seeded too. The base implementation resolves
+nothing, which keeps Kraken spot's ~1900-symbol wildcard on the feed-level
+fallback — expanding it would let one dark low-volume pair pin the whole feed
+to a degraded lag reading.
+
+Where a venue caps symbols per connection, the cap is applied to the
+publisher's own symbol list, so the heartbeat's `symbols` / `symbol_count` and
+the lag loop describe the same set. The truncated tail is never subscribed and
+never delivers; it is reported at start as a `WARNING` advising multiple
+instances rather than carried in the heartbeat as a permanently stale
+subscription that does not exist.
 
 ## Order Executor
 

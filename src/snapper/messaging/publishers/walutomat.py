@@ -10,6 +10,8 @@ from loguru import logger
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonArray
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import PriceBasis
@@ -20,6 +22,7 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import VenueFeedHealth
 
 
 @register_process(
@@ -95,6 +98,78 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
             the same basis, which is correct.
         """
         return "quote_mid"
+
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Expose the client's mark-refusal state on the heartbeat.
+
+        Fail-closed is fail-STALE on the ticker plane: it applies no age gate,
+        so a chronically refused pair keeps serving its frozen last-good mark
+        to position valuation, the caps notional and the paper fill path while
+        the feed reads healthy. That is the frozen-mark defect the mid
+        convention exists to remove, resurrected one pair at a time, and a
+        transition-only log line does not make it visible. The counts,
+        durations and windowed refusal fractions therefore ride the heartbeat
+        under ``meta.venue``, and a symbol refused continuously for
+        :data:`snapper.infrastructure.exchanges.implementations.walutomat.WALUTOMAT_REFUSAL_WARNING_SECONDS`
+        — or refused for more than
+        :data:`snapper.infrastructure.exchanges.implementations.walutomat.WALUTOMAT_REFUSAL_FRACTION_CEILING`
+        of its windowed polls — degrades the feed to WARNING.
+
+        Returns:
+            The refused symbols, their cumulative refusal counts, their
+            continuous refusal durations and their windowed refusal fractions,
+            plus the degraded flag; empty and healthy before the exchange
+            client exists (publisher not started).
+        """
+        client = self._exchange_client
+        if client is None:
+            return VenueFeedHealth(meta={}, degraded=False)
+        report = client.mark_refusal_report()
+        symbols: JsonArray = list(report.symbols)
+        counts: JsonObject = dict(report.counts)
+        seconds: JsonObject = dict(report.seconds)
+        fractions: JsonObject = dict(report.fractions)
+        refused: JsonObject = {
+            "refused_marks": symbols,
+            "refused_mark_counts": counts,
+            "refused_mark_seconds": seconds,
+            "refused_mark_fractions": fractions,
+        }
+        return VenueFeedHealth(meta=refused, degraded=report.escalated)
+
+    def _wildcard_symbol_universe(self) -> list[str]:
+        """Resolve ``["*"]`` into the venue's concrete pair list for seeding.
+
+        Walutomat's publisher forwards the sentinel verbatim and the client
+        expands it privately inside ``_subscribe_ticks_impl``, so nothing in
+        the publisher ever sees the 44 native pairs — which is why the
+        per-symbol lag baseline had nothing to seed and the per-symbol lag
+        path was dead on the configuration that actually ships (``instruments``
+        defaults to ``["*"]`` for every exchange). Resolving here restores it
+        without touching subscription semantics: ``start`` creates and connects
+        the exchange client before it seeds, and ``connect`` populates the pair
+        map, so the universe is known by the time this runs.
+
+        Resolution is fail-soft. Seeding is observability, so a venue that
+        cannot name its pairs must degrade the lag signal, never the publisher
+        start path: ``get_supported_pairs`` raises when no payload has been
+        fetched and its symbol translation raises on a pair the mapper does not
+        know, and either way the sentinel simply contributes nothing.
+
+        Returns:
+            Native symbols currently served by the venue, or an empty list when
+            the client is absent or cannot name them.
+        """
+        client = self._exchange_client
+        if client is None:
+            return []
+        try:
+            return client.get_supported_pairs()
+        except (RuntimeError, ValueError) as exc:
+            logger.warning(
+                "walutomat publisher: cannot resolve the wildcard for lag seeding ({})", exc
+            )
+            return []
 
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.

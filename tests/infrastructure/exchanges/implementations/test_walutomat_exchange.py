@@ -6641,7 +6641,7 @@ def test_walutomat_quote_relative_spread_ceiling_is_a_boundary_not_a_major_filte
         (None, 4.3157),
         (4.3107, None),
         (4.3157, 4.3107),
-        (0.9, 1.1),
+        (0.01, 4.31),
         (4.3107, 4.3157),
         (4.3132, 4.3132),
     ],
@@ -6751,3 +6751,319 @@ async def test_candle_from_moving_mids_is_not_flat_and_reports_no_trades() -> No
         4.3138,
     }
     assert candle.trades == 0
+
+
+def test_measured_try_pln_book_is_accepted_by_the_recalibrated_ceiling() -> None:
+    """Given: The TRY-PLN book measured in production — bid 0.0754 / ask 0.0850.
+
+    When: walutomat_quote inspects it,
+    Then: It is ACCEPTED and marks on 0.0802. Its relative spread is 1197 bps,
+        the widest of the venue's 44 pairs and 60x the retired 0.02 ceiling
+        that silenced this pair on the day the mid convention shipped. Wide
+        spreads are this venue's normal condition, not a pathology.
+    """
+    quote = walutomat_quote(_best_offer(bid=0.0754, ask=0.0850, forex=0.0799))
+    assert quote is not None
+    assert quote.mark == pytest.approx(0.0802)
+    relative_spread = (quote.ask - quote.bid) / quote.mark
+    assert relative_spread == pytest.approx(0.1197, abs=1e-4)
+    assert relative_spread > 0.02
+
+
+def test_dust_order_book_is_refused_by_the_recalibrated_ceiling() -> None:
+    """Given: A peer-to-peer book whose only bid is dust — 0.01 against ask 4.31.
+
+    When: walutomat_quote inspects it,
+    Then: It is REFUSED. The book is positive, finite and uncrossed, so it
+        passes all three structural refusals, and its midpoint of 2.16 is ~50%
+        off any real price. Every consumer of this mark is monotone — trailing
+        stops ratchet, the equity peaks are max() — so such a mid would ratchet
+        a phantom breach into a real forced close or a permanent phantom
+        drawdown. A refusal hole costs one stale minute; a wrong value in a
+        ratchet costs state that never recovers by market action.
+    """
+    assert walutomat_quote(_best_offer(bid=0.01, ask=4.31)) is None
+
+
+def test_refusal_counter_counts_every_poll_and_survives_recovery() -> None:
+    """Given: Three refused polls, one recovery and one further refusal.
+
+    When: The refusal report is read after each phase,
+    Then: The counter counts POLLS (not transitions), the latch and the clock
+        clear on recovery, and the cumulative count is NOT reset — a pair that
+        flaps between usable and refused books keeps its evidence.
+    """
+    client = WalutomatExchangeClient()
+    for _ in range(3):
+        client._note_refused_mark("TRY-PLN", _best_offer(bid=0.01, ask=4.31))
+    assert client.mark_refusal_report().counts == {"TRY-PLN": 3}
+    assert client.mark_refusal_report().symbols == ("TRY-PLN",)
+    client._note_recovered_mark("TRY-PLN")
+    recovered = client.mark_refusal_report()
+    assert recovered.symbols == ()
+    assert recovered.seconds == {}
+    assert recovered.counts == {"TRY-PLN": 3}
+    assert recovered.escalated is False
+    client._note_refused_mark("TRY-PLN", _best_offer(bid=0.01, ask=4.31))
+    assert client.mark_refusal_report().counts == {"TRY-PLN": 4}
+
+
+def test_refusal_report_escalates_only_after_the_warning_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given: One symbol refused continuously across a moving monotonic clock.
+
+    When: The refusal report is read just below and just above the warning
+        duration,
+    Then: Only the second read escalates. The bound sits well above the venue's
+        longest observed healthy silence, so a transiently wide book never
+        degrades the feed while a chronic refusal always does.
+    """
+    clock = 1000.0
+    monkeypatch.setattr(
+        walutomat_mod, "time", SimpleNamespace(monotonic=lambda: clock, time=lambda: clock)
+    )
+    client = WalutomatExchangeClient()
+    client._note_refused_mark("TRY-PLN", _best_offer(bid=0.01, ask=4.31))
+    clock = 1000.0 + walutomat_mod.WALUTOMAT_REFUSAL_WARNING_SECONDS - 1.0
+    below = client.mark_refusal_report()
+    assert below.escalated is False
+    assert below.seconds == {"TRY-PLN": int(walutomat_mod.WALUTOMAT_REFUSAL_WARNING_SECONDS) - 1}
+    clock = 1000.0 + walutomat_mod.WALUTOMAT_REFUSAL_WARNING_SECONDS
+    above = client.mark_refusal_report()
+    assert above.escalated is True
+    assert above.seconds == {"TRY-PLN": int(walutomat_mod.WALUTOMAT_REFUSAL_WARNING_SECONDS)}
+
+
+@pytest.mark.asyncio()
+async def test_refusal_report_is_empty_on_a_healthy_poll() -> None:
+    """Given: A client that has only ever seen a usable book.
+
+    When: The refusal report is read,
+    Then: It is empty and not escalated, so the heartbeat carries the keys
+        with nothing in them rather than omitting them until something breaks.
+    """
+    client = WalutomatExchangeClient()
+    await client._process_polling_data(
+        {"EUR_PLN": _market_pair(_best_offer())}, {"EUR_PLN": "EUR-PLN"}
+    )
+    report = client.mark_refusal_report()
+    assert report.symbols == ()
+    assert report.counts == {}
+    assert report.seconds == {}
+    assert report.fractions == {}
+    assert report.escalated is False
+
+
+def _freeze_walutomat_clock(monkeypatch: pytest.MonkeyPatch, clock: list[float]) -> None:
+    """Point the walutomat module's ``time`` at a caller-advanced clock.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        clock: Single-element list holding the current monotonic instant, so a
+            test can advance time by mutating ``clock[0]``.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr(
+        walutomat_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]),
+    )
+
+
+@pytest.mark.asyncio()
+async def test_a_pair_absent_from_the_payload_is_latched_as_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Given: A subscribed pair that has vanished from the venue payload.
+
+    When: The polling path processes a sweep that no longer carries it,
+    Then: It is latched, counted and clocked exactly like an unusable book,
+        and the transition is a WARNING naming the absence. Previously this
+        produced a DEBUG line and nothing else — no latch, no count, no
+        clock — which is the TRY-PLN blackout shape with zero observability,
+        even though the frozen mark and the candle hole are identical.
+    """
+    client = WalutomatExchangeClient()
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await client._process_polling_data({}, {"TRY_PLN": "TRY-PLN"})
+    finally:
+        logger.remove(sink_id)
+    report = client.mark_refusal_report()
+    assert report.symbols == ("TRY-PLN",)
+    assert report.counts == {"TRY-PLN": 1}
+    assert list(report.seconds) == ["TRY-PLN"]
+    absences = [r for r in caplog.records if "absent from the venue payload" in r.message]
+    assert len(absences) == 1
+    assert absences[0].levelname == "WARNING"
+
+
+@pytest.mark.asyncio()
+async def test_a_persistently_absent_pair_logs_once_and_keeps_counting(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Given: A pair absent twice, present once, then absent inside the cooldown.
+
+    When: The polling path processes the four sweeps,
+    Then: Only the first absence is logged — the second is latched and silent,
+        and the re-entry after recovery is rate-limited — while every absent
+        sweep still bumps the cumulative count. A pair that vanishes for hours
+        must not turn the log into one line per poll per pair.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    present = {"EUR_PLN": _market_pair(_best_offer())}
+    symbol_map = {"EUR_PLN": "EUR-PLN"}
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await client._process_polling_data({}, symbol_map)
+            await client._process_polling_data({}, symbol_map)
+            await client._process_polling_data(present, symbol_map)
+            await client._process_polling_data({}, symbol_map)
+    finally:
+        logger.remove(sink_id)
+    absences = [r for r in caplog.records if "absent from the venue payload" in r.message]
+    assert len(absences) == 1
+    report = client.mark_refusal_report()
+    assert report.counts == {"EUR-PLN": 3}
+    assert report.symbols == ("EUR-PLN",)
+
+
+def test_a_flapping_book_escalates_on_the_windowed_refusal_fraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given: A book refused on nine polls out of every ten, for 100 polls.
+
+    When: The refusal report is read,
+    Then: It escalates on the windowed FRACTION even though the symbol is not
+        currently refused and its longest unbroken streak was 90 s. Recovery
+        pops the streak clock, so the streak rule alone can never see a book
+        that is unusable almost always but flickers usable often enough — the
+        dust-order shape the ceiling docstring describes is exactly such a
+        generator, and its transition logs would otherwise be the only signal.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    offer = _best_offer(bid=0.01, ask=4.31)
+    for _ in range(10):
+        for _ in range(9):
+            client._note_refused_mark("TRY-PLN", offer)
+            clock[0] += 10.0
+        client._note_recovered_mark("TRY-PLN")
+        clock[0] += 10.0
+    report = client.mark_refusal_report()
+    assert report.symbols == ()
+    assert report.seconds == {}
+    assert report.counts == {"TRY-PLN": 90}
+    assert report.fractions == {"TRY-PLN": pytest.approx(0.9)}
+    assert report.escalated is True
+
+
+def test_the_refusal_fraction_needs_a_minimum_sample_before_it_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given: Ten refused polls, below the window's minimum sample count.
+
+    When: The refusal report is read,
+    Then: No fraction is published and nothing escalates. Without the floor the
+        very first refused poll would read as a 100 percent refusal fraction
+        and page on a single transiently wide book.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    for _ in range(10):
+        client._note_refused_mark("TRY-PLN", _best_offer(bid=0.01, ask=4.31))
+        clock[0] += 10.0
+    report = client.mark_refusal_report()
+    assert report.counts == {"TRY-PLN": 10}
+    assert report.fractions == {}
+    assert report.escalated is False
+
+
+def test_a_clean_window_publishes_no_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given: A symbol polled well past the minimum sample with no refusals.
+
+    When: The refusal report is read,
+    Then: It carries no fraction entry at all. Publishing a zero for every
+        healthy pair would bury the one pair that matters under 44 zeroes.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    for _ in range(walutomat_mod.WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS):
+        client._note_recovered_mark("EUR-PLN")
+        clock[0] += 10.0
+    report = client.mark_refusal_report()
+    assert report.fractions == {}
+    assert report.escalated is False
+
+
+def test_poll_outcomes_older_than_the_window_stop_counting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given: A chronic refusal followed by a full window of usable books.
+
+    When: The refusal report is read after the refusals have aged out,
+    Then: The fraction has decayed to zero and the entry disappears, so a
+        resolved incident stops degrading the feed instead of pinning it to
+        WARNING forever. The cumulative counter still remembers it.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    for _ in range(walutomat_mod.WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS):
+        client._note_refused_mark("TRY-PLN", _best_offer(bid=0.01, ask=4.31))
+        clock[0] += 10.0
+    assert client.mark_refusal_report().escalated is True
+    clock[0] += walutomat_mod.WALUTOMAT_REFUSAL_WINDOW_SECONDS
+    for _ in range(walutomat_mod.WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS):
+        client._note_recovered_mark("TRY-PLN")
+        clock[0] += 10.0
+    report = client.mark_refusal_report()
+    assert report.fractions == {}
+    assert report.escalated is False
+    assert report.counts == {"TRY-PLN": walutomat_mod.WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS}
+
+
+def test_transition_logs_are_rate_limited_per_symbol_and_report_suppression(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Given: A book flapping three times fast, then once past the cooldown.
+
+    When: The transitions are logged,
+    Then: Only the first refusal, the first recovery and the post-cooldown
+        refusal reach the log, and the last one names the two suppressed
+        transitions. Transition-only logging keeps a 44-pair sweep quiet but
+        does nothing to bound a flapping pair, which at a 10 s cadence emits
+        thousands of lines a day on its own.
+    """
+    clock = [1000.0]
+    _freeze_walutomat_clock(monkeypatch, clock)
+    client = WalutomatExchangeClient()
+    offer = _best_offer(bid=0.01, ask=4.31)
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            for _ in range(3):
+                client._note_refused_mark("TRY-PLN", offer)
+                client._note_recovered_mark("TRY-PLN")
+                clock[0] += 10.0
+            clock[0] += walutomat_mod.WALUTOMAT_TRANSITION_LOG_COOLDOWN_SECONDS
+            client._note_refused_mark("TRY-PLN", offer)
+    finally:
+        logger.remove(sink_id)
+    refusals = [r for r in caplog.records if "mark refused" in r.message]
+    recoveries = [r for r in caplog.records if "mark recovered" in r.message]
+    assert len(refusals) == 2
+    assert len(recoveries) == 1
+    assert "suppressed" not in refusals[0].message
+    assert "[2 further transition(s) suppressed]" in refusals[1].message
+    assert client.mark_refusal_report().counts == {"TRY-PLN": 4}

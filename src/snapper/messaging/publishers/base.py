@@ -41,6 +41,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AllExchange
 from snapper.core.types import FrameOrigin
 from snapper.core.types import HealthStatusEnum
@@ -304,6 +305,18 @@ def _is_disconnect_error(exc: BaseException) -> bool:
 _DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles")
 """Data types checked by the publisher-start safety rail."""
 
+_WILDCARD_SYMBOL: Final = "*"
+"""Subscribe-all sentinel accepted in a publisher's symbol list.
+
+It is a REQUEST, not an identity: data always arrives under concrete native
+symbols, so the sentinel never appears as a key in any per-symbol state."""
+
+_VENUE_META_KEY: Final = "venue"
+"""Heartbeat ``meta`` key under which venue-specific health is nested.
+
+One sub-object rather than a flat merge, so no venue contribution can shadow
+``symbols``, ``symbol_count`` or ``running`` — see :class:`VenueFeedHealth`."""
+
 _WriterQueue = (
     asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
 )
@@ -380,6 +393,39 @@ class _EnqueuedCandleWrite:
 
 type TickPayloadValue = float | bool | None
 """Union of every value type in the tick payload deduplication tuple."""
+
+
+@dataclass(frozen=True)
+class VenueFeedHealth:
+    """Venue-specific health facts a publisher folds into its heartbeat.
+
+    The heartbeat is built here, in the base publisher, but venue-specific
+    health lives on the exchange CLIENT (which owns the venue protocol and its
+    refusals). This is the seam between the two: a publisher that has such
+    state overrides :meth:`MarketDataPublisherService._venue_feed_health`,
+    reads it off its own client and returns it in this shape, exactly as
+    ``_candle_price_basis_for`` and ``_market_schedule_state`` already let a
+    subclass contribute a venue fact to a base-class decision. The base
+    implementation contributes nothing, so no other publisher changes.
+
+    Attributes:
+        meta: Venue keys published under the heartbeat's ``meta.venue``
+            sub-object. Nesting rather than merging is what ENFORCES the
+            separation: a documented "do not reuse ``symbols``,
+            ``symbol_count`` or ``running``" rule is only as good as the next
+            venue author's memory, and a venue key silently overwriting
+            ``symbol_count`` would corrupt the one surface an operator reads
+            during an incident. Under one sub-object the collision is
+            structurally impossible, and the key is omitted entirely when a
+            venue contributes nothing, so every other publisher's heartbeat is
+            byte-identical to before this hook existed.
+        degraded: Whether the venue considers itself degraded. True escalates
+            the heartbeat ``status`` to WARNING, alongside the existing
+            write-buffer flush-error escalation.
+    """
+
+    meta: JsonObject
+    degraded: bool
 
 
 def _enqueue_or_drop_oldest_tick_write(
@@ -1089,7 +1135,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._feed_health_loop_task = asyncio.create_task(self._feed_health_flush_loop())
         tasks.append(self._feed_health_loop_task)
         self._start_egress_snapshot_publisher(process_name)
-        symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
+        symbols_to_subscribe = self._resolve_subscription_symbols(max_symbols)
         candle_consumer_timeframes = await self._configure_candle_consumers(
             symbols_to_subscribe, tasks
         )
@@ -1176,6 +1222,107 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.info(f"{exchange_name}_feed_publisher: Stopped")
         finally:
             self._candle_shutdown_repair_drain_active = False
+
+    def _resolve_subscription_symbols(self, max_symbols: int) -> list[str]:
+        """Apply the venue connection limit and start per-symbol lag tracking.
+
+        The limit is applied to ``self.symbols`` ITSELF, not to a private copy.
+        The tail beyond a venue's per-connection limit is never subscribed and
+        can therefore never deliver, so reporting it in the heartbeat's
+        ``symbols``/``symbol_count`` claimed a subscription that does not
+        exist, and seeding it would have manufactured permanent, unfixable lag
+        for a state that is a configuration decision rather than a fault. The
+        truncation is already logged as a WARNING at start (with the advice to
+        run multiple instances), which is the honest signal for it; after this
+        the heartbeat describes only what is actually subscribed, and every
+        symbol it names is one whose lag means something.
+
+        Args:
+            max_symbols: Venue limit on symbols per connection; 0 = unlimited.
+
+        Returns:
+            The symbols this publisher will actually subscribe, which is
+            ``self.symbols`` itself.
+        """
+        if 0 < max_symbols < len(self.symbols):
+            self.symbols = self.symbols[:max_symbols]
+        self._seed_symbol_lag_baseline(self.symbols)
+        return self.symbols
+
+    def _seed_symbol_lag_baseline(self, symbols: list[str]) -> None:
+        """Seed ``_last_data_timestamps`` at subscribe time for each symbol.
+
+        Without this seed a symbol that has NEVER delivered has no entry, and
+        :meth:`_compute_max_lag_ms` falls back to the FEED-level dark interval
+        for it - which is near zero on a busy feed. A permanently dark symbol
+        on a venue whose other symbols are healthy would therefore report
+        healthy lag forever after any process restart, which is precisely the
+        state a restart produces. Seeding at subscribe time makes the reported
+        lag the time since subscription until real data arrives, so a
+        never-delivering symbol surfaces as real, growing lag.
+
+        The wildcard sentinel is never seeded under its own name: ``"*"`` is a
+        subscribe-all request, never a delivery key (deliveries arrive under
+        concrete native symbols), so an entry keyed ``"*"`` would manufacture
+        unbounded lag on a perfectly healthy subscribe-all feed. It is instead
+        expanded through :meth:`_wildcard_symbol_universe`, so on a venue that
+        can name its universe at this point the never-delivered pairs are
+        seeded too. ``setdefault`` keeps an already-observed timestamp, so a
+        re-seed can never rewind a symbol's real freshness.
+
+        Args:
+            symbols: The symbols selected for this publisher's subscription.
+
+        Returns:
+            None.
+        """
+        seeded_at_ms = datetime.now(UTC).timestamp() * 1000
+        for symbol in self._expand_seed_symbols(symbols):
+            self._last_data_timestamps.setdefault(symbol, seeded_at_ms)
+
+    def _expand_seed_symbols(self, symbols: list[str]) -> list[str]:
+        """Resolve a subscription list into the concrete symbols to seed.
+
+        Args:
+            symbols: The symbols selected for this publisher's subscription,
+                possibly containing the subscribe-all sentinel.
+
+        Returns:
+            Concrete symbols only; the sentinel is replaced by the venue's
+            universe and contributes nothing when that universe is unknown.
+        """
+        resolved: list[str] = []
+        for symbol in symbols:
+            if symbol != _WILDCARD_SYMBOL:
+                resolved.append(symbol)
+                continue
+            resolved.extend(self._wildcard_symbol_universe())
+        return resolved
+
+    def _wildcard_symbol_universe(self) -> list[str]:
+        """Return the concrete symbols a wildcard subscription covers.
+
+        A venue whose publisher forwards ``"*"`` verbatim (Kraken spot,
+        Walutomat) never names its universe in ``self.symbols``, so nothing
+        downstream can tell a pair that has gone dark from a pair that was
+        never expected. This hook is the seam that lets a venue name it at
+        SEED time - after :meth:`start` has created and connected the exchange
+        client, which is when a venue like Walutomat first knows its pair
+        list - without changing what is actually subscribed. Publishers that
+        expand the wildcard inside ``_validate_symbols`` (Kraken Futures,
+        Kraken Equities) already have concrete symbols and need nothing here.
+
+        The base returns nothing, which reproduces the previous behaviour
+        exactly: the sentinel is skipped and lag falls back to the feed-level
+        figure. That is deliberate for Kraken spot, whose ~1900-symbol
+        universe would turn one dark low-volume pair into a permanently
+        degraded feed reading.
+
+        Returns:
+            Concrete native symbols behind the sentinel; empty when this
+            publisher cannot resolve it.
+        """
+        return []
 
     async def _start_extra_background_tasks(
         self, symbols_to_subscribe: list[str]
@@ -3899,13 +4046,37 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return (False, None)
 
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Return venue-specific heartbeat facts contributed by this publisher.
+
+        The base publisher has no venue-specific health: its heartbeat carries
+        the standard symbol/liveness keys and escalates only on write-buffer
+        flush errors. A publisher whose exchange client refuses data for
+        venue-specific reasons (Walutomat's fail-closed mark refusals)
+        overrides this to expose that state, so a refusal is legible on the
+        status surface instead of only in a log line that has scrolled away.
+
+        Returns:
+            The venue's extra ``meta`` keys and its degraded flag; empty and
+            healthy when the publisher contributes nothing.
+        """
+        return VenueFeedHealth(meta={}, degraded=False)
+
     async def _heartbeat_tick(self, component_name: str) -> None:
         """Compute and publish one heartbeat with honest status.
 
         Runs the full per-tick sequence: bump the sequence counter,
         compute the data-lag figure, run the dark-feed liveness guard,
-        then build and publish the heartbeat message. Status computation
-        must never be skipped or reordered (#145 P2-1 honest heartbeats).
+        collect the venue's own health contribution, then build and publish
+        the heartbeat message. Status computation must never be skipped or
+        reordered (#145 P2-1 honest heartbeats).
+
+        ``status`` is WARNING when the write buffer has flush errors OR the
+        venue reports itself degraded (:meth:`_venue_feed_health`), and the
+        venue's keys ride under ``meta.venue`` so a venue-specific fault - a
+        chronically refused symbol, say - reaches the operator through the
+        heartbeat rather than through a log line alone, without any venue
+        being able to overwrite the standard keys.
 
         Args:
             component_name: Heartbeat component identity for topic and
@@ -3918,9 +4089,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.heartbeat_seq += 1
         max_lag_ms = self._compute_max_lag_ms()
         self._check_feed_liveness()
+        venue_health = self._venue_feed_health()
         now = datetime.now(UTC)
         market_closed, next_open = self._market_schedule_state(now)
         hb_topic = heartbeat_topic_from_component(component_name)
+        hb_meta: JsonObject = {
+            "symbols": list(self.symbols),
+            "symbol_count": len(self.symbols),
+            "running": self.running,
+        }
+        if venue_health.meta:
+            hb_meta[_VENUE_META_KEY] = dict(venue_health.meta)
         hb_msg = HeartbeatData(
             public_id=str(uuid7()),
             timestamp=now,
@@ -3930,42 +4109,86 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             sequence=self.heartbeat_seq,
             status=(
                 HealthStatusEnum.WARNING
-                if any(self._flush_errors.values())
+                if any(self._flush_errors.values()) or venue_health.degraded
                 else HealthStatusEnum.HEALTHY
             ),
             lag_ms=max_lag_ms,
             market_closed=market_closed,
             next_open=next_open,
-            meta={
-                "symbols": list(self.symbols),
-                "symbol_count": len(self.symbols),
-                "running": self.running,
-            },
+            meta=hb_meta,
         )
         await self._publish_heartbeat(hb_topic, hb_msg)
+
+    def _lag_tracked_symbols(self) -> list[str]:
+        """Return every symbol whose individual lag the heartbeat must reflect.
+
+        The set is the UNION of two sources, and it has to be, because neither
+        alone covers the venues this base class serves:
+
+        - the concrete entries of ``self.symbols``, which is what an
+          explicit-list subscription knows; and
+        - the keys of ``_last_data_timestamps``, which is what a wildcard
+          subscription knows.
+
+        Under ``["*"]`` the first source contains only the sentinel — a
+        request, not an identity — while deliveries and the subscribe-time
+        seed both write concrete native keys into the second. Iterating
+        ``self.symbols`` alone therefore looked up ``"*"``, found nothing and
+        fell back to the feed-level figure for the whole feed, so a pair that
+        delivered and then went dark was invisible on the venue configuration
+        that ships by default (every exchange defaults to ``["*"]``).
+
+        Returns:
+            Sorted concrete symbols; empty when the publisher has neither a
+            concrete subscription nor any observed or seeded symbol.
+        """
+        tracked = {symbol for symbol in self.symbols if symbol != _WILDCARD_SYMBOL}
+        tracked.update(self._last_data_timestamps)
+        return sorted(tracked)
 
     def _compute_max_lag_ms(self) -> int:
         """Compute the worst per-symbol data lag in milliseconds.
 
-        A symbol that has never delivered data is counted as stale for the
-        feed-level dark interval — the time since the last message from ANY
-        symbol (``_last_message_at``, seeded at start) — NOT as zero lag. This
-        stops a publisher with no subscribed symbols or one receiving nothing
-        (e.g. a closed FX venue) from reporting a misleading ``0ms`` that reads
-        as fresh real-time data; it instead surfaces the true staleness. The
-        per-symbol path is unchanged for symbols that HAVE delivered, so a busy
-        feed with a single quiet symbol still reflects that symbol's real lag.
+        Lag is computed over :meth:`_lag_tracked_symbols` — the union of the
+        concrete subscription and every symbol that has been seeded or has
+        ever delivered — so three distinct failures all surface as real,
+        growing lag rather than as the feed-level figure:
+
+        - a symbol that delivered and then went dark (its timestamp stops
+          advancing while the feed stays busy);
+        - a symbol that has never delivered but was seeded at subscribe time
+          (:meth:`_seed_symbol_lag_baseline`), which reports the time since
+          SUBSCRIPTION; and
+        - under a wildcard subscription, both of the above for any pair the
+          venue could name through :meth:`_wildcard_symbol_universe`.
+
+        That coverage is load-bearing: the feed-level dark interval is the
+        time since the last message from ANY symbol, which is near zero
+        whenever the venue's other symbols are healthy, so a single dark
+        symbol on a busy feed read as healthy forever after every restart.
+
+        The feed-level fallback now applies in exactly two cases. First, when
+        nothing is tracked at all — no concrete symbol subscribed, nothing
+        seeded and nothing ever delivered — which covers a publisher with an
+        empty symbol list and an unexpanded wildcard on a venue that cannot
+        name its universe. Second, per symbol, for a tracked symbol with no
+        timestamp, which is unreachable through the union above and remains
+        only as a defensive floor. In both the feed-level dark interval is the
+        honest figure: it stops a publisher receiving nothing (e.g. a closed
+        FX venue) from reporting a misleading ``0ms`` that reads as fresh
+        real-time data.
 
         Returns:
-            Maximum lag across all subscribed symbols, in milliseconds; the
-            feed-level dark interval when none are subscribed.
+            Maximum lag across every tracked symbol, in milliseconds; the
+            feed-level dark interval when none are tracked.
         """
         feed_lag_ms = int((monotonic() - self._last_message_at) * 1000)
-        if not self.symbols:
+        tracked = self._lag_tracked_symbols()
+        if not tracked:
             return feed_lag_ms
         current_time = datetime.now(UTC).timestamp() * 1000
         max_lag_ms = 0
-        for symbol in self.symbols:
+        for symbol in tracked:
             last_data_time = self._last_data_timestamps.get(symbol)
             lag_ms = feed_lag_ms if last_data_time is None else int(current_time - last_data_time)
             max_lag_ms = max(max_lag_ms, lag_ms)

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snapper.application.process_manager.launcher import _TOTAL_RESET_UPTIME_S
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import HealthStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
@@ -53,6 +54,7 @@ from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
 from snapper.messaging.publishers.base import FeedDarkTooLongError
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import VenueFeedHealth
 from snapper.messaging.publishers.base import _candle_writer_drop_counters
 from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.base import _CandleRepairResult
@@ -221,6 +223,54 @@ class HookPublisher(DummyPublisher):
             await asyncio.Event().wait()
         finally:
             self.cancelled.set()
+
+
+class VenueHealthPublisher(DummyPublisher):
+    """Publisher stub whose venue reports itself degraded with extra meta."""
+
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Report one chronically refused symbol.
+
+        Returns:
+            A degraded venue contribution carrying one venue-specific key.
+        """
+        return VenueFeedHealth(meta={"refused_marks": ["TRY-PLN"]}, degraded=True)
+
+
+class HealthyVenuePublisher(DummyPublisher):
+    """Publisher stub whose venue reports extra meta but no degradation."""
+
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Report an empty refusal set.
+
+        Returns:
+            A healthy venue contribution carrying one venue-specific key.
+        """
+        return VenueFeedHealth(meta={"refused_marks": []}, degraded=False)
+
+
+class ColludingVenuePublisher(DummyPublisher):
+    """Publisher stub whose venue tries to reuse a standard heartbeat key."""
+
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Report a venue key that collides with the standard symbol count.
+
+        Returns:
+            A venue contribution whose only key is a reserved name.
+        """
+        return VenueFeedHealth(meta={"symbol_count": 999}, degraded=False)
+
+
+class WildcardUniversePublisher(DummyPublisher):
+    """Publisher stub that can name the concrete pairs behind ``["*"]``."""
+
+    def _wildcard_symbol_universe(self) -> list[str]:
+        """Resolve the subscribe-all sentinel to this venue's pair list.
+
+        Returns:
+            The two concrete native symbols the wildcard covers.
+        """
+        return ["EUR-PLN", "TRY-PLN"]
 
 
 class SpotLikePublisher(DummyPublisher):
@@ -396,6 +446,269 @@ def test_compute_max_lag_delivered_symbol_uses_real_per_symbol_lag(
     pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000 - 4000
     lag = pub._compute_max_lag_ms()
     assert 3500 <= lag <= 4500
+
+
+def test_subscription_symbols_truncate_self_symbols_to_the_venue_limit() -> None:
+    """The connection limit narrows the publisher's own symbol list.
+
+    Given: A publisher whose venue limits a connection to one symbol.
+    When: The subscription symbol list is resolved,
+    Then: ``self.symbols`` itself is truncated, the returned list is that same
+        list, and only the surviving symbol is seeded. The tail is never
+        subscribed and can never deliver, so reporting it in the heartbeat
+        would claim a subscription that does not exist and seeding it would
+        manufacture permanent lag for a configuration decision; the
+        truncation is already logged as a WARNING at start.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD", "ETH-USD"])
+    assert pub._resolve_subscription_symbols(1) == ["BTC-USD"]
+    assert pub.symbols == ["BTC-USD"]
+    assert list(pub._last_data_timestamps) == ["BTC-USD"]
+    assert pub._lag_tracked_symbols() == ["BTC-USD"]
+
+
+def test_subscription_symbols_keep_every_symbol_when_the_venue_is_unlimited() -> None:
+    """An unlimited venue subscribes and seeds the full configured list.
+
+    Given: A publisher on a venue with no per-connection symbol limit.
+    When: The subscription symbol list is resolved,
+    Then: Nothing is dropped and every symbol is seeded, so the heartbeat's
+        symbol list and the lag loop describe the same set.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD", "ETH-USD"])
+    assert pub._resolve_subscription_symbols(0) == ["BTC-USD", "ETH-USD"]
+    assert pub.symbols == ["BTC-USD", "ETH-USD"]
+    assert sorted(pub._last_data_timestamps) == ["BTC-USD", "ETH-USD"]
+
+
+def test_seed_symbol_lag_baseline_skips_wildcard_and_never_rewinds() -> None:
+    """The seed never keys the sentinel and keeps observed data.
+
+    Given: A wildcard subscription on a publisher that cannot name its
+        universe, plus one symbol that has already delivered.
+    When: The lag baseline is seeded,
+    Then: ``"*"`` gets no entry — it is a request, never a delivery key, so
+        seeding it would manufacture unbounded lag on a healthy subscribe-all
+        feed — and the already-observed timestamp is left untouched.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["*"])
+    observed = datetime.now(UTC).timestamp() * 1000 - 4000
+    pub._last_data_timestamps["BTC-USD"] = observed
+    pub._seed_symbol_lag_baseline(["*", "BTC-USD"])
+    assert "*" not in pub._last_data_timestamps
+    assert pub._last_data_timestamps["BTC-USD"] == observed
+
+
+def test_seed_expands_the_wildcard_through_the_venue_universe_hook() -> None:
+    """A venue that can name its universe seeds every never-delivered pair.
+
+    Given: A wildcard subscription on a publisher whose venue resolves ``"*"``
+        to two concrete pairs at seed time.
+    When: The lag baseline is seeded,
+    Then: Both pairs are seeded under their concrete native keys and the
+        sentinel still gets none. Without this the seed was a no-op on the
+        configuration that actually ships (``instruments`` defaults to
+        ``["*"]`` for every exchange), so a never-delivering pair was invisible.
+
+    Returns:
+        None.
+    """
+    pub = WildcardUniversePublisher(symbols=["*"])
+    pub._seed_symbol_lag_baseline(["*"])
+    assert sorted(pub._last_data_timestamps) == ["EUR-PLN", "TRY-PLN"]
+    assert "*" not in pub._last_data_timestamps
+
+
+def test_compute_max_lag_sees_a_dark_symbol_under_a_wildcard_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pair that delivered and then went dark surfaces under ``["*"]``.
+
+    Given: A wildcard subscription whose ``self.symbols`` is literally ``["*"]``,
+        where one pair delivered 30 minutes ago and another is delivering now
+        (so the feed-level clock is fresh).
+    When: _compute_max_lag_ms runs,
+    Then: It reports the dark pair's ~30 minute lag. Iterating ``self.symbols``
+        alone looked up ``"*"``, found nothing and fell back to the feed-level
+        figure for the whole feed — which is ~0 here — so the concrete keys
+        that deliveries and the seed both write were never read.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub = DummyPublisher(symbols=["*"])
+    pub._last_message_at = 999.9
+    now_ms = datetime.now(UTC).timestamp() * 1000
+    pub._last_data_timestamps["TRY-PLN"] = now_ms - 1_800_000
+    pub._last_data_timestamps["EUR-PLN"] = now_ms
+    assert pub._lag_tracked_symbols() == ["EUR-PLN", "TRY-PLN"]
+    lag = pub._compute_max_lag_ms()
+    assert 1_795_000 <= lag <= 1_805_000
+
+
+def test_compute_max_lag_seeded_symbol_stays_dark_on_a_busy_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seeded symbol that never delivers reports real lag while peers are busy.
+
+    Given: Two subscribed symbols seeded 30 minutes ago, one of which has been
+        delivering ticks continuously (so the feed-level clock is fresh).
+    When: _compute_max_lag_ms runs,
+    Then: It reports the silent symbol's ~30 minute lag. Without the
+        subscribe-time seed the silent symbol would fall back to the
+        feed-level dark interval — ~0 here — and a permanently refused pair
+        would read as healthy forever after every restart.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub = DummyPublisher(symbols=["BTC-USD", "TRY-PLN"])
+    pub._last_message_at = 999.9
+    seeded_at = datetime.now(UTC).timestamp() * 1000 - 1_800_000
+    pub._last_data_timestamps["BTC-USD"] = seeded_at
+    pub._last_data_timestamps["TRY-PLN"] = seeded_at
+    pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000
+    lag = pub._compute_max_lag_ms()
+    assert 1_795_000 <= lag <= 1_805_000
+
+
+def test_venue_feed_health_defaults_to_empty_and_healthy() -> None:
+    """The base publisher contributes no venue-specific heartbeat facts.
+
+    Given: A publisher subclass that does not override the venue health hook,
+    When: The hook is read,
+    Then: It reports no extra meta and no degradation, so every existing
+        publisher's heartbeat is byte-identical to before the hook existed.
+
+    Returns:
+        None.
+    """
+    health = DummyPublisher(symbols=["BTC-USD"])._venue_feed_health()
+    assert health.meta == {}
+    assert health.degraded is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_carries_venue_meta_and_degrades_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded venue reaches the operator through the heartbeat.
+
+    Given: A publisher whose venue reports itself degraded with extra meta.
+    When: One heartbeat tick is built,
+    Then: The status is WARNING even with no flush errors, and the venue keys
+        ride under ``meta.venue`` alongside the standard symbol keys —
+        fail-closed without visibility is fail-stale.
+
+    Returns:
+        None.
+    """
+    pub = VenueHealthPublisher(symbols=["BTC-USD"])
+    published: list[HeartbeatData] = []
+
+    async def capture(topic: str, message: HeartbeatData) -> None:
+        published.append(message)
+
+    monkeypatch.setattr(pub, "_publish_heartbeat", capture)
+    await pub._heartbeat_tick("feed.kraken")
+    assert published[0].status == HealthStatusEnum.WARNING
+    assert published[0].meta["venue"] == {"refused_marks": ["TRY-PLN"]}
+    assert published[0].meta["symbol_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stays_healthy_when_the_venue_is_not_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Venue meta rides the heartbeat without implying a fault.
+
+    Given: A publisher whose venue reports extra meta but no degradation.
+    When: One heartbeat tick is built,
+    Then: The status stays HEALTHY, so a venue can publish observability keys
+        continuously instead of only once something breaks.
+
+    Returns:
+        None.
+    """
+    pub = HealthyVenuePublisher(symbols=["BTC-USD"])
+    published: list[HeartbeatData] = []
+
+    async def capture(topic: str, message: HeartbeatData) -> None:
+        published.append(message)
+
+    monkeypatch.setattr(pub, "_publish_heartbeat", capture)
+    await pub._heartbeat_tick("feed.kraken")
+    assert published[0].status == HealthStatusEnum.HEALTHY
+    assert published[0].meta["venue"] == {"refused_marks": []}
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_omits_the_venue_key_when_nothing_is_contributed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A publisher without venue health keeps its pre-hook heartbeat exactly.
+
+    Given: A publisher that does not override the venue health hook.
+    When: One heartbeat tick is built,
+    Then: The meta object carries only the three standard keys, so every
+        existing publisher's heartbeat is byte-identical to before the hook.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    published: list[HeartbeatData] = []
+
+    async def capture(topic: str, message: HeartbeatData) -> None:
+        published.append(message)
+
+    monkeypatch.setattr(pub, "_publish_heartbeat", capture)
+    await pub._heartbeat_tick("feed.kraken")
+    assert published[0].meta == {
+        "symbols": ["BTC-USD"],
+        "symbol_count": 1,
+        "running": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_venue_meta_cannot_shadow_a_standard_heartbeat_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nesting makes the reserved-key rule structural rather than documented.
+
+    Given: A misbehaving venue that contributes a key named ``symbol_count``.
+    When: One heartbeat tick is built,
+    Then: The standard ``symbol_count`` still reports the real subscription
+        and the venue's value is confined to ``meta.venue``. A flat merge let
+        a venue silently corrupt the one surface an operator reads during an
+        incident, and a documentation-only rule is worth only as much as the
+        next venue author's memory.
+
+    Returns:
+        None.
+    """
+    pub = ColludingVenuePublisher(symbols=["BTC-USD"])
+    published: list[HeartbeatData] = []
+
+    async def capture(topic: str, message: HeartbeatData) -> None:
+        published.append(message)
+
+    monkeypatch.setattr(pub, "_publish_heartbeat", capture)
+    await pub._heartbeat_tick("feed.kraken")
+    assert published[0].meta["symbol_count"] == 1
+    assert published[0].meta["venue"] == {"symbol_count": 999}
 
 
 @pytest.mark.asyncio
@@ -7994,6 +8307,34 @@ async def test_recovery_attempt_is_bounded_and_retried_on_hang(
     await pub._run_recovery_under_lock("stale")
     assert pub._attempt_liveness_recovery.await_count == 2
     assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_start_seeds_the_per_symbol_lag_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the seed is wired into ``start``, not merely available to it.
+
+    Given: A publisher started against the mocked runtime with two symbols,
+        neither of which has delivered anything.
+    When: ``start`` completes its subscription setup,
+    Then: Both symbols are already in _last_data_timestamps and the reported
+        lag is the per-symbol figure. Pinned at the START path on purpose: the
+        seeding helpers are exercised directly elsewhere, so reverting the call
+        site in ``start`` to the old inline slice would leave every one of
+        those tests green while the shipped behaviour vanished.
+
+    Returns:
+        None.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD", "TRY-PLN"])
+    _mock_start_runtime(pub, monkeypatch)
+    await pub.start()
+    try:
+        assert sorted(pub._last_data_timestamps) == ["BTC-USD", "TRY-PLN"]
+        assert pub._lag_tracked_symbols() == ["BTC-USD", "TRY-PLN"]
+    finally:
+        await pub.stop()
 
 
 def _candle_minute(hour: int, minute: int, *, day: int = 14) -> datetime:

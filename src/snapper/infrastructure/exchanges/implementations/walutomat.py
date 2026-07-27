@@ -35,7 +35,9 @@ import base64
 import contextlib
 import math
 import time
+from collections import deque
 from collections.abc import AsyncIterator
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -593,14 +595,109 @@ def _append_history_page(
     return cursor, False
 
 
-WALUTOMAT_MAX_RELATIVE_SPREAD: Final[float] = 0.02
+WALUTOMAT_MAX_RELATIVE_SPREAD: Final[float] = 0.25
 """Widest ``(ask - bid) / mid`` whose midpoint is still accepted as a mark.
 
-``0.02`` is 17x the EUR-PLN spread measured in production on 2026-07-25 15:58
-(0.0050 / 4.3132 = 11.6 bps). The ceiling exists to stop a nonsensical exotic
-book from becoming an FX conversion plane for the whole portfolio; it must
-never fire on a major. Do not tighten it without measurement - a tighter gate
-manufactures candle holes, and holes flip PnL plane election."""
+Calibrated against the FULL 44-pair production distribution, not one pair. The
+predecessor value ``0.02`` was justified as "17x the EUR-PLN spread" and that
+single-pair reading was wrong about the venue: measured across every walutomat
+pair the median relative spread is 83.7 bps, only TRY-PLN exceeds 200 bps (at
+1197 bps, chronically), the tightest pairs still below the old ceiling were
+GBP-CHF at 176.6 bps, DKK-PLN at 164.6 and CNY-PLN at 157.0, and 15 of the 44
+pairs sit between 100 and 200 bps - one doubling away from silence. Wide
+spreads are this peer-to-peer venue's NORMAL condition, not a pathology.
+
+The two populations are separable: honest thin books on this venue reach about
+12 percent relative spread, while broken books start around 50 percent.
+``0.25`` sits between them - 2x headroom over chronically wide TRY-PLN and 14x
+over the tightest survivor - so it refuses only books whose midpoint is not a
+price under any reading. Per-pair ceilings are the fallback if one pair's own
+spread ever proves too volatile for a single global bound; do not pay that
+operational cost before a measurement demands it.
+
+The ceiling is NOT deleted, and that was proposed and refuted - recorded here
+because the reasoning generalises. Every consumer of this mark is MONOTONE:
+``TrailingStopEvaluator.on_tick`` ratchets ``peak_price`` and never lowers it,
+the four equity peaks are ``max()``, and the Phase-5B causal peak derives from
+persisted samples F6 forbids rewriting. On a peer-to-peer book a single dust
+order (bid 0.01 against ask 4.31) is positive, finite and uncrossed, so it
+passes all three structural refusals, and it prints a mid roughly 50 percent
+off - which ratchets a trailing stop into a phantom breach and a REAL forced
+close, or a peak into a permanent phantom drawdown. A refusal hole costs one
+stale minute; a wrong value in a ratchet costs state that never recovers by
+market action. The mark-convention plan also relies on this ceiling by name: a
+size gate was rejected there (the venue payload carries no sizes) and the
+relative-spread refusal was accepted in its place as the bound on self-marking,
+so removing it would reopen a decision whose alternative is unavailable.
+
+Do not tighten it without measurement either - a tighter gate manufactures
+candle holes, and holes flip PnL plane election."""
+
+WALUTOMAT_REFUSAL_WARNING_SECONDS: Final[float] = 600.0
+"""How long one symbol may stay continuously refused before the feed degrades.
+
+The measured phenomenon this bounds is the duration of a run of continuously
+UNUSABLE polled books - NOT the venue's healthy tick cadence. Those are
+different phenomena and only the first one can extend a refusal: the latch is
+cleared by :meth:`WalutomatExchangeClient._note_recovered_mark`, which runs on
+EVERY usable poll, and the per-symbol lag baseline is refreshed before tick
+deduplication, so a healthy pair whose book simply has not moved is
+refusal-free and lag-fresh at every poll. Post-deduplication silence between
+emitted ticks therefore has no causal path into a refusal duration, and an
+earlier revision of this docstring was wrong to bound one with the other.
+
+At the default 10 s ``polling_interval`` this value is 60 consecutive refused
+polls. Sixty unusable books in a row is a chronic condition on a venue whose
+NORMAL state is a wide but two-sided book (see
+:data:`WALUTOMAT_MAX_RELATIVE_SPREAD`), so the false-positive risk here is the
+same as it was at the hour this replaced - while a real blackout now pages
+roughly fifty minutes sooner.
+
+No measured distribution of refusal durations exists yet: the venue has never
+been observed with refusal instrumentation in place, so this is a conservative
+OPERATIONAL choice, not a measured threshold. Revisit it against
+``refused_mark_seconds`` once the heartbeat has accumulated real history."""
+
+WALUTOMAT_REFUSAL_WINDOW_SECONDS: Final[float] = 3600.0
+"""Rolling window over which the per-symbol refusal FRACTION is measured.
+
+The continuous-streak bound alone cannot see a flapping book, because recovery
+pops the streak clock: a pair that is unusable on 99 percent of polls but
+flickers usable once an hour resets its streak forever and never escalates,
+while its transition logs run to thousands of lines a day. The dust-order
+shape :data:`WALUTOMAT_MAX_RELATIVE_SPREAD` describes - a peer-to-peer order
+appearing and being cancelled - is exactly such a generator. One hour of poll
+outcomes is long enough that an hourly flicker cannot hide the surrounding
+refusals and short enough that a resolved incident ages out of the signal."""
+
+WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS: Final[int] = 60
+"""Poll outcomes a symbol needs inside the window before its fraction counts.
+
+Without a floor the very first refused poll reads as a 100 percent refusal
+fraction. Sixty outcomes is ten minutes at the default 10 s cadence, which
+matches :data:`WALUTOMAT_REFUSAL_WARNING_SECONDS` so neither rule can escalate
+on less than ten minutes of evidence."""
+
+WALUTOMAT_REFUSAL_FRACTION_CEILING: Final[float] = 0.5
+"""Share of a symbol's windowed polls that may be refused before degrading.
+
+A book unusable for more than half of the last hour is chronic no matter how
+often it flickers usable in between. This is a deliberately loose bound: it
+exists to catch the flapping case the streak rule structurally cannot see, not
+to page on an occasional wide print, and like the streak bound it is an
+operational choice with no measured distribution behind it yet."""
+
+WALUTOMAT_TRANSITION_LOG_COOLDOWN_SECONDS: Final[float] = 300.0
+"""Minimum gap between two logged transitions of the same kind for one symbol.
+
+A flapping book crosses the refused/recovered boundary on almost every poll,
+and the transition-only logging that keeps a 44-pair sweep quiet does nothing
+to bound THAT: at a 10 s cadence an alternating pair emits ~8600 lines a day
+on its own. Entry and recovery are rate-limited separately so the first pair
+of lines - the informative ones - always survives, after which each kind is
+capped at one line per five minutes per symbol and the suppressed count rides
+the next line that gets through. The counts and durations on the heartbeat are
+the current-state signal; the log is only the transition record."""
 
 
 @dataclass(frozen=True)
@@ -689,6 +786,68 @@ def walutomat_quote_refusal(offer: WalutomatBestOffer) -> str | None:
     return None
 
 
+_REFUSED_TRANSITION: Final = "refused"
+"""Rate-limit key for the entry-into-refusal log line."""
+
+_RECOVERED_TRANSITION: Final = "recovered"
+"""Rate-limit key for the exit-from-refusal log line."""
+
+
+def _suppressed_suffix(suppressed: int) -> str:
+    """Render the suppressed-transition tail appended to a transition log.
+
+    Args:
+        suppressed: Transitions of this kind dropped by the per-symbol rate
+            limit since the previous emitted line.
+
+    Returns:
+        An empty string when nothing was suppressed, otherwise a short tail
+        naming the count so a flapping book is legible from one line.
+    """
+    if suppressed == 0:
+        return ""
+    return f" [{suppressed} further transition(s) suppressed]"
+
+
+@dataclass(frozen=True)
+class WalutomatMarkRefusalReport:
+    """Observable state of the fail-closed mark refusals, for the heartbeat.
+
+    Fail-closed without visibility is fail-STALE. The ticker plane applies no
+    age gate, so a chronically refused pair keeps serving its frozen last-good
+    mark to position valuation, the caps notional and the paper fill path while
+    the feed looks healthy - the exact frozen-mark defect the mid convention
+    exists to remove, resurrected one pair at a time. This report is what makes
+    that condition legible outside the log file.
+
+    Attributes:
+        symbols: Symbols currently in the refused state, sorted.
+        counts: Cumulative refused-poll count per symbol, sorted by symbol and
+            NOT reset on recovery, so an intermittently refusing pair
+            accumulates evidence instead of hiding between transitions.
+        seconds: Whole seconds each currently-refused symbol has been
+            continuously refused.
+        fractions: Share of the last :data:`WALUTOMAT_REFUSAL_WINDOW_SECONDS`
+            of poll outcomes that were refusals, for every symbol with at
+            least :data:`WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS` outcomes in the
+            window and at least one refusal among them. Symbols with a clean
+            window are omitted so the heartbeat carries evidence rather than
+            44 zeroes.
+        escalated: Whether any symbol has been continuously refused for at
+            least :data:`WALUTOMAT_REFUSAL_WARNING_SECONDS`, OR has a windowed
+            refusal fraction above
+            :data:`WALUTOMAT_REFUSAL_FRACTION_CEILING`. The second rule exists
+            because recovery pops the streak clock, so a mostly-unusable book
+            that flickers usable often enough never satisfies the first.
+    """
+
+    symbols: tuple[str, ...]
+    counts: Mapping[str, int]
+    seconds: Mapping[str, int]
+    fractions: Mapping[str, float]
+    escalated: bool
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -771,6 +930,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
         self._refused_marks: set[str] = set()
+        self._refused_mark_counts: dict[str, int] = {}
+        self._refused_since: dict[str, float] = {}
+        self._poll_outcomes: dict[str, deque[tuple[float, bool]]] = {}
+        self._transition_logged_at: dict[tuple[str, str], float] = {}
+        self._suppressed_transitions: dict[tuple[str, str], int] = {}
         self._execution_poll_interval = execution_poll_interval
         self._execution_idle_interval = 30.0
         self._execution_wake: asyncio.Event = asyncio.Event()
@@ -959,13 +1123,96 @@ class WalutomatExchangeClient(ExchangeClientBase):
             change_pct=0.0,
         )
 
+    def _record_poll_outcome(self, native_symbol: str, *, refused: bool) -> None:
+        """Append one poll outcome to the symbol's rolling refusal window.
+
+        Every polled pair lands here exactly once per poll, whether its book
+        was usable, unusable or missing from the payload altogether, so the
+        window's denominator is the real poll count rather than the refusal
+        count. Outcomes older than :data:`WALUTOMAT_REFUSAL_WINDOW_SECONDS` are
+        dropped on append, which bounds the memory at one entry per poll per
+        symbol for one window (~360 entries per pair at the default cadence).
+
+        Args:
+            native_symbol: Native symbol whose book was just polled.
+            refused: Whether that poll produced no usable mark.
+
+        Returns:
+            None.
+        """
+        now = time.monotonic()
+        window = self._poll_outcomes.setdefault(native_symbol, deque())
+        window.append((now, refused))
+        cutoff = now - WALUTOMAT_REFUSAL_WINDOW_SECONDS
+        while window and window[0][0] < cutoff:
+            window.popleft()
+
+    def _claim_transition_log(self, native_symbol: str, kind: str) -> int | None:
+        """Decide whether this refusal-state transition may emit a log line.
+
+        Rate limiting is keyed on ``(symbol, kind)`` rather than on the symbol
+        alone so a first refusal and its first recovery both survive - those
+        two lines are the informative ones - while a book that flaps across
+        the boundary every poll is capped at one line per kind per
+        :data:`WALUTOMAT_TRANSITION_LOG_COOLDOWN_SECONDS`. Suppressed
+        transitions are counted, not discarded, and the count rides the next
+        line that gets through so the flapping itself stays visible.
+
+        Args:
+            native_symbol: Native symbol that changed refusal state.
+            kind: Transition kind, ``"refused"`` or ``"recovered"``.
+
+        Returns:
+            The number of transitions of this kind suppressed since the last
+            emitted line, or ``None`` when this transition must stay silent.
+        """
+        key = (native_symbol, kind)
+        now = time.monotonic()
+        last = self._transition_logged_at.get(key)
+        if last is not None and now - last < WALUTOMAT_TRANSITION_LOG_COOLDOWN_SECONDS:
+            self._suppressed_transitions[key] = self._suppressed_transitions.get(key, 0) + 1
+            return None
+        self._transition_logged_at[key] = now
+        return self._suppressed_transitions.pop(key, 0)
+
+    def _latch_refusal(self, native_symbol: str) -> bool:
+        """Count one refused poll and report whether it entered the state.
+
+        The COUNTER and the rolling window are updated on every refused poll,
+        before the latch check. The log line alone is current-state-free and
+        scrolls away, so a chronic refusal would otherwise be invisible after
+        the first minute of an operator's attention; the counter, the entry
+        instant and the window are what :meth:`mark_refusal_report` publishes
+        into the heartbeat.
+
+        Args:
+            native_symbol: Native symbol whose mark was refused.
+
+        Returns:
+            ``True`` when this poll moved the symbol INTO the refused state
+            (so the caller may log a transition), ``False`` when it was
+            already latched.
+        """
+        self._refused_mark_counts[native_symbol] = (
+            self._refused_mark_counts.get(native_symbol, 0) + 1
+        )
+        self._record_poll_outcome(native_symbol, refused=True)
+        if native_symbol in self._refused_marks:
+            return False
+        self._refused_marks.add(native_symbol)
+        self._refused_since[native_symbol] = time.monotonic()
+        return True
+
     def _note_refused_mark(self, native_symbol: str, offer: WalutomatBestOffer) -> None:
-        """Warn once on entry into the refused-mark state for a symbol.
+        """Count every refusal and warn on entry into the refused state.
 
         A refusal is a hole in the tick and candle planes, so it must be
         observable; but the poller sweeps ~44 pairs every interval, so a
         per-poll warning would be spam. The symbol is therefore latched in
-        ``_refused_marks`` and only the transition is logged.
+        ``_refused_marks``, only the transition is logged, and that log is
+        additionally rate-limited per symbol
+        (:meth:`_claim_transition_log`) so a flapping book cannot turn the
+        transition record into thousands of daily lines.
 
         Args:
             native_symbol: Native symbol whose mark was refused.
@@ -974,19 +1221,60 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Returns:
             None.
         """
-        if native_symbol in self._refused_marks:
+        if not self._latch_refusal(native_symbol):
             return
-        self._refused_marks.add(native_symbol)
+        suppressed = self._claim_transition_log(native_symbol, _REFUSED_TRANSITION)
+        if suppressed is None:
+            return
         logger.warning(
-            "Walutomat {} mark refused ({}) — raw bid_now={} ask_now={}",
+            "Walutomat {} mark refused ({}) — raw bid_now={} ask_now={}{}",
             native_symbol,
             walutomat_quote_refusal(offer),
             offer.bid_now,
             offer.ask_now,
+            _suppressed_suffix(suppressed),
+        )
+
+    def _note_absent_pair(self, native_symbol: str) -> None:
+        """Latch a subscribed pair that vanished from the venue payload.
+
+        A pair the venue simply stops returning used to produce a DEBUG line
+        and nothing else: no latch, no clock, no count, and - because
+        ``_last_data_timestamps`` is only written on delivery - no per-symbol
+        lag either until the publisher's own seed made the symbol visible.
+        That is the TRY-PLN blackout shape with zero observability, so it is
+        treated here as exactly what it is: a refusal. The last thing known
+        about the pair is that no usable mark arrived, and its frozen last-good
+        mark keeps serving valuation just as it would for a pair whose book is
+        still arriving and still unusable.
+
+        Args:
+            native_symbol: Native symbol missing from the venue payload.
+
+        Returns:
+            None.
+        """
+        if not self._latch_refusal(native_symbol):
+            return
+        suppressed = self._claim_transition_log(native_symbol, _REFUSED_TRANSITION)
+        if suppressed is None:
+            return
+        logger.warning(
+            "Walutomat {} mark refused (pair absent from the venue payload){}",
+            native_symbol,
+            _suppressed_suffix(suppressed),
         )
 
     def _note_recovered_mark(self, native_symbol: str) -> None:
         """Log once when a previously refused symbol produces a usable quote.
+
+        Recovery clears the latch and the continuous-refusal clock but NOT the
+        cumulative counter or the rolling window: a pair that flaps between
+        usable and refused books is a real data-quality signal, and zeroing its
+        count on every recovery would erase exactly that evidence. The window
+        is what turns that evidence into an escalation, because the streak
+        clock this method pops can never reach the chronic bound on a flapping
+        pair.
 
         Args:
             native_symbol: Native symbol whose mark became usable again.
@@ -994,10 +1282,81 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Returns:
             None.
         """
+        self._record_poll_outcome(native_symbol, refused=False)
         if native_symbol not in self._refused_marks:
             return
         self._refused_marks.discard(native_symbol)
-        logger.info("Walutomat {} mark recovered — two-sided quote usable again", native_symbol)
+        self._refused_since.pop(native_symbol, None)
+        suppressed = self._claim_transition_log(native_symbol, _RECOVERED_TRANSITION)
+        if suppressed is None:
+            return
+        logger.info(
+            "Walutomat {} mark recovered — two-sided quote usable again{}",
+            native_symbol,
+            _suppressed_suffix(suppressed),
+        )
+
+    def _refusal_fractions(self, now: float) -> dict[str, float]:
+        """Compute each symbol's refused share of the rolling poll window.
+
+        Symbols with fewer than :data:`WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS`
+        outcomes in the window are omitted (too little evidence to read), and
+        so are symbols with a clean window - publishing 44 zeroes every
+        heartbeat would bury the one pair that matters.
+
+        Args:
+            now: Reference monotonic instant, shared with the streak clock so
+                one report cannot mix two readings of time.
+
+        Returns:
+            Refused fraction per symbol, sorted by symbol, rounded to four
+            decimals for a stable heartbeat payload.
+        """
+        cutoff = now - WALUTOMAT_REFUSAL_WINDOW_SECONDS
+        fractions: dict[str, float] = {}
+        for symbol, window in sorted(self._poll_outcomes.items()):
+            recent = [refused for observed_at, refused in window if observed_at >= cutoff]
+            refused_count = sum(1 for value in recent if value)
+            if len(recent) < WALUTOMAT_REFUSAL_WINDOW_MIN_POLLS or refused_count == 0:
+                continue
+            fractions[symbol] = round(refused_count / len(recent), 4)
+        return fractions
+
+    def mark_refusal_report(self) -> WalutomatMarkRefusalReport:
+        """Report the current mark-refusal state for the publisher heartbeat.
+
+        The exchange client owns the refusal decision, but the heartbeat is
+        built by the publisher, so this read-only accessor is the seam between
+        them. A symbol that stops appearing in the venue payload entirely keeps
+        its latch and its clock, which is deliberate: the last thing known
+        about it is a refusal, and its mark is just as frozen as a pair whose
+        book is still arriving and still unusable.
+
+        Escalation is the OR of two rules on purpose. The streak rule catches
+        an unbroken blackout; the fraction rule catches a book that is mostly
+        unusable but flickers usable often enough to keep resetting the streak
+        clock, which the streak rule structurally cannot see.
+
+        Returns:
+            Currently refused symbols, cumulative per-symbol refusal counts,
+            per-symbol continuous refusal durations in whole seconds, windowed
+            refusal fractions, and whether either escalation rule has fired.
+        """
+        now = time.monotonic()
+        seconds = {
+            symbol: int(now - since) for symbol, since in sorted(self._refused_since.items())
+        }
+        fractions = self._refusal_fractions(now)
+        escalated = any(
+            value >= WALUTOMAT_REFUSAL_WARNING_SECONDS for value in seconds.values()
+        ) or any(value > WALUTOMAT_REFUSAL_FRACTION_CEILING for value in fractions.values())
+        return WalutomatMarkRefusalReport(
+            symbols=tuple(sorted(self._refused_marks)),
+            counts=dict(sorted(self._refused_mark_counts.items())),
+            seconds=seconds,
+            fractions=fractions,
+            escalated=escalated,
+        )
 
     async def _process_polling_data(
         self, data: dict[str, WalutomatMarketPair], symbol_map: dict[str, str]
@@ -1008,13 +1367,18 @@ class WalutomatExchangeClient(ExchangeClientBase):
         entirely: no ticker is enqueued and nothing is appended to the tick
         buffer, so the minute simply has no bar rather than a fabricated one.
 
+        A subscribed pair missing from the payload altogether is treated as a
+        refusal (:meth:`_note_absent_pair`) rather than as a DEBUG line: it
+        produces the same frozen mark and the same candle hole as an unusable
+        book, so it must produce the same observable state.
+
         Args:
             data: Fetched market data keyed by Walutomat symbol.
             symbol_map: Mapping of Walutomat symbol to native symbol.
         """
         for wal_symbol, native_symbol in symbol_map.items():
             if wal_symbol not in data:
-                logger.debug(f"Symbol {wal_symbol} not in Walutomat data")
+                self._note_absent_pair(native_symbol)
                 continue
             pair_data = data[wal_symbol]
             quote = walutomat_quote(pair_data.best_offers)
