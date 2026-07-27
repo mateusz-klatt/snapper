@@ -72,13 +72,21 @@ def test_empty_permissions_survive_as_empty_not_none(service: WsTokenService) ->
 
     Given: A context whose permissions are an EMPTY list,
     When: A ticket is minted,
-    Then: The claim is `[]`, not None.
+    Then: The claim is `[]`, not None — and the ticket is still CONTEXTFUL.
 
     This is the assertion that matters most in the whole module. `[]` means
     "this token was deliberately granted nothing"; `None` means "fall back to
     everything the role allows". Any `or []`/`or None` introduced anywhere along
     the minting path collapses one into the other, and the failure is silent and
     in the widening direction.
+
+    The WHOLE tuple is asserted, not just the permissions, because a zero scope
+    can be degraded by a neighbouring field without the permissions claim moving
+    at all. Stamping `authorization_context_version=None` for an empty scope, or
+    dropping the scope version alongside it, both turn an authoritative zero
+    grant into a LEGACY ticket — and slice 3's legacy path rebuilds scope from
+    the bearer, so the widening happens one slice later and far from here. An
+    assertion that only looks at `permissions` cannot see either.
     """
     context = WsAuthorizationContext(
         active_wallet_public_id=None,
@@ -88,6 +96,9 @@ def test_empty_permissions_survive_as_empty_not_none(service: WsTokenService) ->
     claims = _decode(service, service.generate(user_id="u", session_id="s", context=context).token)
     assert claims["permissions"] == []
     assert claims["permissions"] is not None
+    assert claims["authorization_context_version"] == WS_AUTHORIZATION_CONTEXT_VERSION
+    assert claims["permission_scope_version"] == 1
+    assert claims["active_wallet_public_id"] is None
 
 
 def test_context_version_is_stamped_even_when_every_field_is_none(

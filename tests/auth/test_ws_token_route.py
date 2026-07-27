@@ -33,6 +33,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from snapper.api.auth.schemas.ws_token import WS_AUTHORIZATION_CONTEXT_VERSION
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.dependencies import require_authentication
@@ -202,19 +203,27 @@ class TestWsTokenRouteHappyPath:
         client.close()
 
     @pytest.mark.parametrize(
-        ("claim_wallet", "claim_permissions"),
+        ("claim_wallet", "claim_permissions", "claim_version"),
         [
-            ("019e873c-d062-720f-85df-fd4d7fce5bdf", ["read:signals"]),
-            (None, ["read:signals"]),
-            ("019e873c-d062-720f-85df-fd4d7fce5bdf", None),
-            ("019e873c-d062-720f-85df-fd4d7fce5bdf", []),
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", ["read:signals"], 2),
+            ("019f2949-0b30-7301-b7bf-65f40b8b0546", ["read:positions", "read:orders"], 1),
+            (None, ["read:signals"], 2),
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", None, None),
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", [], 2),
         ],
-        ids=["selected", "none-selected", "selected-full-role", "selected-zero-scope"],
+        ids=[
+            "selected",
+            "second-distinct-tuple",
+            "none-selected",
+            "selected-full-role",
+            "selected-zero-scope",
+        ],
     )
     def test_ticket_carries_the_wallet_selection(
         self,
         claim_wallet: str | None,
         claim_permissions: list[str] | None,
+        claim_version: int | None,
     ) -> None:
         """The client-selected wallet round-trips into the ticket.
 
@@ -245,11 +254,23 @@ class TestWsTokenRouteHappyPath:
         reasons: ``[]`` is a deliberate zero grant, ``None`` the legacy
         full-role grant. A full-role session with a selected wallet is an
         ordinary state, not an edge case.
+
+        ``second-distinct-tuple`` is not redundant with ``selected``, and the
+        reason is a mutation shape the falsy cases cannot reach. Every truthy
+        fixture in this suite used ONE wallet UUID, ONE permission list and the
+        version ``2``, so replacing each assignment with those literal constants
+        left the whole suite green — the code would have been hard-coded to the
+        fixture and no test could tell. A second tuple that differs in all three
+        fields is what makes the assignments observable at all. The scope
+        version is carried on the same axis rather than in a separate test
+        because a hard-coded version is the most dangerous of the three: it
+        decides which compatibility rules a consumer applies to the scope.
         """
         claims = _claims().model_copy(
             update={
                 "active_wallet_public_id": claim_wallet,
                 "permissions": claim_permissions,
+                "permission_scope_version": claim_version,
             }
         )
         client = _create_client(principal=_principal(), claims=claims)
@@ -262,6 +283,8 @@ class TestWsTokenRouteHappyPath:
         )
         assert verified.active_wallet_public_id == claim_wallet
         assert verified.permissions == claim_permissions
+        assert verified.permission_scope_version == claim_version
+        assert verified.authorization_context_version == WS_AUTHORIZATION_CONTEXT_VERSION
         client.close()
 
     def test_route_preserves_an_empty_permission_scope(self) -> None:
@@ -276,8 +299,14 @@ class TestWsTokenRouteHappyPath:
         carrying non-empty permissions, inserting `or None` HERE would widen a
         zero-scope session to the full role grant while leaving every other
         test green. That gap was real until this test existed.
+
+        The neighbouring fields are asserted too, because a zero scope can be
+        degraded WITHOUT the permissions claim moving: dropping the context
+        version or the scope version for an empty scope relabels an
+        authoritative zero grant as a legacy ticket, and a legacy ticket has
+        its scope rebuilt from the bearer.
         """
-        claims = _claims().model_copy(update={"permissions": []})
+        claims = _claims().model_copy(update={"permissions": [], "permission_scope_version": 2})
         client = _create_client(principal=_principal(), claims=claims)
         response = client.post("/api/auth/ws_token")
         assert response.status_code == 200
@@ -288,6 +317,8 @@ class TestWsTokenRouteHappyPath:
         )
         assert verified.permissions == []
         assert verified.permissions is not None
+        assert verified.authorization_context_version == WS_AUTHORIZATION_CONTEXT_VERSION
+        assert verified.permission_scope_version == 2
 
     @pytest.mark.parametrize("claim_version", [2, None], ids=["stale", "unversioned"])
     def test_route_passes_through_the_scope_version(self, claim_version: int | None) -> None:

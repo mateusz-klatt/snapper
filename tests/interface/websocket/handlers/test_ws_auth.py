@@ -28,6 +28,7 @@ import snapper.interface.websocket.handlers.auth as auth_handlers
 import snapper.server.authenticated_websocket as auth_ws
 from snapper.api.auth.errors.ws_token import WsTokenAlreadyUsedError
 from snapper.api.auth.errors.ws_token import WsTokenError
+from snapper.api.auth.schemas.ws_token import WS_AUTHORIZATION_CONTEXT_VERSION
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
@@ -3954,6 +3955,13 @@ def test_refresh_ws_ticket_preserves_an_empty_permission_scope(
     distinguishes them — and it is the case that matters, because collapsing
     `[]` into None turns a session deliberately granted nothing into one
     holding the full role grant.
+
+    The whole carried tuple is asserted, because a zero scope can be degraded
+    by a field NEXT to the permissions without the permissions claim moving.
+    Dropping the context version or the scope version for an empty scope both
+    relabel an authoritative zero grant as a LEGACY ticket, and slice 3's legacy
+    path rebuilds scope from the bearer — so the widening lands one slice later,
+    nowhere near this test.
     """
     client, user_service, token_manager, _csrf_manager = auth_app
     token_manager.verify_response = TokenClaims(
@@ -3988,6 +3996,8 @@ def test_refresh_ws_ticket_preserves_an_empty_permission_scope(
     )
     assert ticket.permissions == []
     assert ticket.permissions is not None
+    assert ticket.authorization_context_version == WS_AUTHORIZATION_CONTEXT_VERSION
+    assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
 
 
 def test_refresh_ws_ticket_preserves_a_full_role_scope(
