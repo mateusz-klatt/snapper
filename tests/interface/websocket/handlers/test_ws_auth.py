@@ -4313,35 +4313,50 @@ def test_refresh_token_concurrent_replay_reserves_winner_pair(
     assert body["payload"]["user"]["active_wallet_public_id"] == "winner-wallet"
 
 
+@pytest.mark.parametrize(
+    ("winner_permissions", "winner_version"),
+    [
+        ([Permission.READ_MARKET_DATA.value], 1),
+        ([], None),
+    ],
+    ids=["narrowed-and-stale", "zero-scope-and-unversioned"],
+)
 def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
     auth_app: AuthAppFixture,
     monkeypatch: pytest.MonkeyPatch,
+    winner_permissions: list[str],
+    winner_version: int | None,
 ) -> None:
     """A CAS loser signs a ws_token from the WINNER's scope and version.
 
-    Given: A concurrently redeemed refresh whose winner carries a NARROWED
-        permission set and a NON-current scope version, while this losing
-        request's own claims carry neither,
+    Given: A concurrently redeemed refresh whose winner carries a scope and
+        version DIFFERENT from this losing request's own claims,
     When: The response's ws_token is decoded,
-    Then: It carries the winner's permissions and the winner's version.
+    Then: It carries the winner's values.
 
-    Two mutations survive every other test in this slice and die here, both
-    only in the concurrency path where the two sources finally differ:
+    The CAS path is the only place the two sources diverge, so it is the only
+    place several mutations are visible at all. Signing from this request's
+    pre-rotation permissions, or stamping today's version constant, both look
+    identical to the correct code under ordinary rotation.
 
-    - Hard-coding the ticket's version to the CURRENT constant. Under ordinary
-      rotation the current constant IS the right answer, so every non-CAS test
-      agrees with the mutant. Only a winner carrying a stale version separates
-      "read the rotation" from "stamp today's value" — and stamping it would
-      reinterpret an older scope under today's compatibility rules.
-    - Signing from this request's pre-rotation permissions instead of the
-      rotation's. Ordinary fixtures make the two identical; here the loser's
-      are None, meaning the FULL role grant, while the winner's are narrowed.
-      The mutant would hand out a full-role ws ticket alongside cookies that
-      carry the winner's narrowed tokens.
+    **Parametrised over a truthy and a FALSY winner on purpose.** The mutations
+    that matter here are of the form ``rotation.X or fallback``, and those are
+    invisible whenever ``rotation.X`` is truthy — which a hand-picked fixture
+    almost always is. Three separate review rounds on this slice found three
+    such holes, each time because the case chosen to demonstrate a rule used a
+    non-empty list or a non-zero version. The axis is covered rather than a
+    fourth example added, so the falsy side cannot be forgotten again:
+
+    - ``narrowed-and-stale``: a non-empty scope at an old version, which pins
+      "read the rotation" against "stamp today's constant".
+    - ``zero-scope-and-unversioned``: a deliberate ``[]`` with no version,
+      which pins the ``or``-fallback mutations. The loser here holds
+      IMPERSONATE_OPERATOR, so falling back to it would widen the winner's
+      zero grant to the broadest permission in the system.
     """
 
     class _ScopedGraceTokenManager(StubTokenManager):
-        """Replay a concurrent redeem whose winner is narrowed and stale."""
+        """Replay a concurrent redeem whose winner carries the parametrised scope."""
 
         winner_pair = TokenPair(
             access_token="winner-access",
@@ -4361,14 +4376,14 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
             return self.winner_pair
 
         def verify_token(self, token: str) -> TokenClaims | None:
-            """Give the winner a narrowed scope at a deliberately stale version."""
+            """Give the winner the parametrised scope, which the loser never shares."""
             if token == "winner-access":
                 return TokenClaims(
                     sub="123",
                     username="bob",
                     role=UserRole.OPERATOR,
-                    permissions=[Permission.READ_MARKET_DATA.value],
-                    permission_scope_version=1,
+                    permissions=winner_permissions,
+                    permission_scope_version=winner_version,
                     exp=999999999,
                     iat=123456,
                     jti="access-winner-scoped",
@@ -4382,8 +4397,8 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
         sub="123",
         username="bob",
         role=UserRole.OPERATOR,
-        permissions=None,
-        permission_scope_version=None,
+        permissions=[Permission.IMPERSONATE_OPERATOR.value],
+        permission_scope_version=PERMISSION_SCOPE_VERSION,
         exp=999999999,
         iat=123456,
         jti="refresh_scoped_race-jti",
@@ -4409,9 +4424,8 @@ def test_refresh_grace_ws_ticket_carries_the_winner_scope_and_version(
         expected_sub="bob",
         expected_sid_hash=compute_sid_hash("session-scoped-race"),
     )
-    assert ticket.permissions == [Permission.READ_MARKET_DATA.value]
-    assert ticket.permission_scope_version == 1
-    assert ticket.permission_scope_version != PERMISSION_SCOPE_VERSION
+    assert ticket.permissions == winner_permissions
+    assert ticket.permission_scope_version == winner_version
 
 
 def test_refresh_grace_replay_with_unverifiable_winner_keeps_loser_principal(
