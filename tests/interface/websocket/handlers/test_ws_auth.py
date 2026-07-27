@@ -3966,6 +3966,70 @@ def test_refresh_ws_ticket_preserves_a_full_role_scope(
     assert ticket.active_wallet_public_id is None
 
 
+def test_refresh_ws_ticket_carries_a_still_readable_wallet(
+    auth_app: AuthAppFixture,
+    monkeypatch: Any,
+) -> None:
+    """A wallet the user can still read reaches the ticket.
+
+    Given: A refresh carrying a wallet the read plane still admits,
+    When: The response's ws_token is decoded,
+    Then: The ticket carries that wallet.
+
+    The sibling tests cannot catch a dropped wallet assignment: their user has
+    no readable wallets, so revalidation zeroes the wallet anyway and removing
+    the assignment produces an identical ticket. Only a wallet that SURVIVES
+    revalidation distinguishes "carried" from "silently discarded" — and the
+    wallet has no other route into a rebuilt principal, because the database
+    deliberately does not store it.
+
+    The read plane itself is stubbed rather than seeded. This test asks whether
+    the wallet reaches the ticket, not whether the read plane is correct; that
+    boundary has its own coverage, and seeding a readable wallet here would
+    couple this assertion to unrelated multi-tenant fixtures.
+    """
+    wallet = "019e873c-d062-720f-85df-fd4d7fce5bdf"
+
+    async def _readable(_principal: AuthPrincipal, _repo: Any) -> set[str]:
+        """Admit exactly the carried wallet."""
+        return {wallet}
+
+    monkeypatch.setattr(routes, "_readable_wallet_ids", _readable)
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=[Permission.READ_MARKET_DATA.value],
+        permission_scope_version=PERMISSION_SCOPE_VERSION,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_readable_wallet_jti",
+        sid="session-readable-wallet",
+        active_wallet_public_id=wallet,
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "readable-wallet-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-readable-wallet"),
+    )
+    assert ticket.active_wallet_public_id == wallet
+
+
 def test_get_current_user_profile_returns_user(
     auth_app: AuthAppFixture,
 ) -> None:
