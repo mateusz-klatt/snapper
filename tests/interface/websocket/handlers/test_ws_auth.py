@@ -3859,6 +3859,56 @@ def test_refresh_ws_ticket_carries_the_rotation_scope_not_the_principal(
     assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
 
 
+def test_refresh_ws_ticket_preserves_an_empty_permission_scope(
+    auth_app: AuthAppFixture,
+) -> None:
+    """A refresh of a zero-permission session mints a zero-permission ticket.
+
+    Given: A refresh token whose scope is an EMPTY permission list,
+    When: The response's ws_token is decoded,
+    Then: It carries `[]`, not None.
+
+    The sibling test above uses a NON-empty scope, so `or None` inserted at
+    this mint site is a no-op there and passes unnoticed. Only an empty scope
+    distinguishes them — and it is the case that matters, because collapsing
+    `[]` into None turns a session deliberately granted nothing into one
+    holding the full role grant.
+    """
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=[],
+        permission_scope_version=PERMISSION_SCOPE_VERSION,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_empty_scope_jti",
+        sid="session-empty-scope",
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "empty-scope-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    ticket = WsTokenService.get_instance().verify(
+        response.json()["payload"]["ws_token"],
+        expected_sub="bob",
+        expected_sid_hash=compute_sid_hash("session-empty-scope"),
+    )
+    assert ticket.permissions == []
+    assert ticket.permissions is not None
+
+
 def test_get_current_user_profile_returns_user(
     auth_app: AuthAppFixture,
 ) -> None:

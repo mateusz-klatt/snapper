@@ -61,12 +61,26 @@ class WsTokenPayload(PartialBody):
     Does not inherit StrictDataSchema because JWT payloads are
     internal token DTOs, not canonical Snapper events.
 
-    ``authorization_context_version`` is the SOLE legacy discriminator. Its
-    absence means a pre-context ticket; presence means the context fields are
+    ``authorization_context_version`` is the SOLE legacy discriminator, and the
+    test is **the VALUE being None, not the key being absent**. Both forms mean
+    legacy and must be treated identically:
+
+    - the key missing entirely — a ticket minted before this field existed;
+    - the key present with a JSON ``null`` — what ``model_dump`` emits today
+      for a context-less mint, because it does not exclude None.
+
+    Stating this as "presence means contextful" would be a trap: every
+    context-less ticket this service mints DOES carry the key, so a consumer
+    keying on presence would read ``permissions: null`` as authoritative — and
+    authoritative None means the FULL role grant, which is the widening this
+    whole context exists to prevent.
+
+    When the version IS a recognised number, the context fields are
     authoritative even when they are None. Consumers must fail closed on a
     version they do not recognise rather than treating it as legacy — a
     forward-compatible reader that silently degrades an unknown version to
-    "no context" would restore the full role grant.
+    "no context" would restore the full role grant. That gate belongs to the
+    reader, which does not exist yet; nothing here enforces it.
 
     Attributes:
         purpose: Token purpose (must be 'ws_connect').

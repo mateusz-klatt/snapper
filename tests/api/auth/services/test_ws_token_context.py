@@ -17,6 +17,7 @@ import pytest
 
 from snapper.api.auth.schemas.ws_token import WS_AUTHORIZATION_CONTEXT_VERSION
 from snapper.api.auth.schemas.ws_token import WsAuthorizationContext
+from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 
 
@@ -110,6 +111,32 @@ def test_context_version_is_stamped_even_when_every_field_is_none(
     )
     claims = _decode(service, service.generate(user_id="u", session_id="s", context=context).token)
     assert claims["authorization_context_version"] == WS_AUTHORIZATION_CONTEXT_VERSION
+    assert claims["permissions"] is None
+
+
+def test_a_genuinely_absent_version_key_parses_as_legacy(service: WsTokenService) -> None:
+    """Verify a ticket with NO version key at all is read as legacy.
+
+    Given: A JWT whose claims omit ``authorization_context_version`` entirely,
+    When: It is validated into a payload,
+    Then: The version is None — the same value a JSON ``null`` produces.
+
+    The two legacy shapes must be indistinguishable. Tickets minted before this
+    field existed omit the key; tickets minted context-less today emit an
+    explicit null, because ``model_dump`` does not exclude None. A reader that
+    keyed on key PRESENCE would therefore treat every modern context-less
+    ticket as authoritative, and authoritative ``permissions=None`` means the
+    full role grant.
+
+    This also pins the default: were the field to acquire a non-None default,
+    an old ticket would silently claim to carry a context it never had.
+    """
+    minted = service.generate(user_id="u", session_id="s")
+    claims = _decode(service, minted.token)
+    del claims["authorization_context_version"]
+    payload = WsTokenPayload.model_validate(claims)
+    assert payload.authorization_context_version is None
+    assert payload.permissions is None
 
 
 def test_omitted_context_mints_a_legacy_ticket(service: WsTokenService) -> None:

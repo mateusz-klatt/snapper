@@ -226,6 +226,55 @@ class TestWsTokenRouteHappyPath:
         assert verified.active_wallet_public_id == "019e873c-d062-720f-85df-fd4d7fce5bdf"
         client.close()
 
+    def test_route_preserves_an_empty_permission_scope(self) -> None:
+        """A zero-permission access token mints a zero-permission ticket.
+
+        Given: Access claims whose permissions are an EMPTY list,
+        When: A ws_token is minted through the route,
+        Then: The ticket carries `[]`, not None.
+
+        The service-level test of this invariant cannot protect the route: it
+        never executes the route's assignment. With both other route fixtures
+        carrying non-empty permissions, inserting `or None` HERE would widen a
+        zero-scope session to the full role grant while leaving every other
+        test green. That gap was real until this test existed.
+        """
+        claims = _claims().model_copy(update={"permissions": []})
+        client = _create_client(principal=_principal(), claims=claims)
+        response = client.post("/api/auth/ws_token")
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.permissions == []
+        assert verified.permissions is not None
+
+    def test_route_passes_through_the_scope_version(self) -> None:
+        """The access token's scope version reaches the ticket unchanged.
+
+        Given: Access claims carrying an explicit scope version,
+        When: A ws_token is minted,
+        Then: The ticket carries that same version.
+
+        This path does not reproject permissions, so it must NOT stamp the
+        current constant: doing so would reinterpret an older scope under
+        today's compatibility rules. The other route fixtures leave the version
+        unset, so without this assertion, replacing it with None or with the
+        current constant would pass unnoticed.
+        """
+        claims = _claims().model_copy(update={"permission_scope_version": 2})
+        client = _create_client(principal=_principal(), claims=claims)
+        response = client.post("/api/auth/ws_token")
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.permission_scope_version == 2
+
 
 class TestWsTokenRouteAuthChain:
     """Auth-chain failure surfaces from ``require_authentication``."""
