@@ -34,7 +34,7 @@ typer = {extras = ["all"], version = "^0.27.0"}
 python-dotenv = "^1.2.2"
 loguru = "^0.7.3"
 alembic = "^1.18.5"
-fastapi = "^0.140.0"
+fastapi = "^0.140.1"
 uvicorn = {extras = ["standard"], version = "^0.51.0"}
 pyzmq = "^27.1.0"
 pyjwt = "^2.13.0"
@@ -86,7 +86,7 @@ nbformat = "^5.10.4"
 ipykernel = "^7.3.0"
 matplotlib = "^3.11.1"
 scikit-learn = "^1.9.0"
-tqdm = "^4.69.1"
+tqdm = "^4.70.0"
 types-markdown = "^3.10.2.20260712"
 httpx2 = "^2.9.1"
 
