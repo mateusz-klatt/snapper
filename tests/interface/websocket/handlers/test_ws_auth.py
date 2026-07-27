@@ -4047,15 +4047,31 @@ def test_refresh_ws_ticket_preserves_a_full_role_scope(
     assert ticket.active_wallet_public_id is None
 
 
+@pytest.mark.parametrize(
+    ("claim_permissions", "claim_version", "expected_permissions"),
+    [
+        (
+            [Permission.READ_MARKET_DATA.value],
+            PERMISSION_SCOPE_VERSION,
+            [Permission.READ_MARKET_DATA.value],
+        ),
+        ([], PERMISSION_SCOPE_VERSION, []),
+        (None, None, None),
+    ],
+    ids=["narrowed-scope", "zero-scope", "full-role"],
+)
 def test_refresh_ws_ticket_carries_a_still_readable_wallet(
     auth_app: AuthAppFixture,
     monkeypatch: pytest.MonkeyPatch,
+    claim_permissions: list[str] | None,
+    claim_version: int | None,
+    expected_permissions: list[str] | None,
 ) -> None:
-    """A wallet the user can still read reaches the ticket.
+    """A wallet the user can still read reaches the ticket, whatever its scope.
 
     Given: A refresh carrying a wallet the read plane still admits,
     When: The response's ws_token is decoded,
-    Then: The ticket carries that wallet.
+    Then: The ticket carries that wallet, and the scope alongside it.
 
     The sibling tests cannot catch a dropped wallet assignment: their user has
     no readable wallets, so revalidation zeroes the wallet anyway and removing
@@ -4063,6 +4079,19 @@ def test_refresh_ws_ticket_carries_a_still_readable_wallet(
     revalidation distinguishes "carried" from "silently discarded" — and the
     wallet has no other route into a rebuilt principal, because the database
     deliberately does not store it.
+
+    **Parametrised across the SCOPE while holding the wallet readable**, which
+    is a cross product the suite otherwise lacks entirely. Before this, every
+    readable-wallet fixture carried a non-empty scope and every falsy-scope
+    fixture had its wallet erased by an unreadable plane, so the two conditions
+    never met. That leaves `carried_wallet if permissions else None` — a
+    plausible-looking coupling of two independent fields — passing every test.
+    Under it a full-role session with a selected, readable wallet loses that
+    selection silently, and nothing can rebuild it.
+
+    Both falsy scopes are covered because they are falsy for different reasons:
+    `[]` is a deliberate zero grant and `None` is the legacy full-role grant.
+    The wallet must survive both.
 
     The read plane itself is stubbed rather than seeded. This test asks whether
     the wallet reaches the ticket, not whether the read plane is correct; that
@@ -4081,8 +4110,8 @@ def test_refresh_ws_ticket_carries_a_still_readable_wallet(
         sub="123",
         username="bob",
         role=UserRole.OPERATOR,
-        permissions=[Permission.READ_MARKET_DATA.value],
-        permission_scope_version=PERMISSION_SCOPE_VERSION,
+        permissions=claim_permissions,
+        permission_scope_version=claim_version,
         exp=999999999,
         iat=123456,
         jti="refresh_readable_wallet_jti",
@@ -4109,6 +4138,7 @@ def test_refresh_ws_ticket_carries_a_still_readable_wallet(
         expected_sid_hash=compute_sid_hash("session-readable-wallet"),
     )
     assert ticket.active_wallet_public_id == wallet
+    assert ticket.permissions == expected_permissions
 
 
 def test_get_current_user_profile_returns_user(

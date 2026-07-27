@@ -202,31 +202,56 @@ class TestWsTokenRouteHappyPath:
         client.close()
 
     @pytest.mark.parametrize(
-        "claim_wallet",
-        ["019e873c-d062-720f-85df-fd4d7fce5bdf", None],
-        ids=["selected", "none-selected"],
+        ("claim_wallet", "claim_permissions"),
+        [
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", ["read:signals"]),
+            (None, ["read:signals"]),
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", None),
+            ("019e873c-d062-720f-85df-fd4d7fce5bdf", []),
+        ],
+        ids=["selected", "none-selected", "selected-full-role", "selected-zero-scope"],
     )
-    def test_ticket_carries_the_wallet_selection(self, claim_wallet: str | None) -> None:
+    def test_ticket_carries_the_wallet_selection(
+        self,
+        claim_wallet: str | None,
+        claim_permissions: list[str] | None,
+    ) -> None:
         """The client-selected wallet round-trips into the ticket.
 
-        Given: Access claims carrying an active wallet, or carrying none,
+        Given: Access claims carrying an active wallet, or carrying none, under
+            any permission scope,
         When: A ws_token is minted,
-        Then: The ticket carries that same value.
+        Then: The ticket carries both values unchanged.
 
         This value has no other route into a rebuilt principal — the database
         deliberately does not store it — so if the ticket drops it, a
         reconnecting client silently loses its wallet selection.
 
-        **Parametrised over a set and an unset wallet on purpose.** With only
-        the set case, ``claims.active_wallet_public_id or <anything>`` returns
-        the wallet unchanged and the mutant passes; the ``none-selected`` case
-        is the only one that can tell "pass the selection through" apart from
-        "substitute a default". That distinction matters more here than on the
-        scope fields: an unset wallet means the client has deliberately chosen
-        no wallet, and a substituted default would hand the socket a wallet
-        scope its own session never selected.
+        Two independent axes are covered, and the second exists because of a
+        mutation the first cannot see.
+
+        The WALLET axis: with only the set case,
+        ``claims.active_wallet_public_id or <anything>`` returns the wallet
+        unchanged and the mutant passes. The ``none-selected`` case is the only
+        one that tells "pass the selection through" apart from "substitute a
+        default" — and an unset wallet is a deliberate choice, so a substituted
+        default hands the socket a scope its session never selected.
+
+        The CROSS with the scope: every wallet-carrying fixture in this suite
+        held a non-empty scope, so ``carried_wallet if permissions else None``
+        — a plausible-looking coupling of two fields that are in fact
+        independent — passed everything. The two ``selected-*`` cases pin the
+        wallet against BOTH falsy scopes, which are falsy for different
+        reasons: ``[]`` is a deliberate zero grant, ``None`` the legacy
+        full-role grant. A full-role session with a selected wallet is an
+        ordinary state, not an edge case.
         """
-        claims = _claims().model_copy(update={"active_wallet_public_id": claim_wallet})
+        claims = _claims().model_copy(
+            update={
+                "active_wallet_public_id": claim_wallet,
+                "permissions": claim_permissions,
+            }
+        )
         client = _create_client(principal=_principal(), claims=claims)
         response = client.post("/api/auth/ws_token")
         assert response.status_code == 200
@@ -236,6 +261,7 @@ class TestWsTokenRouteHappyPath:
             expected_sid_hash=compute_sid_hash(claims.sid),
         )
         assert verified.active_wallet_public_id == claim_wallet
+        assert verified.permissions == claim_permissions
         client.close()
 
     def test_route_preserves_an_empty_permission_scope(self) -> None:
