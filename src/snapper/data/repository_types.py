@@ -2484,6 +2484,17 @@ class UserOperatorMembershipRow(TypedDict):
     sequence_id: int
 
 
+@dataclass(frozen=True)
+class DeskMembershipAttach:
+    """Parameters for one serialized human-viewer desk attachment."""
+
+    username: str
+    operator_public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class InstrumentOrderCapabilityRow(TypedDict):
     """Read projection for instrument_order_capabilities queries."""
 

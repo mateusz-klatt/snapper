@@ -168,6 +168,8 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.paired_execution import compute_paired_group_key
@@ -287,6 +289,7 @@ from snapper.data.repository_types import DerivedProjectionRetirementRequest
 from snapper.data.repository_types import DerivedProjectionRetirementResult
 from snapper.data.repository_types import DerivedProjectionScopeRow
 from snapper.data.repository_types import DerivedProjectionVersionRow
+from snapper.data.repository_types import DeskMembershipAttach
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionAnnulmentReason
@@ -1134,6 +1137,14 @@ class WalletUserReadGrantNotFoundError(Exception):
     ``revoke_wallet_user_read_grant`` when the pair was never granted, was
     already revoked, or lost a concurrent revoke race.
     """
+
+
+class DeskMembershipNotFoundError(Exception):
+    """Raised when the target user or desk is not active."""
+
+
+class DeskMembershipTargetError(Exception):
+    """Raised when the target is not a human VIEWER user."""
 
 
 class CredentialConflictError(Exception):
@@ -6414,6 +6425,28 @@ class Repository(ABC):
             ``user_operator_memberships`` partial unique index guarantees
             at most one primary per user, so callers may safely pick the
             first ``is_primary`` row.
+        """
+        ...
+
+    @abstractmethod
+    async def attach_viewer_to_desk(
+        self, request: DeskMembershipAttach
+    ) -> UserOperatorMembershipRow:
+        """Attach an active human VIEWER to an active desk atomically.
+
+        The target user row is locked before inspecting memberships, so
+        concurrent attachments cannot both become the first primary.
+        An already-active pair is returned unchanged.
+
+        Args:
+            request: Target identities and SCD2 provenance.
+
+        Returns:
+            The existing or newly inserted active membership.
+
+        Raises:
+            DeskMembershipNotFoundError: User or desk is not active.
+            DeskMembershipTargetError: User is not a human VIEWER.
         """
         ...
 
@@ -29021,6 +29054,111 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    async def attach_viewer_to_desk(
+        self, request: DeskMembershipAttach
+    ) -> UserOperatorMembershipRow:
+        """Attach an active human VIEWER to an active desk atomically."""
+        async with self.session() as s:
+            user = (
+                (
+                    await s.execute(
+                        select(User)
+                        .where(
+                            User.username == request.username,
+                            User.is_active.is_(True),
+                            *where_active(User, request.timestamp),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if user is None:
+                raise DeskMembershipNotFoundError("Active target user not found")
+            target_role = UserRole(user.role)
+            is_human_viewer = has_effective_permission(
+                target_role,
+                None,
+                None,
+                Permission.MANAGE_NOTIFICATION_DEVICES,
+            ) and not has_effective_permission(
+                target_role,
+                None,
+                None,
+                Permission.CREATE_ORDERS,
+            )
+            if not is_human_viewer:
+                raise DeskMembershipTargetError(
+                    "Desk attachment supports human VIEWER users only; "
+                    "AI delegate membership is managed by delegate lifecycle"
+                )
+            desk = (
+                (
+                    await s.execute(
+                        select(Operator).where(
+                            Operator.public_id == request.operator_public_id,
+                            *where_active(Operator, request.timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if desk is None:
+                raise DeskMembershipNotFoundError("Active target desk not found")
+            memberships = (
+                (
+                    await s.execute(
+                        select(UserOperatorMembership)
+                        .where(
+                            UserOperatorMembership.user_public_id == user.public_id,
+                            *where_active(UserOperatorMembership, request.timestamp),
+                        )
+                        .order_by(UserOperatorMembership.timestamp.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing = next(
+                (
+                    row
+                    for row in memberships
+                    if row.operator_public_id == request.operator_public_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return self._user_operator_membership_row(existing)
+            membership = UserOperatorMembership(
+                user_public_id=user.public_id,
+                operator_public_id=request.operator_public_id,
+                is_primary=not memberships,
+                timestamp=request.timestamp,
+                session_id=request.session_id,
+                sequence_id=request.sequence_id,
+            )
+            s.add(membership)
+            await s.commit()
+            await s.refresh(membership)
+            return self._user_operator_membership_row(membership)
+
+    @staticmethod
+    def _user_operator_membership_row(
+        membership: UserOperatorMembership,
+    ) -> UserOperatorMembershipRow:
+        """Project one membership model into the repository row contract."""
+        return UserOperatorMembershipRow(
+            public_id=membership.public_id,
+            user_public_id=membership.user_public_id,
+            operator_public_id=membership.operator_public_id,
+            is_primary=bool(membership.is_primary),
+            timestamp=membership.timestamp,
+            session_id=membership.session_id,
+            sequence_id=membership.sequence_id,
+        )
 
     async def get_active_credential(
         self,

@@ -29,6 +29,8 @@ from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import DeskMembershipAttach
+from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import UserDeactivatedData
@@ -37,6 +39,11 @@ from snapper.messaging.topics.builders import admin_topic
 _USERS_TOPIC = "users"
 _LOGIN_EVENTS_TOPIC = "login_events"
 _USER_DEACTIVATED_TOPIC = "user_deactivated"
+_DESK_MEMBERSHIPS_TOPIC = "desk_memberships"
+
+
+class DeskMembershipAuthorizationError(Exception):
+    """Raised when a caller may not manage the target desk."""
 
 
 class UserService:
@@ -90,6 +97,57 @@ class UserService:
         """
         hashed: bytes = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
         return hashed.decode()
+
+    async def attach_viewer_to_desk(
+        self,
+        principal: AuthPrincipal,
+        operator_public_id: str,
+        username: str,
+    ) -> UserOperatorMembershipRow:
+        """Attach a human VIEWER to a desk for the target's next login.
+
+        No bus event or live-principal rebuild occurs because attachment
+        intentionally takes effect only when the target next logs in.
+
+        Args:
+            principal: Authenticated caller.
+            operator_public_id: Target desk public ID.
+            username: Exact username of the target VIEWER.
+
+        Returns:
+            Existing or newly created active membership.
+
+        Raises:
+            DeskMembershipAuthorizationError: Caller lacks the capability
+                or is outside the target desk without being global ADMIN.
+        """
+        if not has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.MANAGE_DESK_MEMBERSHIPS,
+        ):
+            raise DeskMembershipAuthorizationError("MANAGE_DESK_MEMBERSHIPS permission is required")
+        is_global_admin = has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.IMPERSONATE_OPERATOR,
+        )
+        if not is_global_admin and operator_public_id not in principal.operator_public_ids:
+            raise DeskMembershipAuthorizationError(
+                "Current membership in the target desk is required"
+            )
+        now = datetime.now(UTC)
+        return await self.repository.attach_viewer_to_desk(
+            DeskMembershipAttach(
+                username=username,
+                operator_public_id=operator_public_id,
+                timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_DESK_MEMBERSHIPS_TOPIC),
+            )
+        )
 
     def _verify_password(self, password: str, password_hash: str) -> bool:
         """Verify password against stored bcrypt hash.

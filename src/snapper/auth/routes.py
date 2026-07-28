@@ -56,7 +56,10 @@ from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.user_service import DeskMembershipAuthorizationError
 from snapper.auth.user_service import get_user_service
+from snapper.data.repository import DeskMembershipNotFoundError
+from snapper.data.repository import DeskMembershipTargetError
 from snapper.data.repository import Repository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
@@ -1027,6 +1030,55 @@ async def get_users(
         payload=users,
         count=len(users),
     )
+
+
+@router.post("/desks/{operator_public_id}/members/{username}")
+async def attach_viewer_to_desk(
+    request: Request,
+    operator_public_id: str,
+    username: str,
+    current_user: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.MANAGE_DESK_MEMBERSHIPS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+) -> MessageResponse:
+    """Attach a human VIEWER to a desk, effective at the target's next login.
+
+    No bus event or live-principal rebuild is needed in this slice because
+    existing credentials deliberately retain their current membership set.
+
+    Args:
+        request: FastAPI request providing response provenance.
+        operator_public_id: Public ID of the target desk.
+        username: Exact username of the human VIEWER target.
+        current_user: Caller holding MANAGE_DESK_MEMBERSHIPS.
+        _csrf: CSRF token validation.
+
+    Returns:
+        Idempotent attachment confirmation.
+
+    Raises:
+        HTTPException: 403 for a caller outside the target desk, 404 when
+            the active user or desk is absent, or 422 for a non-VIEWER
+            target including an AI delegate.
+    """
+    user_service = get_user_service()
+    try:
+        await user_service.attach_viewer_to_desk(
+            principal=current_user,
+            operator_public_id=operator_public_id,
+            username=username,
+        )
+    except DeskMembershipAuthorizationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except DeskMembershipNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DeskMembershipTargetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return _message_response(request, f"User '{username}' is attached to the desk")
 
 
 @router.post("/users", openapi_extra=openapi_schema(CreateUserRequest))

@@ -48,6 +48,7 @@ class Permission(StrEnum):
     MANAGE_AI_INTEGRATION = "manage:ai_integration"
     CONFIGURE_SYSTEM = "configure:system"
     MANAGE_USERS = "manage:users"
+    MANAGE_DESK_MEMBERSHIPS = "manage:desk_memberships"
     READ_WALLET_CREDENTIALS = "read:wallet_credentials"
     MANAGE_WALLET_CREDENTIALS = "manage:wallet_credentials"
     MANAGE_SCOPE_GRANTS = "manage:scope_grants"
@@ -168,6 +169,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.MANAGE_BACKTESTS,
         Permission.READ_NOTIFICATIONS,
         Permission.MANAGE_NOTIFICATION_DEVICES,
+        Permission.MANAGE_DESK_MEMBERSHIPS,
     },
     UserRole.ADMIN: set(Permission),
 }
