@@ -453,7 +453,7 @@ skip = [".venv", "build", "dist", "data/polygon", "frontend", "ios", "notebooks"
 skip_glob = ["**/node_modules/*"]
 
 [tool.pytest.ini_options]
-addopts = "-q --tb=short --timeout=15 --timeout-method=signal -m 'not integration'"
+addopts = "-q --tb=short --timeout=15 -m 'not integration'"
 asyncio_mode = "auto"
 timeout = 15
 testpaths = ["tests", "proprietary/tests", "integrations/snapper-delegate/tests"]
