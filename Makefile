@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-server-uat dev-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -67,11 +67,22 @@ help:
 	$(info migrate-dev                Run migrations + seed dev data)
 	$(info migrate-prod               Run migrations + seed prod data)
 	$(info )
+	$(info UAT [local Postgres, reads $$(UAT_ENV) = .env.uat, never .env]:)
+	$(info uat-db-up      Start the dev-profile Postgres and create the UAT database)
+	$(info uat-db-schema  Migrate the UAT database to head and seed it [seed is a no-op if users exist])
+	$(info uat-db-refresh Copy a recent market-data window from the read-only source into UAT)
+	$(info                control-plane tables [users/operators/wallets/settings] are NOT touched)
+	$(info uat-setup      uat-db-up + uat-db-schema + uat-db-refresh)
+	$(info run-server-uat Start the UAT backend alone on :8000)
+	$(info run-uat        Alias of run-server-uat [kept for muscle memory])
+	$(info dev-uat        Start UAT backend :8000 + frontend :3000 together [Ctrl-C stops both])
+	$(info )
 	$(info Development [hot reload]:)
 	$(info dev-backend  Start backend with auto-reload [REST + WS + ZMQ broker in-process])
 	$(info dev-notify   Start APNs notify sidecar [ZMQ alerts.* -> APNs HTTP/2])
 	$(info dev-all      Start backend + notify sidecar in parallel [Ctrl-C stops both])
 	$(info dev-frontend Start frontend dev server [Vite with HMR + proxy])
+	$(info dev-uat      Start UAT backend + frontend in parallel [reads $$(UAT_ENV), Ctrl-C stops both])
 	$(info )
 	$(info ZeroMQ IPC:)
 	$(info run-broker     Start ZMQ broker for message routing)
@@ -383,9 +394,31 @@ uat-db-refresh:
 
 uat-setup: uat-db-up uat-db-schema uat-db-refresh
 
-run-uat:
+run-server-uat:
+	$(info Starting UAT backend against $(UAT_ENV)...)
+	$(info Backend API: http://localhost:8000/api)
 	@bash -c 'set -a; [ -f $(UAT_ENV) ] && . ./$(UAT_ENV); set +a; \
 		$(PYRUN) snapper server --host 0.0.0.0'
+
+run-uat: run-server-uat
+
+dev-uat:
+	$(info Starting UAT backend + frontend in parallel...)
+	$(info Frontend URL: http://localhost:3000/)
+	$(info Backend API:  http://localhost:8000/api  [env: $(UAT_ENV)])
+	$(info API proxy:    http://localhost:3000/api -> http://localhost:8000/api)
+	$(info Logs: data/log/snapper-uat/snapper.log)
+	$(info Press Ctrl-C to stop both processes.)
+	@mkdir -p data/log/snapper-uat
+	@bash -c 'set -m; trap "kill 0 2>/dev/null; exit" SIGINT SIGTERM EXIT; \
+		(set -a; [ -f $(UAT_ENV) ] && . ./$(UAT_ENV); set +a; \
+			$(PYRUN) snapper server --host 0.0.0.0 2>&1 \
+			| sed -u "s/\x1b\[[0-9;]*m//g" \
+			| awk "{print \"[backend]  \" \$$0; fflush()}" \
+			| tee data/log/snapper-uat/snapper.log) & \
+		(cd $(UI_DIR) && pnpm dev 2>&1 \
+			| awk "{print \"[frontend] \" \$$0; fflush()}") & \
+		wait'
 
 dev-backend:
 	$(info Starting backend with hot reload...)
@@ -393,14 +426,14 @@ dev-backend:
 	$(info WebSocket: ws://localhost:8000/api/ws)
 	$(info Backend log: data/log/snapper/snapper.log)
 	@mkdir -p data/log/snapper
-	@bash -c '$(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper/snapper.log'
+	@bash -c '$(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 | sed -u "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper/snapper.log'
 
 dev-notify:
 	$(info Starting iOS Push Foundation sidecar (ZMQ alerts -> APNs)...)
 	$(info Topic + APNs creds read from settings cache (apns_*).)
 	$(info Sidecar log: data/log/snapper-notify/snapper-notify.log)
 	@mkdir -p data/log/snapper-notify
-	@bash -c '$(PYRUN) snapper notify 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper-notify/snapper-notify.log'
+	@bash -c '$(PYRUN) snapper notify 2>&1 | sed -u "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper-notify/snapper-notify.log'
 
 dev-all:
 	$(info Starting backend + notify sidecar in parallel...)
@@ -412,11 +445,11 @@ dev-all:
 	@mkdir -p data/log/snapper data/log/snapper-notify
 	@bash -c 'set -m; trap "kill 0 2>/dev/null; exit" SIGINT SIGTERM EXIT; \
 		($(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 \
-			| sed "s/\x1b\[[0-9;]*m//g" \
+			| sed -u "s/\x1b\[[0-9;]*m//g" \
 			| awk "{print \"[backend] \" \$$0; fflush()}" \
 			| tee data/log/snapper/snapper.log) & \
 		($(PYRUN) snapper notify 2>&1 \
-			| sed "s/\x1b\[[0-9;]*m//g" \
+			| sed -u "s/\x1b\[[0-9;]*m//g" \
 			| awk "{print \"[notify]  \" \$$0; fflush()}" \
 			| tee data/log/snapper-notify/snapper-notify.log) & \
 		wait'
