@@ -2504,14 +2504,14 @@ class TraderCoordinator(RegisterableProcess):
         Skips engine_keys already recovered from checkpoints.
 
         Args:
-            now: Current timestamp for DB queries.
+            now: Legacy recovery instant retained for direct-call compatibility.
             checkpoint_recovered: Engine keys already restored from checkpoints.
 
         Returns:
             All recovered execution rows.
         """
-        del checkpoint_recovered
-        executions = await self._load_execution_recovery_rows(now)
+        del now, checkpoint_recovered
+        executions = await self._load_execution_recovery_rows()
         if not executions:
             return []
         durable_by_cid = await self._load_execution_recovery_lineage(executions)
@@ -2521,7 +2521,6 @@ class TraderCoordinator(RegisterableProcess):
 
     async def _load_execution_recovery_rows(
         self,
-        now: datetime,
     ) -> list[ExecutionRow]:
         """Load execution rows, failing certification when the query fails."""
         try:

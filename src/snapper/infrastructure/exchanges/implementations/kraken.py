@@ -1088,10 +1088,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise AmbiguousOrderSubmitError(
                 client_order_id=request.client_order_id,
                 instrument=request.symbol,
-                message=(
-                    f"Kraken Spot create_order unclassified venue error "
-                    f"(placement unproven, order may exist): {e}"
-                ),
+                message=f"Kraken Spot create_order unclassified venue error "
+                f"(placement unproven, order may exist): {e}",
                 venue_answered=True,
             ) from e
         return cast(dict[str, Any], order_data)
