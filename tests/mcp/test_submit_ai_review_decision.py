@@ -14,7 +14,7 @@ Covers the full envelope contract:
   ToolError.
 - Pre-lifespan repository getter -> ToolError (RuntimeError chain).
 
-The tool body is exercised through FastMCP's tool manager so the
+The tool body is exercised through MCPServer's tool manager so the
 dispatch path matches a real MCP client invocation.
 """
 
@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock
 
 import jwt
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from mcp.types import TextContent
 
@@ -44,8 +44,9 @@ from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.mcp.error_envelope import to_call_tool_result
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
-from snapper.mcp.server import PermissionAwareFastMCP
+from snapper.mcp.server import PermissionAwareMCPServer
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 
 def _make_claims(
@@ -127,9 +128,9 @@ def _decode_pre_versioning_claims(
 def _build_server(
     repository: Any = None,
     claims: TokenClaims | None = None,
-) -> PermissionAwareFastMCP:
-    """Construct a FastMCP instance with tools registered + getters wired."""
-    server = PermissionAwareFastMCP("test")
+) -> PermissionAwareMCPServer:
+    """Construct a MCPServer instance with tools registered + getters wired."""
+    server = PermissionAwareMCPServer("test")
     register_mcp_tools(
         server,
         repository_getter=lambda: repository,
@@ -166,7 +167,7 @@ def _envelope_from(result: CallToolResult) -> dict[str, Any]:
 def _decode_call_tool_result(result: Any) -> dict[str, Any]:
     """Pull the JSON envelope out of a tool-manager dispatch result.
 
-    FastMCP's tool manager preserves the :class:`CallToolResult`
+    MCPServer's tool manager preserves the :class:`CallToolResult`
     return shape verbatim for tools that explicitly declare it as
     return type; older callsites in the suite still see a dict
     serialisation, so the helper handles both paths.
@@ -193,7 +194,7 @@ class TestToCallToolResult:
         four contract fields with details defaulted to ``{}``.
         """
         result = to_call_tool_result(success=True, error_code=None, message="ok")
-        assert result.isError is False
+        assert result.is_error is False
         envelope = _envelope_from(result)
         assert envelope == {
             "success": True,
@@ -217,7 +218,7 @@ class TestToCallToolResult:
             message="idempotent retry",
             details={"decision": "approve"},
         )
-        assert result.isError is False
+        assert result.is_error is False
         envelope = _envelope_from(result)
         assert envelope["success"] is True
         assert envelope["error_code"] == "decision_already_recorded"
@@ -237,7 +238,7 @@ class TestToCallToolResult:
             message="no row",
             details={"review_public_id": "ghost"},
         )
-        assert result.isError is True
+        assert result.is_error is True
         envelope = _envelope_from(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "review_not_found"
@@ -287,7 +288,8 @@ class TestSubmitAiReviewDecisionTool:
             ),
         )
         server = _build_server(repository=AsyncMock())
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-1", "decision": "approve", "rationale": "LGTM"},
         )
@@ -335,7 +337,8 @@ class TestSubmitAiReviewDecisionTool:
         finally:
             TOKEN_CLAIMS_CTX.reset(context_token)
 
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-v1", "decision": "approve"},
         )
@@ -399,7 +402,8 @@ class TestSubmitAiReviewDecisionTool:
         finally:
             TOKEN_CLAIMS_CTX.reset(context_token)
 
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-pre-versioning", "decision": "approve"},
         )
@@ -453,7 +457,8 @@ class TestSubmitAiReviewDecisionTool:
             TOKEN_CLAIMS_CTX.reset(context_token)
 
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_ai_review_decision",
                 {"review_id": f"rev-{username}", "decision": "approve"},
             )
@@ -485,7 +490,8 @@ class TestSubmitAiReviewDecisionTool:
             ),
         )
         server = _build_server(repository=AsyncMock())
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-1", "decision": "approve"},
         )
@@ -525,7 +531,8 @@ class TestSubmitAiReviewDecisionTool:
             ),
         )
         server = _build_server(repository=AsyncMock())
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-1", "decision": "reject"},
         )
@@ -557,7 +564,8 @@ class TestSubmitAiReviewDecisionTool:
             ),
         )
         server = _build_server(repository=AsyncMock())
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-1", "decision": "maybe"},
         )
@@ -577,7 +585,7 @@ class TestSubmitAiReviewDecisionTool:
         """
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: AsyncMock(),
@@ -586,7 +594,8 @@ class TestSubmitAiReviewDecisionTool:
         )
         try:
             with pytest.raises(ToolError) as exc:
-                await server._tool_manager.call_tool(
+                await call_raw_tool(
+                    server,
                     "submit_ai_review_decision",
                     {"review_id": "rev-1", "decision": "approve"},
                 )
@@ -617,7 +626,8 @@ class TestSubmitAiReviewDecisionTool:
         server = _build_server(repository=AsyncMock(), claims=claims)
 
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_ai_review_decision",
                 {"review_id": "rev-operator", "decision": "approve"},
             )
@@ -659,7 +669,8 @@ class TestSubmitAiReviewDecisionTool:
         )
         server = _build_server(repository=AsyncMock(), claims=claims)
 
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_ai_review_decision",
             {"review_id": "rev-reviewer", "decision": "approve"},
         )
@@ -681,7 +692,8 @@ class TestSubmitAiReviewDecisionTool:
         """
         server = _build_server(repository=None)
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_ai_review_decision",
                 {"review_id": "rev-1", "decision": "approve"},
             )

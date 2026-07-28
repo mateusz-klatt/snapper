@@ -69,7 +69,7 @@ def filter_mcp_tools(tools: list[MCPTool], claims: TokenClaims) -> list[MCPTool]
     """Filter registered tools through the authenticated visibility policy.
 
     Args:
-        tools: Registered tools in FastMCP catalog order.
+        tools: Registered tools in MCPServer catalog order.
         claims: Authenticated token claims for the current request.
 
     Returns:

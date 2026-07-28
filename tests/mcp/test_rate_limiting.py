@@ -4,7 +4,7 @@ Covers :class:`PrincipalRateLimitMiddleware` — guards against
 regressions where ``build_mcp_app`` could drop the rate-limit
 surface. The suite exercises the sliding-window behaviour
 through a minimal Starlette app so the assertions do not depend
-on the heavier FastMCP dispatcher.
+on the heavier MCPServer dispatcher.
 """
 
 from datetime import UTC

@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from mcp.types import TextContent
 
@@ -18,6 +18,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.data.repository import Repository
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 _RAISING_TRADING_CALLS: tuple[tuple[str, dict[str, object], Permission], ...] = (
     (
@@ -80,7 +81,7 @@ def _researcher_claims(permissions: list[str]) -> TokenClaims:
 def _build_server(
     claims: TokenClaims,
     repository: Repository | None = None,
-) -> FastMCP:
+) -> MCPServer:
     """Register the production MCP tool set against controlled dependencies.
 
     Args:
@@ -88,9 +89,9 @@ def _build_server(
         repository: Optional repository used by an admitted tool.
 
     Returns:
-        FastMCP server with every production tool registered.
+        MCPServer server with every production tool registered.
     """
-    server = FastMCP("ai-researcher-boundary")
+    server = MCPServer("ai-researcher-boundary")
     register_mcp_tools(
         server,
         repository_getter=lambda: repository,
@@ -104,7 +105,7 @@ def _decode_envelope(result: object) -> dict[str, object]:
     """Decode one canonical MCP tool result envelope.
 
     Args:
-        result: Raw value returned by FastMCP tool dispatch.
+        result: Raw value returned by MCPServer tool dispatch.
 
     Returns:
         Parsed canonical response envelope.
@@ -129,13 +130,13 @@ async def test_forged_researcher_scope_cannot_invoke_raising_trading_tools(
 
     Given: AI researcher claims forged to contain every known permission.
     When: A trading tool with a raising permission gate is dispatched.
-    Then: FastMCP returns a permission error before any dependency is used.
+    Then: MCPServer returns a permission error before any dependency is used.
     """
     claims = _researcher_claims([permission.value for permission in Permission])
     server = _build_server(claims)
 
     with pytest.raises(ToolError) as exc:
-        await server._tool_manager.call_tool(tool_name, arguments)
+        await call_raw_tool(server, tool_name, arguments)
 
     assert required_permission.value in str(exc.value)
 
@@ -155,7 +156,7 @@ async def test_forged_researcher_scope_cannot_read_or_act_on_trading_intent(
     claims = _researcher_claims([permission.value for permission in Permission])
     server = _build_server(claims)
 
-    result = await server._tool_manager.call_tool(tool_name, arguments)
+    result = await call_raw_tool(server, tool_name, arguments)
     envelope = _decode_envelope(result)
 
     assert envelope["success"] is False
@@ -176,7 +177,7 @@ async def test_narrow_researcher_scope_can_still_read_market_instruments() -> No
     claims = _researcher_claims([Permission.READ_MARKET_DATA.value])
     server = _build_server(claims, repository)
 
-    result = await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+    result = await call_raw_tool(server, "list_instruments", {"exchange": "kraken"})
 
     assert result == {
         "exchange": "kraken",

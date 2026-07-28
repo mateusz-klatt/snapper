@@ -3,7 +3,7 @@
 This module owns :func:`to_call_tool_result`, the single helper that
 wraps any structured tool envelope (success boolean, optional
 error_code, human-readable message, opaque details) into the
-``mcp.types.CallToolResult`` shape FastMCP serialises across the wire.
+``mcp.types.CallToolResult`` shape MCPServer serialises across the wire.
 
 Why a dedicated helper:
 
@@ -61,12 +61,12 @@ def to_call_tool_result(
     message: str,
     details: JsonObject | None = None,
 ) -> CallToolResult:
-    """Wrap a structured tool envelope as a FastMCP :class:`CallToolResult`.
+    """Wrap a structured tool envelope as an MCPServer :class:`CallToolResult`.
 
     The four fields map 1:1 to the canonical envelope semantics —
     ``error_code`` is the load-bearing discriminator that the bridge
     forwards to delegate clients, ``message`` is the human-readable
-    summary FastMCP exposes verbatim, and ``details`` is the opaque
+    summary MCPServer exposes verbatim, and ``details`` is the opaque
     JSON payload (status, resolution_mode, dispatch_version, etc.)
     consumers parse for follow-up logic.
 
@@ -75,7 +75,7 @@ def to_call_tool_result(
             valid decision AND idempotent retry; ``False`` for hard
             errors (review_not_found, not_authorized, peer_resolved,
             review_id_expired). The MCP layer flips
-            :attr:`CallToolResult.isError` to ``not success`` so
+            :attr:`CallToolResult.is_error` to ``not success`` so
             MCP-aware clients without a JSON-envelope parser still
             observe the correct top-level error flag.
         error_code: Optional stable-classifier string. May
@@ -83,7 +83,7 @@ def to_call_tool_result(
             ``decision_already_recorded``); ``None`` only on the
             first-valid-decision happy path.
         message: Human-readable summary of the outcome. Forwarded
-            verbatim through FastMCP.
+            verbatim through MCPServer.
         details: Optional JSON-serialisable payload with envelope
             extras (status, resolution_mode, dispatch_version, ...).
             ``None`` is normalised to an empty object so consumers can
@@ -91,7 +91,7 @@ def to_call_tool_result(
 
     Returns:
         A :class:`mcp.types.CallToolResult` whose single content entry
-        is the JSON envelope and whose ``isError`` flag equals
+        is the JSON envelope and whose wire-level ``isError`` flag equals
         ``not success``.
     """
     envelope = {
@@ -102,5 +102,5 @@ def to_call_tool_result(
     }
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(envelope))],
-        isError=not success,
+        is_error=not success,
     )

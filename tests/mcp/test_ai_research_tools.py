@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from mcp.types import TextContent
 
@@ -25,6 +25,7 @@ from snapper.data.repository_types import MarketViewInsertRow
 from snapper.data.repository_types import MarketViewRow
 from snapper.data.repository_types import MarketViewSourceInsertRow
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 _AS_OF = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
 _SERVER_NOW = datetime(2026, 7, 21, 8, 5, tzinfo=UTC)
@@ -134,9 +135,9 @@ def _market_view() -> MarketViewRow:
     }
 
 
-def _server(repository: MagicMock | None, claims: TokenClaims) -> FastMCP:
+def _server(repository: MagicMock | None, claims: TokenClaims) -> MCPServer:
     """Register the production MCP surface with focused dependencies."""
-    server = FastMCP("ai-research-tools-test")
+    server = MCPServer("ai-research-tools-test")
     register_mcp_tools(
         server,
         repository_getter=lambda: cast(Repository | None, repository),
@@ -184,7 +185,8 @@ async def test_submit_market_view_uses_inline_sources_and_server_clock(
     server = _server(repository, _claims())
     server_clock = _freeze_server_clock(monkeypatch)
 
-    result = await server._tool_manager.call_tool(
+    result = await call_raw_tool(
+        server,
         "submit_market_view",
         {
             "research_round_public_id": "round-1",
@@ -241,7 +243,8 @@ async def test_submit_market_view_rejects_forged_submitted_at() -> None:
     repository = _repository()
     server = _server(repository, _claims())
 
-    result = await server._tool_manager.call_tool(
+    result = await call_raw_tool(
+        server,
         "submit_market_view",
         {
             "research_round_public_id": "round-1",
@@ -268,7 +271,8 @@ async def test_submit_market_view_denies_role_without_permission() -> None:
     repository = _repository()
     server = _server(repository, _claims(role=UserRole.AI_DELEGATE))
 
-    result = await server._tool_manager.call_tool(
+    result = await call_raw_tool(
+        server,
         "submit_market_view",
         {
             "research_round_public_id": "round-1",
@@ -292,7 +296,8 @@ async def test_submit_market_view_reports_uninitialized_repository() -> None:
     """
     server = _server(None, _claims())
 
-    result = await server._tool_manager.call_tool(
+    result = await call_raw_tool(
+        server,
         "submit_market_view",
         {
             "research_round_public_id": "round-1",
@@ -339,7 +344,8 @@ async def test_submit_market_view_maps_known_repository_rejections(
     repository = _repository(insert_error=ValueError(repository_message))
     server = _server(repository, _claims())
 
-    result = await server._tool_manager.call_tool(
+    result = await call_raw_tool(
+        server,
         "submit_market_view",
         {
             "research_round_public_id": "round-1",
@@ -356,17 +362,18 @@ async def test_submit_market_view_maps_known_repository_rejections(
 
 @pytest.mark.asyncio
 async def test_submit_market_view_does_not_mask_unknown_repository_error() -> None:
-    """An unknown repository ValueError remains observable through FastMCP.
+    """An unknown repository ValueError remains observable through MCPServer.
 
     Given: A repository that raises an unexpected market-view ValueError on insertion.
     When: The submit_market_view tool receives a valid payload.
-    Then: FastMCP raises a ToolError containing the unexpected repository failure message.
+    Then: MCPServer raises a ToolError containing the unexpected repository failure message.
     """
     repository = _repository(insert_error=ValueError("unexpected market view failure"))
     server = _server(repository, _claims())
 
     with pytest.raises(ToolError, match="unexpected market view failure"):
-        await server._tool_manager.call_tool(
+        await call_raw_tool(
+            server,
             "submit_market_view",
             {
                 "research_round_public_id": "round-1",
@@ -389,7 +396,7 @@ async def test_get_latest_research_returns_full_artifact_at_server_clock(
     server = _server(repository, _claims())
     server_clock = _freeze_server_clock(monkeypatch)
 
-    result = await server._tool_manager.call_tool("get_latest_research", {})
+    result = await call_raw_tool(server, "get_latest_research", {})
 
     envelope = _decode_result(result)
     details = _object(envelope["details"])
@@ -446,7 +453,7 @@ async def test_get_latest_research_returns_none_cleanly(
     server = _server(repository, _claims())
     _freeze_server_clock(monkeypatch)
 
-    result = await server._tool_manager.call_tool("get_latest_research", {})
+    result = await call_raw_tool(server, "get_latest_research", {})
 
     envelope = _decode_result(result)
     details = _object(envelope["details"])
@@ -468,7 +475,7 @@ async def test_get_latest_research_denies_narrow_token_without_permission() -> N
     claims = _claims(permissions=[Permission.READ_MARKET_DATA.value])
     server = _server(repository, claims)
 
-    result = await server._tool_manager.call_tool("get_latest_research", {})
+    result = await call_raw_tool(server, "get_latest_research", {})
 
     envelope = _decode_result(result)
     assert envelope["success"] is False
@@ -486,7 +493,7 @@ async def test_get_latest_research_reports_uninitialized_repository() -> None:
     """
     server = _server(None, _claims())
 
-    result = await server._tool_manager.call_tool("get_latest_research", {})
+    result = await call_raw_tool(server, "get_latest_research", {})
 
     envelope = _decode_result(result)
     assert envelope["success"] is False

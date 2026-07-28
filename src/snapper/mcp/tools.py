@@ -41,7 +41,7 @@ from uuid import uuid7
 
 from fastapi import HTTPException
 from loguru import logger
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.types import CallToolResult
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -227,7 +227,7 @@ def _require_permission(claims: TokenClaims, permission: Permission) -> None:
 
     Raises:
         PermissionError: when the caller's effective token scope does
-            not include the required permission. Caught by FastMCP and
+            not include the required permission. Caught by MCPServer and
             returned to the MCP client as a tool-error response.
     """
     effective_permissions = get_effective_permissions(
@@ -337,7 +337,7 @@ def _envelope_for_repository(
     Returns the :class:`Repository` singleton on success, or a
     structured ``service_unavailable`` envelope when the lifespan has
     not yet initialised the repository — clients receive a
-    well-formed envelope instead of a raw FastMCP tool error.
+    well-formed envelope instead of a raw MCPServer tool error.
     """
     repo = repository_getter()
     if repo is None:
@@ -998,7 +998,7 @@ def _require_ai_review_decision_access(
 
     Raises:
         PermissionError: when the caller's effective grant does not
-            project AI-review decision capability. Caught by FastMCP
+            project AI-review decision capability. Caught by MCPServer
             and returned to the client as a tool error.
     """
     claims = claims_getter()
@@ -1928,23 +1928,23 @@ async def _list_recent_signals_tool(
 
 
 def register_mcp_tools(
-    mcp_server: FastMCP,
+    mcp_server: MCPServer,
     *,
     repository_getter: Callable[[], Repository | None],
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
     claims_getter: Callable[[], TokenClaims],
     tracker_getter: Callable[[], SequenceTracker | None] | None = None,
 ) -> None:
-    """Register every MCP tool on the passed-in :class:`FastMCP` server.
+    """Register every MCP tool on the passed-in :class:`MCPServer` server.
 
-    Tools are decorated via :meth:`FastMCP.tool` so the downstream
+    Tools are decorated via :meth:`MCPServer.tool` so the downstream
     Streamable HTTP app dispatches to them automatically. The getter
     pattern allows the sub-app to be constructed before the FastAPI
     lifespan has initialized the repository + enforcer singletons —
     the getters resolve lazily at each tool invocation.
 
     Args:
-        mcp_server: The :class:`FastMCP` instance built in
+        mcp_server: The :class:`MCPServer` instance built in
             ``build_mcp_app()``.
         repository_getter: Zero-arg callable returning the
             :class:`Repository` singleton (or ``None`` pre-lifespan).
@@ -2156,9 +2156,9 @@ def register_mcp_tools(
         Raises:
             PermissionError: if the caller lacks
                 :data:`Permission.SUBMIT_AI_REVIEW_DECISION` (caught by
-                FastMCP and surfaced to the client as a tool error). All
+                MCPServer and surfaced to the client as a tool error). All
                 other failure modes flow through the envelope —
-                FastMCP NEVER sees an exception for a known
+                MCPServer NEVER sees an exception for a known
                 :class:`AiReviewDecisionResult` outcome.
         """
         return await _submit_ai_review_decision_tool(

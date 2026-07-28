@@ -4,14 +4,12 @@ from datetime import UTC
 from datetime import datetime
 
 import pytest
-from mcp.types import ListToolsRequest
-from mcp.types import ListToolsResult
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
-from snapper.mcp.server import PermissionAwareFastMCP
+from snapper.mcp.server import PermissionAwareMCPServer
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tool_catalog import MCP_TOOL_VISIBILITY_POLICY
 from snapper.mcp.tool_catalog import is_mcp_tool_visible
@@ -48,13 +46,13 @@ def _make_claims(
     )
 
 
-def _build_catalog_server() -> PermissionAwareFastMCP:
+def _build_catalog_server() -> PermissionAwareMCPServer:
     """Build the production tool registration on the filtered server.
 
     Returns:
-        Permission-aware FastMCP server with all production tools registered.
+        Permission-aware MCP server with all production tools registered.
     """
-    server = PermissionAwareFastMCP("tool-catalog-test")
+    server = PermissionAwareMCPServer("tool-catalog-test")
     register_mcp_tools(
         server,
         repository_getter=lambda: None,
@@ -65,25 +63,21 @@ def _build_catalog_server() -> PermissionAwareFastMCP:
 
 
 async def _listed_tool_names(
-    server: PermissionAwareFastMCP,
+    server: PermissionAwareMCPServer,
     claims: TokenClaims | None,
 ) -> set[str]:
     """Return catalog names under an optional claims context.
 
     Args:
-        server: Permission-aware FastMCP server to query.
+        server: Permission-aware MCP server to query.
         claims: Claims to bind, or ``None`` for the compatibility path.
 
     Returns:
-        Names returned by the server's registered protocol list handler.
+        Names returned by the server's public list operation.
     """
     context_token = TOKEN_CLAIMS_CTX.set(claims) if claims is not None else None
     try:
-        handler = server._mcp_server.request_handlers[ListToolsRequest]
-        server_result = await handler(ListToolsRequest())
-        list_result = server_result.root
-        assert isinstance(list_result, ListToolsResult)
-        return {tool.name for tool in list_result.tools}
+        return {tool.name for tool in await server.list_tools()}
     finally:
         if context_token is not None:
             TOKEN_CLAIMS_CTX.reset(context_token)
@@ -128,7 +122,7 @@ async def test_ai_reviewer_sees_review_tool_without_research_or_trading_mutation
     """The review-only principal sees decisions but no research or trading writes.
 
     Given: An AI_REVIEWER token carrying its complete v2 role grant.
-    When: The permission-aware FastMCP list handler builds its catalog.
+    When: The permission-aware MCPServer list handler builds its catalog.
     Then: The decision tool is visible while web tools and research or trading writes are absent.
     """
     server = _build_catalog_server()
@@ -165,7 +159,7 @@ async def test_ai_researcher_sees_research_tools_without_review_or_trading_tools
     """The research principal sees market research but no review or trading tools.
 
     Given: An AI_RESEARCHER token carrying its complete v2 role grant.
-    When: The permission-aware FastMCP list handler builds its catalog.
+    When: The permission-aware MCPServer list handler builds its catalog.
     Then: Research submit/read tools appear and decision plus trading tools stay hidden.
     """
     server = _build_catalog_server()

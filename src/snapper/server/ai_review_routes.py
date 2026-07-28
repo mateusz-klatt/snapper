@@ -140,7 +140,7 @@ class AiReviewDecisionCommand(
     a provenance envelope (``public_id``, ``session_id``,
     ``sequence_id``, ``timestamp``) around the inner
     :class:`AiReviewDecisionRequest` payload. The MCP tool surface
-    keeps its flat-args convention because FastMCP owns the JSON-RPC
+    keeps its flat-args convention because MCPServer owns the JSON-RPC
     framing and provenance is minted server-side from JWT claims +
     ``event_metadata`` when the audit event hits the bus.
     """

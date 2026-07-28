@@ -9,7 +9,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.types import CallToolResult
 from mcp.types import TextContent
 
@@ -23,6 +23,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import AiReviewAftermathRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 
 def _claims(role: UserRole = UserRole.AI_DELEGATE) -> TokenClaims:
@@ -156,7 +157,7 @@ def _clear_scope_grant_service() -> Generator[None]:
     ScopeGrantService.clear_instance()
 
 
-def _server(repository: AsyncMock | None, claims: TokenClaims) -> FastMCP:
+def _server(repository: AsyncMock | None, claims: TokenClaims) -> MCPServer:
     """Register the production tool set against focused test dependencies.
 
     Args:
@@ -164,9 +165,9 @@ def _server(repository: AsyncMock | None, claims: TokenClaims) -> FastMCP:
         claims: Authenticated claims returned by the getter.
 
     Returns:
-        FastMCP server whose real tool manager can dispatch the new tool.
+        MCPServer server whose real tool manager can dispatch the new tool.
     """
-    server = FastMCP("aftermath-test")
+    server = MCPServer("aftermath-test")
     register_mcp_tools(
         server,
         repository_getter=lambda: cast(Repository | None, repository),
@@ -190,10 +191,10 @@ def _json_object(value: JsonValue) -> JsonObject:
 
 
 def _decode_result(result: object) -> JsonObject:
-    """Decode FastMCP's native or serialized ``CallToolResult`` shape.
+    """Decode MCPServer's native or serialized ``CallToolResult`` shape.
 
     Args:
-        result: Value returned by the FastMCP tool manager.
+        result: Value returned by the MCPServer tool manager.
 
     Returns:
         Canonical JSON envelope emitted by the tool.
@@ -230,8 +231,8 @@ async def test_get_ai_review_aftermath_returns_terminal_projection() -> None:
     """
     review = _review()
     repo = _repository(review=review, aftermath=_aftermath(review))
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["success"] is True
@@ -258,8 +259,8 @@ async def test_get_ai_review_aftermath_rejects_unregistered_delegate() -> None:
     Then it fails before loading the review.
     """
     repo = _repository(delegate_registered=False, review=_review())
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["success"] is False
@@ -276,8 +277,8 @@ async def test_get_ai_review_aftermath_hides_unknown_review() -> None:
     Then ``review_not_found`` returns before scope and aggregate reads.
     """
     repo = _repository(review=None)
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "missing"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "missing"}
     )
     envelope = _decode_result(result)
     assert envelope["error_code"] == "review_not_found"
@@ -294,8 +295,8 @@ async def test_get_ai_review_aftermath_hides_out_of_scope_review() -> None:
     Then it returns ``review_not_found`` and loads no trading projection.
     """
     repo = _repository(review=_review(), scope_ok=False)
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["error_code"] == "review_not_found"
@@ -311,8 +312,8 @@ async def test_get_ai_review_aftermath_rejects_pending_review() -> None:
     Then no activity is projected and the current status is reported.
     """
     repo = _repository(review=_review("pending"))
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["error_code"] == "review_not_terminal"
@@ -330,8 +331,8 @@ async def test_get_ai_review_aftermath_fails_closed_if_projection_disappears() -
     Then the tool fails closed instead of fabricating empty activity.
     """
     repo = _repository(review=_review(), aftermath=None)
-    result = await _server(repo, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["error_code"] == "review_not_found"
@@ -346,8 +347,10 @@ async def test_get_ai_review_aftermath_rejects_ai_researcher_without_read_signal
     Then the canonical permission-denied envelope returns before repository use.
     """
     repo = _repository(review=_review())
-    result = await _server(repo, _claims(UserRole.AI_RESEARCHER))._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(repo, _claims(UserRole.AI_RESEARCHER)),
+        "get_ai_review_aftermath",
+        {"review_public_id": "review-1"},
     )
     envelope = _decode_result(result)
     assert envelope["success"] is False
@@ -363,8 +366,8 @@ async def test_get_ai_review_aftermath_reports_uninitialized_repository() -> Non
     When the aftermath tool is dispatched,
     Then a structured lifecycle error returns instead of a raw exception.
     """
-    result = await _server(None, _claims())._tool_manager.call_tool(
-        "get_ai_review_aftermath", {"review_public_id": "review-1"}
+    result = await call_raw_tool(
+        _server(None, _claims()), "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
     assert envelope["error_code"] == "service_unavailable"

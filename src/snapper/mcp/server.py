@@ -20,7 +20,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Tool as MCPTool
 from starlette.applications import Starlette
@@ -52,14 +52,14 @@ TOKEN_CLAIMS_CTX: ContextVar[TokenClaims | None] = ContextVar("mcp_token_claims"
 :class:`BearerAuthMiddleware` sets this after verifying the Bearer JWT;
 individual tool handlers read it via :func:`get_current_claims` to check
 per-tool permissions without needing to plumb the HTTP request through
-the FastMCP dispatch layer. ContextVars propagate through the asyncio
+the MCPServer dispatch layer. ContextVars propagate through the asyncio
 task that serves a single MCP call, so the authenticated claims and the
 tool handler always see the same context.
 """
 
 
-class PermissionAwareFastMCP(FastMCP[None]):
-    """FastMCP server whose tool catalog reflects authenticated permissions."""
+class PermissionAwareMCPServer(MCPServer[None]):
+    """MCP server whose tool catalog reflects authenticated permissions."""
 
     async def list_tools(self) -> list[MCPTool]:
         """Return tools visible to the current authenticated principal.
@@ -78,7 +78,7 @@ class PermissionAwareFastMCP(FastMCP[None]):
 def get_current_claims() -> TokenClaims:
     """Return the authenticated :class:`TokenClaims` for the current MCP call.
 
-    Intended to be called from within a FastMCP tool handler. Raises if
+    Intended to be called from within an MCPServer tool handler. Raises if
     the ContextVar hasn't been set — which should never happen under
     normal middleware wiring because :class:`BearerAuthMiddleware` is
     composed above every tool dispatch and rejects before calling
@@ -261,7 +261,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
             - ``request.state.token_claims`` — for any downstream
               middleware / Starlette handler that wants to read it.
-            - :data:`TOKEN_CLAIMS_CTX` ContextVar — for FastMCP tool
+            - :data:`TOKEN_CLAIMS_CTX` ContextVar — for MCPServer tool
               handlers (which don't see the HTTP request object by
               default). The ContextVar is reset on exit so the claims
               don't leak across unrelated asyncio tasks.
@@ -384,7 +384,7 @@ def build_mcp_app(
            ``request.state.token_claims`` before tool dispatch.
         3. :class:`PrincipalRateLimitMiddleware` — per-principal
            throttle keyed off the claims set by (2).
-        4. Downstream FastMCP Streamable HTTP app with tools
+        4. Downstream MCPServer Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 
     Args:
@@ -422,12 +422,9 @@ def build_mcp_app(
     Returns:
         A Starlette sub-app ready for ``FastAPI.mount("/api/mcp",...)``.
     """
-    mcp_server = PermissionAwareFastMCP(
+    mcp_server = PermissionAwareMCPServer(
         _MCP_SERVER_NAME,
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}).",
-        stateless_http=True,
-        streamable_http_path="/",
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
     register_mcp_tools(
         mcp_server,
@@ -436,7 +433,11 @@ def build_mcp_app(
         tracker_getter=tracker_getter or (lambda: None),
         claims_getter=get_current_claims,
     )
-    downstream = mcp_server.streamable_http_app()
+    downstream = mcp_server.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
     downstream.add_middleware(PrincipalRateLimitMiddleware)
     downstream.add_middleware(
         BearerAuthMiddleware,

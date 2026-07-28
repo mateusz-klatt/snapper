@@ -12,8 +12,8 @@ Exercises the full composed middleware stack from
        is supposed to provide.
 
 The test uses a custom Starlette sub-app that stands in for
-FastMCP's Streamable HTTP handler, so the assertion can inspect
-what the handler saw without pulling in FastMCP's full task-group
+MCPServer's Streamable HTTP handler, so the assertion can inspect
+what the handler saw without pulling in MCPServer's full task-group
 lifespan. The middleware composition is identical to production.
 """
 
@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -40,6 +40,7 @@ from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 _TEST_TOKEN_PLACEHOLDER = "dummy.bearer.for.tests.only"
 
@@ -249,14 +250,14 @@ class TestEndToEndBearerToContextVar:
         stub handler that just reads :func:`get_current_claims`,
         this test:
 
-            1. Builds a real :class:`FastMCP` instance and registers
+            1. Builds a real :class:`MCPServer` instance and registers
                the production tools via :func:`register_mcp_tools`
                with :func:`get_current_claims` as the ``claims_getter``
                (the same wiring ``build_mcp_app`` uses).
             2. Mounts a Starlette app with the full middleware stack
                (FeatureFlag + BearerAuth) whose handler dispatches
                the JSON-RPC-shaped body through
-               ``FastMCP._tool_manager.call_tool``.
+               ``MCPServer._tool_manager.call_tool``.
             3. Sends an authenticated request asking for
                ``list_instruments(exchange='kraken')`` and asserts
                the tool's return value (sorted list) comes back —
@@ -277,7 +278,7 @@ class TestEndToEndBearerToContextVar:
             return_value=["ETH-USD", "BTC-USD"],
         )
 
-        mcp_server = FastMCP("test-e2e")
+        mcp_server = MCPServer("test-e2e")
         register_mcp_tools(
             mcp_server,
             repository_getter=lambda: repo,
@@ -287,7 +288,7 @@ class TestEndToEndBearerToContextVar:
 
         async def _dispatch_tool(request: Request) -> JSONResponse:
             body = await request.json()
-            result = await mcp_server._tool_manager.call_tool(body["tool"], body.get("args", {}))
+            result = await call_raw_tool(mcp_server, body["tool"], body.get("args", {}))
             return JSONResponse({"result": result}, status_code=200)
 
         app = Starlette(routes=[Route("/mcp", _dispatch_tool, methods=["POST"])])

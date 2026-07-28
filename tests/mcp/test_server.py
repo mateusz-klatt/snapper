@@ -9,7 +9,7 @@ Verifies the three-layer composition from
 2. :class:`BearerAuthMiddleware` — 401 on missing / malformed /
    unverifiable Bearer; populates ``request.state.token_claims`` on
    success.
-3. FastMCP downstream handler receives the request only when both
+3. MCPServer downstream handler receives the request only when both
    gates admit.
 
 The tests use Starlette's :class:`TestClient` against the sub-app
@@ -17,6 +17,7 @@ directly (not mounted), so framework-level behavior is exercised
 without relying on FastAPI lifespan wiring.
 """
 
+import json
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -136,7 +137,7 @@ class TestBearerAuthMiddleware:
         When: no ``Authorization: Bearer`` header is set,
         Then: HTTP 401 with
             ``error_code="missing_bearer_token"`` is returned, and
-            FastMCP downstream is never invoked.
+            MCPServer downstream is never invoked.
         """
         svc = _make_settings_service(enabled=True)
         app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
@@ -294,7 +295,7 @@ class TestBearerAuthMiddleware:
         Then: the echo handler sees the verified :class:`TokenClaims`
             on ``request.state`` — proving the middleware populates
             the attribute for the tool-dispatch contract. The
-            downstream status is 200 (FastMCP is not invoked here;
+            downstream status is 200 (MCPServer is not invoked here;
             the echo stub replaces it).
         """
 
@@ -374,7 +375,7 @@ class TestStandaloneSseGetRejection:
 
 
 class TestMCPContext:
-    """Context access used by FastMCP tool handlers."""
+    """Context access used by MCPServer tool handlers."""
 
     def test_get_current_claims_raises_when_context_unset(self) -> None:
         """Missing ContextVar state → explicit middleware wiring error.
@@ -406,13 +407,26 @@ class TestMCPAppComposition:
         assert hasattr(app, "routes")
         assert hasattr(app, "user_middleware")
 
-    def test_reverse_proxy_host_header_reaches_fastmcp_transport(self) -> None:
-        """Production Host headers must not trip FastMCP localhost protection.
+    def test_streamable_http_transport_remains_at_mount_root(self) -> None:
+        """The MCP 2.0 transport path remains the mounted app root.
+
+        Given: the MCP sub-application built with MCP 2.0,
+        When: its streamable HTTP routes are inspected,
+        Then: the transport is registered at ``/`` and not the new ``/mcp`` default.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        route_paths = {route.path for route in app.routes}
+        assert "/" in route_paths
+        assert "/mcp" not in route_paths
+
+    def test_reverse_proxy_host_header_reaches_mcp_server_transport(self) -> None:
+        """Production Host headers must not trip MCPServer localhost protection.
 
         Given: a mounted MCP app handling a request for the public
             ``snapper.ch`` host,
         When: a valid bearer initializes the streamable HTTP transport,
-        Then: FastMCP accepts the request instead of returning
+        Then: MCPServer accepts the request instead of returning
             ``421 Invalid Host header``.
         """
         svc = _make_settings_service(enabled=True)
@@ -445,6 +459,51 @@ class TestMCPAppComposition:
                 )
         assert response.status_code == 200
         assert "Invalid Host header" not in response.text
+
+    def test_permission_error_reaches_client_as_tool_error(self) -> None:
+        """Raised permission errors remain MCP tool errors.
+
+        Given: an authenticated reviewer without market-data permission,
+        When: the client calls the registered ``list_instruments`` tool,
+        Then: MCP returns ``isError=true`` with the permission failure text.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        claims = _make_token_claims().model_copy(
+            update={
+                "role": UserRole.AI_REVIEWER,
+                "permissions": [],
+                "permission_scope_version": 2,
+            }
+        )
+        with patch("snapper.mcp.server.get_token_manager") as mock_get:
+            token_manager = Mock()
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(claims=claims, rejection_reason=None)
+            )
+            mock_get.return_value = token_manager
+            with TestClient(app) as client:
+                response = client.post(
+                    "/",
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_instruments",
+                            "arguments": {"exchange": "kraken"},
+                        },
+                    },
+                )
+        assert response.status_code == 200
+        data_line = next(line for line in response.text.splitlines() if line.startswith("data: "))
+        result = json.loads(data_line.removeprefix("data: "))["result"]
+        assert result["isError"] is True
+        assert "read:market_data" in result["content"][0]["text"]
 
     def test_settings_service_getter_invoked_per_request(self) -> None:
         """Getter is called lazily at request time, not at build time.

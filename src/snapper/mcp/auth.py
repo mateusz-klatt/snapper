@@ -24,7 +24,7 @@ mirror — delegates are trade principals). Keeping the MCP helper
 *separate* from the REST scoping function is intentional: the REST
 variant raises :class:`HTTPException` whose semantics are
 REST-specific (status codes, detail strings, OpenAPI responses)
-the MCP variant raises :class:`PermissionError` which FastMCP
+the MCP variant raises :class:`PermissionError` which MCPServer
 surfaces as a structured tool error.
 """
 
@@ -99,7 +99,7 @@ def ensure_operator_in_claims(
         PermissionError: when a caller without global scope picks an operator
             outside :attr:`TokenClaims.operator_public_ids`. The
             message starts with :data:`OPERATOR_SCOPE_ERROR_CODE`
-            so FastMCP tool errors carry a stable classifier.
+            so MCPServer tool errors carry a stable classifier.
     """
     if operator_public_id is None:
         return
@@ -160,7 +160,7 @@ async def validate_user_wallet_scope(
         PermissionError: when the caller lacks global scope and the
             wallet is not in the operator-accessible set. The
             message includes :data:`WALLET_SCOPE_ERROR_CODE` so
-            FastMCP-surfaced errors carry a stable classifier.
+            MCPServer-surfaced errors carry a stable classifier.
     """
     if has_effective_permission(
         claims.role,

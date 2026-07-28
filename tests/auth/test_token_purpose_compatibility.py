@@ -44,8 +44,6 @@ import jwt
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from mcp.types import ListToolsRequest
-from mcp.types import ListToolsResult
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -72,7 +70,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
-from snapper.mcp.server import PermissionAwareFastMCP
+from snapper.mcp.server import PermissionAwareMCPServer
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import register_mcp_tools
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -296,7 +294,7 @@ def _mcp_client(repository: SQLAlchemyRepository) -> StarletteTestClient:
     claims may see, so one request proves BOTH that the bearer passed
     the middleware and that the catalogue it drives is intact.
     """
-    server = PermissionAwareFastMCP("purpose-compatibility")
+    server = PermissionAwareMCPServer("purpose-compatibility")
     register_mcp_tools(
         server,
         repository_getter=lambda: None,
@@ -307,13 +305,8 @@ def _mcp_client(repository: SQLAlchemyRepository) -> StarletteTestClient:
     async def _echo_catalogue(_request: Request) -> JSONResponse:
         """Return the tool names visible to the authenticated claims."""
         claims = get_current_claims()
-        handler = server._mcp_server.request_handlers[ListToolsRequest]
-        server_result = await handler(ListToolsRequest())
-        list_result = server_result.root
-        assert isinstance(list_result, ListToolsResult)
-        return JSONResponse(
-            {"username": claims.username, "tools": [tool.name for tool in list_result.tools]}
-        )
+        tools = await server.list_tools()
+        return JSONResponse({"username": claims.username, "tools": [tool.name for tool in tools]})
 
     settings_service = Mock(spec=SettingsService)
     settings_service.get_setting.return_value = True

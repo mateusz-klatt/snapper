@@ -76,7 +76,7 @@ def _build_contract_app(settings_service: Mock) -> Starlette:
     """Compose the production middleware stack around an echo handler.
 
     Mirrors :func:`snapper.mcp.server.build_mcp_app` but substitutes a
-    deterministic echo route for the downstream :mod:`FastMCP`
+    deterministic echo route for the downstream :mod:`MCPServer`
     dispatcher so the tests can assert on the exact response body
     without wrestling with the SDK's task-group lifecycle.
 

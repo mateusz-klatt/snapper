@@ -321,7 +321,7 @@ class TestLifespan:
 
         Background: the MCP sub-app lifespan entry catches
         ``RuntimeError("... can only be called once ...")`` which is
-        FastMCP's signature for a re-entered session manager (observed
+        MCPServer's signature for a re-entered session manager (observed
         in module-scoped test fixtures that spawn nested ``TestClient``
         instances on the same app). Any OTHER RuntimeError signals a
         real failure and must propagate so operators see it.
@@ -394,7 +394,7 @@ class TestLifespan:
     async def test_lifespan_tolerates_mcp_sub_app_reentry(self) -> None:
         """Lifespan swallows the known MCP session-manager re-entry error.
 
-        Background: FastMCP's session manager raises
+        Background: MCPServer's session manager raises
         ``RuntimeError("... can only be called once ...")`` when its
         lifespan is entered a second time on the same app object —
         historically hit by module-scoped test fixtures spawning nested

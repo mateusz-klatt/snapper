@@ -8,7 +8,7 @@ Exercises the two MVP tools exported by
       writes ``TradeCommand`` with ``source_surface="mcp"`` via the
       shared :class:`TradingCapsEnforcer`.
 
-Tests invoke tools directly through FastMCP's tool manager so the
+Tests invoke tools directly through MCPServer's tool manager so the
 same dispatch path a real MCP client exercises is under test.
 """
 
@@ -24,8 +24,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.service import compute_shard_key
@@ -52,6 +52,7 @@ from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
 from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
+from tests.mcp.raw_dispatch import call_raw_tool
 
 
 def _make_claims(
@@ -105,9 +106,9 @@ def _build_server(
     repository: Any = None,
     caps_enforcer: Any = None,
     claims: TokenClaims | None = None,
-) -> FastMCP:
-    """Construct a FastMCP instance with tools registered + getters wired."""
-    server = FastMCP("test")
+) -> MCPServer:
+    """Construct a MCPServer instance with tools registered + getters wired."""
+    server = MCPServer("test")
     register_mcp_tools(
         server,
         repository_getter=lambda: repository,
@@ -161,7 +162,7 @@ class TestListInstrumentsTool:
         repo = AsyncMock()
         repo.get_exchange_instruments = AsyncMock(return_value=["BTC-USD", "ADA-USD", "ETH-USD"])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+        result = await call_raw_tool(server, "list_instruments", {"exchange": "kraken"})
         assert result == {
             "exchange": "kraken",
             "instruments": ["ADA-USD", "BTC-USD", "ETH-USD"],
@@ -176,12 +177,12 @@ class TestListInstrumentsTool:
             not initialized the singleton),
         When: the tool is dispatched,
         Then: ToolError bubbles wrapping the underlying RuntimeError —
-            FastMCP standardizes tool failures as :class:`ToolError`
+            MCPServer standardizes tool failures as :class:`ToolError`
             with the original exception chained on ``__cause__``.
         """
         server = _build_server(repository=None)
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+            await call_raw_tool(server, "list_instruments", {"exchange": "kraken"})
         assert "Repository not yet initialized" in str(exc.value)
 
     @pytest.mark.asyncio
@@ -195,7 +196,7 @@ class TestListInstrumentsTool:
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -204,7 +205,7 @@ class TestListInstrumentsTool:
         )
         try:
             with pytest.raises(ToolError) as exc:
-                await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+                await call_raw_tool(server, "list_instruments", {"exchange": "kraken"})
             assert "read:market_data" in str(exc.value)
         finally:
             if saved is not None:
@@ -217,13 +218,13 @@ class TestListInstrumentsTool:
         Given: An AI delegate role that grants READ_MARKET_DATA but a
             token scoped only to READ_ORDERS,
         When: The raising-path list-instruments tool checks permission,
-        Then: FastMCP returns a permission error before repository access.
+        Then: MCPServer returns a permission error before repository access.
         """
         repo = AsyncMock()
         claims = _make_claims(permissions=[Permission.READ_ORDERS.value])
         server = _build_server(repository=repo, claims=claims)
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+            await call_raw_tool(server, "list_instruments", {"exchange": "kraken"})
         assert Permission.READ_MARKET_DATA.value in str(exc.value)
         repo.get_exchange_instruments.assert_not_awaited()
 
@@ -305,7 +306,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -368,7 +370,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        await server._tool_manager.call_tool(
+        await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -409,7 +412,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -447,7 +451,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -480,7 +485,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -514,7 +520,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -549,7 +556,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -583,7 +591,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -617,7 +626,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
             claims=claims,
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -664,7 +674,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -702,7 +713,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -741,7 +753,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError, match="requires stop_price"):
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -775,7 +788,8 @@ class TestSubmitManualOrderTool:
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
         )
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -817,7 +831,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_reject(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -841,7 +856,7 @@ class TestSubmitManualOrderTool:
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
         try:
-            server = FastMCP("test")
+            server = MCPServer("test")
             register_mcp_tools(
                 server,
                 repository_getter=lambda: repo,
@@ -849,7 +864,8 @@ class TestSubmitManualOrderTool:
                 claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
             )
             with pytest.raises(ToolError) as exc:
-                await server._tool_manager.call_tool(
+                await call_raw_tool(
+                    server,
                     "submit_manual_order",
                     {
                         "exchange": "kraken",
@@ -878,7 +894,8 @@ class TestSubmitManualOrderTool:
         """
         server = _build_server(repository=None, caps_enforcer=None)
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -923,7 +940,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -967,7 +985,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1011,7 +1030,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1048,7 +1068,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError):
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1084,7 +1105,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1131,7 +1153,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1170,7 +1193,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1208,7 +1232,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1277,7 +1302,8 @@ class TestSubmitManualOrderTool:
         )
         _allow_wallet(repo)
         server = _build_server(repository=repo, caps_enforcer=enforcer)
-        await server._tool_manager.call_tool(
+        await call_raw_tool(
+            server,
             "submit_manual_order",
             {
                 "exchange": "kraken",
@@ -1324,7 +1350,8 @@ class TestSubmitManualOrderTool:
             caps_enforcer=self._make_enforcer_admit(),
         )
         with pytest.raises(ToolError) as exc:
-            await server._tool_manager.call_tool(
+            await call_raw_tool(
+                server,
                 "submit_manual_order",
                 {
                     "exchange": "kraken",
@@ -1368,7 +1395,7 @@ class TestListOrdersTool:
         order_row = _ORDER_ROW_FIXTURE.copy()
         repo = self._build_repo_with_orders([order_row], total=42)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_orders", {"limit": 10, "offset": 0})
+        result = await call_raw_tool(server, "list_orders", {"limit": 10, "offset": 0})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["total_count"] == 42
@@ -1379,7 +1406,7 @@ class TestListOrdersTool:
         """Invalid status enum → invalid_argument envelope, no repo call."""
         repo = self._build_repo_with_orders([], total=0)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_orders", {"status": "bogus"})
+        result = await call_raw_tool(server, "list_orders", {"status": "bogus"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "invalid_argument"
@@ -1390,7 +1417,7 @@ class TestListOrdersTool:
         """Negative limit/offset → invalid_argument."""
         repo = self._build_repo_with_orders([], total=0)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_orders", {"limit": -1, "offset": 0})
+        result = await call_raw_tool(server, "list_orders", {"limit": -1, "offset": 0})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "invalid_argument"
 
@@ -1399,9 +1426,7 @@ class TestListOrdersTool:
         """Inaccessible wallet → ``order_not_found`` (anti-enumeration)."""
         repo = self._build_repo_with_orders([], total=0, accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "list_orders", {"wallet_public_id": "wallet-99"}
-        )
+        result = await call_raw_tool(server, "list_orders", {"wallet_public_id": "wallet-99"})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "order_not_found"
         repo.get_orders.assert_not_awaited()
@@ -1414,12 +1439,12 @@ class TestListOrdersTool:
             permission set,
         When: the tool dispatches,
         Then: the envelope flag is ``permission_denied`` (NOT a raw
-            FastMCP ``ToolError`` from a bare PermissionError).
+            MCPServer ``ToolError`` from a bare PermissionError).
         """
         repo = self._build_repo_with_orders([], total=0)
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -1427,7 +1452,7 @@ class TestListOrdersTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool("list_orders", {})
+            result = await call_raw_tool(server, "list_orders", {})
             envelope = _decode_envelope(result)
             assert envelope["success"] is False
             assert envelope["error_code"] == "permission_denied"
@@ -1447,7 +1472,7 @@ class TestListOrdersTool:
         repo = self._build_repo_with_orders([], total=0)
         claims = _make_claims(permissions=[Permission.READ_MARKET_DATA.value])
         server = _build_server(repository=repo, claims=claims)
-        result = await server._tool_manager.call_tool("list_orders", {})
+        result = await call_raw_tool(server, "list_orders", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "permission_denied"
@@ -1457,7 +1482,7 @@ class TestListOrdersTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool("list_orders", {})
+        result = await call_raw_tool(server, "list_orders", {})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
 
@@ -1466,7 +1491,7 @@ class TestListOrdersTool:
         """Caller passing limit=10000 is clamped to the 200 ceiling."""
         repo = self._build_repo_with_orders([], total=0)
         server = _build_server(repository=repo)
-        await server._tool_manager.call_tool("list_orders", {"limit": 10000})
+        await call_raw_tool(server, "list_orders", {"limit": 10000})
         kwargs = repo.get_orders.await_args.kwargs
         assert kwargs["limit"] == 200
 
@@ -1478,7 +1503,7 @@ class TestListOrdersTool:
         repo.get_orders_total_count = AsyncMock(return_value=0)
         admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
         server = _build_server(repository=repo, claims=admin_claims)
-        await server._tool_manager.call_tool("list_orders", {})
+        await call_raw_tool(server, "list_orders", {})
         kwargs = repo.get_orders.await_args.kwargs
         assert kwargs["wallet_public_ids"] is None
         repo.list_accessible_wallets_for_operators.assert_not_called()
@@ -1491,9 +1516,7 @@ class TestListOrdersTool:
         repo.get_orders_total_count = AsyncMock(return_value=0)
         admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
         server = _build_server(repository=repo, claims=admin_claims)
-        await server._tool_manager.call_tool(
-            "list_orders", {"wallet_public_id": "wallet-admin-target"}
-        )
+        await call_raw_tool(server, "list_orders", {"wallet_public_id": "wallet-admin-target"})
         kwargs = repo.get_orders.await_args.kwargs
         assert kwargs["wallet_public_ids"] == ["wallet-admin-target"]
         repo.list_accessible_wallets_for_operators.assert_not_called()
@@ -1503,7 +1526,7 @@ class TestListOrdersTool:
         """Non-admin caller with a wallet inside scope → repo gets ``[that wallet]``."""
         repo = self._build_repo_with_orders([], total=0, accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo)
-        await server._tool_manager.call_tool("list_orders", {"wallet_public_id": "wallet-1"})
+        await call_raw_tool(server, "list_orders", {"wallet_public_id": "wallet-1"})
         kwargs = repo.get_orders.await_args.kwargs
         assert kwargs["wallet_public_ids"] == ["wallet-1"]
 
@@ -1529,9 +1552,7 @@ class TestGetOrderStatusTool:
         repo.get_order_by_command_public_id = AsyncMock(return_value=order_row)
         repo.get_executions_for_order = AsyncMock(return_value=[_EXEC_ROW_FIXTURE.copy()])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_order_status", {"command_public_id": "cmd-1"}
-        )
+        result = await call_raw_tool(server, "get_order_status", {"command_public_id": "cmd-1"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["order"]["public_id"] == order_row["public_id"]
@@ -1546,8 +1567,8 @@ class TestGetOrderStatusTool:
         )
         repo.get_trade_command_by_public_id = AsyncMock(return_value=None)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_order_status", {"command_public_id": "cmd-missing"}
+        result = await call_raw_tool(
+            server, "get_order_status", {"command_public_id": "cmd-missing"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "order_not_found"
@@ -1568,9 +1589,7 @@ class TestGetOrderStatusTool:
         )
         repo.get_order_by_command_public_id = AsyncMock(return_value=None)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_order_status", {"command_public_id": "cmd-x"}
-        )
+        result = await call_raw_tool(server, "get_order_status", {"command_public_id": "cmd-x"})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "order_not_found"
         repo.get_order_by_command_public_id.assert_not_called()
@@ -1581,7 +1600,7 @@ class TestGetOrderStatusTool:
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -1589,9 +1608,7 @@ class TestGetOrderStatusTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool(
-                "get_order_status", {"command_public_id": "cmd-x"}
-            )
+            result = await call_raw_tool(server, "get_order_status", {"command_public_id": "cmd-x"})
             envelope = _decode_envelope(result)
             assert envelope["error_code"] == "permission_denied"
         finally:
@@ -1602,9 +1619,7 @@ class TestGetOrderStatusTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """get_order_status pre-lifespan also envelope-wrapped."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool(
-            "get_order_status", {"command_public_id": "cmd-x"}
-        )
+        result = await call_raw_tool(server, "get_order_status", {"command_public_id": "cmd-x"})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
 
@@ -1624,8 +1639,8 @@ class TestGetOrderStatusTool:
         )
         repo.get_order_by_command_public_id = AsyncMock(return_value=None)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_order_status", {"command_public_id": "cmd-pending"}
+        result = await call_raw_tool(
+            server, "get_order_status", {"command_public_id": "cmd-pending"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
@@ -1820,7 +1835,7 @@ class TestListPositionsTool:
         position_row = _POSITION_ROW_FIXTURE.copy()
         repo = self._build_repo_with_positions([position_row])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_positions", {})
+        result = await call_raw_tool(server, "list_positions", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 1
@@ -1832,7 +1847,7 @@ class TestListPositionsTool:
         position_row = _POSITION_ROW_FIXTURE.copy()
         repo = self._build_repo_with_positions([position_row])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_positions", {})
+        result = await call_raw_tool(server, "list_positions", {})
         envelope = _decode_envelope(result)
         timestamp = envelope["details"]["positions"][0]["timestamp"]
         assert isinstance(timestamp, str)
@@ -1847,9 +1862,7 @@ class TestListPositionsTool:
         kraken_futures_row["exchange"] = "kraken_futures"
         repo = self._build_repo_with_positions([kraken_row, kraken_futures_row])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "list_positions", {"exchange": "kraken_futures"}
-        )
+        result = await call_raw_tool(server, "list_positions", {"exchange": "kraken_futures"})
         envelope = _decode_envelope(result)
         assert envelope["details"]["count"] == 1
         assert envelope["details"]["positions"][0]["public_id"] == "pos-2"
@@ -1863,7 +1876,7 @@ class TestListPositionsTool:
         eth_row["instrument"] = "ETH-USD"
         repo = self._build_repo_with_positions([btc_row, eth_row])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_positions", {"instrument": "ETH-USD"})
+        result = await call_raw_tool(server, "list_positions", {"instrument": "ETH-USD"})
         envelope = _decode_envelope(result)
         assert envelope["details"]["count"] == 1
         assert envelope["details"]["positions"][0]["instrument"] == "ETH-USD"
@@ -1873,9 +1886,7 @@ class TestListPositionsTool:
         """Inaccessible wallet → ``position_not_found`` (anti-enumeration)."""
         repo = self._build_repo_with_positions([], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "list_positions", {"wallet_public_id": "wallet-99"}
-        )
+        result = await call_raw_tool(server, "list_positions", {"wallet_public_id": "wallet-99"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "position_not_found"
@@ -1887,7 +1898,7 @@ class TestListPositionsTool:
         repo = self._build_repo_with_positions([])
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -1895,7 +1906,7 @@ class TestListPositionsTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool("list_positions", {})
+            result = await call_raw_tool(server, "list_positions", {})
             envelope = _decode_envelope(result)
             assert envelope["success"] is False
             assert envelope["error_code"] == "permission_denied"
@@ -1907,7 +1918,7 @@ class TestListPositionsTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool("list_positions", {})
+        result = await call_raw_tool(server, "list_positions", {})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
 
@@ -1918,7 +1929,7 @@ class TestListPositionsTool:
         repo.get_positions = AsyncMock(return_value=[])
         admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
         server = _build_server(repository=repo, claims=admin_claims)
-        await server._tool_manager.call_tool("list_positions", {})
+        await call_raw_tool(server, "list_positions", {})
         kwargs = repo.get_positions.await_args.kwargs
         assert kwargs["wallet_public_ids"] is None
         repo.list_accessible_wallets_for_operators.assert_not_called()
@@ -1928,7 +1939,7 @@ class TestListPositionsTool:
         """Non-admin caller with a wallet inside scope → repo gets ``[that wallet]``."""
         repo = self._build_repo_with_positions([], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo)
-        await server._tool_manager.call_tool("list_positions", {"wallet_public_id": "wallet-1"})
+        await call_raw_tool(server, "list_positions", {"wallet_public_id": "wallet-1"})
         kwargs = repo.get_positions.await_args.kwargs
         assert kwargs["wallet_public_ids"] == ["wallet-1"]
 
@@ -1959,7 +1970,7 @@ class TestListVenueAccountStatesTool:
         """AI_DELEGATE lacks READ_ACCOUNT_STATE → permission_denied envelope."""
         repo = self._build_repo([_venue_account_state_row()])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        result = await call_raw_tool(server, "list_venue_account_states", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "permission_denied"
@@ -1970,7 +1981,7 @@ class TestListVenueAccountStatesTool:
         """OPERATOR caller → success with fail-closed-mapped account states."""
         repo = self._build_repo([_venue_account_state_row()])
         server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
-        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        result = await call_raw_tool(server, "list_venue_account_states", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 1
@@ -2006,7 +2017,7 @@ class TestListVenueAccountStatesTool:
         )
         server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
 
-        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        result = await call_raw_tool(server, "list_venue_account_states", {})
 
         envelope = _decode_envelope(result)
         state = envelope["details"]["account_states"][0]
@@ -2022,8 +2033,8 @@ class TestListVenueAccountStatesTool:
         """Inaccessible wallet → account_state_not_found (anti-enumeration)."""
         repo = self._build_repo([], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
-        result = await server._tool_manager.call_tool(
-            "list_venue_account_states", {"wallet_public_id": "wallet-99"}
+        result = await call_raw_tool(
+            server, "list_venue_account_states", {"wallet_public_id": "wallet-99"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
@@ -2035,7 +2046,7 @@ class TestListVenueAccountStatesTool:
         """No rows → success with an empty account-state list."""
         repo = self._build_repo([], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
-        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        result = await call_raw_tool(server, "list_venue_account_states", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 0
@@ -2049,8 +2060,8 @@ class TestListVenueAccountStatesTool:
         futures = _venue_account_state_row(public_id="acct-futures", exchange="kraken_futures")
         repo = self._build_repo([kraken, futures], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
-        result = await server._tool_manager.call_tool(
-            "list_venue_account_states", {"exchange": "kraken_futures"}
+        result = await call_raw_tool(
+            server, "list_venue_account_states", {"exchange": "kraken_futures"}
         )
         envelope = _decode_envelope(result)
         assert envelope["details"]["count"] == 1
@@ -2061,7 +2072,7 @@ class TestListVenueAccountStatesTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository surfaces a structured envelope for an authorized role."""
         server = _build_server(repository=None, claims=_make_claims(role=UserRole.OPERATOR))
-        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        result = await call_raw_tool(server, "list_venue_account_states", {})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
 
@@ -2079,9 +2090,7 @@ class TestGetPositionCycleTool:
         cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["position_cycle"]["public_id"] == cycle_row["public_id"]
@@ -2098,9 +2107,7 @@ class TestGetPositionCycleTool:
         cycle_row["closed_at"] = datetime.now(UTC)
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         cycle = envelope["details"]["position_cycle"]
         assert isinstance(cycle["timestamp"], str) and "T" in cycle["timestamp"]
@@ -2118,9 +2125,7 @@ class TestGetPositionCycleTool:
         cycle_row["closed_at"] = None
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         assert envelope["details"]["position_cycle"]["closed_at"] is None
 
@@ -2133,8 +2138,8 @@ class TestGetPositionCycleTool:
         )
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=None)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-missing"}
+        result = await call_raw_tool(
+            server, "get_position_cycle", {"cycle_public_id": "cycle-missing"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
@@ -2151,9 +2156,7 @@ class TestGetPositionCycleTool:
         cycle_row["wallet_public_id"] = "wallet-other"
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "position_cycle_not_found"
@@ -2167,9 +2170,7 @@ class TestGetPositionCycleTool:
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
         admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
         server = _build_server(repository=repo, claims=admin_claims)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["position_cycle"]["wallet_public_id"] == "wallet-other"
@@ -2181,7 +2182,7 @@ class TestGetPositionCycleTool:
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -2189,8 +2190,8 @@ class TestGetPositionCycleTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool(
-                "get_position_cycle", {"cycle_public_id": "cycle-1"}
+            result = await call_raw_tool(
+                server, "get_position_cycle", {"cycle_public_id": "cycle-1"}
             )
             envelope = _decode_envelope(result)
             assert envelope["error_code"] == "permission_denied"
@@ -2202,9 +2203,7 @@ class TestGetPositionCycleTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool(
-            "get_position_cycle", {"cycle_public_id": "cycle-1"}
-        )
+        result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
 
@@ -2270,7 +2269,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _ok)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "cancel_order",
             {"plan_public_id": "plan-1", "idempotency_key": "k-1"},
         )
@@ -2285,8 +2285,8 @@ class TestCancelOrderTool:
         """Empty key → invalid_argument envelope, no service call."""
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": ""}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": ""}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "invalid_argument"
@@ -2297,7 +2297,7 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -2305,8 +2305,8 @@ class TestCancelOrderTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool(
-                "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+            result = await call_raw_tool(
+                server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
             )
             envelope = _decode_envelope(result)
             assert envelope["error_code"] == "permission_denied"
@@ -2318,8 +2318,8 @@ class TestCancelOrderTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None, caps_enforcer=self._enforcer_admit())
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
@@ -2329,8 +2329,8 @@ class TestCancelOrderTool:
         """Caps enforcer not yet wired → service_unavailable envelope."""
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=None)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
@@ -2348,8 +2348,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _miss)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-missing", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-missing", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "order_not_found"
@@ -2367,8 +2367,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _scope)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-other-tenant", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-other-tenant", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "order_not_found"
@@ -2386,8 +2386,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _term)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "already_terminal"
@@ -2406,8 +2406,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _inprog)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-new"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-new"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "cancel_in_progress"
@@ -2427,8 +2427,8 @@ class TestCancelOrderTool:
         monkeypatch.setattr(
             cancel_service.PlansCancelService, "cancel_by_plan_public_id", _conflict
         )
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-B"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-B"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "idempotency_key_conflict"
@@ -2446,8 +2446,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _race)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
@@ -2462,7 +2462,8 @@ class TestCancelOrderTool:
         """
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "cancel_order",
             {"plan_public_id": "plan-1", "idempotency_key": "x" * 65},
         )
@@ -2485,8 +2486,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _caps)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "caps_violation"
@@ -2509,8 +2510,8 @@ class TestCancelOrderTool:
         monkeypatch.setattr(
             cancel_service.PlansCancelService, "cancel_by_plan_public_id", _emit_fail
         )
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
@@ -2529,8 +2530,8 @@ class TestCancelOrderTool:
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
         monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _ok)
-        result = await server._tool_manager.call_tool(
-            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        result = await call_raw_tool(
+            server, "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
         )
         envelope = _decode_envelope(result)
         plan_payload = envelope["details"]["plan"]
@@ -2589,7 +2590,8 @@ class TestGetOhlcvTool:
         candle = _CANDLE_ROW_FIXTURE.copy()
         repo = self._build_repo_with_candles([candle])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
         )
@@ -2613,7 +2615,8 @@ class TestGetOhlcvTool:
         candle = _CANDLE_ROW_FIXTURE.copy()
         repo = self._build_repo_with_candles([candle])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {
                 "exchange": "kraken",
@@ -2636,7 +2639,8 @@ class TestGetOhlcvTool:
         """Unknown timeframe → invalid_argument with allowed list in details."""
         repo = self._build_repo_with_candles([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "30s"},
         )
@@ -2652,7 +2656,8 @@ class TestGetOhlcvTool:
         """Only one of since/until set → invalid_argument."""
         repo = self._build_repo_with_candles([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {
                 "exchange": "kraken",
@@ -2671,7 +2676,8 @@ class TestGetOhlcvTool:
         """Bare Unix-integer since → invalid_argument (non-ISO 8601)."""
         repo = self._build_repo_with_candles([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {
                 "exchange": "kraken",
@@ -2691,7 +2697,8 @@ class TestGetOhlcvTool:
         """Negative limit → invalid_argument."""
         repo = self._build_repo_with_candles([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {
                 "exchange": "kraken",
@@ -2710,7 +2717,8 @@ class TestGetOhlcvTool:
         """limit=5000 is clamped to _OHLCV_LIMIT_CAP=1000."""
         repo = self._build_repo_with_candles([])
         server = _build_server(repository=repo)
-        await server._tool_manager.call_tool(
+        await call_raw_tool(
+            server,
             "get_ohlcv",
             {
                 "exchange": "kraken",
@@ -2728,7 +2736,7 @@ class TestGetOhlcvTool:
         repo = self._build_repo_with_candles([])
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
@@ -2736,7 +2744,8 @@ class TestGetOhlcvTool:
             claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
         )
         try:
-            result = await server._tool_manager.call_tool(
+            result = await call_raw_tool(
+                server,
                 "get_ohlcv",
                 {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
             )
@@ -2751,7 +2760,8 @@ class TestGetOhlcvTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository → service_unavailable envelope."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "get_ohlcv",
             {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
         )
@@ -2783,8 +2793,8 @@ class TestListRecentSignalsTool:
         signal = _SIGNAL_ROW_FIXTURE.copy()
         repo = self._build_repo_with_signals([signal])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        result = await call_raw_tool(
+            server, "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
@@ -2797,8 +2807,8 @@ class TestListRecentSignalsTool:
         signal = _SIGNAL_ROW_FIXTURE.copy()
         repo = self._build_repo_with_signals([signal])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
-            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        result = await call_raw_tool(
+            server, "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
         )
         envelope = _decode_envelope(result)
         sig = envelope["details"]["signals"][0]
@@ -2810,7 +2820,7 @@ class TestListRecentSignalsTool:
         """Empty since → invalid_argument (since is REQUIRED)."""
         repo = self._build_repo_with_signals([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_recent_signals", {"since": ""})
+        result = await call_raw_tool(server, "list_recent_signals", {"since": ""})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "invalid_argument"
@@ -2821,7 +2831,7 @@ class TestListRecentSignalsTool:
         """Unparseable since → invalid_argument."""
         repo = self._build_repo_with_signals([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_recent_signals", {"since": "yesterday"})
+        result = await call_raw_tool(server, "list_recent_signals", {"since": "yesterday"})
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "invalid_argument"
@@ -2832,7 +2842,8 @@ class TestListRecentSignalsTool:
         """Negative limit → invalid_argument."""
         repo = self._build_repo_with_signals([])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "list_recent_signals",
             {"since": "2026-04-28T00:00:00Z", "limit": -5},
         )
@@ -2846,7 +2857,8 @@ class TestListRecentSignalsTool:
         """Inaccessible wallet → signal_not_found (anti-enumeration)."""
         repo = self._build_repo_with_signals([], accessible_wallets=["wallet-1"])
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool(
+        result = await call_raw_tool(
+            server,
             "list_recent_signals",
             {"since": "2026-04-28T00:00:00Z", "wallet_public_id": "wallet-99"},
         )
@@ -2868,8 +2880,8 @@ class TestListRecentSignalsTool:
             repository=repo,
             claims=_make_claims(role=UserRole.AI_RESEARCHER),
         )
-        result = await server._tool_manager.call_tool(
-            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        result = await call_raw_tool(
+            server, "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
@@ -2880,8 +2892,8 @@ class TestListRecentSignalsTool:
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
         """Pre-lifespan repository → service_unavailable envelope."""
         server = _build_server(repository=None)
-        result = await server._tool_manager.call_tool(
-            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        result = await call_raw_tool(
+            server, "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
         )
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
@@ -2893,16 +2905,14 @@ class TestListRecentSignalsTool:
         repo = AsyncMock()
         repo.get_signals = AsyncMock(return_value=[])
         admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
-        server = FastMCP("test")
+        server = MCPServer("test")
         register_mcp_tools(
             server,
             repository_getter=lambda: repo,
             caps_enforcer_getter=lambda: None,
             claims_getter=lambda: admin_claims,
         )
-        await server._tool_manager.call_tool(
-            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
-        )
+        await call_raw_tool(server, "list_recent_signals", {"since": "2026-04-28T00:00:00Z"})
         kwargs = repo.get_signals.await_args.kwargs
         assert kwargs["wallet_public_ids"] is None
         assert kwargs["limit"] == 50
@@ -2912,7 +2922,8 @@ class TestListRecentSignalsTool:
         """limit=500 is clamped to _LIST_SIGNALS_LIMIT_CAP=200."""
         repo = self._build_repo_with_signals([])
         server = _build_server(repository=repo)
-        await server._tool_manager.call_tool(
+        await call_raw_tool(
+            server,
             "list_recent_signals",
             {"since": "2026-04-28T00:00:00Z", "limit": 500},
         )
@@ -3037,7 +3048,7 @@ class TestListPositionsDelegateScopeRealRepository:
                 }
             )
         server = _build_server(repository=repo)
-        result = await server._tool_manager.call_tool("list_positions", {})
+        result = await call_raw_tool(server, "list_positions", {})
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 1

@@ -107,7 +107,7 @@ class TestValidateUserWalletScope:
         Given: the repository returns a set that does not include the
             target wallet,
         When: the gate runs,
-        Then: PermissionError surfaces the stable error code so FastMCP
+        Then: PermissionError surfaces the stable error code so MCPServer
             emits a structured tool error clients can branch on.
         """
         repo = AsyncMock()
@@ -204,7 +204,7 @@ class TestEnsureOperatorInClaims:
         When: they select ``op-2``,
         Then: the gate raises PermissionError citing
             :data:`OPERATOR_SCOPE_ERROR_CODE` — the stable classifier
-            FastMCP tool errors surface to clients.
+            MCPServer tool errors surface to clients.
         """
         with pytest.raises(PermissionError) as exc:
             ensure_operator_in_claims(
