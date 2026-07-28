@@ -31,6 +31,7 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
@@ -67,6 +68,27 @@ class _SymbolContext:
     quote_currency: str | None
     archive_symbol: str
     symbol_public_id: str = ""
+
+
+@dataclass(slots=True)
+class _RunStats:
+    """Observable aggregate-download outcomes for one invocation."""
+
+    selected_symbols: int = 0
+    fetched_symbols: int = 0
+    symbols_with_data: int = 0
+    symbols_without_data: int = 0
+    skipped_symbols: int = 0
+
+    def as_dict(self) -> JsonObject:
+        """Return JSON-compatible counters for process run persistence."""
+        return {
+            "selected_symbols": self.selected_symbols,
+            "fetched_symbols": self.fetched_symbols,
+            "symbols_with_data": self.symbols_with_data,
+            "symbols_without_data": self.symbols_without_data,
+            "skipped_symbols": self.skipped_symbols,
+        }
 
 
 def _timeframe_label(multiplier: int, timespan: str) -> str:
@@ -172,6 +194,15 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         self._loader: PolygonHistoricalLoader | None = None
         self._archive_symbols: dict[str, str] = {}
         self._symbol_mapper = SymbolMapperService.get_instance()
+        self._run_stats = _RunStats()
+
+    def get_run_result(self) -> JsonObject:
+        """Return counters suitable for process run persistence.
+
+        Returns:
+            JSON-compatible symbol outcome counters.
+        """
+        return self._run_stats.as_dict()
 
     async def start(self) -> None:
         """Start the download process.
@@ -197,14 +228,23 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             client = PolygonExchangeClient(api_key=api_key)
             self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
             symbols = self._resolve_symbols_for_start()
+            self._run_stats.selected_symbols = len(symbols)
             if not symbols:
                 return
             for symbol in symbols:
                 context = self._resolve_symbol_context(symbol)
                 if context is None:
+                    self._run_stats.skipped_symbols += 1
                     logger.warning("Skipping symbol without context", symbol=symbol)
                     continue
-                await self._process_symbol(context)
+                fetched = await self._process_symbol(context)
+                if fetched is None:
+                    continue
+                self._run_stats.fetched_symbols += 1
+                if fetched:
+                    self._run_stats.symbols_with_data += 1
+                else:
+                    self._run_stats.symbols_without_data += 1
         finally:
             if client is not None:
                 await client.disconnect()
@@ -342,10 +382,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._loader is not None
         check_day = day_start
         while check_day <= day_end:
-            csv_path = self._loader.get_aggregate_csv_path_for_day(
-                archive_symbol, self._timespan, check_day
-            )
-            if not csv_path or not csv_path.exists():
+            if not self._loader.is_aggregate_day_settled(archive_symbol, self._timespan, check_day):
                 return False
             check_day += timedelta(days=1)
         return True
@@ -372,10 +409,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         current = day_start if forward else day_end
         step = timedelta(days=1) if forward else timedelta(days=-1)
         while (forward and current <= day_end) or (not forward and current >= day_start):
-            csv_path = self._loader.get_aggregate_csv_path_for_day(
-                archive_symbol, self._timespan, current
-            )
-            if not csv_path or not csv_path.exists():
+            if not self._loader.is_aggregate_day_settled(archive_symbol, self._timespan, current):
                 return current
             current += step
         return current
@@ -503,7 +537,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         chunk_start: date,
         chunk_end: date,
         max_ts: datetime,
-    ) -> None:
+    ) -> bool:
         """Download candle data for a chunk to the CSV cache.
 
         Writes the on-disk CSV cache only. Does not touch the database;
@@ -543,13 +577,14 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 f"No candles for chunk {chunk_start.isoformat()} -> {chunk_end.isoformat()}",
                 symbol=context.polygon_symbol,
             )
-            return
+            return False
         logger.info(
             f"Downloaded {len(candles)} candles for {context.native_symbol}",
             chunk=f"{chunk_start.isoformat()} -> {chunk_end.isoformat()}",
             first_ts=candles[0].timestamp.isoformat(),
             last_ts=candles[-1].timestamp.isoformat(),
         )
+        return True
 
     def _resolve_chunk_range(
         self,
@@ -595,7 +630,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             start_date,
         )
 
-    async def _process_symbol(self, context: _SymbolContext) -> None:
+    async def _process_symbol(self, context: _SymbolContext) -> bool | None:
         """Download a single symbol's candles to the CSV cache.
 
         Handles chunked date ranges and CSV-based resume optimization.
@@ -616,6 +651,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         )
         chunk_days = self._compute_chunk_days(start_date, end_date)
         chunk_end: date = end_date
+        fetched_any = False
+        fetched_data = False
         while chunk_end >= start_date:
             chunk_start = max(chunk_end - timedelta(days=chunk_days - 1), start_date)
             resolved = self._resolve_chunk_range(
@@ -625,13 +662,18 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 chunk_end = chunk_start - timedelta(days=1)
                 continue
             chunk_start, chunk_end = resolved
-            await self._fetch_chunk(
-                context,
-                chunk_start,
-                chunk_end,
-                max_ts,
+            fetched_data = (
+                await self._fetch_chunk(
+                    context,
+                    chunk_start,
+                    chunk_end,
+                    max_ts,
+                )
+                or fetched_data
             )
+            fetched_any = True
             chunk_end = chunk_start - timedelta(days=1)
+        return fetched_data if fetched_any else None
 
     def _lookup_context_by_native(self, native_symbol: str) -> _SymbolContext | None:
         """Look up active symbol and polygon alias for a native symbol.

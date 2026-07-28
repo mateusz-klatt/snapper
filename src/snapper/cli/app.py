@@ -93,7 +93,10 @@ from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.process_manager.command_listener import ProcessCommandListener
 from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.registry import discover_processes
+from snapper.application.process_manager.registry import get_registered_processes
+from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.services.candle_coverage import VERIFIABLE_TIMEFRAMES
 from snapper.application.services.candle_coverage import CoverageReport
 from snapper.application.services.candle_coverage import verify_candle_coverage
@@ -135,8 +138,11 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessAutostartProfileEnum
+from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import STATE_TABLES
@@ -1532,6 +1538,30 @@ def polygon_backfill_aggregates(
             resume=resume,
             save_csv=save_csv,
         )
+        entry = get_registered_processes()["polygon_aggregates_backfill"]
+        symbol_parameters: list[JsonValue] = list(symbols or [])
+        parameters: JsonObject = {
+            "symbols": symbol_parameters,
+            "all_mapped": all_mapped,
+            "multiplier": multiplier,
+            "timespan": timespan,
+            "days_back": actual_days,
+            "resume": resume,
+            "save_csv": save_csv,
+        }
+        config = ProcessConfigModel(
+            name="polygon_aggregates_backfill",
+            enabled=False,
+            mode=entry.mode,
+            class_path=entry.class_path,
+            method=entry.method,
+            parameters=parameters,
+            lifecycle=entry.lifecycle,
+            role=entry.role,
+            tags=entry.tags,
+        )
+        recorder = ProcessRunRecorder(get_settings())
+        run_public_id = await recorder.create_run_record(config, parameters)
         try:
             symbol_source = (
                 _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_mapped else _CLI_SYMBOL_SOURCE_SETTINGS
@@ -1542,8 +1572,19 @@ def polygon_backfill_aggregates(
             )
             typer.echo(msg)
             await service.start()
+            await recorder.update_run_record(
+                run_public_id,
+                ProcessRunStatusEnum.SUCCEEDED,
+                result=service.get_run_result(),
+            )
             typer.echo("Polygon aggregates backfill complete!")
         except Exception as e:
+            await recorder.update_run_record(
+                run_public_id,
+                ProcessRunStatusEnum.FAILED,
+                result=service.get_run_result(),
+                error=str(e),
+            )
             typer.echo(f"Error during Polygon aggregates backfill: {e}")
             raise typer.Exit(code=1) from e
 

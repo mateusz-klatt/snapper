@@ -26,6 +26,7 @@ Example:
 
 import asyncio
 import csv
+import json
 from collections import defaultdict
 from collections.abc import Iterable
 from collections.abc import Sequence
@@ -40,6 +41,8 @@ from typing import Any
 
 from loguru import logger
 
+from snapper.core.market_hours import is_us_equity_market_closed
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonAggregateResponse
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
 __all__ = [
@@ -81,6 +84,8 @@ _HEADER = [
     "vwap",
     "transactions",
 ]
+_LEGACY_RECHECK_FROM = date(2026, 7, 27)
+_HEADER_ONLY_MAX_BYTES = len(",".join(_HEADER)) + 2
 
 
 @dataclass(slots=True)
@@ -441,10 +446,110 @@ class PolygonHistoricalLoader:
         for path in sorted(candles_by_path):
             merged = self._merge_with_existing(path, archive_symbol, candles_by_path[path])
             self._write_csv(path, merged)
+            self._empty_marker_sidecar(path).unlink(missing_ok=True)
         for path in sorted(marker_paths):
             if not path.exists():
                 self._write_csv(path, [])
                 logger.debug(f"Created empty marker file for {path.name}")
+            if path.stat().st_size <= _HEADER_ONLY_MAX_BYTES:
+                self._write_empty_marker_evidence(path, None)
+
+    @staticmethod
+    def _empty_marker_sidecar(csv_path: Path) -> Path:
+        """Resolve the provenance sidecar path for an aggregate CSV."""
+        return csv_path.with_suffix(".empty.json")
+
+    def _write_empty_marker_evidence(
+        self,
+        csv_path: Path,
+        evidence: PolygonAggregateResponse | None,
+    ) -> None:
+        """Write the vendor verdict next to a header-only marker.
+
+        Args:
+            csv_path: Marker CSV path.
+            evidence: Vendor response evidence, or None for an unconfirmed write.
+        """
+        sidecar = self._empty_marker_sidecar(csv_path)
+        payload = {
+            "affirmative": evidence.affirmative if evidence is not None else False,
+            "results_count": evidence.results_count if evidence is not None else None,
+            "query_count": evidence.query_count if evidence is not None else None,
+            "request_ids": list(evidence.request_ids) if evidence is not None else [],
+            "adjusted": evidence.adjusted if evidence is not None else None,
+        }
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _save_marker_evidence_for_range(
+        self,
+        archive_symbol: str,
+        timespan: str,
+        from_ts: datetime,
+        to_ts: datetime,
+        evidence: PolygonAggregateResponse,
+    ) -> None:
+        """Apply one response envelope to header-only files in its window.
+
+        Args:
+            archive_symbol: Stable cache symbol.
+            timespan: Aggregate timespan.
+            from_ts: Requested range start.
+            to_ts: Requested range end.
+            evidence: Vendor response evidence.
+        """
+        current_day = from_ts.date()
+        while current_day <= to_ts.date():
+            path = self.get_aggregate_csv_path_for_day(archive_symbol, timespan, current_day)
+            if path.exists() and path.stat().st_size <= _HEADER_ONLY_MAX_BYTES:
+                self._write_empty_marker_evidence(path, evidence)
+            current_day += timedelta(days=1)
+
+    def is_aggregate_day_settled(
+        self,
+        archive_symbol: str,
+        timespan: str,
+        day: date,
+    ) -> bool:
+        """Return whether a cache day contains data or an honest empty verdict.
+
+        Legacy empty markers are grandfathered except incident-era US equity
+        sessions. This bounds migration while reconsidering the known poisoned
+        population. Closed equity days are intrinsically settled.
+
+        A header-only marker is detected by size, and ``_HEADER_ONLY_MAX_BYTES``
+        adds TWO bytes to the joined header rather than one on purpose. Both
+        line-terminator conventions exist in the real cache: this writer emits
+        LF (55 bytes) but 10 406 of the 111 012 markers on disk were written
+        with CRLF (56 bytes), including some of the 2026-07-27 incident files.
+        Deriving the bound as ``+ 1`` would classify every CRLF marker as
+        holding data and silently reintroduce exactly the defect this predicate
+        exists to prevent. Any real data row pushes a file far past either
+        value, so the looser bound costs nothing.
+
+        Args:
+            archive_symbol: Stable cache symbol.
+            timespan: Aggregate timespan.
+            day: Calendar day to inspect.
+
+        Returns:
+            True when resume may safely skip the day.
+        """
+        path = self.get_aggregate_csv_path_for_day(archive_symbol, timespan, day)
+        if not path.exists():
+            return False
+        if path.stat().st_size > _HEADER_ONLY_MAX_BYTES:
+            return True
+        sidecar = self._empty_marker_sidecar(path)
+        if sidecar.exists():
+            try:
+                payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return False
+            return payload.get("affirmative") is True
+        is_equity = "-" not in archive_symbol
+        needs_migration_check = is_equity and day >= _LEGACY_RECHECK_FROM
+        return not needs_migration_check or is_us_equity_market_closed(day)
 
     def _merge_with_existing(
         self,
@@ -534,13 +639,26 @@ class PolygonHistoricalLoader:
             sort=sort,
             limit=limit,
         )
-        candles = self._parse_aggregate_response(response, ticker, resume_from)
+        candles = self._parse_aggregate_response(response.aggregates, ticker, resume_from)
         logger.info(f"Received {len(candles)} candles")
         if save_csv:
             if archive_symbol is None:
                 raise ValueError("archive_symbol is required when save_csv=True")
             await asyncio.to_thread(
-                self._save_candles_to_csv, candles, archive_symbol, timespan, from_ts, to_ts
+                self._save_candles_to_csv,
+                candles,
+                archive_symbol,
+                timespan,
+                from_ts,
+                to_ts,
+            )
+            await asyncio.to_thread(
+                self._save_marker_evidence_for_range,
+                archive_symbol,
+                timespan,
+                from_ts,
+                to_ts,
+                response,
             )
         await asyncio.sleep(self._rate_delay)
         return candles

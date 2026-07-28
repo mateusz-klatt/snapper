@@ -28,6 +28,7 @@ holiday, which is the safe direction for a monitoring calendar.
 """
 
 from datetime import UTC
+from datetime import date
 from datetime import datetime
 from datetime import time as datetime_time
 from datetime import timedelta
@@ -46,6 +47,32 @@ CME_DAILY_BREAK_END_CT: Final = datetime_time(hour=17)
 _FRIDAY: Final = 4
 _SATURDAY: Final = 5
 _SUNDAY: Final = 6
+
+US_EQUITY_FULL_CLOSURES: Final[frozenset[date]] = frozenset(
+    {
+        date(2026, 1, 1),
+        date(2026, 1, 19),
+        date(2026, 2, 16),
+        date(2026, 4, 3),
+        date(2026, 5, 25),
+        date(2026, 6, 19),
+        date(2026, 7, 3),
+        date(2026, 9, 7),
+        date(2026, 11, 26),
+        date(2026, 12, 25),
+        date(2027, 1, 1),
+        date(2027, 1, 18),
+        date(2027, 2, 15),
+        date(2027, 3, 26),
+        date(2027, 5, 31),
+        date(2027, 6, 18),
+        date(2027, 7, 5),
+        date(2027, 9, 6),
+        date(2027, 11, 25),
+        date(2027, 12, 24),
+    }
+)
+"""Full-day US equity market closures covering migration and forward operation."""
 
 
 def _ct(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
@@ -175,6 +202,18 @@ def is_cme_closed(now_utc: datetime) -> bool:
         the venue is open.
     """
     return _is_closed_ct(_as_ct(now_utc))
+
+
+def is_us_equity_market_closed(day: date) -> bool:
+    """Return whether US equities have no regular session on a date.
+
+    Args:
+        day: US market calendar date.
+
+    Returns:
+        True for weekends and curated full-day exchange holidays.
+    """
+    return day.weekday() >= _SATURDAY or day in US_EQUITY_FULL_CLOSURES
 
 
 def last_cme_reopen(now_utc: datetime) -> datetime:

@@ -31,10 +31,22 @@ from snapper.application.updaters.historical.aggregates import PolygonAggregates
 from snapper.application.updaters.historical.aggregates import _SymbolContext
 from snapper.application.updaters.historical.aggregates import _timeframe_label
 from snapper.data.repository import DatabaseRepository
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonAggregateResponse
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 
 TEST_DB_URL = "sqlite:///:memory:"
+
+
+def _incident_context() -> _SymbolContext:
+    """Build an equity context for marker migration tests."""
+    return _SymbolContext(
+        native_symbol="AAPL",
+        polygon_symbol="AAPL",
+        base_currency="AAPL",
+        quote_currency="USD",
+        archive_symbol="AAPL",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -531,6 +543,7 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=1)
     loader: Any = SimpleNamespace()
     loader.get_aggregate_csv_path_for_day = Mock(return_value=None)
+    loader.is_aggregate_day_settled = Mock(return_value=False)
     loader.fetch_aggregates = AsyncMock(return_value=[])
     svc._loader = loader
     context = _SymbolContext(
@@ -630,6 +643,9 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
         def get_aggregate_csv_path_for_day(self, *_args: Any, **_kwargs: Any) -> DummyPath:
             return DummyPath(True)
 
+        def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
         async def fetch_aggregates(self, *_args: Any, **_kwargs: Any) -> list[Any]:
             self.fetch_calls += 1
             return []
@@ -678,6 +694,9 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
             self, _archive_symbol: str, _timespan: str, day: Any
         ) -> DummyPath:
             return DummyPath(day not in missing_days)
+
+        def is_aggregate_day_settled(self, _archive_symbol: str, _timespan: str, day: Any) -> bool:
+            return day not in missing_days
 
         async def fetch_aggregates(self, *_args: Any, **_kwargs: Any) -> list[AggregateCandle]:
             self.fetch_calls += 1
@@ -731,6 +750,9 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
 
         def get_aggregate_csv_path_for_day(self, *_args: Any, **_kwargs: Any) -> DummyPath:
             return DummyPath(False)
+
+        def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+            return False
 
         async def fetch_aggregates(self, *_args: Any, **_kwargs: Any) -> list[AggregateCandle]:
             self.fetch_calls += 1
@@ -920,6 +942,9 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
 
         def get_aggregate_csv_path_for_day(self, *_args: Any, **_kwargs: Any) -> DummyPath:
             return DummyPath(True)
+
+        def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
 
         async def fetch_aggregates(self, *_args: Any, **_kwargs: Any) -> list[Any]:
             self.fetch_calls += 1
@@ -1250,6 +1275,9 @@ class _StubLoader:
         self, archive_symbol: str, timespan: str, day: date
     ) -> Path | None:
         return None
+
+    def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
 
 
 @pytest.mark.asyncio
@@ -1733,6 +1761,9 @@ class _DummyLoader:
     def get_aggregate_csv_path_for_day(self, *_: object) -> Any:
         return None
 
+    def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
+
 
 @pytest.mark.asyncio()
 async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2053,6 +2084,9 @@ class _LoaderStub:
     def get_aggregate_csv_path_for_day(self, *_args: Any, **_kwargs: Any) -> _PathStub:
         return _PathStub(self._csv_exists)
 
+    def is_aggregate_day_settled(self, *_args: Any, **_kwargs: Any) -> bool:
+        return self._csv_exists
+
     async def fetch_aggregates(self, *args: Any, **kwargs: Any) -> list[AggregateCandle]:
         self.fetch_calls.append({"args": args, "kwargs": kwargs})
         return self._candles
@@ -2355,3 +2389,89 @@ def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
 
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
     assert service._lookup_context_by_polygon_symbol("X:ORPHAN") is None
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_incident_marker_is_refetched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refetch an incident-era equity marker without affirmative provenance.
+
+    Given: A header-only AAPL marker for the incident trading day with no
+        affirmative sidecar,
+    When: resume optimization processes that one-day range,
+    Then: the loader is called instead of treating file existence as settled.
+    """
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 7, 28, tzinfo=UTC)
+
+    monkeypatch.setattr(aggregates_module, "datetime", FrozenDatetime)
+    loader = PolygonHistoricalLoader(None, cache_root=tmp_path, rate_delay_seconds=0.0)
+    marker = loader.get_aggregate_csv_path_for_day("AAPL", "minute", date(2026, 7, 27))
+    loader._write_csv(marker, [])
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(loader, "fetch_aggregates", fetch)
+    service = PolygonAggregatesBackfillService(symbols=[], days_back=1, resume=True, save_csv=True)
+    service._loader = loader
+
+    await service._process_symbol(_incident_context())
+
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_empty_incident_marker_is_not_refetched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip an incident-era empty marker carrying an affirmative vendor verdict.
+
+    Given: A header-only AAPL marker whose sidecar records an OK response,
+    When: resume optimization processes that one-day range,
+    Then: no vendor fetch is attempted.
+    """
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 7, 28, tzinfo=UTC)
+
+    monkeypatch.setattr(aggregates_module, "datetime", FrozenDatetime)
+    loader = PolygonHistoricalLoader(None, cache_root=tmp_path, rate_delay_seconds=0.0)
+    marker = loader.get_aggregate_csv_path_for_day("AAPL", "minute", date(2026, 7, 27))
+    loader._write_csv(marker, [])
+    evidence = PolygonAggregateResponse([], True, 0, 0, ("request-empty",), True)
+    loader._save_marker_evidence_for_range(
+        "AAPL",
+        "minute",
+        datetime(2026, 7, 27, tzinfo=UTC),
+        datetime(2026, 7, 27, 23, 59, tzinfo=UTC),
+        evidence,
+    )
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(loader, "fetch_aggregates", fetch)
+    service = PolygonAggregatesBackfillService(symbols=[], days_back=1, resume=True, save_csv=True)
+    service._loader = loader
+
+    await service._process_symbol(_incident_context())
+
+    fetch.assert_not_awaited()
+
+
+def test_legacy_marker_on_closed_equity_day_is_settled(tmp_path: Path) -> None:
+    """Grandfather a legacy equity marker when the US market was closed.
+
+    Given: A header-only AAPL marker without a sidecar on Labor Day,
+    When: the cache verdict is evaluated,
+    Then: it is settled without any vendor request.
+    """
+    loader = PolygonHistoricalLoader(None, cache_root=tmp_path)
+    holiday = date(2026, 9, 7)
+    marker = loader.get_aggregate_csv_path_for_day("AAPL", "minute", holiday)
+    loader._write_csv(marker, [])
+
+    assert loader.is_aggregate_day_settled("AAPL", "minute", holiday) is True

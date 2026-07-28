@@ -14,6 +14,7 @@ from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +22,7 @@ import pytest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonAggregateResponse
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
@@ -134,18 +136,29 @@ async def test_list_aggregates_filters_invalid(monkeypatch: pytest.MonkeyPatch) 
     """
     client = PolygonExchangeClient(api_key="key")
 
-    class FakeAgg(SimpleNamespace):
-        def __init__(self, ts: int | None) -> None:
-            super().__init__(timestamp=ts, open=1, high=2, low=0.5, close=1.5, volume=10)
-
-    def fake_request() -> list[FakeAgg]:
-        return [FakeAgg(int(time.time() * 1000)), FakeAgg(None)]
-
-    monkeypatch.setattr(client, "_make_request_with_retry", AsyncMock(return_value=fake_request()))
+    pages = [
+        {
+            "status": "OK",
+            "resultsCount": 2,
+            "queryCount": 2,
+            "request_id": "request-1",
+            "adjusted": True,
+            "results": [
+                {"t": int(time.time() * 1000), "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10},
+                {"t": None, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10},
+            ],
+        }
+    ]
+    monkeypatch.setattr(client, "_make_request_with_retry", AsyncMock(return_value=pages))
     now = datetime.now(UTC)
     result = await client.list_aggregates("X:BTCUSD", 1, "minute", now, now)
-    assert all(isinstance(agg, PolygonAgg) for agg in result)
-    assert len(result) == 1
+    assert all(isinstance(agg, PolygonAgg) for agg in result.aggregates)
+    assert len(result.aggregates) == 1
+    assert result.affirmative is True
+    assert result.results_count == 2
+    assert result.query_count == 2
+    assert result.request_ids == ("request-1",)
+    assert result.adjusted is True
 
 
 @pytest.mark.asyncio
@@ -366,7 +379,50 @@ class TestPolygonAggregatesPagination:
             SimpleNamespace(timestamp=i, open=100.0, high=101.0, low=99.0, close=100.5, volume=1000)
             for i in range(51)
         ]
-        polygon_client._client.list_aggs = MagicMock(return_value=iter(mock_aggs))
+        raw_results = [
+            {
+                "t": agg.timestamp,
+                "o": agg.open,
+                "h": agg.high,
+                "l": agg.low,
+                "c": agg.close,
+                "v": agg.volume,
+            }
+            for agg in mock_aggs
+        ]
+        pages = [
+            {
+                "status": "OK",
+                "resultsCount": 25,
+                "queryCount": 25,
+                "next_url": "https://api.polygon.io/v2/next?cursor=abc",
+                "results": raw_results[:25],
+            },
+            {
+                "status": "OK",
+                "resultsCount": 25,
+                "queryCount": 25,
+                "next_url": "https://api.polygon.io/v2/final",
+                "results": raw_results[25:50],
+            },
+            {
+                "status": "OK",
+                "resultsCount": 1,
+                "queryCount": 1,
+                "results": raw_results[50:],
+            },
+        ]
+        first_response = object()
+        second_response = object()
+        third_response = object()
+        polygon_client._client.list_aggs = MagicMock(return_value=first_response)
+        polygon_client._client._decode = MagicMock(side_effect=pages)
+        polygon_client._client._get = MagicMock(side_effect=[second_response, third_response])
+
+        async def execute_request(request_func: Any) -> Any:
+            return request_func()
+
+        polygon_client._make_request_with_retry = execute_request
         with patch("time.sleep"):
             result = await polygon_client.list_aggregates(
                 ticker="X:BTCUSD",
@@ -376,7 +432,22 @@ class TestPolygonAggregatesPagination:
                 to_date=date(2024, 1, 31),
                 limit=50,
             )
-        assert len(result) == 51
+        assert len(result.aggregates) == 51
+        polygon_client._client.list_aggs.assert_called_once_with(
+            "X:BTCUSD",
+            1,
+            "day",
+            "2024-01-01",
+            "2024-01-31",
+            adjusted=True,
+            sort="asc",
+            limit=50,
+            raw=True,
+        )
+        assert polygon_client._client._get.call_args_list == [
+            call(path="/v2/next?cursor=abc", params={}, raw=True),
+            call(path="/v2/final", params={}, raw=True),
+        ]
 
     @pytest.mark.asyncio
     async def test_list_aggregates_empty_results(
@@ -388,7 +459,17 @@ class TestPolygonAggregatesPagination:
         When: Listing,
         Then: Returns empty list.
         """
-        polygon_client._client.list_aggs = MagicMock(return_value=iter([]))
+        polygon_client._make_request_with_retry = AsyncMock(
+            return_value=[
+                {
+                    "status": "OK",
+                    "resultsCount": 0,
+                    "queryCount": 0,
+                    "request_id": "empty-request",
+                    "results": [],
+                }
+            ]
+        )
         result = await polygon_client.list_aggregates(
             ticker="X:BTCUSD",
             multiplier=1,
@@ -396,7 +477,36 @@ class TestPolygonAggregatesPagination:
             from_date=date(2024, 1, 1),
             to_date=date(2024, 1, 31),
         )
-        assert result == []
+        assert result.aggregates == []
+        assert result.affirmative is True
+        assert result.results_count == 0
+
+    @pytest.mark.asyncio
+    async def test_list_aggregates_without_http_response_is_unconfirmed(
+        self, polygon_client: PolygonExchangeClient
+    ) -> None:
+        """Keep a missing raw response distinct from an affirmative empty page.
+
+        Given: The SDK raw call returns no HTTP response,
+        When: aggregates are listed,
+        Then: the result is empty but not affirmative.
+        """
+        polygon_client._client.list_aggs = MagicMock(return_value=None)
+
+        async def execute_request(request_func: Any) -> Any:
+            return request_func()
+
+        polygon_client._make_request_with_retry = execute_request
+        result = await polygon_client.list_aggregates(
+            "AAPL",
+            1,
+            "minute",
+            date(2026, 7, 27),
+            date(2026, 7, 27),
+        )
+
+        assert result.aggregates == []
+        assert result.affirmative is False
 
     @pytest.mark.asyncio
     async def test_format_aggregate_boundary_datetime(
@@ -488,22 +598,33 @@ async def test_list_aggregates_skips_invalid_records(
     When: Listing aggregates,
     Then: Skips invalid records.
     """
-    good = SimpleNamespace(
-        timestamp=int(time.time() * 1000), open=1, high=1, low=1, close=1, volume=1
-    )
-
-    class Bad:
-        def __getattr__(self, _name: str) -> Any:
-            raise ValueError("boom")
-
     monkeypatch.setattr(
         polygon_client,
         "_make_request_with_retry",
-        AsyncMock(return_value=[good, Bad()]),
+        AsyncMock(
+            return_value=[
+                {
+                    "status": "OK",
+                    "resultsCount": 2,
+                    "queryCount": 2,
+                    "results": [
+                        {
+                            "t": int(time.time() * 1000),
+                            "o": 1,
+                            "h": 1,
+                            "l": 1,
+                            "c": 1,
+                            "v": 1,
+                        },
+                        {"t": "invalid"},
+                    ],
+                }
+            ]
+        ),
     )
     now = datetime.now(UTC)
     aggs = await polygon_client.list_aggregates("X:BTCUSD", 1, "minute", now, now)
-    assert len(aggs) == 1
+    assert len(aggs.aggregates) == 1
 
 
 @pytest.mark.asyncio
@@ -655,7 +776,15 @@ async def test_get_ohlcv_builds_snapshots(
         vwap=None,
         transactions=1,
     )
-    monkeypatch.setattr(client, "list_aggregates", AsyncMock(return_value=[agg, agg]))
+    response = PolygonAggregateResponse(
+        aggregates=[agg, agg],
+        affirmative=True,
+        results_count=2,
+        query_count=2,
+        request_ids=(),
+        adjusted=True,
+    )
+    monkeypatch.setattr(client, "list_aggregates", AsyncMock(return_value=response))
     result = await client.get_ohlcv("X:BTCUSD", timeframe="1m", since=0, limit=2)
     assert len(result) == 2
 

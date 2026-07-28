@@ -32,6 +32,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from typing import cast
+from urllib.parse import urlparse
 
 import certifi
 import urllib3
@@ -101,6 +102,27 @@ class PolygonSplitEvent:
             Expected consecutive-close ratio at a stale-basis boundary.
         """
         return self.split_from / self.split_to
+
+
+@dataclass(slots=True)
+class PolygonAggregateResponse:
+    """Validated bars plus the vendor response evidence for their window.
+
+    Attributes:
+        aggregates: Validated aggregate bars.
+        affirmative: Whether every response page reported status ``OK``.
+        results_count: Sum of the vendor-declared page result counts.
+        query_count: Sum of the vendor-declared page query counts.
+        request_ids: Vendor request identifiers for audit correlation.
+        adjusted: Vendor-declared adjustment setting when present.
+    """
+
+    aggregates: list[PolygonAgg]
+    affirmative: bool
+    results_count: int
+    query_count: int
+    request_ids: tuple[str, ...]
+    adjusted: bool | None
 
 
 @dataclass
@@ -341,7 +363,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         adjusted: bool = True,
         sort: str = "asc",
         limit: int = 50000,
-    ) -> list[PolygonAgg]:
+    ) -> PolygonAggregateResponse:
         """Fetch aggregated OHLCV bars from Polygon.io.
 
         Args:
@@ -355,12 +377,12 @@ class PolygonExchangeClient(ExchangeClientBase):
             limit: Maximum bars per page.
 
         Returns:
-            List of validated aggregate bars.
+            Validated bars and vendor response-envelope evidence.
         """
 
-        def _request() -> list[Any]:
-            results: list[Any] = []
-            iterator = self._client.list_aggs(
+        def _request() -> list[dict[str, Any]]:
+            pages: list[dict[str, Any]] = []
+            response = self._client.list_aggs(
                 ticker,
                 multiplier,
                 timespan,
@@ -369,34 +391,65 @@ class PolygonExchangeClient(ExchangeClientBase):
                 adjusted=adjusted,
                 sort=sort,
                 limit=limit,
+                raw=True,
             )
-            page_size = limit
-            items_in_page = 0
-            for item in iterator:
-                results.append(item)
-                items_in_page += 1
-                if items_in_page >= page_size:
-                    logger.info(
-                        f"Fetched {len(results)} bars. Sleeping 12s before next page (5 req/min)..."
-                    )
-                    time.sleep(12)
-                    items_in_page = 0
-            if results:
-                logger.info(f"Total fetched: {len(results)} bars")
-            return results
+            while response is not None:
+                decoded = cast(dict[str, Any], self._client._decode(response))
+                pages.append(decoded)
+                next_url = decoded.get("next_url")
+                if not isinstance(next_url, str):
+                    break
+                logger.info("Fetched aggregate page. Sleeping 12s before next page (5 req/min)...")
+                time.sleep(12)
+                parsed = urlparse(next_url)
+                next_path = parsed.path
+                if parsed.query:
+                    next_path = f"{next_path}?{parsed.query}"
+                response = self._client._get(path=next_path, params={}, raw=True)
+            return pages
 
-        response = await self._make_request_with_retry(_request)
+        pages = await self._make_request_with_retry(_request)
         validated: list[PolygonAgg] = []
-        for item in response:
-            try:
-                agg = PolygonAgg.from_sdk_agg(item)
-                if agg.timestamp is None:
-                    logger.debug("Skipping aggregate with missing timestamp")
-                    continue
-                validated.append(agg)
-            except Exception as e:
-                logger.warning(f"Skipping invalid aggregate record: {e}")
-        return validated
+        for page in pages:
+            for item in page.get("results", []):
+                try:
+                    agg = PolygonAgg(
+                        open=item.get("o"),
+                        high=item.get("h"),
+                        low=item.get("l"),
+                        close=item.get("c"),
+                        volume=item.get("v"),
+                        vwap=item.get("vw"),
+                        timestamp=item.get("t"),
+                        transactions=item.get("n"),
+                        otc=item.get("otc"),
+                    )
+                    if agg.timestamp is None:
+                        logger.debug("Skipping aggregate with missing timestamp")
+                        continue
+                    validated.append(agg)
+                except Exception as e:
+                    logger.warning(f"Skipping invalid aggregate record: {e}")
+        if validated:
+            logger.info(f"Total fetched: {len(validated)} bars")
+        request_ids = tuple(
+            request_id for page in pages if isinstance(request_id := page.get("request_id"), str)
+        )
+        return PolygonAggregateResponse(
+            aggregates=validated,
+            affirmative=bool(pages) and all(page.get("status") == "OK" for page in pages),
+            results_count=sum(
+                count for page in pages if isinstance(count := page.get("resultsCount"), int)
+            ),
+            query_count=sum(
+                count for page in pages if isinstance(count := page.get("queryCount"), int)
+            ),
+            request_ids=request_ids,
+            adjusted=next(
+                (value for page in pages if isinstance(value := page.get("adjusted"), bool)),
+                None,
+            ),
+        )
 
     async def list_splits(
         self,
@@ -659,7 +712,7 @@ class PolygonExchangeClient(ExchangeClientBase):
                 close=float(agg.close or 0.0),
                 volume=float(agg.volume or 0.0),
             )
-            for agg in aggregates
+            for agg in aggregates.aggregates
         ]
         return snapshots
 

@@ -20,8 +20,10 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.implementations import polygon as polygon_module
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonAggregateResponse
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
+from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 
@@ -83,12 +85,16 @@ class TestPolygonSmallBranches:
         client = PolygonExchangeClient.__new__(PolygonExchangeClient)
         client.rate_limit = 120
 
-        async def fake_list_aggregates(**_: Any) -> list[Any]:
-            return [
-                SimpleNamespace(
-                    timestamp=1_600_000_000_000, open=1, high=2, low=0.5, close=1.5, volume=10
-                )
-            ]
+        async def fake_list_aggregates(**_: Any) -> PolygonAggregateResponse:
+            aggregate = PolygonAgg(
+                timestamp=1_600_000_000_000,
+                open=1,
+                high=2,
+                low=0.5,
+                close=1.5,
+                volume=10,
+            )
+            return PolygonAggregateResponse([aggregate], True, 1, 1, (), True)
 
         cast(Any, client).list_aggregates = fake_list_aggregates
         client._resolve_timeframe = lambda timeframe: (1, "minute", timedelta(minutes=1))

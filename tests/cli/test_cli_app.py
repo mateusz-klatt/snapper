@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 import snapper.cli.app as app_module
 import snapper.messaging.infrastructure.publisher as publisher_module
 from snapper.application.process_manager.launcher import CoreProcessStartupError
+from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.services.continuous_contract_builder import BuildResult
 from snapper.application.services.continuous_contract_builder import RollPointInfo
 from snapper.application.updaters.historical.split_repair import SplitRepairCandidate
@@ -588,6 +589,9 @@ def test_polygon_backfill_aggregates_reports_error(
         async def start(self) -> None:
             raise RuntimeError("agg-fail")
 
+        def get_run_result(self) -> dict[str, int]:
+            return {}
+
     monkeypatch.setattr(app_module, "PolygonAggregatesBackfillService", DummyService)
     result = cli_runner.invoke(
         app,
@@ -595,6 +599,50 @@ def test_polygon_backfill_aggregates_reports_error(
     )
     assert result.exit_code == 1
     assert "Error during Polygon aggregates backfill" in result.stdout
+
+
+def test_polygon_backfill_aggregates_writes_process_run(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+) -> None:
+    """Persist a completed process run for the direct daily CLI path.
+
+    Given: A backfill service replaced by an offline successful fake,
+    When: the Polygon aggregates CLI command runs,
+    Then: the isolated test database contains a succeeded process run with
+        observable symbol outcome counters.
+    """
+
+    async def offline_start(self: Any) -> None:
+        self._run_stats.selected_symbols = 163
+        self._run_stats.fetched_symbols = 163
+        self._run_stats.symbols_without_data = 163
+
+    monkeypatch.setattr(
+        app_module.PolygonAggregatesBackfillService,
+        "start",
+        offline_start,
+    )
+    result = cli_runner.invoke(
+        app,
+        ["polygon-backfill-aggregates", "--symbol", "AAPL", "--days", "1"],
+    )
+
+    async def load_run() -> dict[str, Any]:
+        recorder = ProcessRunRecorder(app_module.get_settings())
+        runs = await recorder.get_recent_runs(name="polygon_aggregates_backfill", limit=1)
+        return runs[0]
+
+    run = asyncio.run(load_run())
+    assert result.exit_code == 0
+    assert run["status"] == "succeeded"
+    assert run["result"] == {
+        "selected_symbols": 163,
+        "fetched_symbols": 163,
+        "symbols_with_data": 0,
+        "symbols_without_data": 163,
+        "skipped_symbols": 0,
+    }
 
 
 def test_polygon_backfill_grouped_reports_error(
@@ -2352,6 +2400,7 @@ class TestPolygonBackfillErrors:
                 raise RuntimeError("API error")
 
             mock_service.start = mock_start
+            mock_service.get_run_result.return_value = {}
             mock_service_class.return_value = mock_service
             with pytest.raises(typer.Exit) as exc_info:
                 polygon_backfill_aggregates(
@@ -2416,6 +2465,7 @@ class TestPolygonBackfillSuccess:
                 return None
 
             mock_service.start = mock_start
+            mock_service.get_run_result.return_value = {}
             mock_service_class.return_value = mock_service
             polygon_backfill_aggregates(
                 symbols=["BTC-USD"],

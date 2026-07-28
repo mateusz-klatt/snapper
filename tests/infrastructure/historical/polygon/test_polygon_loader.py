@@ -13,7 +13,9 @@ from typing import cast
 
 import pytest
 
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonAggregateResponse
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
+from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 from snapper.infrastructure.historical.polygon.loader import _format_decimal
@@ -219,7 +221,7 @@ class _StubPolygonClient:
         adjusted: bool,
         sort: str,
         limit: int,
-    ) -> list[Any]:
+    ) -> PolygonAggregateResponse:
         self.aggregate_calls.append(
             {
                 "ticker": ticker,
@@ -232,7 +234,15 @@ class _StubPolygonClient:
                 "limit": limit,
             }
         )
-        return self._aggregates
+        aggregates = [PolygonAgg.from_sdk_agg(item) for item in self._aggregates]
+        return PolygonAggregateResponse(
+            aggregates=aggregates,
+            affirmative=True,
+            results_count=len(aggregates),
+            query_count=len(aggregates),
+            request_ids=("test-request",),
+            adjusted=adjusted,
+        )
 
     async def get_grouped_daily_aggs(
         self,
@@ -1013,6 +1023,90 @@ def test_read_aggregate_csv_skips_header_only_marker(tmp_path: Path) -> None:
     csv_path = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-02.csv"
     loader._write_csv(csv_path, [])
     assert read_aggregate_csv(csv_path, "ARCH") == []
+
+
+def test_aggregate_day_settlement_handles_file_states(tmp_path: Path) -> None:
+    """Distinguish missing, populated, and malformed-provenance cache days.
+
+    Given: Three equity dates representing no file, a data file, and a marker
+        with malformed provenance,
+    When: their settlement verdicts are read,
+    Then: only the populated day is settled.
+    """
+    loader = _cache_loader(tmp_path)
+    missing_day = date(2026, 7, 27)
+    data_day = date(2026, 7, 28)
+    malformed_day = date(2026, 7, 29)
+    data_path = loader.get_aggregate_csv_path_for_day("AAPL", "minute", data_day)
+    loader._write_csv(
+        data_path,
+        [
+            _make_candle(
+                datetime(2026, 7, 28, tzinfo=UTC),
+                vwap=None,
+                transactions=None,
+            )
+        ],
+    )
+    malformed_path = loader.get_aggregate_csv_path_for_day("AAPL", "minute", malformed_day)
+    loader._write_csv(malformed_path, [])
+    loader._empty_marker_sidecar(malformed_path).write_text("{", encoding="utf-8")
+
+    assert loader.is_aggregate_day_settled("AAPL", "minute", missing_day) is False
+    assert loader.is_aggregate_day_settled("AAPL", "minute", data_day) is True
+    assert loader.is_aggregate_day_settled("AAPL", "minute", malformed_day) is False
+
+
+def test_save_empty_inverted_range_writes_nothing(tmp_path: Path) -> None:
+    """Leave the marker loop empty for an inverted empty range.
+
+    Given: No candles and a start after the end,
+    When: the cache writer runs,
+    Then: no cache paths are created.
+    """
+    loader = _cache_loader(tmp_path)
+    loader._save_candles_to_csv(
+        [],
+        "AAPL",
+        "minute",
+        datetime(2026, 7, 28, tzinfo=UTC),
+        datetime(2026, 7, 27, tzinfo=UTC),
+    )
+
+    assert list(tmp_path.rglob("*.csv")) == []
+
+
+def test_save_empty_two_day_range_preserves_data_then_marks_empty(tmp_path: Path) -> None:
+    """Preserve an existing data day while marking a later empty day.
+
+    Given: An empty two-day response whose first day already contains data,
+    When: the cache writer runs,
+    Then: the data day remains untouched and the empty day gains provenance.
+    """
+    loader = _cache_loader(tmp_path)
+    first_path = loader.get_aggregate_csv_path_for_day("AAPL", "minute", date(2026, 7, 27))
+    loader._write_csv(
+        first_path,
+        [
+            _make_candle(
+                datetime(2026, 7, 27, tzinfo=UTC),
+                vwap=None,
+                transactions=None,
+            )
+        ],
+    )
+    loader._save_candles_to_csv(
+        [],
+        "AAPL",
+        "minute",
+        datetime(2026, 7, 27, tzinfo=UTC),
+        datetime(2026, 7, 28, tzinfo=UTC),
+    )
+
+    second_path = loader.get_aggregate_csv_path_for_day("AAPL", "minute", date(2026, 7, 28))
+    assert read_aggregate_csv(first_path, "AAPL")
+    assert not loader._empty_marker_sidecar(first_path).exists()
+    assert loader._empty_marker_sidecar(second_path).exists()
 
 
 def test_read_aggregate_csv_parses_naive_timestamp_as_utc(tmp_path: Path) -> None:
