@@ -176,7 +176,7 @@ IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 
-PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
+PYTEST_TIMEOUT := --timeout=15 --timeout-method=signal
 ROOT_DIR := $(CURDIR)
 SERVER_PORT ?= 8000
 UI_DIR := frontend
