@@ -271,6 +271,29 @@ verification steps.
 
 ## Database
 
+### `retire-trade-projection-checkpoints`
+
+Preview and SCD2-close stale trade-projection checkpoints so the next
+trader boot rebuilds them from replay. The command never deletes a row or
+changes checkpoint values; it only closes the current knowledge interval by
+setting `known_to`.
+
+Selection and confirmation are deliberately separate. Choose exactly one of
+`--shard-key KEY` or `--all`. Every invocation prints the credential-free
+database host and database name plus each candidate's shard key, position
+quantity, realized P&L, turnover, and checkpoint time. Without `--confirm`,
+the command is a read-only dry run.
+
+```bash
+snapper retire-trade-projection-checkpoints --all
+snapper retire-trade-projection-checkpoints --all --confirm
+```
+
+Use `--all` when checkpoint age cannot distinguish clean state from state
+accumulated under older projection semantics. A confirmed invocation still
+prints the full preview before writing, revalidates that exact set in the
+repository transaction, and refuses if it changed.
+
 ### `db-init`
 
 Initializes the database schema.

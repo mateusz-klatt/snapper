@@ -25907,6 +25907,112 @@ class SQLAlchemyRepository(Repository):
                 )
             return rows
 
+    async def retire_trade_projection_checkpoints(
+        self,
+        shard_key: str | None,
+        expected_public_ids: list[str],
+        retired_at: datetime,
+    ) -> int:
+        """SCD2-close exactly the active checkpoints the operator previewed.
+
+        The writer reselects current rows under lock and refuses when their
+        public ids differ from the preview assertion. It only changes
+        ``known_to`` and verifies the database-reported affected-row count
+        before committing.
+
+        Args:
+            shard_key: One exact shard key, or None for every active checkpoint.
+            expected_public_ids: Exact public ids shown by the CLI preview.
+            retired_at: Knowledge time stamped onto ``known_to``.
+
+        Returns:
+            Number of checkpoint versions closed.
+
+        Raises:
+            ValueError: If current rows differ from the preview or the affected
+                row count differs from the asserted count.
+        """
+        async with self.session() as s:
+            filters: list[ColumnElement[bool]] = [TradeProjectionCheckpoint.known_to > retired_at]
+            if shard_key is not None:
+                filters.append(TradeProjectionCheckpoint.shard_key == shard_key)
+            result = await s.execute(
+                select(TradeProjectionCheckpoint.id, TradeProjectionCheckpoint.public_id)
+                .where(*filters)
+                .order_by(TradeProjectionCheckpoint.shard_key)
+                .with_for_update()
+            )
+            rows = result.all()
+            actual_public_ids = [str(row.public_id) for row in rows]
+            if actual_public_ids != expected_public_ids:
+                raise ValueError(
+                    "checkpoint set changed after preview; nothing was written: "
+                    f"expected={expected_public_ids!r} actual={actual_public_ids!r}"
+                )
+            if not rows:
+                return 0
+            row_ids = [int(row.id) for row in rows]
+            update_result = await s.execute(
+                update(TradeProjectionCheckpoint)
+                .where(
+                    TradeProjectionCheckpoint.id.in_(row_ids),
+                    TradeProjectionCheckpoint.known_to > retired_at,
+                )
+                .values(known_to=retired_at)
+            )
+            closed = cast(CursorResult[Any], update_result).rowcount
+            if closed != len(rows):
+                raise ValueError(
+                    "checkpoint close count mismatch; transaction rolled back: "
+                    f"previewed={len(rows)} closed={closed}"
+                )
+            await s.commit()
+            return closed
+
+    async def get_trade_projection_checkpoint_retirement_candidates(
+        self, shard_key: str | None, as_of: datetime
+    ) -> list[TradeProjectionCheckpointRow]:
+        """Return checkpoint versions still known at the preview instant.
+
+        Args:
+            shard_key: One exact shard key, or None for every checkpoint.
+            as_of: Knowledge instant used by the ``known_to > as_of`` predicate.
+
+        Returns:
+            Candidate checkpoints ordered by shard key.
+        """
+        filters: list[ColumnElement[bool]] = [TradeProjectionCheckpoint.known_to > as_of]
+        if shard_key is not None:
+            filters.append(TradeProjectionCheckpoint.shard_key == shard_key)
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeProjectionCheckpoint)
+                .where(*filters)
+                .order_by(TradeProjectionCheckpoint.shard_key)
+            )
+            return [
+                {
+                    "public_id": cp.public_id,
+                    "shard_key": cp.shard_key,
+                    "position_qty": cp.position_qty,
+                    "entry_price": cp.entry_price,
+                    "position_opened_at": cp.position_opened_at,
+                    "cash": cp.cash,
+                    "peak_equity": cp.peak_equity,
+                    "realized_pnl": cp.realized_pnl,
+                    "turnover": cp.turnover,
+                    "last_venue_event_id": cp.last_venue_event_id,
+                    "last_venue_event_at": cp.last_venue_event_at,
+                    "open_command_ids": cp.open_command_ids,
+                    "seen_exec_ids": cp.seen_exec_ids,
+                    "checkpoint_at": cp.checkpoint_at,
+                    "session_id": cp.session_id,
+                    "wallet_public_id": cp.wallet_public_id,
+                    "operator_public_id": cp.operator_public_id,
+                }
+                for cp in result.scalars().all()
+            ]
+
     async def insert_funding_rate(
         self,
         row: FundingRateInsertRow,

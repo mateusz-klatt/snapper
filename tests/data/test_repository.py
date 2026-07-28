@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import Select
 from sqlalchemy import event as _sa_event
+from sqlalchemy import func
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
 from sqlalchemy import update as sqlalchemy_update
@@ -56,6 +57,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueFeeSchedule
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
@@ -6621,6 +6623,233 @@ async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
     assert rows[0]["shard_key"] == "kraken.BTC-USD.live"
     assert rows[1]["shard_key"] == "kraken.ETH-USD.live"
     assert rows[0]["seen_exec_ids"] == '["t1"]'
+
+
+@pytest.mark.asyncio
+async def test_retire_trade_projection_checkpoint_preserves_history_and_siblings(
+    tmp_path: Path,
+) -> None:
+    """Retirement closes only the selected version and preserves its evidence.
+
+    Given: Two active checkpoint siblings and an exact preview assertion for one.
+    When: The repository retirement closes the selected shard.
+    Then: The current read path omits it, its sibling remains unchanged, and the
+        historical version still exists and is readable before its close time.
+    """
+    db_path = tmp_path / "cp_retire.db"
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repository.create_all()
+    created_at = datetime(2026, 7, 28, 1, 0, tzinfo=UTC)
+    selected_id = await repository.upsert_checkpoint(
+        {
+            "shard_key": "walutomat.EUR-PLN.live.example",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+            "position_qty": 21.04,
+            "entry_price": 4.3,
+            "position_opened_at": created_at,
+            "cash": 100.0,
+            "peak_equity": 110.0,
+            "realized_pnl": 0.0,
+            "turnover": 92.24084400000001,
+            "last_venue_event_id": 2,
+            "last_venue_event_at": created_at,
+            "open_command_ids": None,
+            "seen_exec_ids": "[]",
+            "checkpoint_at": created_at,
+            "session_id": "session",
+            "sequence_id": 1,
+            "bus_time": created_at,
+        }
+    )
+    await repository.upsert_checkpoint(
+        {
+            "shard_key": "paper.BTC-USD.paper.example",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+            "position_qty": 0.02,
+            "entry_price": 64000.0,
+            "position_opened_at": created_at,
+            "cash": 50.0,
+            "peak_equity": 60.0,
+            "realized_pnl": 0.0,
+            "turnover": 1283.972,
+            "last_venue_event_id": 3,
+            "last_venue_event_at": created_at,
+            "open_command_ids": None,
+            "seen_exec_ids": "[]",
+            "checkpoint_at": created_at,
+            "session_id": "session",
+            "sequence_id": 2,
+            "bus_time": created_at,
+        }
+    )
+    candidates = await repository.get_trade_projection_checkpoint_retirement_candidates(
+        "walutomat.EUR-PLN.live.example", created_at
+    )
+    assert len(candidates) == 1
+    retired_at = created_at + timedelta(minutes=1)
+
+    closed = await repository.retire_trade_projection_checkpoints(
+        "walutomat.EUR-PLN.live.example",
+        [candidates[0]["public_id"]],
+        retired_at,
+    )
+
+    assert closed == 1
+    assert await repository.get_checkpoint("walutomat.EUR-PLN.live.example", retired_at) is None
+    sibling = await repository.get_checkpoint("paper.BTC-USD.paper.example", retired_at)
+    assert sibling is not None
+    assert sibling["position_qty"] == 0.02
+    historical = await repository.get_checkpoint("walutomat.EUR-PLN.live.example", created_at)
+    assert historical is not None
+    assert historical["position_qty"] == 21.04
+    async with repository.session() as session:
+        stored = await session.get(TradeProjectionCheckpoint, selected_id)
+        assert stored is not None
+        assert stored.known_to == retired_at
+        assert stored.position_qty == 21.04
+
+
+@pytest.mark.asyncio
+async def test_retire_trade_projection_checkpoint_rerun_is_a_no_op(
+    tmp_path: Path,
+) -> None:
+    """A retired checkpoint is not closed again.
+
+    Given: One checkpoint already closed through the repository writer.
+    When: Current candidates are read and the writer is called with the empty
+        preview assertion.
+    Then: The second run closes zero rows and history remains one physical row.
+    """
+    db_path = tmp_path / "cp_retire_rerun.db"
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repository.create_all()
+    created_at = datetime(2026, 7, 28, 1, 0, tzinfo=UTC)
+    row = {
+        "shard_key": "walutomat.EUR-PLN.live.example",
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+        "position_qty": 21.04,
+        "entry_price": 4.3,
+        "position_opened_at": created_at,
+        "cash": 100.0,
+        "peak_equity": 110.0,
+        "realized_pnl": 0.0,
+        "turnover": 92.24084400000001,
+        "last_venue_event_id": 2,
+        "last_venue_event_at": created_at,
+        "open_command_ids": None,
+        "seen_exec_ids": "[]",
+        "checkpoint_at": created_at,
+        "session_id": "session",
+        "sequence_id": 1,
+        "bus_time": created_at,
+    }
+    await repository.upsert_checkpoint(row)
+    preview = await repository.get_all_checkpoints(created_at)
+    retired_at = created_at + timedelta(minutes=1)
+    await repository.retire_trade_projection_checkpoints(
+        None, [preview[0]["public_id"]], retired_at
+    )
+
+    current = await repository.get_trade_projection_checkpoint_retirement_candidates(
+        None, retired_at
+    )
+    closed = await repository.retire_trade_projection_checkpoints(
+        None, [], retired_at + timedelta(minutes=1)
+    )
+
+    assert current == []
+    assert closed == 0
+    async with repository.session() as session:
+        count = await session.scalar(
+            _sa_select(func.count()).select_from(TradeProjectionCheckpoint)
+        )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_retire_trade_projection_checkpoint_refuses_a_changed_preview(
+    tmp_path: Path,
+) -> None:
+    """A stale preview cannot authorize a different active checkpoint set.
+
+    Given: One active checkpoint and a preview assertion naming another id.
+    When: The guarded repository writer reselects the current row.
+    Then: It refuses before mutation and leaves the active checkpoint readable.
+    """
+    db_path = tmp_path / "cp_retire_changed.db"
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repository.create_all()
+    created_at = datetime(2026, 7, 28, 1, 0, tzinfo=UTC)
+    await repository.upsert_checkpoint(
+        {
+            "shard_key": "walutomat.EUR-PLN.live.example",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+            "position_qty": 21.04,
+            "entry_price": 4.3,
+            "position_opened_at": created_at,
+            "cash": 100.0,
+            "peak_equity": 110.0,
+            "realized_pnl": 0.0,
+            "turnover": 92.24084400000001,
+            "last_venue_event_id": 2,
+            "last_venue_event_at": created_at,
+            "open_command_ids": None,
+            "seen_exec_ids": "[]",
+            "checkpoint_at": created_at,
+            "session_id": "session",
+            "sequence_id": 1,
+            "bus_time": created_at,
+        }
+    )
+
+    with pytest.raises(ValueError, match="checkpoint set changed after preview"):
+        await repository.retire_trade_projection_checkpoints(
+            None, ["stale-preview-id"], created_at + timedelta(minutes=1)
+        )
+
+    active = await repository.get_all_checkpoints(created_at + timedelta(minutes=1))
+    assert len(active) == 1
+    assert active[0]["position_qty"] == 21.04
+
+
+@pytest.mark.asyncio
+async def test_retire_trade_projection_checkpoint_rolls_back_a_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer refuses when its conditional update closes fewer rows.
+
+    Given: One locked preview row and a conditional update reporting zero
+        affected rows.
+    When: The repository performs its guarded close.
+    Then: It raises the count mismatch before commit.
+    """
+    repository = object.__new__(SQLAlchemyRepository)
+    session = MagicMock()
+    selected = MagicMock()
+    selected.all.return_value = [
+        SimpleNamespace(id=7, public_id="00000000-0000-7000-8000-000000000007")
+    ]
+    updated = MagicMock(rowcount=0)
+    session.execute = AsyncMock(side_effect=[selected, updated])
+    session.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def mocked_session(
+        current: SQLAlchemyRepository,
+    ) -> AsyncIterator[MagicMock]:
+        assert current is repository
+        yield session
+
+    monkeypatch.setattr(SQLAlchemyRepository, "session", mocked_session)
+
+    with pytest.raises(ValueError, match="previewed=1 closed=0"):
+        await repository.retire_trade_projection_checkpoints(
+            None,
+            ["00000000-0000-7000-8000-000000000007"],
+            datetime(2026, 7, 28, 1, 1, tzinfo=UTC),
+        )
+
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -134,6 +134,7 @@ from snapper.auth.user_service import UserService
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.token_preflight import token_app
+from snapper.cli.trade_projection_checkpoints import retire_trade_projection_checkpoints
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
@@ -2985,6 +2986,7 @@ def notify() -> None:
 
 
 app.command(name="dev-mint-pat")(dev_mint_pat)
+app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.add_typer(annulment_app, name="annulment")
 app.add_typer(token_app, name="token")
 

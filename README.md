@@ -347,6 +347,7 @@ snapper db-init             # Initialize schema
 snapper db-upgrade          # Alembic migrations
 snapper db-downgrade        # Rollback migrations
 snapper db-seed             # Seed profile data
+snapper retire-trade-projection-checkpoints --all  # Dry-run checkpoint retirement
 ```
 
 ### Configuration and Maintenance
