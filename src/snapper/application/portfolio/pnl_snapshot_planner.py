@@ -55,28 +55,51 @@ from snapper.application.portfolio.account_status import AUTHORITY_MAX_WINDOW
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import ValuationProvenance
+from snapper.application.portfolio.basket_valuation import ValuationReason
 from snapper.application.portfolio.basket_valuation import attribute_position_inventory
 from snapper.application.portfolio.basket_valuation import value_currency
-from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
 from snapper.data.repository_types import SampleReasonCode
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
 
-_POINT_REASON_TO_SAMPLE_CODE: Final[dict[str, SampleReasonCode]] = {
+_POINT_REASON_TO_SAMPLE_CODE: Final[dict[PnlIncompletenessReason, SampleReasonCode]] = {
     "mark_unavailable": "missing_mark",
     "fx_conversion_unproven": "missing_fx_rate",
+    "cost_basis_unavailable": "cost_basis_unproven",
+    "execution_price_invalid": "cost_basis_unproven",
     "unrealized_non_finite": "non_finite",
     "net_non_finite": "non_finite",
     "attribution_value_non_finite": "non_finite",
+    "fill_evidence_gap": "fill_gap_evidence",
+    "activation_baseline_non_finite": "non_finite",
+    "seed_quantity_non_finite": "non_finite",
+    "cumulative_non_finite": "non_finite",
+    "scope_order_regression": "pnl_point_withheld",
+    "before_activation": "pnl_point_withheld",
+    "late_pre_activation_execution": "pnl_point_withheld",
+    "execution_price_provenance_unproven": "pnl_point_withheld",
+    "execution_size_invalid": "pnl_point_withheld",
+    "attribution_reconciliation_failed": "pnl_point_withheld",
+    "instrument_reconciliation_failed": "pnl_point_withheld",
 }
-"""Exact R9 mapping of a 5A mark-incomplete point's causal provenance to a
-persisted reason code (D1). A missing mark stays retryable ``missing_mark``, but a
-missing mark-FX rate is the distinct retryable ``missing_fx_rate`` (never flattened
-into ``missing_mark``), and any non-finite unrealized/net/attribution value is the
-terminal ``non_finite``. Any other mark-incomplete cause (for example an
-unestablished cost basis) falls back to the conservative retryable ``missing_mark``
-so a bounded self-heal may revisit it."""
+"""Total mapping of 5A causal provenance to persisted reason codes.
+
+Widening :data:`PnlIncompletenessReason` fails the map exhaustiveness test and is
+also a breaking wire change for iOS and the frontend.
+"""
+
+_VALUATION_REASON_TO_SAMPLE_CODE: Final[dict[ValuationReason, SampleReasonCode]] = {
+    "missing_fiat_rate": "missing_fx_rate",
+    "missing_version": "missing_fx_rate",
+    "missing_crypto_plane": "crypto_plane_unpriced",
+    "no_usable_close": "crypto_plane_unpriced",
+    "ambiguous_plane": "crypto_plane_ambiguous",
+    "overflow": "valuation_overflow",
+    "non_finite": "non_finite",
+}
 
 FINALIZATION_LAG: Final[timedelta] = timedelta(minutes=2)
 """Minutes withheld behind ``now`` so only finalized grid minutes are sampled."""
@@ -162,6 +185,15 @@ class DrawdownOutcome:
     drawdown: float | None
     peak: float | None
     demoted: bool
+    reason: Literal["prior_peak_non_finite", "negative_equity"] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _GateFailure:
+    """One basket authority failure with its honest persisted cause."""
+
+    code: SampleReasonCode
+    cause: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +209,7 @@ class BasketOutcome:
     observed_balances: dict[tuple[str, str], float]
     observations: tuple[dict[str, str], ...]
     reason_codes: frozenset[SampleReasonCode]
+    diagnostics: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +223,7 @@ class EquityOutcome:
     equity: float | None
     valuation: tuple[dict[str, object], ...]
     reason_codes: frozenset[SampleReasonCode]
+    diagnostics: tuple[dict[str, str], ...]
 
 
 def _floor_to_minute(instant: datetime) -> datetime:
@@ -358,16 +392,20 @@ def resolve_drawdown(prior_peak: float | None, equity: float) -> DrawdownOutcome
         The drawdown, the carried peak, and whether the minute was demoted.
     """
     if prior_peak is not None and not math.isfinite(prior_peak):
-        return DrawdownOutcome(drawdown=None, peak=prior_peak, demoted=True)
+        return DrawdownOutcome(
+            drawdown=None, peak=prior_peak, demoted=True, reason="prior_peak_non_finite"
+        )
     running_peak = equity if prior_peak is None else max(prior_peak, equity)
     if running_peak > 0.0:
         drawdown = (running_peak - equity) / running_peak
         if 0.0 <= drawdown <= 1.0:
-            return DrawdownOutcome(drawdown=drawdown, peak=running_peak, demoted=False)
-        return DrawdownOutcome(drawdown=None, peak=prior_peak, demoted=True)
+            return DrawdownOutcome(drawdown=drawdown, peak=running_peak, demoted=False, reason=None)
+        return DrawdownOutcome(
+            drawdown=None, peak=prior_peak, demoted=True, reason="negative_equity"
+        )
     if abs(equity) <= 0.0:
-        return DrawdownOutcome(drawdown=0.0, peak=running_peak, demoted=False)
-    return DrawdownOutcome(drawdown=None, peak=prior_peak, demoted=True)
+        return DrawdownOutcome(drawdown=0.0, peak=running_peak, demoted=False, reason=None)
+    return DrawdownOutcome(drawdown=None, peak=prior_peak, demoted=True, reason="negative_equity")
 
 
 def _effective_until(observed_at: datetime) -> datetime:
@@ -378,7 +416,7 @@ def _effective_until(observed_at: datetime) -> datetime:
 
 def _parse_balance_entries(
     balances_json: str,
-) -> tuple[tuple[str, float], ...] | SampleReasonCode:
+) -> tuple[tuple[str, float], ...] | _GateFailure:
     """Parse one venue's balances into ``(currency, total)`` legs or a reason.
 
     A structurally unpriceable payload — invalid JSON, a non-array shape, a
@@ -395,30 +433,30 @@ def _parse_balance_entries(
     try:
         payload = json.loads(balances_json)
     except (ValueError, TypeError):
-        return "non_finite"
+        return _GateFailure("basket_payload_invalid", "balances_json_unparseable")
     if not isinstance(payload, list):
-        return "non_finite"
+        return _GateFailure("basket_payload_invalid", "balances_payload_not_a_list")
     legs: list[tuple[str, float]] = []
     for entry in payload:
         if not isinstance(entry, dict):
-            return "non_finite"
+            return _GateFailure("basket_payload_invalid", "balance_entry_not_an_object")
         currency = entry.get("currency")
         total = entry.get("total")
         if not isinstance(currency, str) or not currency or currency.endswith(_COLLATERAL_SUFFIX):
-            return "non_finite"
+            return _GateFailure("basket_payload_invalid", "balance_entry_currency_invalid")
         if (
             isinstance(total, bool)
             or not isinstance(total, (int, float))
             or not math.isfinite(total)
         ):
-            return "non_finite"
+            return _GateFailure("basket_payload_invalid", "balance_entry_total_non_finite")
         legs.append((currency, float(total)))
     return tuple(legs)
 
 
 def _gate_attempt(
     minute: datetime, attempt: VenueAccountObservationAttemptRow
-) -> tuple[tuple[str, float], ...] | SampleReasonCode:
+) -> tuple[tuple[str, float], ...] | _GateFailure:
     """Authority-gate one venue's latest attempt as-of a minute (A1).
 
     The attempt must itself be a fresh ``observed`` reading whose balance was seen
@@ -436,17 +474,17 @@ def _gate_attempt(
         The parsed balance legs, or the reason the basket is unauthoritative.
     """
     if attempt["balance_status"] != "observed":
-        return "basket_stale"
+        return _GateFailure("basket_stale", "balance_not_observed")
     observed_at = attempt["balance_observed_at"]
     if observed_at is None:
-        return "basket_stale"
+        return _GateFailure("basket_stale", "balance_observed_at_missing")
     if observed_at > minute:
-        return "future_clock"
+        return _GateFailure("future_clock", "balance_observed_after_minute")
     if minute >= _effective_until(observed_at):
-        return "basket_stale"
+        return _GateFailure("basket_stale", "authority_window_expired")
     balances_json = attempt["balances_json"]
     if balances_json is None:
-        return "non_finite"
+        return _GateFailure("basket_payload_invalid", "balances_json_missing")
     return _parse_balance_entries(balances_json)
 
 
@@ -480,44 +518,61 @@ def evaluate_basket(
         The authoritative basket and its observation records, or the reason set.
     """
     observations: list[dict[str, str]] = []
+    diagnostics: list[dict[str, str]] = []
     reasons: set[SampleReasonCode] = set()
     resolved: dict[tuple[str, str], float] = {}
     for exchange in sorted(expected_venues):
         attempt = attempts.get(exchange)
         if attempt is None:
             reasons.add("basket_missing_venue")
+            diagnostics.append(
+                _diagnostic_record(
+                    "basket_gate",
+                    "venue_attempt_missing",
+                    "basket_missing_venue",
+                    {"exchange": exchange},
+                )
+            )
             continue
         gated = _gate_attempt(minute, attempt)
-        if isinstance(gated, str):
-            reasons.add(gated)
+        if isinstance(gated, _GateFailure):
+            reasons.add(gated.code)
+            diagnostics.append(
+                _diagnostic_record("basket_gate", gated.cause, gated.code, {"exchange": exchange})
+            )
             continue
         for currency, total in gated:
             key = (exchange, currency)
             resolved[key] = resolved.get(key, 0.0) + total
         observations.append(_observation_record(attempt))
     if reasons:
-        return BasketOutcome(observed_balances={}, observations=(), reason_codes=frozenset(reasons))
+        return BasketOutcome(
+            observed_balances={},
+            observations=(),
+            reason_codes=frozenset(reasons),
+            diagnostics=_bounded_diagnostics(diagnostics),
+        )
     return BasketOutcome(
         observed_balances=resolved,
         observations=tuple(observations),
         reason_codes=frozenset(),
+        diagnostics=(),
     )
 
 
-def _map_valuation_reason(
-    currency: str, reason: str, evidence: ValuationEvidence
-) -> SampleReasonCode:
-    """Map a per-leg valuation withholding to a canonical sample reason (R9)."""
-    if reason in ("missing_rate", "missing_version"):
-        if _currency_has_fiat_plane(currency, evidence):
-            return "missing_fx_rate"
-        return "missing_mark"
-    return "non_finite"
+def _map_valuation_reason(reason: ValuationReason | None) -> SampleReasonCode:
+    """Map valuation withholding without ever stalling the wallet snapshotter.
 
-
-def _currency_has_fiat_plane(currency: str, evidence: ValuationEvidence) -> bool:
-    """Return whether a currency prices through the pinned fiat forex plane."""
-    return evidence.fiat_venues.get(currency_pair_key(currency, "USD")) is not None
+    This boundary must not raise. An exception escapes to ``_tick_once``'s
+    per-wallet catch, writes nothing for the tick, and repeat logging is
+    suppressed for the failure streak. A neutral fallback is therefore louder
+    in persisted evidence than nominally failing loud.
+    """
+    return (
+        "basket_leg_withheld"
+        if reason is None
+        else _VALUATION_REASON_TO_SAMPLE_CODE.get(reason, "basket_leg_withheld")
+    )
 
 
 def _orientation(currency: str, provenance: ValuationProvenance) -> str:
@@ -606,23 +661,46 @@ def value_basket(
     legs: list[float] = []
     provenances: list[tuple[str, ValuationProvenance]] = []
     reasons: set[SampleReasonCode] = set()
+    diagnostics: list[dict[str, str]] = []
     for (exchange, currency), qty in sorted(observed_balances.items()):
         leg = value_currency(exchange, currency, qty, minute, evidence)
         if leg.usd_value is None:
-            reasons.add(_map_valuation_reason(currency, leg.reason or "non_finite", evidence))
+            code = _map_valuation_reason(leg.reason)
+            reasons.add(code)
+            diagnostics.append(
+                _diagnostic_record(
+                    "valuation",
+                    leg.reason or "unmapped",
+                    code,
+                    {"exchange": exchange, "currency": currency},
+                )
+            )
             continue
         legs.append(leg.usd_value)
         if leg.provenance is not None:
             provenances.append((currency, leg.provenance))
     if reasons:
-        return EquityOutcome(equity=None, valuation=(), reason_codes=frozenset(reasons))
+        return EquityOutcome(
+            equity=None,
+            valuation=(),
+            reason_codes=frozenset(reasons),
+            diagnostics=_bounded_diagnostics(diagnostics),
+        )
     total = _fsum_guarded(legs)
     if total is None:
-        return EquityOutcome(equity=None, valuation=(), reason_codes=frozenset({"non_finite"}))
+        return EquityOutcome(
+            equity=None,
+            valuation=(),
+            reason_codes=frozenset({"valuation_overflow"}),
+            diagnostics=(
+                _diagnostic_record("equity_aggregation", "overflow", "valuation_overflow"),
+            ),
+        )
     return EquityOutcome(
         equity=total,
         valuation=_dedupe_valuation_records(provenances),
         reason_codes=frozenset(),
+        diagnostics=(),
     )
 
 
@@ -712,6 +790,36 @@ def _canonical_json(payload: object) -> str:
     return json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
+def _diagnostic_record(
+    stage: str,
+    cause: str,
+    code: SampleReasonCode,
+    identity: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build one diagnostic record with optional leg identity."""
+    record = {"stage": stage, "cause": cause, "reason_code": code}
+    if identity is not None:
+        record.update(identity)
+    return record
+
+
+def _bounded_diagnostics(
+    records: Sequence[dict[str, str]],
+) -> tuple[dict[str, str], ...]:
+    """Dedupe and deterministically cap diagnostics while preserving every code."""
+    unique = {_canonical_json(record): record for record in records}
+    ordered_keys = sorted(unique)
+    first_by_code: dict[str, str] = {}
+    for key in ordered_keys:
+        first_by_code.setdefault(unique[key]["reason_code"], key)
+    selected = set(first_by_code.values())
+    for key in ordered_keys:
+        if len(selected) >= PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS:
+            break
+        selected.add(key)
+    return tuple(unique[key] for key in sorted(selected))
+
+
 def _complete_audit_json(
     valuation: Sequence[dict[str, object]],
     observations: Sequence[dict[str, str]],
@@ -723,11 +831,16 @@ def _complete_audit_json(
     )
 
 
-def _incomplete_audit_json(reason_codes: frozenset[SampleReasonCode]) -> str:
+def _incomplete_audit_json(
+    reason_codes: frozenset[SampleReasonCode],
+    diagnostics: Sequence[dict[str, str]],
+    coverage: dict[str, object],
+) -> str:
     """Build one ``incomplete`` sample's reason-coded, coverage-disclosed envelope."""
     return _canonical_json(
         {
-            "coverage": _coverage(False, False),
+            "coverage": coverage,
+            "diagnostics": list(diagnostics),
             "observations": [],
             "reason_codes": sorted(reason_codes),
             "valuation": [],
@@ -736,7 +849,10 @@ def _incomplete_audit_json(reason_codes: frozenset[SampleReasonCode]) -> str:
 
 
 def _incomplete_sample(
-    point: PnlTimelinePoint, reasons: frozenset[SampleReasonCode]
+    point: PnlTimelinePoint,
+    reasons: frozenset[SampleReasonCode],
+    diagnostics: Sequence[dict[str, str]],
+    coverage: dict[str, object],
 ) -> PlannedSample:
     """Assemble one ``incomplete`` sample carrying trusted cumulatives only.
 
@@ -757,7 +873,7 @@ def _incomplete_sample(
         drawdown=None,
         mark_source=None,
         mark_time=None,
-        audit_json=_incomplete_audit_json(reasons),
+        audit_json=_incomplete_audit_json(reasons, diagnostics, coverage),
     )
 
 
@@ -852,9 +968,25 @@ def _mark_incomplete_reason_codes(point: PnlTimelinePoint) -> set[SampleReasonCo
         The distinct persisted reason codes implied by the point's provenance.
     """
     return {
-        _POINT_REASON_TO_SAMPLE_CODE.get(entry.reason, "missing_mark")
+        _POINT_REASON_TO_SAMPLE_CODE.get(entry.reason, "pnl_point_withheld")
         for entry in point.incompleteness_reasons
     }
+
+
+def _mark_incomplete_diagnostics(
+    point: PnlTimelinePoint,
+) -> tuple[dict[str, str], ...]:
+    """Explain every 5A withholding cause and identify its triggering instrument."""
+    records: list[dict[str, str]] = []
+    for entry in point.incompleteness_reasons:
+        code = _POINT_REASON_TO_SAMPLE_CODE.get(entry.reason, "pnl_point_withheld")
+        identity = (
+            {"instrument_public_id": entry.trigger_instrument_public_id}
+            if entry.trigger_instrument_public_id is not None
+            else None
+        )
+        records.append(_diagnostic_record("pnl_point", entry.reason, code, identity))
+    return _bounded_diagnostics(records)
 
 
 def assemble_minute_sample(
@@ -889,9 +1021,19 @@ def assemble_minute_sample(
     pnl_complete = point.valuation_status == "complete"
     if not pnl_complete or basket.reason_codes:
         reasons = set(basket.reason_codes)
+        diagnostics = list(basket.diagnostics)
         if not pnl_complete:
             reasons |= _mark_incomplete_reason_codes(point)
-        return MinutePlan(sample=_incomplete_sample(point, frozenset(reasons)), peak=prior_peak)
+            diagnostics.extend(_mark_incomplete_diagnostics(point))
+        return MinutePlan(
+            sample=_incomplete_sample(
+                point,
+                frozenset(reasons),
+                _bounded_diagnostics(diagnostics),
+                _coverage(False, False),
+            ),
+            peak=prior_peak,
+        )
     positions = positions_at(position_versions, point.point_time)
     return _assemble_complete_minute(inputs, basket, positions, prior_peak)
 
@@ -907,19 +1049,40 @@ def _assemble_complete_minute(
     equity_outcome = value_basket(basket.observed_balances, point.point_time, inputs.evidence)
     if equity_outcome.equity is None:
         return MinutePlan(
-            sample=_incomplete_sample(point, equity_outcome.reason_codes), peak=prior_peak
+            sample=_incomplete_sample(
+                point,
+                equity_outcome.reason_codes,
+                equity_outcome.diagnostics,
+                _coverage(False, False),
+            ),
+            peak=prior_peak,
         )
     partition = _partition_position(
         basket.observed_balances, positions, point.point_time, inputs.evidence
     )
     if partition.position_value is None:
         return MinutePlan(
-            sample=_incomplete_sample(point, frozenset({"non_finite"})), peak=prior_peak
+            sample=_incomplete_sample(
+                point,
+                frozenset({"valuation_overflow"}),
+                (_diagnostic_record("position_partition", "overflow", "valuation_overflow"),),
+                _coverage(partition.leveraged_excluded, partition.non_finite_excluded),
+            ),
+            peak=prior_peak,
         )
     drawdown = resolve_drawdown(prior_peak, equity_outcome.equity)
     if drawdown.demoted or drawdown.drawdown is None:
+        code: SampleReasonCode = (
+            "non_finite" if drawdown.reason == "prior_peak_non_finite" else "drawdown_unpriceable"
+        )
         return MinutePlan(
-            sample=_incomplete_sample(point, frozenset({"non_finite"})), peak=prior_peak
+            sample=_incomplete_sample(
+                point,
+                frozenset({code}),
+                (_diagnostic_record("drawdown", drawdown.reason or "negative_equity", code),),
+                _coverage(partition.leveraged_excluded, partition.non_finite_excluded),
+            ),
+            peak=prior_peak,
         )
     cash = equity_outcome.equity - partition.position_value
     coverage = _coverage(partition.leveraged_excluded, partition.non_finite_excluded)

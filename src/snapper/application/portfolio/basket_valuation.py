@@ -53,17 +53,21 @@ type ValuationProvenanceKind = Literal["identity", "fiat_fx", "crypto_candle"]
 """Which price plane produced a priced leg's USD value."""
 
 type ValuationReason = Literal[
-    "missing_rate",
+    "missing_fiat_rate",
     "missing_version",
+    "missing_crypto_plane",
+    "no_usable_close",
     "non_finite",
     "overflow",
     "ambiguous_plane",
 ]
 """Why a currency leg was withheld from valuation.
 
-- ``missing_rate``: no eligible plane, or no usable finalized close at the minute.
+- ``missing_fiat_rate``: the pinned fiat plane produced no usable rate.
 - ``missing_version``: a usable rate exists but its candle VERSION identity is
   absent, so the priced leg could not be made attributable and is withheld.
+- ``missing_crypto_plane``: no crypto instrument was admitted to the price plane.
+- ``no_usable_close``: admitted crypto instruments had no positive-finite close.
 - ``non_finite``: the input quantity is not a finite number.
 - ``overflow``: a finite quantity and rate produced a non-finite USD value or rate.
 - ``ambiguous_plane``: two distinct instruments price one venue plane at the
@@ -228,12 +232,12 @@ def _value_fiat(
         evidence: Pre-loaded fiat rate, venue and version maps.
 
     Returns:
-        A priced leg, or a withheld leg with ``missing_rate``, ``overflow`` or
+        A priced leg, or a withheld leg with ``missing_fiat_rate``, ``overflow`` or
         ``missing_version``.
     """
     resolved = resolve_rate(currency, "USD", minute, evidence.fiat_rates, evidence.fiat_venues)
     if resolved is None:
-        return ValuedLeg(usd_value=None, provenance=None, reason="missing_rate")
+        return ValuedLeg(usd_value=None, provenance=None, reason="missing_fiat_rate")
     if resolved.orientation == "direct":
         usd = qty * resolved.close
         rate = resolved.close
@@ -298,12 +302,12 @@ def _value_crypto(
         crypto_planes: Candidate candles keyed by ``(currency, minute)``.
 
     Returns:
-        A priced leg, or a withheld leg with ``missing_rate``, ``ambiguous_plane``
-        or ``overflow``.
+        A priced leg, or a withheld leg with ``missing_crypto_plane``,
+        ``no_usable_close``, ``ambiguous_plane`` or ``overflow``.
     """
     candidates = crypto_planes.get((currency, minute))
     if not candidates:
-        return ValuedLeg(usd_value=None, provenance=None, reason="missing_rate")
+        return ValuedLeg(usd_value=None, provenance=None, reason="missing_crypto_plane")
     usable = sorted(
         (candle for candle in candidates if is_positive_finite(candle.close)),
         key=lambda candle: (
@@ -314,7 +318,7 @@ def _value_crypto(
         ),
     )
     if not usable:
-        return ValuedLeg(usd_value=None, provenance=None, reason="missing_rate")
+        return ValuedLeg(usd_value=None, provenance=None, reason="no_usable_close")
     plane_exchange = _select_plane_exchange(exchange, usable)
     plane_candles = [candle for candle in usable if candle.exchange == plane_exchange]
     if len({candle.instrument_public_id for candle in plane_candles}) > 1:

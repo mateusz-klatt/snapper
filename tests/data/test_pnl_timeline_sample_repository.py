@@ -96,11 +96,21 @@ def _complete_audit(
 def _incomplete_audit(reason_codes: object = ("missing_mark",)) -> str:
     """Serialize one incomplete-row audit envelope with a reason-code list."""
     codes = list(reason_codes) if isinstance(reason_codes, tuple) else reason_codes
+    diagnostics = (
+        [
+            {"stage": "test", "cause": "test_cause", "reason_code": code}
+            for code in codes
+            if isinstance(code, str)
+        ]
+        if isinstance(codes, list)
+        else []
+    )
     return json.dumps(
         {
             "valuation": [],
             "observations": [],
             "reason_codes": codes,
+            "diagnostics": diagnostics,
             "coverage": dict(_VALID_COVERAGE),
         }
     )
@@ -315,6 +325,72 @@ def test_validator_accepts_a_canonical_complete_sample() -> None:
 def test_validator_accepts_a_canonical_incomplete_sample() -> None:
     """A null-valued incomplete sample with a reason code is accepted."""
     SQLAlchemyRepository._validate_portfolio_pnl_sample(_incomplete_sample(), _scope())
+
+
+def test_complete_sample_refuses_a_diagnostics_key() -> None:
+    """Complete rows refuse diagnostics even when the list is empty."""
+    sample = _complete_sample()
+    audit = json.loads(sample["audit_json"])
+    audit["diagnostics"] = []
+    sample["audit_json"] = json.dumps(audit)
+    with pytest.raises(ValueError, match="must carry no diagnostics"):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "not-an-object",
+        {"stage": "", "cause": "cause", "reason_code": "missing_mark"},
+        {"stage": "stage", "cause": "cause"},
+        {"stage": "stage", "cause": "cause", "reason_code": "unknown"},
+        {
+            "stage": "stage",
+            "cause": "cause",
+            "reason_code": "missing_mark",
+            "exchange": "",
+        },
+    ],
+)
+def test_diagnostic_record_rejects_invalid_shape(record: object) -> None:
+    """Diagnostic records require canonical codes and nonempty string fields."""
+    sample = _incomplete_sample()
+    audit = json.loads(sample["audit_json"])
+    audit["diagnostics"] = [record]
+    sample["audit_json"] = json.dumps(audit)
+    with pytest.raises(ValueError):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+
+
+def test_diagnostics_must_explain_exactly_the_reason_codes() -> None:
+    """The diagnostic code set equals the persisted reason-code set."""
+    sample = _incomplete_sample()
+    audit = json.loads(sample["audit_json"])
+    audit["diagnostics"] = []
+    sample["audit_json"] = json.dumps(audit)
+    with pytest.raises(ValueError, match="must explain exactly"):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+
+
+def test_diagnostics_are_capped() -> None:
+    """The DAL refuses an oversized diagnostics list."""
+    sample = _incomplete_sample()
+    audit = json.loads(sample["audit_json"])
+    audit["diagnostics"] = [
+        {"stage": "test", "cause": str(index), "reason_code": "missing_mark"} for index in range(65)
+    ]
+    sample["audit_json"] = json.dumps(audit)
+    with pytest.raises(ValueError, match="exceed the maximum"):
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+
+
+def test_diagnostic_record_accepts_an_unknown_cause() -> None:
+    """Stage and cause remain deliberately open vocabularies."""
+    sample = _incomplete_sample()
+    audit = json.loads(sample["audit_json"])
+    audit["diagnostics"][0]["cause"] = "future_upstream_taxonomy"
+    sample["audit_json"] = json.dumps(audit)
+    SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
 
 
 @pytest.mark.parametrize(

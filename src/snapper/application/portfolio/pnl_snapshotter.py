@@ -234,6 +234,7 @@ class PortfolioPnlSnapshotter:
         self._unsupported_logged: set[str] = set()
         self._no_anchor_logged: set[str] = set()
         self._failure_logged: set[tuple[str, str]] = set()
+        self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
 
     @property
     def disabled(self) -> bool:
@@ -349,6 +350,7 @@ class PortfolioPnlSnapshotter:
             for logged_wallet, failure_class in self._failure_logged
             if logged_wallet != wallet
         }
+        self._self_heal_logged.pop(wallet, None)
 
     def _prune_absent_scopes(self, current_wallets: set[str]) -> None:
         """Drop in-memory state for wallets absent from this discovery pass (B5)."""
@@ -357,6 +359,11 @@ class PortfolioPnlSnapshotter:
         self._failure_logged = {
             (wallet, failure_class)
             for wallet, failure_class in self._failure_logged
+            if wallet in current_wallets
+        }
+        self._self_heal_logged = {
+            wallet: value
+            for wallet, value in self._self_heal_logged.items()
             if wallet in current_wallets
         }
         self._baselines = {
@@ -529,6 +536,19 @@ class PortfolioPnlSnapshotter:
             for row in incompletes
         ]
         minutes = plan_self_heal_minutes(candidates, ctx.as_of)
+        if minutes:
+            selected = next(
+                candidate for candidate in candidates if candidate.point_time == minutes[0]
+            )
+            key = (minutes[0], tuple(sorted(selected.reason_codes)))
+            if self._self_heal_logged.get(ctx.wallet_public_id) != key:
+                logger.info(
+                    "PortfolioPnlSnapshotter: wallet {} self-heal window starts at {} with reasons {}",
+                    ctx.wallet_public_id,
+                    key[0],
+                    key[1],
+                )
+                self._self_heal_logged[ctx.wallet_public_id] = key
         return minutes[0] if minutes else None
 
     @staticmethod

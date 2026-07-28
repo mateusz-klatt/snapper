@@ -806,6 +806,14 @@ type SampleReasonCode = Literal[
     "missing_fx_rate",
     "basket_stale",
     "basket_missing_venue",
+    "basket_payload_invalid",
+    "crypto_plane_unpriced",
+    "crypto_plane_ambiguous",
+    "valuation_overflow",
+    "drawdown_unpriceable",
+    "cost_basis_unproven",
+    "pnl_point_withheld",
+    "basket_leg_withheld",
     "fill_gap_evidence",
     "non_finite",
     "future_clock",
@@ -855,7 +863,20 @@ genuinely heal them. Classify a new code by whether re-attempting the minute is
 consume retries without converging until a retry budget exists."""
 
 PNL_SAMPLE_RETRYABLE_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
-    {"missing_mark", "missing_fx_rate", "basket_stale", "basket_missing_venue"}
+    {
+        "missing_mark",
+        "missing_fx_rate",
+        "basket_stale",
+        "basket_missing_venue",
+        "basket_payload_invalid",
+        "crypto_plane_unpriced",
+        "crypto_plane_ambiguous",
+        "valuation_overflow",
+        "drawdown_unpriceable",
+        "cost_basis_unproven",
+        "pnl_point_withheld",
+        "basket_leg_withheld",
+    }
 )
 """Canonical retryable reason codes (R9): a self-heal supersede may replace an
 ``incomplete`` sample carrying only these when its evidence later lands. Typed
@@ -879,6 +900,19 @@ PNL_SAMPLE_REASON_CODES: Final[frozenset[SampleReasonCode]] = (
 PNL_SAMPLE_NEVER_PERSIST_REASONS: Final[frozenset[SampleReasonCode]] = frozenset({"pnl_untrusted"})
 """A ``pnl_untrusted`` minute writes NO row at all (R1); the validator rejects one
 defensively if ever handed it."""
+
+PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS: Final[frozenset[str]] = frozenset(
+    {"stage", "cause", "reason_code"}
+)
+"""Required fields in every incomplete-sample diagnostic record.
+
+``stage`` and ``cause`` deliberately have open vocabularies. The data layer
+validates their shape but never membership, allowing upstream taxonomies to grow
+without coupling every new diagnostic cause to a data-layer release.
+"""
+
+PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS: Final[int] = 64
+"""Maximum diagnostic records carried by one incomplete sample."""
 
 
 class PortfolioPnlSampleRow(TypedDict):

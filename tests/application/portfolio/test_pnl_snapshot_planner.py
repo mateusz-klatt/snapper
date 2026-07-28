@@ -17,14 +17,18 @@ from snapper.application.portfolio.basket_valuation import CandleVersionIdentity
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
+from snapper.application.portfolio.basket_valuation import ValuationReason
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_snapshot_planner import _POINT_REASON_TO_SAMPLE_CODE
+from snapper.application.portfolio.pnl_snapshot_planner import _VALUATION_REASON_TO_SAMPLE_CODE
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
+from snapper.application.portfolio.pnl_snapshot_planner import _bounded_diagnostics
+from snapper.application.portfolio.pnl_snapshot_planner import _coverage
 from snapper.application.portfolio.pnl_snapshot_planner import _incomplete_audit_json
 from snapper.application.portfolio.pnl_snapshot_planner import _PartitionOutcome
 from snapper.application.portfolio.pnl_snapshot_planner import assemble_minute_sample
@@ -47,6 +51,7 @@ from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
 from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
 from snapper.data.repository_types import PNL_SAMPLE_RETRYABLE_REASONS
@@ -515,14 +520,14 @@ class TestEvaluateBasket:
         """An observed attempt with no balances payload is structurally broken."""
         attempts = {"kraken": _attempt(minute=_M1, balances_json=None)}
         outcome = evaluate_basket(_M1, frozenset({"kraken"}), attempts)
-        assert outcome.reason_codes == frozenset({"non_finite"})
+        assert outcome.reason_codes == frozenset({"basket_payload_invalid"})
 
     def test_synthetic_collateral_currency_is_non_finite(self) -> None:
         """A synthetic collateral currency fails the basket closed."""
         payload = '[{"currency":"USD_collateral_value","total":1.0}]'
         attempts = {"kraken": _attempt(minute=_M1, balances_json=payload)}
         outcome = evaluate_basket(_M1, frozenset({"kraken"}), attempts)
-        assert outcome.reason_codes == frozenset({"non_finite"})
+        assert outcome.reason_codes == frozenset({"basket_payload_invalid"})
 
     @pytest.mark.parametrize(
         "payload",
@@ -540,7 +545,7 @@ class TestEvaluateBasket:
         """Any structurally invalid balances payload is terminal ``non_finite``."""
         attempts = {"kraken": _attempt(minute=_M1, balances_json=payload)}
         outcome = evaluate_basket(_M1, frozenset({"kraken"}), attempts)
-        assert outcome.reason_codes == frozenset({"non_finite"})
+        assert outcome.reason_codes == frozenset({"basket_payload_invalid"})
 
     def test_multiple_currency_entries_aggregate(self) -> None:
         """Repeated currencies on one venue accumulate."""
@@ -568,7 +573,7 @@ class TestValueBasket:
         balances = {("kraken", "BTC"): 0.5}
         outcome = value_basket(balances, _M1, _crypto_evidence())
         assert outcome.equity is None
-        assert outcome.reason_codes == frozenset({"missing_mark"})
+        assert outcome.reason_codes == frozenset({"crypto_plane_unpriced"})
 
     def test_missing_fiat_rate_is_missing_fx_rate(self) -> None:
         """An unpriceable fiat leg withholds with ``missing_fx_rate``."""
@@ -598,7 +603,7 @@ class TestValueBasket:
         )
         balances = {("kraken", "BTC"): 1.0, ("kraken", "ETH"): 1.0}
         outcome = value_basket(balances, _M1, evidence)
-        assert outcome.reason_codes == frozenset({"non_finite"})
+        assert outcome.reason_codes == frozenset({"valuation_overflow"})
 
     def test_zero_balance_leg_has_no_provenance(self) -> None:
         """A zero-quantity currency prices to zero and records no valuation leg."""
@@ -655,7 +660,7 @@ class TestAssembleMinuteSample:
         inputs = MinuteInputs(point, _attempts(_M1), _crypto_evidence())
         plan = assemble_minute_sample(inputs, frozenset({"kraken"}), (), None)
         assert plan.sample is not None
-        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["missing_mark"]
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["cost_basis_unproven"]
 
     def test_mark_incomplete_distinct_reasons_map_to_distinct_codes(self) -> None:
         """Distinct mark reasons map to distinct codes rather than flattening (D1)."""
@@ -705,7 +710,7 @@ class TestAssembleMinuteSample:
         plan = assemble_minute_sample(inputs, frozenset({"kraken"}), (), None)
         assert plan.sample is not None
         assert plan.sample.valuation_status == "incomplete"
-        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["missing_mark"]
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["crypto_plane_unpriced"]
 
     def test_complete_point_demoted_drawdown_is_non_finite(self) -> None:
         """A priced minute whose peak cannot draw down demotes to ``non_finite``."""
@@ -793,7 +798,7 @@ class TestAssembleMinuteSample:
         plan = assemble_minute_sample(inputs, frozenset({"kraken", "binance"}), (), None)
         assert plan.sample is not None
         assert plan.sample.valuation_status == "incomplete"
-        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["non_finite"]
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["valuation_overflow"]
 
     def test_partition_overflow_demotes_the_minute(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A partition aggregation overflow demotes the minute even with finite equity (P2)."""
@@ -807,7 +812,7 @@ class TestAssembleMinuteSample:
         plan = assemble_minute_sample(inputs, frozenset({"kraken"}), (), None)
         assert plan.sample is not None
         assert plan.sample.valuation_status == "incomplete"
-        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["non_finite"]
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["valuation_overflow"]
 
 
 class TestPlanChunkSamples:
@@ -874,7 +879,7 @@ class TestReasonCodeContract:
         ``empty_parameter_set_mark`` is unset, so a regression that emptied a set
         would silently SKIP every case rather than fail.
         """
-        assert len(PNL_SAMPLE_REASON_CODES) == 8
+        assert len(PNL_SAMPLE_REASON_CODES) == 16
         assert len(PNL_SAMPLE_FINAL_REASONS) == 4
 
     def test_never_persist_is_final(self) -> None:
@@ -883,7 +888,18 @@ class TestReasonCodeContract:
 
     def test_mapped_codes_are_canonical(self) -> None:
         """Every code the 5A reason map can emit is writable by the validator."""
-        assert set(_POINT_REASON_TO_SAMPLE_CODE.values()) <= PNL_SAMPLE_REASON_CODES
+        assert (
+            set(_POINT_REASON_TO_SAMPLE_CODE.values())
+            | set(_VALUATION_REASON_TO_SAMPLE_CODE.values())
+        ) <= PNL_SAMPLE_REASON_CODES
+
+    def test_point_reason_map_is_exhaustive(self) -> None:
+        """Every 5A reason has an explicit persisted mapping."""
+        assert set(get_args(PnlIncompletenessReason)) == set(_POINT_REASON_TO_SAMPLE_CODE)
+
+    def test_valuation_reason_map_is_exhaustive(self) -> None:
+        """Every valuation reason has an explicit persisted mapping."""
+        assert set(get_args(ValuationReason.__value__)) == set(_VALUATION_REASON_TO_SAMPLE_CODE)
 
     @pytest.mark.parametrize("code", sorted(PNL_SAMPLE_REASON_CODES))
     def test_every_code_round_trips_its_partition(self, code: str) -> None:
@@ -894,10 +910,30 @@ class TestReasonCodeContract:
         is the production one end to end: the planner's audit envelope, the
         service's reader, and the planner's eligibility gate.
         """
-        audit = _incomplete_audit_json(frozenset({cast(SampleReasonCode, code)}))
+        canonical = cast(SampleReasonCode, code)
+        audit = _incomplete_audit_json(
+            frozenset({canonical}),
+            ({"stage": "test", "cause": "round_trip", "reason_code": canonical},),
+            _coverage(False, False),
+        )
         candidate = SelfHealCandidate(point_time=_M2, reason_codes=_extract_reason_codes(audit))
         expected = (_M2,) if code in PNL_SAMPLE_RETRYABLE_REASONS else ()
         assert plan_self_heal_minutes([candidate], _M3 + timedelta(minutes=1)) == expected
+
+    def test_diagnostics_are_capped(self) -> None:
+        """Deterministic truncation retains no more than the contract maximum."""
+        records = [
+            {
+                "stage": "pnl_point",
+                "cause": "mark_unavailable",
+                "reason_code": "missing_mark",
+                "instrument_public_id": str(index),
+            }
+            for index in range(200)
+        ]
+        diagnostics = _bounded_diagnostics(records)
+        assert len(diagnostics) == PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
+        assert {record["reason_code"] for record in diagnostics} == {"missing_mark"}
 
 
 def _to_row(sample: PlannedSample) -> PortfolioPnlSampleRow:

@@ -172,7 +172,7 @@ class TestFiatPath:
         leg = value_currency("kraken", "EUR", 10.0, _M, _evidence(_fiat_rates()))
         assert leg.usd_value is None
         assert leg.provenance is None
-        assert leg.reason == "missing_rate"
+        assert leg.reason == "missing_fiat_rate"
 
     def test_pinned_fiat_plane_never_falls_through_to_crypto(self) -> None:
         """A fiat-pinned currency commits to the fiat plane despite a crypto candle."""
@@ -181,7 +181,7 @@ class TestFiatPath:
             "kraken", "EUR", 10.0, _M, _evidence(_fiat_rates(), crypto_planes=crypto)
         )
         assert leg.usd_value is None
-        assert leg.reason == "missing_rate"
+        assert leg.reason == "missing_fiat_rate"
 
 
 class TestCryptoPath:
@@ -224,7 +224,7 @@ class TestCryptoPath:
         """A crypto currency with no candle at the minute yields missing_rate."""
         leg = value_currency("kraken", "BTC", 1.0, _M, _evidence())
         assert leg.usd_value is None
-        assert leg.reason == "missing_rate"
+        assert leg.reason == "missing_crypto_plane"
 
     def test_only_non_positive_closes_withholds(self) -> None:
         """Candidates present but with no positive-finite close yield missing_rate."""
@@ -236,7 +236,7 @@ class TestCryptoPath:
         }
         leg = value_currency("kraken", "BTC", 1.0, _M, _evidence(crypto_planes=crypto))
         assert leg.usd_value is None
-        assert leg.reason == "missing_rate"
+        assert leg.reason == "no_usable_close"
 
     def test_non_positive_holding_close_is_skipped_for_a_valid_rival(self) -> None:
         """A degenerate holding-exchange close does not block a valid rival plane."""

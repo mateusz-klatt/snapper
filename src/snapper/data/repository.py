@@ -258,7 +258,9 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
 from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
+from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
 from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
 from snapper.data.repository_types import AccrualLedgerInsertRow
@@ -2208,7 +2210,7 @@ def _resolve_disposable_engine(engine: object) -> _DisposableEngine | None:
 
 
 _PNL_SAMPLE_AUDIT_KEYS: frozenset[str] = frozenset(
-    {"valuation", "observations", "reason_codes", "coverage"}
+    {"valuation", "observations", "reason_codes", "coverage", "diagnostics"}
 )
 """The only permitted top-level keys of a sample audit envelope. Unknown
 top-level keys are rejected; forward-compatible extra fields inside individual
@@ -13936,6 +13938,42 @@ class SQLAlchemyRepository(Repository):
             SQLAlchemyRepository._validate_portfolio_pnl_sample_observation_record(record)
 
     @staticmethod
+    def _validate_portfolio_pnl_sample_diagnostic_record(record: JsonValue) -> str:
+        """Validate one open-vocabulary diagnostic and return its canonical code."""
+        if not isinstance(record, dict):
+            raise ValueError("portfolio P&L sample diagnostic record must be an object")
+        for key, value in record.items():
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"portfolio P&L sample diagnostic record {key} must be a nonempty string"
+                )
+        for key in PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS:
+            value = record.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"portfolio P&L sample diagnostic record {key} must be a nonempty string"
+                )
+        code = cast(str, record["reason_code"])
+        if code not in PNL_SAMPLE_REASON_CODES:
+            raise ValueError("portfolio P&L sample diagnostic reason_code must be canonical")
+        return code
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_diagnostics(audit: JsonObject, codes: list[str]) -> None:
+        """Require bounded diagnostics explaining exactly the persisted codes."""
+        records = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "diagnostics")
+        if len(records) > PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS:
+            raise ValueError("portfolio P&L incomplete sample diagnostics exceed the maximum")
+        explained = {
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_diagnostic_record(record)
+            for record in records
+        }
+        if explained != set(codes):
+            raise ValueError(
+                "portfolio P&L incomplete sample diagnostics must explain exactly its reason codes"
+            )
+
+    @staticmethod
     def _validate_portfolio_pnl_sample_audit_envelope(audit: JsonObject) -> None:
         """Reject unknown top-level audit keys (record extra fields stay allowed)."""
         if set(audit) - _PNL_SAMPLE_AUDIT_KEYS:
@@ -13997,6 +14035,8 @@ class SQLAlchemyRepository(Repository):
         SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_envelope(audit)
         if SQLAlchemyRepository._portfolio_pnl_sample_reason_codes(audit):
             raise ValueError("portfolio P&L complete sample audit must carry no reason codes")
+        if "diagnostics" in audit:
+            raise ValueError("portfolio P&L complete sample audit must carry no diagnostics")
         valuation = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "valuation")
         observations = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "observations")
         if not observations:
@@ -14035,6 +14075,7 @@ class SQLAlchemyRepository(Repository):
         SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)
         codes = SQLAlchemyRepository._portfolio_pnl_sample_reason_codes(audit)
         SQLAlchemyRepository._validate_portfolio_pnl_sample_reason_codes(codes)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_diagnostics(audit, codes)
         SQLAlchemyRepository._validate_portfolio_pnl_sample_coverage(audit)
 
     @staticmethod

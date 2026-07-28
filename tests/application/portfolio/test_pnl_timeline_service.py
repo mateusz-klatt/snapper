@@ -6363,7 +6363,7 @@ class TestLoadBasketFiatEvidence:
         ).usd_value == pytest.approx(100.0)
         withheld = value_currency("walutomat", "PLN", 400.0, _m(2), evidence)
         assert withheld.usd_value is None
-        assert withheld.reason == "missing_rate"
+        assert withheld.reason == "missing_fiat_rate"
 
     async def test_usd_only_currency_set_requests_nothing(self) -> None:
         """A basket of only the valuation currency loads no fiat evidence."""
