@@ -1634,14 +1634,14 @@ tests = ["asttokens (>=2.1.0)", "coverage", "coverage-enable-subprocess", "ipyth
 
 [[package]]
 name = "fastapi"
-version = "0.140.8"
+version = "0.140.9"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "fastapi-0.140.8-py3-none-any.whl", hash = "sha256:66d65922ff010d99548db624beec4d705f731c29e58a163207f5a0a83974a3d1"},
-    {file = "fastapi-0.140.8.tar.gz", hash = "sha256:c166580b6a1f96d0feda536830dbaef56962f66e9a3a87054c34906b6339390b"},
+    {file = "fastapi-0.140.9-py3-none-any.whl", hash = "sha256:313ab1c00f02d1a2255573d456d2cb519e87826d3eb82ce75ea2da2e983bcb64"},
+    {file = "fastapi-0.140.9.tar.gz", hash = "sha256:fadc1dae3671c34a542a34b14e3cec92ebe774b9f6ae6ae8da7339a9f0e9c287"},
 ]
 
 [package.dependencies]
@@ -7417,4 +7417,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "00ecfe23f718f6e74f1dc4fc181aec07b0f2297281700a3e62b6301ab005b43b"
+content-hash = "ce4e3452bcdaf34b91b4d98bf0d2c961054a88af2a083def793e586d571f4197"
