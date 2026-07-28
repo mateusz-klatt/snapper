@@ -44,6 +44,7 @@ from typing import cast
 
 import ccxt
 import requests
+from kraken.exceptions import KrakenDeadlineElapsedError
 from kraken.spot import SpotWSClient
 from kraken.spot import Trade
 from kraken.spot import User
@@ -119,6 +120,16 @@ _NATIVE_BALANCE_MALFORMED_ROW_MSG = (
 _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
     {"free", "used", "total", "info", "timestamp", "datetime"}
 )
+
+
+def _kraken_native_txid(payload: dict[str, Any]) -> Any:
+    """Return the first native transaction id from a raw SDK payload."""
+    txid = payload.get("txid", "")
+    if isinstance(txid, list):
+        return txid[0] if txid else ""
+    return txid
+
+
 _STOP_ORDER_TYPES = frozenset(
     {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
 )
@@ -1199,22 +1210,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             extra_params: dict[str, Any] = {"cl_ord_id": request.client_order_id}
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
-            try:
-                result = await self._dispatch_routed_rest(
-                    operation="native_create_order",
-                    kind="private_mutation",
-                    target=spot_sdk_proxy_target(trade_client),
-                    sync_call=lambda: trade_client.create_order(
-                        **kraken_params,
-                        extra_params=extra_params or None,
-                    ),
-                )
-            except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
-                raise AmbiguousOrderSubmitError(
-                    client_order_id=request.client_order_id,
-                    instrument=request.symbol,
-                    message=f"Kraken native create_order transport failure (order may exist): {e}",
-                ) from e
+            result = await self._submit_native_order(
+                trade_client, request, kraken_params, extra_params
+            )
             order = self._convert_kraken_native_order(result, request)
             db_result = await self._log_order_to_db(request, order)
             if db_result is not None:
@@ -1224,6 +1222,52 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as fallback_error:
             logger.error(f"Failed to create order with native Kraken API: {fallback_error}")
             raise
+
+    async def _submit_native_order(
+        self,
+        trade_client: Trade,
+        request: ExchangeOrderRequest,
+        kraken_params: dict[str, Any],
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send a native order and classify every unproven placement outcome."""
+        try:
+            result = await self._dispatch_routed_rest(
+                operation="native_create_order",
+                kind="private_mutation",
+                target=spot_sdk_proxy_target(trade_client),
+                sync_call=lambda: trade_client.create_order(
+                    **kraken_params,
+                    extra_params=extra_params or None,
+                ),
+            )
+        except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message=f"Kraken native create_order transport failure (order may exist): {e}",
+            ) from e
+        except KrakenDeadlineElapsedError as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message=f"Kraken native create_order deadline elapsed "
+                f"(placement unproven, order may exist): {e}",
+                venue_answered=True,
+            ) from e
+        if (
+            isinstance(result, dict)
+            and isinstance(result.get("error"), list)
+            and not _kraken_native_txid(result)
+        ):
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message=f"Kraken native create_order unclassified venue error "
+                f"(placement unproven, order may exist): {result}",
+                venue_answered=True,
+            )
+        return cast(dict[str, Any], result)
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Cancel an existing order.
@@ -3551,11 +3595,7 @@ class KrakenExchangeClient(ExchangeClientBase):
     def _convert_kraken_native_order(
         self, kraken_response: dict[str, Any], request: ExchangeOrderRequest
     ) -> ExchangeOrderSnapshot:
-        txid = (
-            kraken_response.get("txid", [""])[0]
-            if isinstance(kraken_response.get("txid"), list)
-            else kraken_response.get("txid", "")
-        )
+        txid = _kraken_native_txid(kraken_response)
         return ExchangeOrderSnapshot(
             id=str(txid),
             client_order_id=request.client_order_id,

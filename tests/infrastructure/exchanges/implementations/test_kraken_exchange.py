@@ -20,6 +20,7 @@ import ccxt
 import pytest
 import requests
 from ccxt.base.errors import NetworkError
+from kraken.exceptions import KrakenDeadlineElapsedError
 from loguru import logger
 from pydantic import ValidationError
 from pytest import MonkeyPatch
@@ -3831,6 +3832,86 @@ class TestAmbiguousSubmitClassification:
             await kraken_client._create_order_via_native(self._request())
         assert isinstance(exc_info.value.__cause__, requests.exceptions.ConnectionError)
         assert exc_info.value.client_order_id == "client_tax"
+        assert exc_info.value.venue_answered is False
+
+    @pytest.mark.asyncio
+    async def test_native_unmapped_error_payload_is_ambiguous(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An unclassified native error answer cannot become an empty-id snapshot.
+
+        Given: The SDK returning Kraken's error envelope because it has
+            no exception mapping for the venue's error string,
+        When: _create_order_via_native is called,
+        Then: AmbiguousOrderSubmitError carries the submit identity and
+            records that the venue answered, while no database order is
+            written.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.return_value = {"error": ["EOrder:Order already exists"]}
+        log_order = AsyncMock()
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(kraken_client, "_log_order_to_db", log_order),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client._create_order_via_native(self._request())
+        assert exc_info.value.client_order_id == "client_tax"
+        assert exc_info.value.instrument == "BTC-USD"
+        assert exc_info.value.venue_answered is True
+        assert "EOrder:Order already exists" in str(exc_info.value)
+        log_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_native_deadline_elapsed_is_ambiguous(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A venue deadline answer leaves native order placement unproven.
+
+        Given: The SDK mapping Kraken's deadline-elapsed response to its
+            dedicated exception,
+        When: _create_order_via_native is called,
+        Then: AmbiguousOrderSubmitError preserves the cause and records
+            that Kraken returned an answer.
+        """
+        deadline_error = KrakenDeadlineElapsedError({"error": ["EService:Deadline elapsed"]})
+        trade_client = MagicMock()
+        trade_client.create_order.side_effect = deadline_error
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client._create_order_via_native(self._request())
+        assert exc_info.value.__cause__ is deadline_error
+        assert exc_info.value.client_order_id == "client_tax"
+        assert exc_info.value.instrument == "BTC-USD"
+        assert exc_info.value.venue_answered is True
+
+    @pytest.mark.asyncio
+    async def test_native_success_returns_real_txid(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A successful native answer still returns its real transaction id.
+
+        Given: The SDK returning a normal AddOrder result,
+        When: _create_order_via_native is called,
+        Then: The pending snapshot carries Kraken's transaction id and
+            is logged normally.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.return_value = {
+            "txid": ["OID-native-success"],
+            "descr": {},
+        }
+        log_order = AsyncMock(return_value=None)
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(kraken_client, "_log_order_to_db", log_order),
+        ):
+            order = await kraken_client._create_order_via_native(self._request())
+        assert order.id == "OID-native-success"
+        assert order.client_order_id == "client_tax"
+        log_order.assert_awaited_once()
 
 
 class TestStatusBranchInSubscriptions:
