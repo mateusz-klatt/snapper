@@ -6152,7 +6152,12 @@ class TraderCoordinator(RegisterableProcess):
           active ``orders`` row at dispatch time so a late venue ACK
           landing after the REST route snapshotted the command row
           still results in a cancel that targets the correct exchange
-          order id.
+          order id. Cancels remain admissible after recovery
+          certification fails because they use durable order identity,
+          not uncertified position projections, and remove resting
+          exposure. They are part of the repair surface; blocking them
+          could trap an order at the venue while the system is unable
+          to certify its position.
 
         Args:
             cmd: TradeCommandRow dict from the outbox dispatcher.
@@ -6160,6 +6165,7 @@ class TraderCoordinator(RegisterableProcess):
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
         command_type = cmd["command_type"]
+        attempt = f"trade command {cmd['public_id']} ({command_type})"
         if command_type == OrderCommandEnum.CANCEL.value:
             topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
             resolved_venue_id = cmd.get("exchange_order_id") or ""
@@ -6186,6 +6192,8 @@ class TraderCoordinator(RegisterableProcess):
             return
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
         order = order_request_from_command(cmd)
+        if self._refuse_uncertified_order_execution(attempt):
+            raise RuntimeError("recovery certification failed; order execution refused")
         if command_type in ("create", OrderCommandEnum.SUBMIT.value):
             self._register_order_shard_key(
                 cmd["client_order_id"], cmd["shard_key"], cmd.get("wallet_public_id") or ""
@@ -6427,6 +6435,10 @@ class TraderCoordinator(RegisterableProcess):
             signal: Validated signal envelope with instrument, side,
                 strength, and price information.
         """
+        if self._refuse_uncertified_order_execution(
+            f"strategy signal {signal.public_id} for {signal.instrument}"
+        ):
+            return
         context = self._build_signal_routing_context(signal)
         if context is None:
             return
@@ -6482,6 +6494,29 @@ class TraderCoordinator(RegisterableProcess):
                     command_public_id=command_public_id,
                     client_order_id=new_oid,
                 )
+
+    def _refuse_uncertified_order_execution(self, attempt: str) -> bool:
+        """Refuse an order attempt while recovered state is uncertified.
+
+        Recovery certification is currently process-global, so one
+        contradiction refuses every strategy, wallet, instrument, mode,
+        manual surface, plan, and command type handled by this coordinator.
+
+        Args:
+            attempt: Human-readable description of the refused attempt.
+
+        Returns:
+            True when recovery certification failed and the caller must
+            return or raise before creating or publishing an order.
+        """
+        if not getattr(self, "_recovery_certification_failed", False):
+            return False
+        logger.error(
+            "TraderCoordinator: refusing {} because recovery certification failed; "
+            "global order execution remains halted",
+            attempt,
+        )
+        return True
 
     async def _grouped_signal_blocked_by_halt(self, signal: SignalData) -> bool:
         """Fast-reject a NEW grouped signal whose pair scope is durably halted.

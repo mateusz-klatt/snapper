@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
@@ -1937,6 +1938,128 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     sent_order = coord.msg_publisher.send.call_args.args[1]
     assert isinstance(sent_order, OrderRequestData)
     assert coord._order_shard_keys == {"cid-1": "kraken.BTC-USD.live"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_type", ["create", "submit", "replace"])
+async def test_recovery_certification_contradiction_emits_no_order(command_type: str) -> None:
+    """A certification contradiction refuses the outermost order publish.
+
+    Given: recovery marked the coordinator globally uncertified,
+    When: the durable outbox attempts to publish a manual command,
+    Then: publication raises loudly before the ZMQ publisher is called.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    coord._recovery_certification_failed = True
+    coord._order_shard_keys = {}
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-uncertified",
+        "client_order_id": "cid-uncertified",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "command_type": command_type,
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "session",
+        "sequence_id": 1,
+        "exchange_order_id": "exchange-order",
+    }
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="ERROR")
+    try:
+        with pytest.raises(RuntimeError, match="recovery certification failed"):
+            await coord._outbox_publish(cmd)
+    finally:
+        logger.remove(sink_id)
+    coord.msg_publisher.send.assert_not_awaited()
+    assert any(
+        "recovery certification failed" in message
+        and "global order execution remains halted" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_uncertified_recovery_still_publishes_cancel() -> None:
+    """An uncertified position does not block a durable risk-reducing cancel.
+
+    A cancel resolves its venue order id from the durable command record, never
+    from the position projections that failed certification, so it cannot be
+    misdirected by the contradiction. It only removes resting exposure, and it
+    is the repair surface the failure policy requires to stay alive.
+
+    Given: A coordinator whose recovery certification failed,
+    When: A durable cancel command reaches outbox publication,
+    Then: The cancel is published with its exchange order id intact.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    coord._recovery_certification_failed = True
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-cancel-uncertified",
+        "client_order_id": "cid-cancel-uncertified",
+        "command_type": "cancel",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 0.5,
+        "price": 50000.0,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "session",
+        "sequence_id": 1,
+        "exchange_order_id": "exchange-order",
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_awaited_once()
+    sent_message = coord.msg_publisher.send.await_args.args[1]
+    assert isinstance(sent_message, OrderCancelData)
+    assert sent_message.exchange_order_id == "exchange-order"
+
+
+@pytest.mark.asyncio
+async def test_uncertified_strategy_signal_stops_before_engine_routing() -> None:
+    """The strategy fast path rejects uncertified state before engine work.
+
+    Refusing here rather than only at publication keeps the engine from routing,
+    sizing or reserving against a position the system cannot prove.
+
+    Given: A coordinator whose recovery certification failed,
+    When: A strategy signal arrives at the signal handler,
+    Then: Routing context is never built and no order work begins.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord._recovery_certification_failed = True
+    coord._build_signal_routing_context = MagicMock(return_value=None)
+    signal = SignalData(
+        session_id="session",
+        sequence_id=1,
+        public_id="signal-uncertified",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime(2024, 1, 1, tzinfo=UTC),
+        strategy_name="heartbeat_consult_btc_1h",
+        instrument="BTC-USD",
+        side="buy",
+        strength=0.5,
+        price=50000.0,
+        exchange="kraken",
+        reason="test",
+    )
+    await coord._on_signal(signal)
+    coord._build_signal_routing_context.assert_not_called()
 
 
 @pytest.mark.asyncio
