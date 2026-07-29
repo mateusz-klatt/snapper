@@ -3982,14 +3982,14 @@ test = ["pytest", "pytest-cov", "scipy"]
 
 [[package]]
 name = "pbs-installer"
-version = "2026.7.18"
+version = "2026.7.28"
 description = "Installer for Python Build Standalone"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "pbs_installer-2026.7.18-py3-none-any.whl", hash = "sha256:fefa193fa55bfe1a09aedbb8fc24ba2fc05252985f3e90ffbf89175e9490aa9a"},
-    {file = "pbs_installer-2026.7.18.tar.gz", hash = "sha256:e3093353d371ce3ae620e927beb47558589f3a88eb332f6d7ef394f9b543fa66"},
+    {file = "pbs_installer-2026.7.28-py3-none-any.whl", hash = "sha256:0c1c141807fee0dc3de6fde5fc4f59676df8709f3a33904bde6cf6c41d5d76c7"},
+    {file = "pbs_installer-2026.7.28.tar.gz", hash = "sha256:fe75ba9442a559ad989ace5b985f8c7e5f8f438ce791f04a35f5ed3854f8e8ee"},
 ]
 
 [package.dependencies]
