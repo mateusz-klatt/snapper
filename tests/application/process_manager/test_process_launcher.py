@@ -13225,3 +13225,56 @@ class TestParkedExecutorDetection:
         assert factory._feed_failed_publisher == "kraken_feed_publisher"
         assert factory._feed_failure_event.is_set()
         assert not factory._park_heartbeat_tasks
+
+
+class TestEmitSnapshotSurvivesShutdownRace:
+    """Emit helpers must not re-read the publisher across their await."""
+
+    def _factory(self) -> ProcessLauncherService:
+        """Launcher wired with a stubbed publisher."""
+        factory = ProcessLauncherService(MagicMock())
+        publisher = MagicMock()
+        publisher.tracker = MagicMock()
+        publisher.tracker.session_id = "s1"
+        publisher.tracker.next_sequence = MagicMock(return_value=1)
+        publisher.send = mock.AsyncMock()
+        factory.set_msg_publisher(publisher)
+        factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        factory.coordinator_label = MagicMock(return_value="coord-0")
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_summary_snapshot_survives_publisher_cleared_mid_await(self) -> None:
+        """Clearing the publisher during the await must not raise.
+
+        Given: A wired publisher and a summary emit already past its
+            None-guard,
+        When: ``set_msg_publisher(None)`` lands while the coroutine is
+            suspended inside ``build_process_summary_items`` — which is
+            exactly what shutdown does,
+        Then: The emit completes and still sends through the publisher it
+            validated.
+
+        This reproduces a production failure of 2026-07-28:
+        ``'NoneType' object has no attribute 'tracker'`` at
+        ``_emit_summary_snapshot``. The None-guard was present and had
+        PASSED; the field was cleared while the coroutine was suspended,
+        and the line after the await re-read the attribute. A guard does
+        not survive an await — the publisher must be captured into a
+        local and used from there.
+
+        The stub clears the field FROM INSIDE the awaited call, because a
+        test that clears it before or after the await cannot observe this
+        defect at all.
+        """
+        factory = self._factory()
+        publisher = factory.message_publisher
+
+        async def _clear_then_return() -> list[object]:
+            factory.set_msg_publisher(None)
+            return []
+
+        factory.build_process_summary_items = _clear_then_return
+        await factory._emit_summary_snapshot()
+        assert publisher is not None
+        publisher.send.assert_awaited_once()

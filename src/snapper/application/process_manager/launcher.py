@@ -632,14 +632,24 @@ class ProcessLauncherService:
         level. Matches the :class:`ScopeGrantService` resilience
         contract — emit failures must not propagate into the launcher's
         start / stop control flow.
+
+        The publisher is CAPTURED INTO A LOCAL before the guard and used
+        from that local afterwards, never re-read off ``self``. There is
+        an ``await`` between the two, and :meth:`set_msg_publisher` is
+        called with ``None`` during shutdown, so re-reading the attribute
+        after the await raised ``'NoneType' object has no attribute
+        'tracker'`` in production on 2026-07-28 — the guard had passed
+        and the field was cleared while this coroutine was suspended.
+        Keep the local; the guard alone does not survive the await.
         """
-        if self._msg_publisher is None:
+        publisher = self._msg_publisher
+        if publisher is None:
             return
         slug = self.coordinator_topic_slug()
         topic = f"{_PROCESSES_SUMMARY_STREAM}.{slug}"
         try:
             items = await self.build_process_summary_items()
-            tracker = self._msg_publisher.tracker
+            tracker = publisher.tracker
             payload = ProcessSummaryEventData(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence(topic),
@@ -650,7 +660,7 @@ class ProcessLauncherService:
                 processes=items,
                 snapshot_at=datetime.now(UTC),
             )
-            await self._msg_publisher.send(topic, payload)
+            await publisher.send(topic, payload)
         except Exception as exc:
             logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
 
@@ -661,13 +671,14 @@ class ProcessLauncherService:
         (``create_process_config``) or when runtime per-wallet executor
         instances appear after :meth:`spawn_per_wallet_executors`.
         """
-        if self._msg_publisher is None:
+        publisher = self._msg_publisher
+        if publisher is None:
             return
         topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self.coordinator_topic_slug()}"
         try:
             configs = await self.get_process_configs()
             names = sorted({config.name for config in configs} | set(self.instance_configs.keys()))
-            tracker = self._msg_publisher.tracker
+            tracker = publisher.tracker
             payload = ProcessConfiguredEventData(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence(topic),
@@ -676,7 +687,7 @@ class ProcessLauncherService:
                 process_names=names,
                 snapshot_at=datetime.now(UTC),
             )
-            await self._msg_publisher.send(topic, payload)
+            await publisher.send(topic, payload)
         except Exception as exc:
             logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
 
@@ -687,7 +698,8 @@ class ProcessLauncherService:
         strategy-role process. Frontend invalidates against this
         signal — payload identity fields are informational only.
         """
-        if self._msg_publisher is None:
+        publisher = self._msg_publisher
+        if publisher is None:
             return
         topic = f"{_STRATEGIES_LIST_STREAM}.{self.coordinator_topic_slug()}"
         try:
@@ -695,7 +707,7 @@ class ProcessLauncherService:
             class_paths = sorted(
                 {config.class_path for config in configs if config.role is ProcessRoleEnum.STRATEGY}
             )
-            tracker = self._msg_publisher.tracker
+            tracker = publisher.tracker
             payload = StrategyListEventData(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence(topic),
@@ -704,7 +716,7 @@ class ProcessLauncherService:
                 strategy_classes=class_paths,
                 snapshot_at=datetime.now(UTC),
             )
-            await self._msg_publisher.send(topic, payload)
+            await publisher.send(topic, payload)
         except Exception as exc:
             logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
 
@@ -728,11 +740,12 @@ class ProcessLauncherService:
         :meth:`_finalize_process_run` callers) and left ``None`` for
         asyncio-task processes which have no equivalent exit code.
         """
-        if self._msg_publisher is None:
+        publisher = self._msg_publisher
+        if publisher is None:
             return
         topic = f"{_PROCESSES_RUNS_STREAM}.{process_name}"
         try:
-            tracker = self._msg_publisher.tracker
+            tracker = publisher.tracker
             payload = ProcessRunEventData(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence(topic),
@@ -747,7 +760,7 @@ class ProcessLauncherService:
             )
             if error is not None:
                 logger.debug("run-event error for {} run {}: {}", process_name, run_id, error)
-            await self._msg_publisher.send(topic, payload)
+            await publisher.send(topic, payload)
         except Exception as exc:
             logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
 
