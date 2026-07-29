@@ -711,7 +711,7 @@ class PortfolioPnlSnapshotter:
             await repo.supersede_portfolio_pnl_sample(
                 ctx.scope,
                 replacement,
-                late_fill_correction=True,
+                derived_suffix_reconciliation=True,
                 expected_public_id=existing["public_id"],
             )
             return False

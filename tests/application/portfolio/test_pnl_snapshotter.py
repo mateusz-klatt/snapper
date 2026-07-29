@@ -336,14 +336,14 @@ class _FakeRepo:
         scope: Any,
         replacement: PortfolioPnlSampleRow,
         *,
-        late_fill_correction: bool,
+        derived_suffix_reconciliation: bool,
         expected_public_id: str,
     ) -> PortfolioPnlSampleRow:
         """Record a supersede; raise a CAS conflict when configured (B3)."""
         del scope
         if replacement["point_time"] in self.conflict_minutes:
             raise PortfolioPnlSampleConflictError("synthetic CAS conflict")
-        self.superseded.append((replacement, late_fill_correction, expected_public_id))
+        self.superseded.append((replacement, derived_suffix_reconciliation, expected_public_id))
         return replacement
 
     async def retract_portfolio_pnl_sample(
@@ -778,7 +778,7 @@ class TestCatchupAndCorrections:
         snap = _snapshotter(repo, _minute(6))
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         await snap._tick_once()
-        superseded = {(row["point_time"], late, pid) for row, late, pid in repo.superseded}
+        superseded = {(row["point_time"], derived, pid) for row, derived, pid in repo.superseded}
         assert (_minute(2), True, "sample-" + _minute(2).isoformat()) in superseded
         assert (_minute(3), True, "sample-" + _minute(3).isoformat()) in superseded
         assert _minute(2) in repo.peak_before
@@ -797,7 +797,7 @@ class TestCatchupAndCorrections:
         _install_series(monkeypatch, first=_meta(seq=4))
         await snap._tick_once()
         assert repo.recorded == []
-        healed = {row["point_time"] for row, _late, _pid in repo.superseded}
+        healed = {row["point_time"] for row, _derived, _pid in repo.superseded}
         assert _minute(2) in healed
 
     @pytest.mark.asyncio
@@ -846,7 +846,7 @@ class TestCatchupAndCorrections:
         _install_series(monkeypatch, first=_meta(seq=4))
         await snap._tick_once()
         assert repo.recorded == []
-        healed = {row["point_time"] for row, _late, _pid in repo.superseded}
+        healed = {row["point_time"] for row, _derived, _pid in repo.superseded}
         assert _minute(2) in healed
 
     @pytest.mark.asyncio

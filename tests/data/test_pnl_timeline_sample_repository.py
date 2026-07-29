@@ -832,10 +832,10 @@ async def test_writer_reports_a_different_active_row_as_conflict(
     assert stored[0]["cash_usd"] == 1000.0
 
 
-async def test_supersede_late_fill_replaces_a_complete_sample(
+async def test_derived_suffix_reconciliation_supersedes_a_complete_sample(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """A late-fill correction supersedes a complete sample and preserves identity."""
+    """A changed complete suffix minute remains supersedable."""
     original = _complete_sample(_M1, public_id="22222222-0000-7000-8000-000000000002")
     await repository.record_portfolio_pnl_samples([original], _scope())
     replacement = _mutate(
@@ -844,7 +844,10 @@ async def test_supersede_late_fill_replaces_a_complete_sample(
         timestamp=_M1 + timedelta(minutes=3),
     )
     superseded = await repository.supersede_portfolio_pnl_sample(
-        _scope(), replacement, late_fill_correction=True, expected_public_id=original["public_id"]
+        _scope(),
+        replacement,
+        derived_suffix_reconciliation=True,
+        expected_public_id=original["public_id"],
     )
     assert superseded["realized_pnl"] == 99.0
     assert superseded["public_id"] == original["public_id"]
@@ -853,34 +856,36 @@ async def test_supersede_late_fill_replaces_a_complete_sample(
     assert active[0].realized_pnl == 99.0
 
 
-async def test_supersede_self_heal_replaces_a_retryable_incomplete_sample(
+async def test_derived_suffix_reconciliation_supersedes_an_incomplete_sample(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """A self-heal supersedes an incomplete row carrying only retryable codes."""
+    """A changed incomplete suffix minute remains supersedable."""
     await repository.record_portfolio_pnl_samples(
         [_incomplete_sample(_M1, public_id=_ORIG, reasons=("missing_mark",))], _scope()
     )
     healed = await repository.supersede_portfolio_pnl_sample(
         _scope(),
         _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
-        late_fill_correction=False,
+        derived_suffix_reconciliation=True,
         expected_public_id=_ORIG,
     )
     assert healed["valuation_status"] == "complete"
 
 
-async def test_supersede_self_heal_refuses_a_complete_sample(
+async def test_supersede_refuses_a_non_derived_write(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Self-heal without the late-fill flag refuses to touch a complete row."""
+    """The money writer accepts only derived suffix reconciliations."""
     await repository.record_portfolio_pnl_samples(
         [_complete_sample(_M1, public_id=_ORIG)], _scope()
     )
-    with pytest.raises(PortfolioPnlSampleSupersedeError, match="refuses a complete sample"):
+    with pytest.raises(
+        PortfolioPnlSampleSupersedeError, match="requires a derived suffix reconciliation"
+    ):
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
-            late_fill_correction=False,
+            derived_suffix_reconciliation=False,
             expected_public_id=_ORIG,
         )
 
@@ -902,90 +907,16 @@ async def test_incomplete_sample_accepts_every_canonical_code(
     assert json.loads(rows[0]["audit_json"])["reason_codes"] == [code]
 
 
-async def test_supersede_self_heal_accepts_an_unknown_code(
-    repository: SQLAlchemyRepository,
-) -> None:
-    """An incomplete row carrying an unrecognised code is still self-healable.
-
-    The guard is a FINAL deny-list, not a retryable allow-list, so a token this
-    binary does not know reads as NOT terminal and the minute keeps healing. The
-    row is inserted through the ORM because the write validator refuses a
-    non-canonical code — which is precisely why the only rows that can carry one
-    were written by a newer binary. Without this test the "final", "unknown" and
-    "codeless" refusals below are indistinguishable (they share one message) and
-    an inversion regression could hide among them.
-    """
-    async with repository.session() as s:
-        s.add(
-            PortfolioPnlPoint(
-                **SQLAlchemyRepository._portfolio_pnl_sample_orm_kwargs(
-                    _mutate(
-                        _incomplete_sample(_M1, public_id=_ORIG),
-                        audit_json=_incomplete_audit(("a_future_code",)),
-                    )
-                ),
-                known_to=KNOWN_TO_MAX,
-            )
-        )
-        await s.commit()
-    healed = await repository.supersede_portfolio_pnl_sample(
-        _scope(),
-        _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
-        late_fill_correction=False,
-        expected_public_id=_ORIG,
-    )
-    assert healed["valuation_status"] == "complete"
-
-
-async def test_supersede_self_heal_refuses_a_final_reason_row(
-    repository: SQLAlchemyRepository,
-) -> None:
-    """Self-heal refuses an incomplete row carrying a final reason code."""
-    await repository.record_portfolio_pnl_samples(
-        [_incomplete_sample(_M1, public_id=_ORIG, reasons=("non_finite",))], _scope()
-    )
-    with pytest.raises(PortfolioPnlSampleSupersedeError, match="final reason code"):
-        await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _incomplete_sample(_M1, reasons=("missing_mark",)),
-            late_fill_correction=False,
-            expected_public_id=_ORIG,
-        )
-
-
-async def test_supersede_self_heal_refuses_a_codeless_incomplete_row(
-    repository: SQLAlchemyRepository,
-) -> None:
-    """A malformed incomplete row with no reason codes is never self-healed."""
-    async with repository.session() as s:
-        s.add(
-            PortfolioPnlPoint(
-                **SQLAlchemyRepository._portfolio_pnl_sample_orm_kwargs(
-                    _mutate(
-                        _incomplete_sample(_M1, public_id=_ORIG),
-                        audit_json=json.dumps({"reason_codes": []}),
-                    )
-                ),
-                known_to=KNOWN_TO_MAX,
-            )
-        )
-        await s.commit()
-    with pytest.raises(PortfolioPnlSampleSupersedeError, match="final reason code"):
-        await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
-            late_fill_correction=False,
-            expected_public_id=_ORIG,
-        )
-
-
 async def test_supersede_refuses_when_no_active_sample_exists(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Superseding a minute with no active sample is refused."""
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="no active row"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(), _complete_sample(_M1), late_fill_correction=True, expected_public_id=_ORIG
+            _scope(),
+            _complete_sample(_M1),
+            derived_suffix_reconciliation=True,
+            expected_public_id=_ORIG,
         )
 
 
@@ -998,7 +929,10 @@ async def test_supersede_refuses_a_scope_epoch_the_anchor_disowns(
     replacement = _mutate(_complete_sample(_M1), epoch_public_id=_OTHER_EPOCH)
     with pytest.raises(PortfolioPnlSampleScopeError, match="does not match the active anchor"):
         await repository.supersede_portfolio_pnl_sample(
-            other_scope, replacement, late_fill_correction=True, expected_public_id=_ORIG
+            other_scope,
+            replacement,
+            derived_suffix_reconciliation=True,
+            expected_public_id=_ORIG,
         )
 
 
@@ -1020,7 +954,7 @@ async def test_supersede_refuses_a_cross_epoch_active_row(
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
-            late_fill_correction=True,
+            derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
 
@@ -1034,7 +968,7 @@ async def test_supersede_validates_the_replacement(
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _mutate(_complete_sample(_M1), drawdown=3.0),
-            late_fill_correction=True,
+            derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
 
@@ -1055,7 +989,10 @@ async def test_supersede_refuses_a_scope_without_an_active_anchor(
     """Supersede also refuses an unsampleable scope before touching a row."""
     with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
         await bare_repository.supersede_portfolio_pnl_sample(
-            _scope(), _complete_sample(_M1), late_fill_correction=True, expected_public_id=_ORIG
+            _scope(),
+            _complete_sample(_M1),
+            derived_suffix_reconciliation=True,
+            expected_public_id=_ORIG,
         )
 
 
@@ -1144,7 +1081,7 @@ async def test_range_read_excludes_a_superseded_row(
     await repository.supersede_portfolio_pnl_sample(
         _scope(),
         _mutate(_complete_sample(_M1), realized_pnl=42.0, timestamp=_M1 + timedelta(minutes=3)),
-        late_fill_correction=True,
+        derived_suffix_reconciliation=True,
         expected_public_id=_ORIG,
     )
     rows = await repository.get_portfolio_pnl_samples(_query(), _M1, _M1)
@@ -1182,7 +1119,7 @@ async def test_peak_read_excludes_superseded_rows(
             position_value_usd=0.0,
             timestamp=_M1 + timedelta(minutes=3),
         ),
-        late_fill_correction=True,
+        derived_suffix_reconciliation=True,
         expected_public_id=_ORIG,
     )
     assert await repository.get_portfolio_pnl_sample_peak(_query(), before=_M5) == 10.0
@@ -1435,7 +1372,7 @@ async def test_supersede_conflict_on_a_stale_public_id(
         await repository.supersede_portfolio_pnl_sample(
             _scope(),
             _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=3)),
-            late_fill_correction=True,
+            derived_suffix_reconciliation=True,
             expected_public_id="99999999-0000-7000-8000-000000000009",
         )
 

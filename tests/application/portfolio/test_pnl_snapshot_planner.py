@@ -346,8 +346,8 @@ class TestPlanSelfHeal:
         candidate = SelfHealCandidate(point_time=_M2, reason_codes=frozenset({"missing_mark"}))
         assert plan_self_heal_minutes([candidate], now) == (_M2,)
 
-    def test_terminal_reason_excluded(self) -> None:
-        """A minute carrying a terminal reason is never retried."""
+    def test_ineligible_initiating_minute_with_terminal_reason_is_refused(self) -> None:
+        """A terminal minute cannot initiate a derived suffix reconciliation."""
         now = _M3
         candidate = SelfHealCandidate(point_time=_M2, reason_codes=frozenset({"non_finite"}))
         assert plan_self_heal_minutes([candidate], now) == ()

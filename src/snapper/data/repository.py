@@ -260,7 +260,6 @@ from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
-from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
 from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
@@ -1056,10 +1055,9 @@ class PortfolioPnlSampleScopeError(RuntimeError):
 class PortfolioPnlSampleSupersedeError(RuntimeError):
     """Raised when a Phase-5B sample supersede is refused.
 
-    Guards the two sanctioned close-and-insert paths: no active sample exists for
-    the minute, the active row's epoch does not match the write scope, or a
-    self-heal attempt (no late-fill-correction flag) targets a complete row or a
-    row carrying a final (non-retryable) reason code.
+    Guards the sanctioned derived suffix close-and-insert path: the caller does
+    not identify a derived suffix reconciliation, no active sample exists for the
+    minute, or the active row's epoch does not match the write scope.
     """
 
 
@@ -3947,17 +3945,16 @@ class Repository(ABC):
         scope: PortfolioPnlSampleScope,
         replacement: PortfolioPnlSampleRow,
         *,
-        late_fill_correction: bool,
+        derived_suffix_reconciliation: bool,
         expected_public_id: str,
     ) -> PortfolioPnlSampleRow:
         """Close the active sample for one minute and insert its replacement.
 
-        SCD2 close-and-insert within the SAME epoch for the two sanctioned paths:
-        late-fill recompute-forward (``late_fill_correction=True``) and bounded
-        self-heal of a retryable ``incomplete`` row (``late_fill_correction=False``
-        — refused unless the active row is ``incomplete`` and carries only
-        retryable reason codes). ``expected_public_id`` is the ``public_id`` of the
-        active row the caller read; a mismatch under the write lock raises
+        SCD2 close-and-insert within the SAME epoch for a derived suffix
+        reconciliation. The initiating minute's eligibility is decided before
+        the suffix is recomputed; every changed suffix minute may be replaced
+        regardless of its status. ``expected_public_id`` is the ``public_id`` of
+        the active row the caller read; a mismatch under the write lock raises
         :class:`PortfolioPnlSampleConflictError` (optimistic CAS). Refuses when no
         active sample exists for the minute or its scope/epoch does not match.
         """
@@ -14538,37 +14535,11 @@ class SQLAlchemyRepository(Repository):
         self,
         existing: PortfolioPnlPoint,
         scope: PortfolioPnlSampleScope,
-        *,
-        late_fill_correction: bool,
     ) -> None:
-        """Refuse a supersede that crosses epochs or self-heals a non-retryable row.
-
-        Eligibility is decided by a FINAL **deny-list**, not a retryable
-        allow-list: the row is refused when it carries a code known to be
-        terminal, so a token this binary does not recognise reads as NOT final
-        and stays healable. The two readings coincide for every canonical code,
-        because ``PNL_SAMPLE_RETRYABLE_REASONS`` and ``PNL_SAMPLE_FINAL_REASONS``
-        partition the canonical set; they diverge only for a code written by a
-        newer binary, and there refusing would be permanent while retrying is
-        bounded by the planner's self-heal lookback. See
-        :data:`snapper.data.repository_types.SampleReasonCode` for the
-        deploy-ordering rule this inversion imposes on new FINAL codes.
-        """
+        """Refuse a supersede that crosses epochs."""
         if existing.epoch_public_id != scope.epoch_public_id:
             raise PortfolioPnlSampleSupersedeError(
                 "portfolio P&L sample supersede must stay within the same epoch"
-            )
-        if late_fill_correction:
-            return
-        if existing.valuation_status != "incomplete":
-            raise PortfolioPnlSampleSupersedeError(
-                "self-heal supersede refuses a complete sample without a late-fill correction"
-            )
-        audit = self._parse_portfolio_pnl_sample_audit(existing.opening_basket_json)
-        codes = self._portfolio_pnl_sample_reason_codes(audit)
-        if not codes or any(code in PNL_SAMPLE_FINAL_REASONS for code in codes):
-            raise PortfolioPnlSampleSupersedeError(
-                "self-heal supersede refuses a sample with a final reason code"
             )
 
     async def supersede_portfolio_pnl_sample(
@@ -14576,23 +14547,26 @@ class SQLAlchemyRepository(Repository):
         scope: PortfolioPnlSampleScope,
         replacement: PortfolioPnlSampleRow,
         *,
-        late_fill_correction: bool,
+        derived_suffix_reconciliation: bool,
         expected_public_id: str,
     ) -> PortfolioPnlSampleRow:
         """Close one active sample and insert its validated replacement (SCD2).
 
-        Both sanctioned paths (late-fill recompute-forward and bounded self-heal)
-        run inside one locked transaction. The replacement is validated against the
+        A derived suffix reconciliation runs inside one locked transaction. The
+        marker records that the initiating minute's eligibility was decided
+        before the suffix was recomputed; it does not restrict a changed suffix
+        minute by status or reason code. The replacement is validated against the
         canonical scope; the active row for the minute must exist, match the
         scope's epoch, and still carry ``expected_public_id`` — the ``public_id``
         the caller read and planned against — or the close-and-insert is refused
         with :class:`PortfolioPnlSampleConflictError` (optimistic CAS, never
-        last-writer-wins). Without ``late_fill_correction`` the active row must be
-        ``incomplete`` and carry at least one reason code, none of them a known
-        terminal one (a FINAL deny-list, so an unrecognised newer token stays
-        eligible rather than being stranded). The SCD2 bus time is
-        clamped up to the closed row's timestamp so the close interval stays valid.
+        last-writer-wins). The SCD2 bus time is clamped up to the closed row's
+        timestamp so the close interval stays valid.
         """
+        if not derived_suffix_reconciliation:
+            raise PortfolioPnlSampleSupersedeError(
+                "portfolio P&L sample supersede requires a derived suffix reconciliation"
+            )
         canonical_scope = self._normalize_portfolio_pnl_sample_scope(scope)
         normalized = self._normalize_portfolio_pnl_sample(replacement)
         self._validate_portfolio_pnl_sample(normalized, canonical_scope)
@@ -14612,9 +14586,7 @@ class SQLAlchemyRepository(Repository):
                     raise PortfolioPnlSampleConflictError(
                         "portfolio P&L sample supersede lost its optimistic CAS"
                     )
-                self._guard_portfolio_pnl_sample_supersede(
-                    existing, canonical_scope, late_fill_correction=late_fill_correction
-                )
+                self._guard_portfolio_pnl_sample_supersede(existing, canonical_scope)
                 bus_time = max(normalized["timestamp"], existing.timestamp)
                 values = self._portfolio_pnl_sample_orm_kwargs(normalized)
                 values.pop("public_id")

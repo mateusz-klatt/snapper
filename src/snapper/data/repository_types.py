@@ -944,11 +944,11 @@ PNL_SAMPLE_RETRYABLE_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
         "basket_leg_withheld",
     }
 )
-"""Canonical retryable reason codes (R9): a self-heal supersede may replace an
+"""Canonical retryable reason codes (R9): a self-heal may start at an
 ``incomplete`` sample carrying only these when its evidence later lands. Typed
 against :data:`SampleReasonCode` rather than ``frozenset[str]`` so a member added
 here without being declared in the Literal fails type-checking instead of
-becoming a code the writer refuses at runtime."""
+becoming a code the planner cannot classify."""
 
 PNL_SAMPLE_FINAL_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
     {"fill_gap_evidence", "non_finite", "future_clock", "pnl_untrusted"}
