@@ -706,14 +706,14 @@ async def test_watermark_matches_trade_id_only_and_exec_id_only_fills(tmp_path: 
     assert matched_trade > matched_exec
 
 
-async def test_shard_has_any_accruals_is_clock_free(tmp_path: Path) -> None:
-    """The certification accrual probe sees future-stamped rows.
+async def test_shard_accrual_probe_is_clock_free_and_state_bounded(tmp_path: Path) -> None:
+    """The accrual probe separates visibility from the state boundary.
 
     Given: an accrual ledger row whose coordinator-clock timestamp sits
         ten minutes in the FUTURE (a skewed writer's crash-window row),
-    When: shard_has_any_accruals probes the scope,
-    Then: the row is visible (a temporal window would hide it) and a
-        different scope stays clean.
+    When: temporal visibility and durable state-boundary probes execute,
+    Then: recovery-clock visibility misses the row, while the state probe
+        sees it only at its economic instant and keeps sibling scopes clean.
     """
     repo = await _make_repo(tmp_path)
     future = datetime.now(UTC) + timedelta(minutes=10)
@@ -738,9 +738,28 @@ async def test_shard_has_any_accruals_is_clock_free(tmp_path: Path) -> None:
             )
         )
         await s.commit()
-    assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "live") is True
-    assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "paper") is False
-    assert await repo.shard_has_any_accruals(_WALLET, "kraken", "live") is False
+    recovery_clock = future - timedelta(minutes=5)
+    assert (
+        await repo.shard_has_accruals(
+            _WALLET,
+            "kraken_futures",
+            "live",
+            recovery_clock,
+        )
+        is False
+    )
+    assert (
+        await repo.shard_has_any_accruals(
+            _WALLET,
+            _INSTRUMENT,
+            "live",
+            future - timedelta(microseconds=1),
+        )
+        is False
+    )
+    assert await repo.shard_has_any_accruals(_WALLET, _INSTRUMENT, "live", future) is True
+    assert await repo.shard_has_any_accruals(_WALLET, _INSTRUMENT, "paper", future) is False
+    assert await repo.shard_has_any_accruals(_WALLET, "sibling-instrument", "live", future) is False
 
 
 async def test_fill_shard_lineage_maps_and_drops_ambiguity(tmp_path: Path) -> None:

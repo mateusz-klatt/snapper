@@ -3277,6 +3277,7 @@ class TradeProjectionCheckpoint(TemporalMixin, Base):
     shard_key: Mapped[str] = mapped_column(String(256))
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    projection_calc_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     position_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     entry_price: Mapped[float | None] = mapped_column(Float)
     position_opened_at: Mapped[datetime | None] = mapped_column(TZDateTime())

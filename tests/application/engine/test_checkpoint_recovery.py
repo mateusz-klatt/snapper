@@ -3,6 +3,8 @@
 from collections import OrderedDict
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -14,10 +16,12 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.trade.trade_service import FillProjection
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.wallet_short import compute_wallet_short
+from snapper.data.models import AccrualLedger
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
@@ -43,6 +47,7 @@ def _make_checkpoint(
     return {
         "public_id": "cp-1",
         "shard_key": shard_key,
+        "projection_calc_version": PROJECTION_CALC_VERSION,
         "position_qty": position_qty,
         "entry_price": entry_price,
         "position_opened_at": position_opened_at,
@@ -133,6 +138,207 @@ def _set_sqlalchemy_repo(coord: TraderCoordinator, mock_repo: AsyncMock) -> None
 
 class TestCheckpointRecovery:
     """Checkpoint recovery restores TradeService, engine, and portfolio."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [PROJECTION_CALC_VERSION - 1, None])
+    async def test_older_and_legacy_checkpoint_replay_instead_of_restore(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        version: int | None,
+    ) -> None:
+        """Older calculation epochs bypass checkpoint restoration.
+
+        Given: an owned spot checkpoint stamped with an older version or
+            carrying the legacy NULL version,
+        When: boot recovery considers the checkpoint row,
+        Then: it returns the shard to authoritative replay without restoring
+            checkpoint state or quarantining the identity.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        checkpoint = _make_checkpoint()
+        checkpoint["projection_calc_version"] = version
+        checkpoint["wallet_public_id"] = "w-1"
+        restore = Mock()
+        with patch.object(coord, "_restore_trade_service_from_checkpoint", restore):
+            recovered = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert recovered is None
+        restore.assert_not_called()
+        assert coord._failed_recovery_identities == set()
+        assert checkpoint["shard_key"] not in coord._checkpoint_recovered_shard_keys
+
+    @pytest.mark.asyncio
+    async def test_future_checkpoint_quarantines_without_restore(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A newer binary's calculation epoch fails closed.
+
+        Given: an owned checkpoint stamped above the running calculation
+            version,
+        When: boot recovery considers the checkpoint row,
+        Then: the identity is quarantined and neither checkpoint restoration
+            nor generic full replay may consume the unknown state.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        checkpoint = _make_checkpoint()
+        checkpoint["projection_calc_version"] = PROJECTION_CALC_VERSION + 1
+        checkpoint["wallet_public_id"] = "w-1"
+        restore = Mock()
+        with patch.object(coord, "_restore_trade_service_from_checkpoint", restore):
+            recovered = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert recovered is None
+        restore.assert_not_called()
+        assert checkpoint["shard_key"] in coord._checkpoint_recovered_shard_keys
+        assert ("inst-pid", "live", "w-1") in coord._failed_recovery_identities
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [2.0, "2", 1.5, True])
+    async def test_non_integer_checkpoint_version_quarantines(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        version: object,
+    ) -> None:
+        """Non-integer database versions fail closed consistently.
+
+        Given: a checkpoint whose version column contains a non-integer
+            SQLite value from a weakly typed import or manual repair,
+        When: recovery evaluates the calculation version,
+        Then: the identity is quarantined without restoring or ordering
+            the malformed value.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        checkpoint = _make_checkpoint()
+        checkpoint["projection_calc_version"] = cast(int, version)
+        checkpoint["wallet_public_id"] = "w-1"
+        restore = Mock()
+        with patch.object(coord, "_restore_trade_service_from_checkpoint", restore):
+            recovered = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert recovered is None
+        restore.assert_not_called()
+        assert checkpoint["shard_key"] in coord._checkpoint_recovered_shard_keys
+
+    @pytest.mark.asyncio
+    async def test_older_funding_checkpoint_quarantines_without_full_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale funding cash is never replaced by a fill-only replay.
+
+        Given: an older-version checkpoint whose wallet and venue carry
+            durable funding accruals,
+        When: boot recovery considers the checkpoint row,
+        Then: the identity is quarantined and marked checkpoint-backed so
+            execution and venue-gap recovery cannot fabricate pre-checkpoint
+            funding cash.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=True)
+        checkpoint = _make_checkpoint()
+        checkpoint["projection_calc_version"] = PROJECTION_CALC_VERSION - 1
+        checkpoint["wallet_public_id"] = "w-1"
+        recovered = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert recovered is None
+        assert checkpoint["shard_key"] in coord._checkpoint_recovered_shard_keys
+        assert coord._checkpoint_execution_replay_should_skip(checkpoint["shard_key"], "w-1")
+
+    @pytest.mark.asyncio
+    async def test_stale_version_funding_probe_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unavailable funding evidence prevents a stale-state rebuild.
+
+        Given: a stale-version checkpoint and, separately, a non-SQL
+            repository and a SQL repository whose accrual query raises,
+        When: the version gate asks whether full replay is safe,
+        Then: both probes report possible accruals so recovery fails closed.
+        """
+        coord = _make_coord(monkeypatch)
+        context = trader_module.CheckpointRecoveryContext(
+            shard_key="kraken.BTC-USD.live",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            strategy_tag=None,
+            wallet_public_id="w-1",
+        )
+        coord.repository = AsyncMock()
+        assert await coord._checkpoint_shard_has_accruals(context, datetime.now(UTC))
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.shard_has_any_accruals = AsyncMock(side_effect=RuntimeError("DB down"))
+        coord.repository = mock_repo
+        assert await coord._checkpoint_shard_has_accruals(context, datetime.now(UTC))
+
+    @pytest.mark.asyncio
+    async def test_funding_probes_fail_closed_without_instrument_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing instrument identity cannot authorize replay.
+
+        Given: a SQL repository that cannot resolve the checkpoint instrument,
+        When: stale-version and accrual-certainty probes evaluate the shard,
+        Then: stale replay is blocked and checkpoint accrual certainty is denied.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        context = trader_module.CheckpointRecoveryContext(
+            shard_key="kraken.BTC-USD.live",
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            strategy_tag=None,
+            wallet_public_id="w-1",
+        )
+        assert await coord._checkpoint_shard_has_accruals(context, datetime.now(UTC)) is True
+        assert await coord._checkpoint_accruals_certain(context, True) is False
+
+    @pytest.mark.asyncio
+    async def test_future_checkpoint_without_wallet_fails_globally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unattributable future checkpoint still cannot enter replay.
+
+        Given: a future-version checkpoint with no resolvable durable wallet,
+        When: the version gate quarantines it,
+        Then: it suppresses generic replay and escalates through the existing
+            unattributable-failure policy without recording a wallet mapping.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        checkpoint = _make_checkpoint()
+        checkpoint["projection_calc_version"] = PROJECTION_CALC_VERSION + 1
+        context = trader_module.CheckpointRecoveryContext(
+            shard_key=checkpoint["shard_key"],
+            exchange="kraken",
+            instrument="BTC-USD",
+            mode="live",
+            strategy_tag=None,
+            wallet_public_id="",
+        )
+        allowed = await coord._checkpoint_version_allows_restore(
+            context, checkpoint, datetime.now(UTC)
+        )
+        assert allowed is False
+        assert checkpoint["shard_key"] not in coord._checkpoint_recovered_shard_wallets
+        assert coord._recovery_certification_failed is True
 
     @pytest.mark.asyncio
     async def test_checkpoint_recovery_restores_position(
@@ -1635,6 +1841,7 @@ class TestRecoveryCertification:
             position_qty=0.5,
             entry_price=50000.0,
             position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            cash=10000.0 - (0.5 * 50000.0 + 0.01),
             realized_pnl=0.0,
             turnover=25000.0,
             last_venue_event_id=1,
@@ -1820,6 +2027,14 @@ class TestRecoveryCertification:
         _set_sqlalchemy_repo(coord, mock_repo)
         await coord._recover_engine_state()
         assert "kraken.BTC-USD.live" not in coord._trusted_recovery_shards
+        coord._projection_identities["kraken.BTC-USD.live"] = ("inst-pid", "live", "")
+        await coord._certify_execution_replay(
+            coord.engines["BTC-USD@kraken-live"],
+            "kraken.BTC-USD.live",
+            "",
+            datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        assert "kraken.BTC-USD.live" not in coord._trusted_recovery_shards
         coord2 = _make_coord(monkeypatch)
         mock_repo2 = AsyncMock(spec=SQLAlchemyRepository)
         mock_repo2.get_all_checkpoints = AsyncMock(return_value=[])
@@ -1862,6 +2077,7 @@ class TestDurableExecutionLineage:
             position_qty=0.5,
             entry_price=50000.0,
             position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            cash=10000.0 - (0.5 * 50000.0 + 0.01),
             realized_pnl=0.0,
             turnover=25000.0,
             last_venue_event_id=1,
@@ -2861,6 +3077,8 @@ class TestNoGapFillEvidence:
         coord = _make_coord(monkeypatch)
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
         _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
         mock_repo.get_venue_events_after = AsyncMock(return_value=events)
         return coord
 
@@ -2898,6 +3116,7 @@ class TestNoGapFillEvidence:
             position_qty=0.5,
             entry_price=50000.0,
             position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            cash=10000.0 - (0.5 * 50000.0 + 0.01),
             realized_pnl=0.0,
             turnover=25000.0,
             last_venue_event_id=1,
@@ -2973,6 +3192,227 @@ class TestNoGapFillEvidence:
         )
         assert certain is False
         assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_cash_digest_mismatch_quarantines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cash is part of same-version checkpoint certification.
+
+        Given: a current-version checkpoint whose position, entry, realized
+            PnL, turnover, metadata, and fill identities match its durable
+            replay but whose cash differs by one fee,
+        When: the no-gap certification compares the exact replay digest,
+        Then: the cash-only divergence fails the whole certification without
+            any tolerance.
+        """
+        coord = self._coord_with_repo(monkeypatch, [self._evidence_event(1, self._WALLET, "E-1")])
+        checkpoint = self._matching_checkpoint()
+        checkpoint["cash"] += 0.01
+        coord._restore_trade_service_from_checkpoint(checkpoint, self._SHARD, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD,
+            self._WALLET,
+            "paper",
+            "paper",
+            datetime.now(UTC),
+            checkpoint,
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_legitimate_funding_cash_certifies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Funding cash is excluded from a fill-only digest.
+
+        Given: a current-version checkpoint whose exact fill fold matches
+            but whose cash includes a real pre-checkpoint ledger charge,
+        When: no-gap certification queries that durable accrual data,
+        Then: the legitimate checkpoint certifies without weakening cash
+            checks for reconstructable shards.
+        """
+        coord = _make_coord(monkeypatch)
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'funding.db'}")
+        await repo.create_all()
+        checkpoint = self._matching_checkpoint()
+        checkpoint["cash"] -= 0.04
+        instrument_public_id = "00000000-0000-7000-8000-00000000000a"
+        async with repo.session() as session:
+            session.add(
+                AccrualLedger(
+                    instrument_public_id=instrument_public_id,
+                    wallet_public_id=self._WALLET,
+                    operator_public_id=None,
+                    mode="paper",
+                    accrual_type="funding",
+                    accrued_at=checkpoint["checkpoint_at"] - timedelta(minutes=1),
+                    amount=-0.04,
+                    amount_asset="USD",
+                    rate=0.0001,
+                    notional=25000.0,
+                    position_quantity_at_accrual=0.5,
+                    exchange="paper",
+                    timestamp=checkpoint["checkpoint_at"] - timedelta(minutes=1),
+                    session_id="s1",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        coord.repository = repo
+        coord._restore_trade_service_from_checkpoint(checkpoint, self._SHARD, [])
+        with (
+            patch.object(
+                repo,
+                "get_instrument_public_id_by_symbol",
+                AsyncMock(return_value=instrument_public_id),
+            ),
+            patch.object(
+                repo,
+                "get_venue_events_after",
+                AsyncMock(return_value=[self._evidence_event(1, self._WALLET, "E-1")]),
+            ),
+        ):
+            certain = await coord._correct_checkpoint_fill_gap(
+                self._SHARD,
+                self._WALLET,
+                "paper",
+                "paper",
+                datetime.now(UTC),
+                checkpoint,
+            )
+        assert certain is True
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_future_accrual_does_not_mask_cash_corruption(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Post-checkpoint funding cannot suppress cash certification.
+
+        Given: a cash-corrupted tagged checkpoint and a real same-scope
+            accrual ledger row economically after its recorded state instant,
+        When: no-gap certification scopes funding to that checkpoint,
+        Then: exact cash comparison remains enabled and quarantines the shard.
+        """
+        coord = _make_coord(monkeypatch)
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'future-funding.db'}")
+        await repo.create_all()
+        checkpoint = self._matching_checkpoint()
+        checkpoint["cash"] += 0.01
+        instrument_public_id = "00000000-0000-7000-8000-00000000000a"
+        future = checkpoint["checkpoint_at"] + timedelta(minutes=1)
+        async with repo.session() as session:
+            session.add(
+                AccrualLedger(
+                    instrument_public_id=instrument_public_id,
+                    wallet_public_id=self._WALLET,
+                    operator_public_id=None,
+                    mode="paper",
+                    accrual_type="funding",
+                    accrued_at=future,
+                    amount=-0.04,
+                    amount_asset="USD",
+                    rate=0.0001,
+                    notional=25000.0,
+                    position_quantity_at_accrual=0.5,
+                    exchange="paper",
+                    timestamp=future,
+                    session_id="s1",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        coord.repository = repo
+        coord._restore_trade_service_from_checkpoint(checkpoint, self._SHARD, [])
+        with (
+            patch.object(
+                repo,
+                "get_instrument_public_id_by_symbol",
+                AsyncMock(return_value=instrument_public_id),
+            ),
+            patch.object(
+                repo,
+                "get_venue_events_after",
+                AsyncMock(return_value=[self._evidence_event(1, self._WALLET, "E-1")]),
+            ),
+        ):
+            certain = await coord._correct_checkpoint_fill_gap(
+                self._SHARD,
+                self._WALLET,
+                "paper",
+                "paper",
+                datetime.now(UTC),
+                checkpoint,
+            )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("shard_key", "instrument_public_id"),
+        [("invalid", "inst-pid"), ("paper.BTC-USD.paper", None)],
+    )
+    async def test_unproven_accrual_scope_keeps_cash_comparison(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        shard_key: str,
+        instrument_public_id: str | None,
+    ) -> None:
+        """Cash comparison stays enabled unless accrual scope is proven.
+
+        Given: an invalid shard key or an unresolved durable instrument,
+        When: certification decides whether fill replay reconstructs cash,
+        Then: it keeps exact cash comparison enabled instead of weakening it.
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        mock_repo = cast(AsyncMock, coord.repository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=instrument_public_id)
+        reconstructable = await coord._checkpoint_cash_is_fill_reconstructable(
+            shard_key,
+            self._WALLET,
+            _make_checkpoint(),
+        )
+        assert reconstructable is True
+
+    @pytest.mark.asyncio
+    async def test_throwing_accrual_scope_keeps_cash_comparison(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scope lookup failures retain strict cash certification.
+
+        Given: instrument resolution and the accrual predicate each fail
+            while deciding whether checkpoint cash is fill-reconstructable,
+        When: certification probes both failure paths,
+        Then: neither exception escapes and both retain exact cash comparison.
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        mock_repo = cast(AsyncMock, coord.repository)
+        checkpoint = _make_checkpoint()
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
+            side_effect=RuntimeError("resolution failed")
+        )
+        assert (
+            await coord._checkpoint_cash_is_fill_reconstructable(
+                self._SHARD,
+                self._WALLET,
+                checkpoint,
+            )
+            is True
+        )
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.shard_has_any_accruals = AsyncMock(side_effect=RuntimeError("probe failed"))
+        assert (
+            await coord._checkpoint_cash_is_fill_reconstructable(
+                self._SHARD,
+                self._WALLET,
+                checkpoint,
+            )
+            is True
+        )
 
     @pytest.mark.asyncio
     async def test_identity_digest_mismatch_quarantines(
@@ -3388,6 +3828,7 @@ class TestFillDigestBranches:
             qty: float = 0.0,
             entry: float | None = None,
             realized: float = 0.0,
+            cash: float = 10000.0,
             turnover: float = 0.0,
         ) -> FillProjection:
             return {
@@ -3395,7 +3836,7 @@ class TestFillDigestBranches:
                 "entry_price": entry,
                 "position_opened_at": None,
                 "realized_pnl": realized,
-                "cash": 0.0,
+                "cash": cash,
                 "turnover": turnover,
                 "seen_exec_ids": OrderedDict(),
                 "last_venue_event_id": 0,
@@ -3403,6 +3844,8 @@ class TestFillDigestBranches:
 
         assert coord._fill_digest_matches(shard, projection()) is True
         assert coord._fill_digest_matches(shard, projection(qty=float("nan"))) is False
+        assert coord._fill_digest_matches(shard, projection(cash=float("nan"))) is False
+        assert coord._fill_digest_matches(shard, projection(cash=9999.99)) is False
         assert coord._fill_digest_matches(shard, projection(entry=50000.0)) is False
         shard.position.entry_price = float("nan")
         assert coord._fill_digest_matches(shard, projection(entry=float("nan"))) is False
@@ -3685,7 +4128,7 @@ class TestRoundThreeFailClosed:
                 "entry_price": None,
                 "position_opened_at": opened_at,
                 "realized_pnl": 0.0,
-                "cash": 0.0,
+                "cash": 10000.0,
                 "turnover": 0.0,
                 "seen_exec_ids": seen if seen is not None else OrderedDict(),
                 "last_venue_event_id": watermark,

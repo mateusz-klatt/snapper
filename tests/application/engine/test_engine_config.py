@@ -25,6 +25,7 @@ from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import _OrderDispatch
 from snapper.application.engine.service import _StrategyOrderProvenance
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
@@ -2516,6 +2517,7 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     mock_repo.upsert_checkpoint.assert_called_once()
     call_row = mock_repo.upsert_checkpoint.call_args.args[0]
     assert call_row["shard_key"] == "kraken.BTC-USD.live"
+    assert call_row["projection_calc_version"] == PROJECTION_CALC_VERSION
     assert call_row["position_qty"] == 0.5
     assert call_row["position_opened_at"] == venue_ts
 

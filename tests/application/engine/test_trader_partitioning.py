@@ -28,6 +28,7 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.config.app import AppSettings
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
@@ -404,6 +405,7 @@ def _make_checkpoint_row(shard_key: str) -> dict[str, Any]:
     return {
         "public_id": "cp-1",
         "shard_key": shard_key,
+        "projection_calc_version": PROJECTION_CALC_VERSION,
         "position_qty": 0.0,
         "entry_price": None,
         "position_opened_at": None,

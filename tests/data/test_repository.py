@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import snapper.data.repository
 import snapper.data.repository as repo
 import snapper.data.repository as repository
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
@@ -6502,6 +6503,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     cp_id = await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
+            "projection_calc_version": PROJECTION_CALC_VERSION,
             "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 0.5,
             "entry_price": 50000.0,
@@ -6524,6 +6526,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     cp = await r.get_checkpoint("kraken.BTC-USD.live", now)
     assert cp is not None
     assert cp["position_qty"] == 0.5
+    assert cp["projection_calc_version"] == PROJECTION_CALC_VERSION
     assert cp["cash"] == 9000.0
     assert cp["last_venue_event_id"] == 42
     assert cp["position_opened_at"] == now
@@ -6531,6 +6534,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     cp_id2 = await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
+            "projection_calc_version": PROJECTION_CALC_VERSION,
             "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 1.0,
             "entry_price": 50000.0,

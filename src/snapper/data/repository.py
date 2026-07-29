@@ -11946,8 +11946,7 @@ class SQLAlchemyRepository(Repository):
         )
         await s.execute(
             text(
-                "SELECT pg_advisory_xact_lock("
-                "hashtext('portfolio_pnl_anchor'), hashtext(:scope))"
+                "SELECT pg_advisory_xact_lock(hashtext('portfolio_pnl_anchor'), hashtext(:scope))"
             ),
             {"scope": scope},
         )
@@ -12402,7 +12401,7 @@ class SQLAlchemyRepository(Repository):
         """
         try:
             wallet_public_id = str(UUID(target.wallet_public_id))
-        except (AttributeError, TypeError, ValueError):
+        except AttributeError, TypeError, ValueError:
             return False
         return (
             wallet_public_id == command.wallet_public_id
@@ -14997,8 +14996,7 @@ class SQLAlchemyRepository(Repository):
             )
         if wallet_short and wallet_short != compute_wallet_short(execution.wallet_public_id):
             raise ExecutionChainError(
-                "crossed_execution_shard_wallet_lineage: "
-                f"execution_public_id={execution.public_id}"
+                f"crossed_execution_shard_wallet_lineage: execution_public_id={execution.public_id}"
             )
         return shard_key
 
@@ -15111,7 +15109,7 @@ class SQLAlchemyRepository(Repository):
             return fill_row.id
         try:
             return UUID(str(fill_row.public_id)).int
-        except (AttributeError, TypeError, ValueError):
+        except AttributeError, TypeError, ValueError:
             if isinstance(fill_row.sequence_id, int) and fill_row.sequence_id >= 0:
                 return fill_row.sequence_id
             raise ExecutionChainError("invalid_execution_fill_identity") from None
@@ -15371,8 +15369,7 @@ class SQLAlchemyRepository(Repository):
                     f"crossed_execution_shard_lineage: execution_public_id={execution.public_id}"
                 )
             raise ExecutionChainError(
-                "crossed_execution_fill_scope_lineage: "
-                f"execution_public_id={execution.public_id}"
+                f"crossed_execution_fill_scope_lineage: execution_public_id={execution.public_id}"
             )
         lineage_key = (scope_key, candidate.symbol_public_id)
         lineage_evidence = state.scope_lineage_evidence.get(lineage_key)
@@ -22516,36 +22513,48 @@ class SQLAlchemyRepository(Repository):
             )
             return (result.scalar() or 0) > 0
 
-    async def shard_has_any_accruals(self, wallet_public_id: str, exchange: str, mode: str) -> bool:
-        """CLOCK-FREE existence check for accrual ledger rows.
+    async def shard_has_any_accruals(
+        self,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        mode: str,
+        state_at: datetime,
+    ) -> bool:
+        """Return accrual existence through a durable projection-state boundary.
 
-        The projection certification probe must not depend on the
-        recovery clock: accrual timestamps are coordinator-clock
-        values, so a skewed writer's row can sit AHEAD of a corrected
-        clock and hide from a ``timestamp <= as_of`` window while still
-        being durable funding truth. This reads by the current-version
-        sentinel filter with no temporal window at all.
+        Current-version visibility remains clock-free: ``known_to`` is
+        matched only against its sentinel, never against the recovery
+        clock. The ``accrued_at <= state_at`` condition instead compares
+        two durable economic instants and asks whether the projected
+        state could have folded the accrual.
+
+        The accrual ledger carries no strategy-tag identity. Tagged
+        siblings therefore share this predicate's scope, so an accrual
+        through the state boundary disables cash comparison for all of
+        them, a residual fail-open direction for certification.
 
         Args:
             wallet_public_id: Owning wallet.
-            exchange: Shard exchange.
+            instrument_public_id: Durable instrument identity.
             mode: Execution mode (``live``/``paper``).
+            state_at: Inclusive durable state instant being certified.
 
         Returns:
-            True if ANY current accrual ledger row exists for the scope.
+            True if a current accrual row exists through ``state_at``.
         """
         async with self.session() as s:
             result = await s.execute(
-                select(func.count())
-                .select_from(AccrualLedger)
-                .where(
-                    AccrualLedger.wallet_public_id == wallet_public_id,
-                    AccrualLedger.exchange == exchange,
-                    AccrualLedger.mode == mode,
-                    AccrualLedger.known_to == KNOWN_TO_MAX,
+                select(
+                    exists().where(
+                        AccrualLedger.wallet_public_id == wallet_public_id,
+                        AccrualLedger.instrument_public_id == instrument_public_id,
+                        AccrualLedger.mode == mode,
+                        AccrualLedger.known_to == KNOWN_TO_MAX,
+                        AccrualLedger.accrued_at <= state_at,
+                    )
                 )
             )
-            return (result.scalar() or 0) > 0
+            return bool(result.scalar())
 
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.
@@ -26041,6 +26050,7 @@ class SQLAlchemyRepository(Repository):
             row: TradeProjectionCheckpointRow = {
                 "public_id": cp.public_id,
                 "shard_key": cp.shard_key,
+                "projection_calc_version": cp.projection_calc_version,
                 "position_qty": cp.position_qty,
                 "entry_price": cp.entry_price,
                 "position_opened_at": cp.position_opened_at,
@@ -26080,6 +26090,7 @@ class SQLAlchemyRepository(Repository):
                     {
                         "public_id": cp.public_id,
                         "shard_key": cp.shard_key,
+                        "projection_calc_version": cp.projection_calc_version,
                         "position_qty": cp.position_qty,
                         "entry_price": cp.entry_price,
                         "position_opened_at": cp.position_opened_at,
@@ -26186,6 +26197,7 @@ class SQLAlchemyRepository(Repository):
                 {
                     "public_id": cp.public_id,
                     "shard_key": cp.shard_key,
+                    "projection_calc_version": cp.projection_calc_version,
                     "position_qty": cp.position_qty,
                     "entry_price": cp.entry_price,
                     "position_opened_at": cp.position_opened_at,

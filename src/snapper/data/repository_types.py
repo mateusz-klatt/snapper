@@ -1826,6 +1826,7 @@ class TradeProjectionCheckpointRow(TypedDict):
 
     public_id: str
     shard_key: str
+    projection_calc_version: int | None
     position_qty: float
     entry_price: float | None
     position_opened_at: datetime | None
@@ -2339,6 +2340,7 @@ class CheckpointUpsertRow(TypedDict):
     """
 
     shard_key: str
+    projection_calc_version: NotRequired[int]
     position_qty: float
     entry_price: float | None
     position_opened_at: datetime | None

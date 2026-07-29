@@ -27,6 +27,7 @@ from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import _compute_pending_boundaries
 from snapper.application.engine.trader import run_zmq_trader
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
@@ -5043,6 +5044,7 @@ class TestRecoveryAccrualReplayError:
             return_value=[
                 {
                     "shard_key": "kraken.BTC-USD.live",
+                    "projection_calc_version": PROJECTION_CALC_VERSION,
                     "position_qty": 1.0,
                     "entry_price": 50000.0,
                     "cash": 10000.0,
@@ -5096,6 +5098,7 @@ class TestRecoveryAccrualReplayBranches:
             return_value=[
                 {
                     "shard_key": "kraken.BTC-USD.live",
+                    "projection_calc_version": PROJECTION_CALC_VERSION,
                     "position_qty": 1.0,
                     "entry_price": 50000.0,
                     "cash": 10000.0,
@@ -5143,6 +5146,7 @@ class TestRecoveryAccrualReplayBranches:
             return_value=[
                 {
                     "shard_key": "kraken.BTC-USD.live",
+                    "projection_calc_version": PROJECTION_CALC_VERSION,
                     "position_qty": 1.0,
                     "entry_price": 50000.0,
                     "cash": 10000.0,
@@ -5194,6 +5198,7 @@ class TestRecoveryNoCheckpointAt:
             return_value=[
                 {
                     "shard_key": "kraken.BTC-USD.live",
+                    "projection_calc_version": PROJECTION_CALC_VERSION,
                     "position_qty": 1.0,
                     "entry_price": 50000.0,
                     "cash": 10000.0,

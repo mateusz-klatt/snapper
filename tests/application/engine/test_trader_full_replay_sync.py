@@ -23,6 +23,7 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
@@ -82,6 +83,7 @@ def _make_checkpoint(
     return {
         "public_id": "cp-1",
         "shard_key": shard_key,
+        "projection_calc_version": PROJECTION_CALC_VERSION,
         "position_qty": position_qty,
         "entry_price": entry_price,
         "position_opened_at": datetime(2026, 1, 1, tzinfo=UTC),

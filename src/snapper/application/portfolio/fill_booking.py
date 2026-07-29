@@ -1,4 +1,11 @@
-"""Position-quantity booking rules for execution fills."""
+"""Position and cash booking rules for execution fills.
+
+``PROJECTION_CALC_VERSION`` identifies the complete deterministic fold used
+to derive trade projection checkpoints. Every change to fill booking or any
+other checkpointed fold semantic must bump this constant in the same commit.
+That makes older persisted state rebuildable instead of allowing it to pass
+as output from the current rules.
+"""
 
 import math
 
@@ -7,6 +14,7 @@ from snapper.core.types import TradeSideEnum
 
 _BASE_ASSET_QUANTITY_UNIT = "base_asset"
 _CONTRACT_QUANTITY_UNIT = "contract_count"
+PROJECTION_CALC_VERSION = 2
 
 
 def resolve_position_quantity_unit(exchange: str) -> str:

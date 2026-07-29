@@ -37,6 +37,7 @@ from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import compute_shard_key
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
@@ -1051,6 +1052,8 @@ class TraderCoordinator(RegisterableProcess):
         context = await self._checkpoint_recovery_context(checkpoint, now)
         if context is None:
             return None
+        if not await self._checkpoint_version_allows_restore(context, checkpoint, now):
+            return None
         delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
         if delta_events is None:
             return None
@@ -1085,6 +1088,71 @@ class TraderCoordinator(RegisterableProcess):
             fill_state_certain=fill_state_certain,
             accruals_certain=accruals_certain,
         )
+
+    async def _checkpoint_version_allows_restore(
+        self,
+        context: CheckpointRecoveryContext,
+        checkpoint: TradeProjectionCheckpointRow,
+        now: datetime,
+    ) -> bool:
+        """Apply the checkpoint calculation-version recovery policy."""
+        version = checkpoint["projection_calc_version"]
+        genuine_integer = isinstance(version, int) and not isinstance(version, bool)
+        if genuine_integer and version == PROJECTION_CALC_VERSION:
+            return True
+        known_older = version is None or (genuine_integer and 0 < version < PROJECTION_CALC_VERSION)
+        if known_older and not await self._checkpoint_shard_has_accruals(
+            context, checkpoint["checkpoint_at"]
+        ):
+            logger.warning(
+                f"ZMQTrader: checkpoint {context.shard_key} uses projection calc "
+                f"version {version!r}; replaying the authoritative ledger under "
+                f"current version {PROJECTION_CALC_VERSION}"
+            )
+            return False
+        reason = (
+            "cannot be rebuilt because it carries funding accruals"
+            if known_older
+            else f"has unknown or future projection calc version {version!r}"
+        )
+        logger.warning(
+            f"ZMQTrader: checkpoint {context.shard_key} {reason}; leaving the identity UNCERTIFIED"
+        )
+        self._checkpoint_recovered_shard_keys.add(context.shard_key)
+        if context.wallet_public_id:
+            self._checkpoint_recovered_shard_wallets[context.shard_key] = context.wallet_public_id
+        await self._record_recovery_shard_failure(
+            context.shard_key,
+            durable_wallet_public_id=context.wallet_public_id or None,
+            anchor=checkpoint.get("checkpoint_at"),
+        )
+        return False
+
+    async def _checkpoint_shard_has_accruals(
+        self,
+        context: CheckpointRecoveryContext,
+        checkpoint_at: datetime | None,
+    ) -> bool:
+        """Fail closed when stale checkpoint state may include funding cash."""
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository) or checkpoint_at is None:
+            return True
+        try:
+            instrument_public_id = await repository.get_instrument_public_id_by_symbol(
+                native_symbol=context.instrument,
+                exchange=context.exchange,
+                as_of=checkpoint_at,
+            )
+            if instrument_public_id is None:
+                return True
+            return await repository.shard_has_any_accruals(
+                context.wallet_public_id,
+                instrument_public_id,
+                context.mode,
+                checkpoint_at,
+            )
+        except Exception:
+            return True
 
     async def _checkpoint_recovery_context(
         self,
@@ -1197,8 +1265,18 @@ class TraderCoordinator(RegisterableProcess):
         if not replay_certain or not isinstance(repository, SQLAlchemyRepository):
             return replay_certain
         try:
+            instrument_public_id = await repository.get_instrument_public_id_by_symbol(
+                native_symbol=context.instrument,
+                exchange=context.exchange,
+                as_of=datetime.now(UTC),
+            )
+            if instrument_public_id is None:
+                return False
             has_accruals = await repository.shard_has_any_accruals(
-                context.wallet_public_id, context.exchange, context.mode
+                context.wallet_public_id,
+                instrument_public_id,
+                context.mode,
+                datetime.now(UTC),
             )
         except Exception:
             return False
@@ -1653,7 +1731,12 @@ class TraderCoordinator(RegisterableProcess):
             return False
         if not self._checkpoint_fill_wallet_certain(shard_key, wallet_public_id, fill_events):
             return False
-        return self._checkpoint_fill_digest_certain(shard_key, events)
+        return await self._checkpoint_fill_digest_certain(
+            shard_key,
+            wallet_public_id,
+            checkpoint,
+            events,
+        )
 
     @staticmethod
     def _checkpoint_without_fill_evidence_certain(
@@ -1733,21 +1816,30 @@ class TraderCoordinator(RegisterableProcess):
             return False
         return True
 
-    def _checkpoint_fill_digest_certain(
+    async def _checkpoint_fill_digest_certain(
         self,
         shard_key: str,
+        wallet_public_id: str,
+        checkpoint: TradeProjectionCheckpointRow,
         events: list[VenueEventRow],
     ) -> bool:
         """Require restored fill state to equal the durable full-history fold."""
         projection = self.trade_service.project_fill_state_from_events(events)
         shard = self.trade_service._get_or_create_shard(shard_key)
-        if not self._fill_digest_matches(shard, projection):
+        compare_cash = await self._checkpoint_cash_is_fill_reconstructable(
+            shard_key,
+            wallet_public_id,
+            checkpoint,
+        )
+        if not self._fill_digest_matches(shard, projection, compare_cash=compare_cash):
             logger.warning(
                 f"ZMQTrader: checkpoint {shard_key} restored fill state "
                 f"(pos={shard.position.position_qty}, "
+                f"cash={shard.cash}, "
                 f"realized={shard.position.realized_pnl}, "
                 f"turnover={shard.turnover}) CONTRADICTS the full replay of its "
                 f"durable venue events (pos={projection['position_qty']}, "
+                f"cash={projection['cash']}, "
                 f"realized={projection['realized_pnl']}, "
                 f"turnover={projection['turnover']}) — failing the whole "
                 f"projection certification"
@@ -1756,7 +1848,43 @@ class TraderCoordinator(RegisterableProcess):
             return False
         return True
 
-    def _fill_digest_matches(self, shard: ShardState, projection: FillProjection) -> bool:
+    async def _checkpoint_cash_is_fill_reconstructable(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        checkpoint: TradeProjectionCheckpointRow,
+    ) -> bool:
+        """Keep cash comparison unless checkpoint-scoped accruals are proven."""
+        try:
+            repository = cast(SQLAlchemyRepository, self.repository)
+            parsed = self._parse_shard_key(shard_key)
+            checkpoint_at = checkpoint["checkpoint_at"]
+            if parsed is None or checkpoint_at is None:
+                return True
+            instrument_public_id = await repository.get_instrument_public_id_by_symbol(
+                native_symbol=parsed[1],
+                exchange=parsed[0],
+                as_of=checkpoint_at,
+            )
+            if instrument_public_id is None:
+                return True
+            has_accruals = await repository.shard_has_any_accruals(
+                wallet_public_id,
+                instrument_public_id,
+                parsed[2],
+                checkpoint_at,
+            )
+        except Exception:
+            return True
+        return not has_accruals
+
+    def _fill_digest_matches(
+        self,
+        shard: ShardState,
+        projection: FillProjection,
+        *,
+        compare_cash: bool = True,
+    ) -> bool:
         """Compare restored fill-derived state against a durable replay digest.
 
         The checkpoint fold and a chronological replay of the SAME
@@ -1766,10 +1894,11 @@ class TraderCoordinator(RegisterableProcess):
         folded something the durable plane never recorded (a 5e-10
         drift already flips the projection writer's non-flat boundary).
         Position, entry, realized PnL, turnover, the opening timestamp,
-        and the venue-event watermark must all agree; non-finite values
-        never match (a NaN/inf checkpoint is corruption). Fill identity
-        sets must agree, and a side at the 10k LRU dedup cap is
-        SATURATED — completeness is undecidable there, so it never
+        and the venue-event watermark must all agree. Cash must also
+        agree when the durable replay can reconstruct it. Non-finite
+        values never match (a NaN/inf checkpoint is corruption). Fill
+        identity sets must agree, and a side at the 10k LRU dedup cap
+        is SATURATED — completeness is undecidable there, so it never
         matches (quarantine over guesswork).
         """
         numeric_pairs = (
@@ -1778,6 +1907,8 @@ class TraderCoordinator(RegisterableProcess):
             (shard.turnover, projection["turnover"]),
         )
         if not all(self._finite_values_match(*pair) for pair in numeric_pairs):
+            return False
+        if compare_cash and not self._finite_values_match(shard.cash, projection["cash"]):
             return False
         restored_entry = shard.position.entry_price
         replayed_entry = projection["entry_price"]
@@ -2985,11 +3116,18 @@ class TraderCoordinator(RegisterableProcess):
     ) -> None:
         """Grant trust only when replay omitted no durable accrual state."""
         repository = self.repository
+        identity = self._projection_identities.get(shard_key)
+        instrument_public_id = identity[0] if identity is not None else None
         try:
-            shard_has_accruals = not isinstance(
-                repository, SQLAlchemyRepository
-            ) or await repository.shard_has_any_accruals(
-                wallet_public_id, str(engine.exchange), str(engine.mode)
+            shard_has_accruals = (
+                not isinstance(repository, SQLAlchemyRepository)
+                or instrument_public_id is not None
+                and (
+                    anchor is None
+                    or await repository.shard_has_any_accruals(
+                        wallet_public_id, instrument_public_id, str(engine.mode), anchor
+                    )
+                )
             )
         except Exception:
             shard_has_accruals = True
@@ -2999,7 +3137,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"accruals the replay cannot reconstruct; leaving UNCERTIFIED for the "
                 f"position projection"
             )
-        elif shard_key in self._projection_identities:
+        elif identity is not None:
             self._trusted_recovery_shards.add(shard_key)
         else:
             await self._record_recovery_shard_failure(
@@ -5032,8 +5170,7 @@ class TraderCoordinator(RegisterableProcess):
         )
         if instrument_public_id is None:
             logger.warning(
-                "ZMQTrader: position_cycle open skipped "
-                "(unresolved instrument) shard={} symbol={}",
+                "ZMQTrader: position_cycle open skipped (unresolved instrument) shard={} symbol={}",
                 shard_key,
                 engine.instrument,
             )
@@ -5206,8 +5343,7 @@ class TraderCoordinator(RegisterableProcess):
             shard.active_cycle_public_id = cycle_id
             shard.active_cycle_max_qty = fallback["max_qty"]
         logger.warning(
-            "ZMQTrader: position_cycle {} recovered via DB fallback "
-            "(cache miss) shard={} cycle={}",
+            "ZMQTrader: position_cycle {} recovered via DB fallback (cache miss) shard={} cycle={}",
             transition,
             shard_key,
             cycle_id,
@@ -5493,6 +5629,7 @@ class TraderCoordinator(RegisterableProcess):
         opened_at = snap.get("position_opened_at")
         return {
             "shard_key": shard_key,
+            "projection_calc_version": PROJECTION_CALC_VERSION,
             "wallet_public_id": wallet_public_id,
             "operator_public_id": operator_public_id,
             "position_qty": cast(float, snap["position_qty"]),
@@ -6037,7 +6174,7 @@ class TraderCoordinator(RegisterableProcess):
         if isinstance(self.repository, SQLAlchemyRepository):
             try:
                 configured_ttl = float(self.settings.trade_command_dispatch_ttl_s)
-            except (AttributeError, TypeError, ValueError):
+            except AttributeError, TypeError, ValueError:
                 configured_ttl = 0.0
             self.outbox = OutboxDispatcher(
                 repository=self.repository,
@@ -6730,8 +6867,7 @@ class TraderCoordinator(RegisterableProcess):
         instrument = signal.instrument
         if not is_tradeable(instrument, exchange):
             logger.warning(
-                f"ZMQTrader: instrument {instrument} not tradeable on {exchange}, "
-                f"dropping signal"
+                f"ZMQTrader: instrument {instrument} not tradeable on {exchange}, dropping signal"
             )
             return False
         if not signal.price or signal.price <= 0:

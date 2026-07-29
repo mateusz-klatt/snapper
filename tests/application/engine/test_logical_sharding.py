@@ -15,6 +15,7 @@ import snapper.application.engine.trader as trader_module
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -529,6 +530,7 @@ class TestCheckpointRecoveryWithSharding:
             return_value=[
                 {
                     "public_id": "cp-1",
+                    "projection_calc_version": PROJECTION_CALC_VERSION,
                     "shard_key": "paper.BTC-USD.paper.scalp",
                     "position_qty": 0.5,
                     "entry_price": 50000.0,
