@@ -67,7 +67,12 @@ class _Target:
 async def test_uat_trade_import_enqueues_inside_copy_transaction(
     tmp_path: Path,
 ) -> None:
-    """Trade COPY and monitor obligations share one explicit transaction."""
+    """Trade COPY and monitor obligations share one explicit transaction.
+
+    Given: A trade dump and a target containing the integrity worklog,
+    When: The importer loads the trade dump,
+    Then: The COPY and exact monitor obligations commit in one transaction.
+    """
     dump_path = tmp_path / "trades.dat"
     dump_path.write_bytes(b"trade rows")
     target = _Target()
@@ -91,5 +96,31 @@ async def test_uat_trade_import_enqueues_inside_copy_transaction(
             "trade_id IS NOT NULL, TRUE FROM trades"
         ),
         "transaction:commit",
+    ]
+    assert not dump_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_uat_non_trade_import_keeps_direct_copy_path(tmp_path: Path) -> None:
+    """Non-trade COPY keeps the existing direct load behavior.
+
+    Given: A dump for a table that does not require integrity work,
+    When: The importer loads that dump,
+    Then: It truncates and copies without a catalog check or transaction.
+    """
+    dump_path = tmp_path / "ticks.dat"
+    dump_path.write_bytes(b"tick rows")
+    target = _Target()
+
+    copied = await _load_dump(
+        cast(asyncpg.Connection, target),
+        "ticks",
+        dump_path,
+    )
+
+    assert copied == 7
+    assert target.events == [
+        'execute:TRUNCATE TABLE "ticks"',
+        "copy:ticks:ticks.dat",
     ]
     assert not dump_path.exists()

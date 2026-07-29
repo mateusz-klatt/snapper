@@ -94,7 +94,12 @@ def test_rolled_back_restore_leaves_no_worklog_entry(tmp_path: Path) -> None:
 async def test_rolled_back_replay_upsert_leaves_no_worklog_entry(
     tmp_path: Path,
 ) -> None:
-    """Replay trade and work obligation roll back as one transaction."""
+    """Replay trade and work obligation roll back as one transaction.
+
+    Given: A replay trade upsert using a caller-owned session,
+    When: The caller rolls back after both rows become visible,
+    Then: Neither the trade nor its integrity work remains durable.
+    """
     repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'replay-rollback.db'}")
     async with repository.engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -142,4 +147,49 @@ async def test_rolled_back_replay_upsert_leaves_no_worklog_entry(
     assert visible_worklog_count == 1
     assert durable_trade_count == 0
     assert durable_worklog_count == 0
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_upsert_owned_session_commits_trade_and_worklog(
+    tmp_path: Path,
+) -> None:
+    """Owned replay upsert commits the trade and its work obligation.
+
+    Given: A historical trade submitted without a caller-owned session,
+    When: The repository upserts it with integrity work requested,
+    Then: The returned count and durable rows prove both inserts committed.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'replay-commit.db'}")
+    async with repository.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    row = TradeUpsertRow(
+        public_id="49000000-0000-0000-0000-000000000001",
+        instrument_public_id="4a000000-0000-0000-0000-000000000001",
+        timestamp=datetime(2026, 7, 29, 10, 0, tzinfo=UTC),
+        executed_at=datetime(2026, 7, 28, 10, 0, tzinfo=UTC),
+        price=100.0,
+        size=1.0,
+        side="buy",
+        trade_id="replay-trade-commit",
+        session_id="4b000000-0000-0000-0000-000000000001",
+        sequence_id=1,
+    )
+
+    inserted = await repository.upsert_trades(
+        [row],
+        enqueue_integrity_work=True,
+    )
+
+    async with repository.session() as session:
+        trade_count = int((await session.execute(text("SELECT count(*) FROM trades"))).scalar_one())
+        work_item = (
+            await session.execute(
+                text("SELECT public_id, m1_pending, m2_pending FROM trade_integrity_worklog")
+            )
+        ).one()
+
+    assert inserted == 1
+    assert trade_count == 1
+    assert tuple(work_item) == (row["public_id"], 1, 1)
     await repository.engine.dispose()
