@@ -26,6 +26,7 @@ from typing import cast
 from loguru import logger
 
 from snapper.core.types import TradeSideEnum
+from snapper.infrastructure.exchanges.adapters.kraken_timestamps import normalize_kraken_timestamp
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
@@ -173,7 +174,7 @@ def parse_kraken_trade(data: dict[str, Any]) -> TradeUpdate:
         TradeUpdate with trade execution details.
     """
     schema = KrakenTradeSchema.model_validate(data)
-    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", _UTC_SUFFIX))
+    timestamp = normalize_kraken_timestamp(schema.timestamp)
     return TradeUpdate(
         symbol=kraken_websocket_to_native(schema.symbol),
         side=schema.side,
@@ -391,7 +392,7 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
     schema = KrakenExecutionSchema.model_validate(_execution_validation_data(data))
     if not schema.timestamp:
         raise ValueError("Execution data missing required 'timestamp' field")
-    timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", _UTC_SUFFIX))
+    timestamp = normalize_kraken_timestamp(schema.timestamp)
     return ExecutionUpdate(
         order_id=schema.order_id or "",
         exec_type=cast(ExecType, schema.exec_type) if schema.exec_type else None,

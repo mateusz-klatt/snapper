@@ -1,6 +1,8 @@
 """Tests for Kraken Equities data format adapter functions."""
 
 from collections.abc import Generator
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -212,6 +214,28 @@ class TestParseKrakenEquitiesTrade:
         result = parse_kraken_equities_trade(raw)
         assert result.symbol == "GCQ6-COMEX"
         assert result.side == "sell"
+
+    def test_timestamp_normalizes_to_exact_utc_milliseconds(self) -> None:
+        """Normalize offset ISO precision to the containing UTC millisecond.
+
+        Given: An equities trade in a DST fold with sub-millisecond precision,
+        When: The single equities timestamp branch parses the trade,
+        Then: It returns the floored exact millisecond with canonical UTC tzinfo.
+        """
+        raw = {
+            "symbol": "CLM6.NYMEX",
+            "side": "buy",
+            "price": 90.12,
+            "qty": 1,
+            "timestamp": "2024-11-03T01:30:00.123999-04:00",
+            "sequence": 95579,
+            "index": 7623847138430121307,
+        }
+
+        result = parse_kraken_equities_trade(raw)
+
+        assert result.timestamp == datetime(2024, 11, 3, 5, 30, 0, 123000, tzinfo=UTC)
+        assert result.timestamp.tzinfo is UTC
 
     def test_parse_undefined_side_defaults_to_buy(self) -> None:
         """Parse a trade with undefined side, defaulting to buy.

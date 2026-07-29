@@ -15,12 +15,12 @@ Each ``_list`` function catches per-item errors so that a single
 unparseable item does not discard the entire batch.
 """
 
-from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from loguru import logger
 
+from snapper.infrastructure.exchanges.adapters.kraken_timestamps import normalize_kraken_timestamp
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -102,7 +102,7 @@ def parse_kraken_equities_trade(data: dict[str, Any]) -> TradeUpdate:
         TradeUpdate with normalized symbol and trade data.
     """
     schema = KrakenEquitiesTradeSchema.model_validate(data)
-    ts = datetime.fromisoformat(schema.timestamp.replace("Z", "+00:00"))
+    ts = normalize_kraken_timestamp(schema.timestamp)
     side = schema.side if schema.side in ("buy", "sell") else "buy"
     return TradeUpdate(
         symbol=kraken_equities_ws_to_native(schema.symbol),

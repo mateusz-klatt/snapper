@@ -1,6 +1,9 @@
 """Tests for Kraken Futures data format adapter functions."""
 
 from collections.abc import Generator
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +27,50 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+
+_TIMESTAMP_PATH_CASES = (
+    (
+        8615030419946,
+        "2243-01-01T00:00:19.946000Z",
+    ),
+    (
+        -32264771900095,
+        "0947-07-28T03:21:39.905000Z",
+    ),
+    (
+        -1,
+        "1969-12-31T23:59:59.999999Z",
+    ),
+    (
+        0,
+        "1970-01-01T00:00:00.000999Z",
+    ),
+    (
+        1,
+        "1970-01-01T00:00:00.001999Z",
+    ),
+    (
+        1710053999999,
+        "2024-03-10T01:59:59.999500-05:00",
+    ),
+    (
+        1710054000000,
+        "2024-03-10T03:00:00.000500-04:00",
+    ),
+    (
+        1730611800123,
+        "2024-11-03T01:30:00.123999-04:00",
+    ),
+    (
+        1730615400123,
+        "2024-11-03T01:30:00.123999-05:00",
+    ),
+)
+
+
+def _identity_symbol(symbol: str) -> str:
+    """Return a symbol unchanged for timestamp-only execution tests."""
+    return symbol
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +185,65 @@ class TestParseKrakenFuturesTickerList:
 class TestParseKrakenFuturesTrade:
     """Tests for parse_kraken_futures_trade."""
 
+    @pytest.mark.parametrize(
+        ("milliseconds", "iso_timestamp"),
+        _TIMESTAMP_PATH_CASES,
+        ids=(
+            "far-future-float-counterexample",
+            "far-past-float-counterexample",
+            "pre-epoch-sub-millisecond",
+            "epoch-sub-millisecond",
+            "post-epoch-sub-millisecond",
+            "dst-spring-before",
+            "dst-spring-after",
+            "dst-fall-first-fold",
+            "dst-fall-second-fold",
+        ),
+    )
+    def test_integer_and_iso_paths_normalize_identically(
+        self,
+        milliseconds: int,
+        iso_timestamp: str,
+    ) -> None:
+        """Normalize every supported timestamp representation to exact UTC milliseconds.
+
+        Given: Equivalent integer-ms and ISO timestamps spanning epoch boundaries,
+            sub-millisecond fractions, DST-adjacent offsets, and distant dates,
+        When: Each representation is parsed through the Kraken Futures trade adapter,
+        Then: Both paths return the same exact millisecond and UTC timezone object.
+        """
+        integer_result = parse_kraken_futures_trade(
+            {
+                "product_id": "PI_XBTUSD",
+                "time": milliseconds,
+                "price": 50000.0,
+                "qty": 0.5,
+                "side": "buy",
+                "uid": "timestamp-contract",
+            }
+        )
+        iso_results = parse_kraken_futures_trade_list(
+            [
+                {
+                    "product_id": "PI_XBTUSD",
+                    "time": iso_timestamp,
+                    "price": 50000.0,
+                    "qty": 0.5,
+                    "side": "buy",
+                    "uid": "timestamp-contract",
+                }
+            ]
+        )
+        assert len(iso_results) == 1
+        iso_result = iso_results[0]
+        expected = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=milliseconds)
+
+        assert integer_result.timestamp == expected
+        assert iso_result.timestamp == expected
+        assert integer_result.timestamp.isoformat() == iso_result.timestamp.isoformat()
+        assert integer_result.timestamp.tzinfo is UTC
+        assert iso_result.timestamp.tzinfo is UTC
+
     def test_parse_rest_trade(self) -> None:
         """Parse a trade from REST API with ISO 8601 time.
 
@@ -181,6 +287,25 @@ class TestParseKrakenFuturesTrade:
         assert result.symbol == "BTC-USD-PERP-INV"
         assert result.quantity == pytest.approx(0.5)
         assert result.timestamp.year == 2022
+
+    def test_rejects_timezone_naive_iso_timestamp(self) -> None:
+        """Reject an ISO timestamp whose instant is ambiguous across host timezones.
+
+        Given: A Kraken Futures trade carrying an ISO timestamp without an offset,
+        When: The trade adapter normalizes its venue execution time,
+        Then: Parsing fails instead of applying the host's local timezone.
+        """
+        raw = {
+            "product_id": "PI_XBTUSD",
+            "time": "2024-01-01T00:00:00.123",
+            "price": 50000.0,
+            "qty": 0.5,
+            "side": "buy",
+            "uid": "naive-timestamp",
+        }
+
+        with pytest.raises(ValueError, match="must include a timezone offset"):
+            parse_kraken_futures_trade(raw)
 
     def test_raises_when_both_product_id_and_symbol_missing(self) -> None:
         """Raise ValueError when trade has neither product_id nor symbol.
@@ -453,6 +578,27 @@ class TestParseKrakenFuturesFill:
         assert result.side == OrderSideEnum.SELL
         assert result.symbol == "ETH-USD-PERP"
 
+    def test_integer_timestamp_uses_exact_millisecond_arithmetic(self) -> None:
+        """Preserve a distant integer-millisecond fill timestamp exactly.
+
+        Given: A Kraken Futures fill at an instant where float seconds lose a microsecond,
+        When: The fill adapter parses the integer venue timestamp,
+        Then: The resulting UTC datetime remains on the exact source millisecond.
+        """
+        data = {
+            "fill_id": "fill-exact-time",
+            "order_id": "order-exact-time",
+            "instrument": "PF_XBTUSD",
+            "buy": True,
+            "qty": 1.0,
+            "price": 66000.0,
+            "time": 8615030419946,
+        }
+
+        result = parse_kraken_futures_fill(data, _identity_symbol)
+
+        assert result.timestamp == datetime(2243, 1, 1, 0, 0, 19, 946000, tzinfo=UTC)
+
     def test_usd_fee_maps_to_fee_usd_equiv(self) -> None:
         """Map USD fee to fee_usd_equiv.
 
@@ -579,6 +725,26 @@ class TestParseKrakenFuturesOrderStatus:
         assert result.order_status == ExchangeOrderStatusEnum.CLOSED
         assert result.exec_type == "status"
         assert result.side == OrderSideEnum.SELL
+
+    def test_integer_timestamp_uses_exact_millisecond_arithmetic(self) -> None:
+        """Preserve a distant integer-millisecond order timestamp exactly.
+
+        Given: An order update at an instant where float seconds lose a microsecond,
+        When: The order-status adapter parses the integer venue timestamp,
+        Then: The resulting UTC datetime remains on the exact source millisecond.
+        """
+        data = {
+            "order_id": "order-exact-time",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 1.0,
+            "time": 8615030419946,
+        }
+
+        result = parse_kraken_futures_order_status(data, _identity_symbol)
+
+        assert result.timestamp == datetime(2243, 1, 1, 0, 0, 19, 946000, tzinfo=UTC)
 
     def test_parse_stop_order_type(self) -> None:
         """Parse an order with stop type.

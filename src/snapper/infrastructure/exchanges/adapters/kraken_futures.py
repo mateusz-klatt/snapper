@@ -18,13 +18,12 @@ unparseable item does not discard the entire batch.
 """
 
 from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from loguru import logger
 
+from snapper.infrastructure.exchanges.adapters.kraken_timestamps import normalize_kraken_timestamp
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
@@ -40,8 +39,6 @@ from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuture
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTickerSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTradeSchema
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
-
-_UTC_SUFFIX = "+00:00"
 
 
 def parse_kraken_futures_ticker(data: dict[str, Any]) -> TickerUpdate:
@@ -105,10 +102,7 @@ def parse_kraken_futures_trade(data: dict[str, Any]) -> TradeUpdate:
         TradeUpdate with normalized symbol and trade data.
     """
     schema = KrakenFuturesTradeSchema.model_validate(data)
-    if isinstance(schema.time, int):
-        ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
-    else:
-        ts = datetime.fromisoformat(str(schema.time).replace("Z", _UTC_SUFFIX))
+    ts = normalize_kraken_timestamp(schema.time)
     product_id = data.get("product_id") or data.get("symbol") or ""
     if not product_id:
         raise ValueError("Trade missing both product_id and symbol")
@@ -264,7 +258,7 @@ def parse_kraken_futures_fill(
     """
     schema = KrakenFuturesFillSchema.model_validate(data)
     native_symbol = symbol_mapper(schema.instrument)
-    ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
+    ts = normalize_kraken_timestamp(schema.time)
     side = OrderSideEnum.BUY if schema.buy else OrderSideEnum.SELL
     order_type = _ORDER_TYPE_MAP.get(schema.order_type or "", ExchangeOrderTypeEnum.LIMIT)
     fee_currency = schema.fee_currency or "USD"
@@ -308,7 +302,7 @@ def parse_kraken_futures_order_status(
     schema = KrakenFuturesOpenOrderSchema.model_validate(data)
     native_symbol = symbol_mapper(schema.instrument)
     ts_ms = schema.last_update_time if schema.last_update_time is not None else schema.time
-    ts = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+    ts = normalize_kraken_timestamp(ts_ms)
     is_fully_filled = schema.filled >= schema.qty and schema.qty > 0
     status = ExchangeOrderStatusEnum.CLOSED if is_fully_filled else ExchangeOrderStatusEnum.OPEN
     exec_type: ExecType = "status"

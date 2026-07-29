@@ -1,5 +1,6 @@
 """Tests for Kraken exchange response adapter functions."""
 
+from datetime import UTC
 from datetime import datetime
 from typing import Any
 from unittest.mock import patch
@@ -323,6 +324,28 @@ def test_parse_kraken_trade_valid() -> None:
     assert result.trade_id == "12345"
 
 
+def test_parse_kraken_trade_timestamp_normalizes_to_exact_utc_milliseconds() -> None:
+    """Normalize offset ISO precision to the containing UTC millisecond.
+
+    Given: A spot trade in a DST fold with sub-millisecond precision,
+    When: The single spot timestamp branch parses the trade,
+    Then: It returns the floored exact millisecond with canonical UTC tzinfo.
+    """
+    raw_data: dict[str, Any] = {
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "qty": 0.5,
+        "price": 45000.0,
+        "trade_id": 12345,
+        "timestamp": "2024-11-03T01:30:00.123999-04:00",
+    }
+
+    result = parse_kraken_trade(raw_data)
+
+    assert result.timestamp == datetime(2024, 11, 3, 5, 30, 0, 123000, tzinfo=UTC)
+    assert result.timestamp.tzinfo is UTC
+
+
 def test_parse_kraken_trade_list_valid() -> None:
     """Parse list of Kraken trades.
 
@@ -473,6 +496,29 @@ def test_parse_kraken_execution_valid() -> None:
     assert result.last_qty_decimal == "0.500000000000000005"
     assert result.last_price_decimal == "45000.000000000000000005"
     assert result.fees[0].quantity_decimal == "22.500000000000000005"
+
+
+def test_parse_kraken_execution_timestamp_normalizes_to_exact_utc_milliseconds() -> None:
+    """Normalize execution ISO precision to the containing UTC millisecond.
+
+    Given: A spot execution in a DST fold with sub-millisecond precision,
+    When: The execution adapter parses its venue timestamp,
+    Then: It returns the floored exact millisecond with canonical UTC tzinfo.
+    """
+    raw_data: dict[str, Any] = {
+        "order_id": "OQCLSE-BW3P3-BUCMWZ",
+        "exec_type": "trade",
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "order_type": "limit",
+        "order_status": "partially_filled",
+        "timestamp": "2024-11-03T01:30:00.123999-04:00",
+    }
+
+    result = parse_kraken_execution(raw_data)
+
+    assert result.timestamp == datetime(2024, 11, 3, 5, 30, 0, 123000, tzinfo=UTC)
+    assert result.timestamp.tzinfo is UTC
 
 
 def test_parse_kraken_execution_accepts_non_dict_fee() -> None:
