@@ -134,16 +134,16 @@ five-minute settlement grace, cadence, and warning spacing, a newly
 settled cursor-only violation normally takes at most about 89 minutes
 to alert. If every successful database call consumes nearly all of its
 30-second budget, the same throughput calculation grows to roughly four
-hours. These
-are operational bounds, not mathematical guarantees: the publisher
-retries retained batches without a time limit, so a commit stalled for
-more than the six-hour overlap is outside enforced live-row coverage.
-Restore and import do not share that exposure because their trade write
-and exact monitor obligations commit in one transaction.
+hours. These are operational bounds, not mathematical guarantees: the
+live publisher retries retained batches without a time limit, so a
+commit stalled for more than the six-hour overlap is outside enforced
+live-row coverage. Archive restore, historical paper replay, and the
+local-UAT trade import do not share that exposure because their trade
+write and exact monitor obligations commit in one transaction.
 
 An M1 or M2 finding blocks the U2-to-U3 widening: inspect the identities
 in heartbeat metadata and database logs, stop the responsible
-ingestion/restore/import writer, preserve the pending worklog evidence,
+ingestion/restore/import/replay writer, preserve the pending worklog evidence,
 and repair or quarantine the conflicting rows.
 A lag-only warning means the zero observation is not current; restore
 monitor coverage before treating the baseline as proven or proceeding

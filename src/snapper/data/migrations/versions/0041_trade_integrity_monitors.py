@@ -1,10 +1,10 @@
 """Add durable work and cursor state for incremental trade integrity monitors.
 
-Restore and import writers enqueue the identities they touch in the worklog
-inside the trade transaction. Each monitor drains its own pending flag while a
-separate durable cursor records bounded timestamp-and-id sweep progress. The
-partial pending indexes keep draining proportional to outstanding work rather
-than accumulated history. Revises 0040.
+Restore, import, and replay writers enqueue the identities they touch in the
+worklog inside the trade transaction. Each monitor drains its own pending flag
+while a separate durable cursor records bounded timestamp-and-id sweep
+progress. The partial pending indexes keep draining proportional to
+outstanding work rather than accumulated history. Revises 0040.
 """
 
 from collections.abc import Sequence

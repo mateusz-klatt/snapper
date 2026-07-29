@@ -4736,10 +4736,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         repository = self._require_repository()
         writer_session = self._trade_writer_session
         if writer_session is not None:
-            await repository.upsert_trades(batch, session=writer_session)
+            if self._requires_trade_integrity_worklog():
+                await repository.upsert_trades(
+                    batch,
+                    session=writer_session,
+                    enqueue_integrity_work=True,
+                )
+            else:
+                await repository.upsert_trades(batch, session=writer_session)
             await writer_session.commit()
             return
-        await repository.upsert_trades(batch)
+        if self._requires_trade_integrity_worklog():
+            await repository.upsert_trades(
+                batch,
+                enqueue_integrity_work=True,
+            )
+        else:
+            await repository.upsert_trades(batch)
+
+    def _requires_trade_integrity_worklog(self) -> bool:
+        """Return whether this publisher writes historical trade identities."""
+        return False
 
     async def _rollback_trade_writer_session(self) -> None:
         """Roll back the pinned trade session after a failed partition."""

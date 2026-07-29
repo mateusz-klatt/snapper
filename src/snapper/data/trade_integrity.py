@@ -31,10 +31,11 @@ TRADE_INTEGRITY_OVERLAP: Final = timedelta(hours=6)
 
 The 400,000-row writer queue represents about 86 minutes at 6.7 million
 trades per day. Six hours keeps ordinary queue and retry delay inside a
-wide operational margin. Restore/import obligations do not rely on this
-bound because they enter the durable worklog. The live writer has no
-absolute retry-age ceiling, so this remains an operational bound; the
-half-overlap lag warning exposes erosion before the full margin is spent.
+wide operational margin. Restore/import/replay obligations do not rely
+on this bound because they enter the durable worklog. The live writer
+has no absolute retry-age ceiling, so this remains an operational bound;
+the half-overlap lag warning exposes erosion before the full margin is
+spent.
 """
 
 TRADE_INTEGRITY_SETTLEMENT_GRACE: Final = timedelta(minutes=5)

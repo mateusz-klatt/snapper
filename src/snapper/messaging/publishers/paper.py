@@ -153,6 +153,10 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
         """Skip candle persistence for replayed paper market data."""
         _ = batch
 
+    def _requires_trade_integrity_worklog(self) -> bool:
+        """Require exact obligations for every historical paper trade."""
+        return True
+
     def _candle_live_epoch(self) -> datetime:
         """Use the REPLAY START as the aggregator live epoch, not wall-clock now.
 

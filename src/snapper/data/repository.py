@@ -2655,12 +2655,25 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_trades(
-        self, rows: list[TradeUpsertRow], session: AsyncSession | None = None
+        self,
+        rows: list[TradeUpsertRow],
+        session: AsyncSession | None = None,
+        *,
+        enqueue_integrity_work: bool = False,
     ) -> int:
         """Insert trades, skipping duplicates. Return inserted count.
 
         Optional ``session`` lets writer tasks share a pinned
         connection across many flushes.
+
+        Args:
+            rows: Trade rows to insert.
+            session: Optional caller-managed session.
+            enqueue_integrity_work: Whether the same transaction must
+                enqueue exact M1 and M2 obligations for historical writes.
+
+        Returns:
+            Number of inserted rows.
         """
         ...
 
@@ -9564,7 +9577,11 @@ class SQLAlchemyRepository(Repository):
         return True
 
     async def upsert_trades(
-        self, rows: list[TradeUpsertRow], session: AsyncSession | None = None
+        self,
+        rows: list[TradeUpsertRow],
+        session: AsyncSession | None = None,
+        *,
+        enqueue_integrity_work: bool = False,
     ) -> int:
         """Insert trades with dialect-specific conflict handling.
 
@@ -9572,13 +9589,59 @@ class SQLAlchemyRepository(Repository):
         caller-managed session is supplied the insert runs without
         committing so the writer task can batch many flushes onto a
         single pinned :class:`AsyncConnection`. Omit ``session`` for
-        ad-hoc / test paths that want an inline commit.
+        ad-hoc / test paths that want an inline commit. Historical
+        replay callers set ``enqueue_integrity_work`` so the trade and
+        exact monitor obligations share that transaction.
         """
         if not rows:
             return 0
-        return await self._upsert_batch(
-            Trade, rows, ["instrument_public_id", "trade_id"], session=session
-        )
+        if not enqueue_integrity_work:
+            return await self._upsert_batch(
+                Trade,
+                rows,
+                ["instrument_public_id", "trade_id"],
+                session=session,
+            )
+        if session is not None:
+            inserted = await self._upsert_batch(
+                Trade,
+                rows,
+                ["instrument_public_id", "trade_id"],
+                session=session,
+            )
+            await self._enqueue_trade_integrity_work(session, rows)
+            return inserted
+        async with self.session() as owned_session:
+            inserted = await self._upsert_batch(
+                Trade,
+                rows,
+                ["instrument_public_id", "trade_id"],
+                session=owned_session,
+            )
+            await self._enqueue_trade_integrity_work(owned_session, rows)
+            await owned_session.commit()
+            return inserted
+
+    @staticmethod
+    async def _enqueue_trade_integrity_work(
+        session: AsyncSession,
+        rows: list[TradeUpsertRow],
+    ) -> None:
+        """Enqueue exact historical trade identities before their commit."""
+        work_items: list[TradeIntegrityWorkItemInsertRow] = []
+        for row in rows:
+            trade_id = row.get("trade_id")
+            work_items.append(
+                TradeIntegrityWorkItemInsertRow(
+                    public_id=row["public_id"],
+                    instrument_public_id=row["instrument_public_id"],
+                    trade_id=trade_id,
+                    executed_at=row["executed_at"],
+                    m1_pending=trade_id is not None,
+                    m2_pending=True,
+                )
+            )
+        await session.execute(insert(TradeIntegrityWorkItem), work_items)
 
     async def run_trade_integrity_monitor(
         self,

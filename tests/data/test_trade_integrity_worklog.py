@@ -1,5 +1,7 @@
-"""Transactional proofs for archive-restore integrity work."""
+"""Transactional proofs for historical trade integrity work."""
 
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,8 @@ from sqlalchemy.orm import Session
 from snapper.data.archiver import ArchiveRestorer
 from snapper.data.models import Base
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeUpsertRow
 
 
 class _ForcedRestoreRollbackError(RuntimeError):
@@ -84,3 +88,58 @@ def test_rolled_back_restore_leaves_no_worklog_entry(tmp_path: Path) -> None:
     assert trade_count == 0
     assert worklog_count == 0
     repository.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rolled_back_replay_upsert_leaves_no_worklog_entry(
+    tmp_path: Path,
+) -> None:
+    """Replay trade and work obligation roll back as one transaction."""
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'replay-rollback.db'}")
+    async with repository.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    row = TradeUpsertRow(
+        public_id="43000000-0000-0000-0000-000000000001",
+        instrument_public_id="44000000-0000-0000-0000-000000000001",
+        timestamp=datetime(2026, 7, 29, 10, 0, tzinfo=UTC),
+        executed_at=datetime(2026, 7, 28, 10, 0, tzinfo=UTC),
+        price=100.0,
+        size=1.0,
+        side="buy",
+        trade_id="replay-trade-1",
+        session_id="45000000-0000-0000-0000-000000000001",
+        sequence_id=1,
+    )
+
+    async with repository.session() as session:
+        inserted = await repository.upsert_trades(
+            [row],
+            session=session,
+            enqueue_integrity_work=True,
+        )
+        visible_trade_count = int(
+            (await session.execute(text("SELECT count(*) FROM trades"))).scalar_one()
+        )
+        visible_worklog_count = int(
+            (
+                await session.execute(text("SELECT count(*) FROM trade_integrity_worklog"))
+            ).scalar_one()
+        )
+        await session.rollback()
+
+    async with repository.session() as session:
+        durable_trade_count = int(
+            (await session.execute(text("SELECT count(*) FROM trades"))).scalar_one()
+        )
+        durable_worklog_count = int(
+            (
+                await session.execute(text("SELECT count(*) FROM trade_integrity_worklog"))
+            ).scalar_one()
+        )
+
+    assert inserted == 1
+    assert visible_trade_count == 1
+    assert visible_worklog_count == 1
+    assert durable_trade_count == 0
+    assert durable_worklog_count == 0
+    await repository.engine.dispose()
