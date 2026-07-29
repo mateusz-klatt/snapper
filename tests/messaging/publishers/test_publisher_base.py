@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import json
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
@@ -59,6 +60,7 @@ from snapper.messaging.publishers.base import _candle_writer_drop_counters
 from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.base import _CandleRepairResult
 from snapper.messaging.publishers.base import _cleanup_pending_future
+from snapper.messaging.publishers.base import _database_sqlstate
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_candle_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_tick_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_trade_write
@@ -68,6 +70,7 @@ from snapper.messaging.publishers.base import _PendingCandleRepair
 from snapper.messaging.publishers.base import _PendingLateCandleDrop
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.base import _trade_writer_drop_counters
+from snapper.messaging.publishers.base import _TradeWriterBlockedError
 from snapper.messaging.publishers.base import _WriterBatchState
 from snapper.messaging.publishers.base import _WriterSessionLostError
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
@@ -6823,6 +6826,148 @@ def _dummy_trade_row(idx: int) -> dict[str, Any]:
         "side": "buy",
         "trade_id": str(idx),
     }
+
+
+def test_database_sqlstate_ignores_non_string_driver_diagnostic() -> None:
+    """A driver diagnostic without a string SQLSTATE remains unavailable.
+
+    Given: An exception whose diagnostic SQLSTATE is an integer.
+    When: The database SQLSTATE extractor inspects the exception.
+    Then: It returns ``None`` instead of treating the value as a SQLSTATE.
+    """
+
+    class _DiagnosticError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("statement failed")
+            self.diag = SimpleNamespace(sqlstate=12345)
+
+    assert _database_sqlstate(_DiagnosticError()) is None
+
+
+def test_database_sqlstate_reads_string_driver_diagnostic() -> None:
+    """A structured driver diagnostic supplies its string SQLSTATE.
+
+    Given: An exception whose diagnostic exposes a string SQLSTATE.
+    When: The database SQLSTATE extractor inspects the exception.
+    Then: It returns the diagnostic value for retry classification.
+    """
+
+    class _DiagnosticError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("connection failed")
+            self.diag = SimpleNamespace(sqlstate="08006")
+
+    assert _database_sqlstate(_DiagnosticError()) == "08006"
+
+
+@pytest.mark.asyncio
+async def test_pending_trade_write_rows_counts_queued_and_retained_rows() -> None:
+    """Shutdown accounting includes both queued rows and the in-flight batch.
+
+    Given: One queued trade row and two rows retained by the writer batch.
+    When: The publisher reports its pending trade write rows.
+    Then: It reports all three rows awaiting durable disposition.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    await pub._trade_write_queue.put(cast(TradeUpsertRow, _dummy_trade_row(1)))
+    pub._trade_writer_pending_batch.extend(
+        [
+            cast(TradeUpsertRow, _dummy_trade_row(2)),
+            cast(TradeUpsertRow, _dummy_trade_row(3)),
+        ]
+    )
+
+    assert pub.pending_trade_write_rows() == 3
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_blocked_recovery_resets_batch_age_and_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked retained batch resets its age before retrying the session.
+
+    Given: A retained trade batch whose first drain attempt becomes blocked.
+    When: The trade writer recovers and retries with a fresh session.
+    Then: It backs off with the held row count and resets the batch age.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._trade_writer_pending_batch.append(cast(TradeUpsertRow, _dummy_trade_row(1)))
+    drain_attempts = 0
+    observed_started_at: list[float] = []
+    observed_held_rows: list[int] = []
+
+    async def _drain(
+        queue: asyncio.Queue[TradeUpsertRow],
+        state: _WriterBatchState[TradeUpsertRow],
+        max_rows: int,
+        poll_s: float,
+        flush_batch: Callable[[list[TradeUpsertRow]], Awaitable[None]],
+    ) -> None:
+        nonlocal drain_attempts
+        del queue, max_rows, poll_s, flush_batch
+        drain_attempts += 1
+        if drain_attempts == 1:
+            state.started_at = 42.0
+            raise _TradeWriterBlockedError("database unavailable")
+        observed_started_at.append(state.started_at)
+        state.batch.clear()
+        pub.running = False
+
+    async def _backoff(
+        backoff_s: float,
+        held_rows: int,
+        exc: BaseException,
+    ) -> float:
+        assert isinstance(exc, _TradeWriterBlockedError)
+        observed_held_rows.append(held_rows)
+        return backoff_s * 2.0
+
+    monkeypatch.setattr(pub, "_drain_writer_session", _drain)
+    monkeypatch.setattr(pub, "_trade_writer_blocked_backoff", _backoff)
+
+    await pub._trade_writer_loop()
+
+    assert drain_attempts == 2
+    assert observed_started_at == [0.0]
+    assert observed_held_rows == [1]
+    assert pub._trade_writer_pending_batch == []
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_blocked_recovery_exits_after_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked writer exits once shutdown leaves no retained work.
+
+    Given: A blocked drain attempt that disposes its row during shutdown.
+    When: The blocked-error recovery predicate sees no remaining work.
+    Then: The writer returns without scheduling another backoff.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._trade_writer_pending_batch.append(cast(TradeUpsertRow, _dummy_trade_row(1)))
+
+    async def _drain(
+        queue: asyncio.Queue[TradeUpsertRow],
+        state: _WriterBatchState[TradeUpsertRow],
+        max_rows: int,
+        poll_s: float,
+        flush_batch: Callable[[list[TradeUpsertRow]], Awaitable[None]],
+    ) -> None:
+        del queue, max_rows, poll_s, flush_batch
+        state.batch.clear()
+        pub.running = False
+        raise _TradeWriterBlockedError("shutdown disposal")
+
+    backoff_mock = AsyncMock()
+    monkeypatch.setattr(pub, "_drain_writer_session", _drain)
+    monkeypatch.setattr(pub, "_trade_writer_blocked_backoff", backoff_mock)
+
+    await pub._trade_writer_loop()
+
+    backoff_mock.assert_not_awaited()
+    assert pub.pending_trade_write_rows() == 0
 
 
 @pytest.mark.asyncio

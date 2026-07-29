@@ -531,6 +531,68 @@ async def test_loop_skips_tick_when_stopped_during_sleep(
 
 
 @pytest.mark.asyncio
+async def test_loop_ticks_then_stops_on_the_next_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Continue with a guarded tick when an interval completes normally.
+
+    Given: A watchdog that remains active through its first interval.
+    When: The second interval sleep signals shutdown.
+    Then: Exactly one guarded tick runs before the loop returns.
+    """
+    watchdog = _make_watchdog(
+        _make_repo(_result("m1"), _result("m2")),
+        None,
+    )
+    guarded_tick = AsyncMock()
+    sleep_count = 0
+
+    async def stop_after_one_interval(delay: float) -> None:
+        """Keep one interval active and stop during the next.
+
+        Args:
+            delay: Ignored requested interval.
+        """
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 2:
+            watchdog._stopping.set()
+
+    monkeypatch.setattr(monitor_module.asyncio, "sleep", stop_after_one_interval)
+    monkeypatch.setattr(watchdog, "_guarded_tick", guarded_tick)
+
+    await watchdog._loop()
+
+    guarded_tick.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_loop_returns_immediately_when_already_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Avoid scheduling work when shutdown preceded loop entry.
+
+    Given: A watchdog whose stopping event is already set.
+    When: Its recurring loop begins.
+    Then: It returns without sleeping or invoking a guarded tick.
+    """
+    watchdog = _make_watchdog(
+        _make_repo(_result("m1"), _result("m2")),
+        None,
+    )
+    sleep = AsyncMock()
+    guarded_tick = AsyncMock()
+    watchdog._stopping.set()
+    monkeypatch.setattr(monitor_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(watchdog, "_guarded_tick", guarded_tick)
+
+    await watchdog._loop()
+
+    sleep.assert_not_awaited()
+    guarded_tick.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_startup_grace_delays_initial_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

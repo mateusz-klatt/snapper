@@ -13,6 +13,7 @@ import asyncio
 import signal
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Coroutine
 from collections.abc import Iterator
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -25,6 +26,7 @@ from snapper.server import process_runner
 from snapper.server.process_runner import _ai_review_decision_listener
 from snapper.server.process_runner import _await_result_with_listener
 from snapper.server.process_runner import _run_async_method_with_listener
+from snapper.server.process_runner import _run_with_sigterm_drain
 
 
 @pytest.fixture(autouse=True)
@@ -505,3 +507,182 @@ def test_main_sigterm_drains_and_reports_rows_left_at_deadline(
     assert registered_signals == [signal.SIGTERM]
     assert state == {"stop_called": True}
     assert any("undrained_trade_rows=7" in message for message in warning_messages)
+
+
+@pytest.mark.asyncio
+async def test_sigterm_drain_fallback_returns_awaitable_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported signal handlers preserve the target awaitable's result.
+
+    Given: An event loop that cannot install a SIGTERM handler.
+    When: The runner drives a target awaitable.
+    Then: It returns the target result unchanged without starting a drain.
+    """
+    loop = asyncio.get_running_loop()
+    drainable = MagicMock()
+
+    async def _target() -> object:
+        return drainable
+
+    monkeypatch.setattr(
+        loop,
+        "add_signal_handler",
+        MagicMock(side_effect=NotImplementedError),
+    )
+
+    assert await _run_with_sigterm_drain(drainable, _target()) is drainable
+    drainable.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_drain_completion_cancels_target_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed SIGTERM drain cancels the still-running target task.
+
+    Given: A pending target and a drain that completes immediately.
+    When: The registered SIGTERM callback fires.
+    Then: The drain completes and the target task observes cancellation.
+    """
+    loop = asyncio.get_running_loop()
+    target_started = asyncio.Event()
+    target_cancelled = asyncio.Event()
+    stop_completed = asyncio.Event()
+    signal_callback: Callable[[], None] | None = None
+
+    class _Drainable:
+        async def stop(self) -> None:
+            stop_completed.set()
+
+        def pending_trade_write_rows(self) -> int:
+            return 0
+
+    async def _target() -> None:
+        target_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            target_cancelled.set()
+
+    def _add_signal_handler(
+        signal_number: int,
+        callback: Callable[[], None],
+    ) -> None:
+        nonlocal signal_callback
+        assert signal_number == signal.SIGTERM
+        signal_callback = callback
+
+    monkeypatch.setattr(loop, "add_signal_handler", _add_signal_handler)
+    monkeypatch.setattr(loop, "remove_signal_handler", MagicMock(return_value=True))
+    runner = asyncio.create_task(_run_with_sigterm_drain(_Drainable(), _target()))
+    await target_started.wait()
+    assert signal_callback is not None
+    signal_callback()
+
+    await runner
+    assert runner.result() is None
+    assert stop_completed.is_set()
+    assert target_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_drain_deadline_reports_rows_and_cancels_pending_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired drain deadline reports retained rows and cancels both jobs.
+
+    Given: Pending target and drain tasks with seven retained trade rows.
+    When: SIGTERM fires and the patched zero-second deadline expires.
+    Then: The warning reports seven rows and both pending jobs are cancelled.
+    """
+    loop = asyncio.get_running_loop()
+    target_started = asyncio.Event()
+    target_cancelled = asyncio.Event()
+    drain_started = asyncio.Event()
+    drain_cancelled = asyncio.Event()
+    signal_callback: Callable[[], None] | None = None
+
+    class _Drainable:
+        async def stop(self) -> None:
+            drain_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                drain_cancelled.set()
+
+        def pending_trade_write_rows(self) -> int:
+            return 7
+
+    async def _target() -> None:
+        target_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            target_cancelled.set()
+
+    def _add_signal_handler(
+        signal_number: int,
+        callback: Callable[[], None],
+    ) -> None:
+        nonlocal signal_callback
+        assert signal_number == signal.SIGTERM
+        signal_callback = callback
+
+    monkeypatch.setattr(loop, "add_signal_handler", _add_signal_handler)
+    monkeypatch.setattr(loop, "remove_signal_handler", MagicMock(return_value=True))
+    monkeypatch.setattr(process_runner, "_SIGTERM_DRAIN_TIMEOUT_S", 0.0)
+    warning_mock = MagicMock()
+    monkeypatch.setattr(process_runner.logger, "warning", warning_mock)
+    runner = asyncio.create_task(_run_with_sigterm_drain(_Drainable(), _target()))
+    await target_started.wait()
+    assert signal_callback is not None
+    signal_callback()
+
+    await runner
+    assert runner.result() is None
+    assert drain_started.is_set()
+    assert target_cancelled.is_set()
+    assert drain_cancelled.is_set()
+    warning_mock.assert_called_once()
+    assert "undrained_trade_rows=7" in str(warning_mock.call_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_target_completion_cancels_pending_signal_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary target completion cancels the unused SIGTERM waiter.
+
+    Given: A target that completes before any SIGTERM arrives.
+    When: The SIGTERM-aware runner returns its result.
+    Then: The unused signal waiter ends cancelled instead of leaking.
+    """
+    loop = asyncio.get_running_loop()
+    created_tasks: list[asyncio.Task[object]] = []
+    original_create_task = asyncio.create_task
+
+    class _Drainable:
+        async def stop(self) -> None:
+            raise AssertionError("Ordinary completion must not drain")
+
+        def pending_trade_write_rows(self) -> int:
+            return 0
+
+    async def _target() -> str:
+        return "complete"
+
+    def _create_task(
+        coroutine: Coroutine[object, object, object],
+    ) -> asyncio.Task[object]:
+        task: asyncio.Task[object] = original_create_task(coroutine)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(loop, "add_signal_handler", MagicMock())
+    monkeypatch.setattr(loop, "remove_signal_handler", MagicMock(return_value=True))
+    monkeypatch.setattr(process_runner.asyncio, "create_task", _create_task)
+
+    assert await _run_with_sigterm_drain(_Drainable(), _target()) == "complete"
+    assert len(created_tasks) == 1
+    assert created_tasks[0].cancelled()
