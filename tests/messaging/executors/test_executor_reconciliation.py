@@ -1700,6 +1700,56 @@ class TestAdoptedOrderRowRepair:
         assert pending.order_public_id == "ord-pub-1"
 
     @pytest.mark.asyncio
+    async def test_dispatched_history_witness_preserves_requested_size(self) -> None:
+        """A fill-derived history witness cannot shrink the durable order.
+
+        Given: a dispatched command requesting 100 units and a restart
+            lookup returning a history witness that observed only 10,
+        When: unresolved-DISPATCHED recovery repairs the missing order
+            row,
+        Then: the durable insert receives the requested size of 100,
+            while the history witness itself remains a 10-unit
+            observation.
+        """
+        ex = _make_sweep_executor()
+        command = _make_cmd_row()
+        command["quantity"] = 100.0
+        history_witness = _make_order_snapshot(filled=10.0)
+        history_witness.amount = 10.0
+        history_witness.amount_decimal = "10"
+        history_witness.amount_is_order_size = False
+        durable_sizes: list[float] = []
+
+        async def _persist_repaired_order(
+            _request: object, snapshot: ExchangeOrderSnapshot
+        ) -> tuple[int, str]:
+            durable_sizes.append(snapshot.amount)
+            return 7, "ord-pub-1"
+
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=history_witness)
+        ex.exchange_client._log_order_to_db = AsyncMock(side_effect=_persist_repaired_order)
+        await ex._verify_one_dispatched_command(command)
+        assert durable_sizes == [100.0]
+        assert history_witness.amount == 10.0
+
+    @pytest.mark.asyncio
+    async def test_dispatched_venue_snapshot_keeps_authoritative_size(self) -> None:
+        """A genuine venue snapshot remains authoritative during repair.
+
+        Given: a dispatched command and a venue snapshot with its true
+            order size,
+        When: unresolved-DISPATCHED recovery repairs the missing row,
+        Then: the snapshot reaches persistence unchanged.
+        """
+        ex = _make_sweep_executor()
+        snapshot = _make_order_snapshot()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=snapshot)
+        await ex._verify_one_dispatched_command(_make_cmd_row())
+        persisted = ex.exchange_client._log_order_to_db.await_args.args[1]
+        assert persisted is snapshot
+        assert persisted.amount == 1.0
+
+    @pytest.mark.asyncio
     async def test_existing_row_is_not_duplicated(self) -> None:
         """An already-present orders row is left alone.
 

@@ -17,6 +17,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -2212,23 +2213,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 }
             )
             return
-        if exchange_order_id:
-            await self._finalize_accepted_submit(order, exchange_order_id)
-        else:
-            logger.warning(f"[{exchange_name}] Order {order.client_order_id} rejected by exchange")
-            self.pending_orders.pop(order.client_order_id, None)
-            await self._publish_order_status(order, OrderEventEnum.REJECTED)
-            await self._record_venue_event(
-                {
-                    "event_type": "order_rejected",
-                    "exchange_name": exchange_name,
-                    "instrument": order.instrument,
-                    "client_order_id": order.client_order_id,
-                    "side": order.side,
-                    "error": "rejected by exchange",
-                    "strategy_tag": order.strategy_tag,
-                }
-            )
+        await self._finalize_accepted_submit(order, exchange_order_id)
 
     async def _handle_breaker_open_submit(self, order: OrderRequestData) -> None:
         """Give a breaker-open submit its distinct, redispatch-safe disposition.
@@ -2768,7 +2753,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
           anyway, so resolving the current order's truth first is worth
           more than dispatching the next one into the same outage.
         - Venue answered but unclassifiable (``venue_answered`` True —
-          today only Kraken Spot's bare ``ccxt.ExchangeError``):
+          Kraken Spot or Futures unmapped refusals, plus any successful
+          venue response carrying a falsy order id):
           ``_AMBIGUOUS_VERIFY_DELAYS_VENUE_ANSWERED_S``, first lookup
           immediate. NEITHER rationale above transfers. The venue is
           healthy and answered synchronously, so the queued cancel
@@ -3319,23 +3305,22 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing replace event: {e}")
 
-    async def _execute_live_order(self, order: OrderRequestData) -> str | None:
+    async def _execute_live_order(self, order: OrderRequestData) -> str:
         """Execute an order on the exchange and return the exchange order ID.
 
         Exceptions PROPAGATE to the caller: the previous
         blanket except-return-None coerced every failure — including
         ambiguous network failures where the order may have executed —
-        into the definitive-reject path. ``_process_order`` now
-        distinguishes ``AmbiguousOrderSubmitError`` (UNKNOWN/verify
-        path) from genuine errors (reject path); a ``None``/empty-id
-        return remains the definitive venue-side rejection signal.
+        into the definitive-reject path. A missing snapshot or falsy
+        venue id is equally placement-unproven: a successful venue
+        response without a usable identity cannot prove refusal, so it
+        raises ``AmbiguousOrderSubmitError`` with ``venue_answered=True``.
 
         Args:
             order: Order request data containing order details.
 
         Returns:
-            Exchange order ID if accepted, None when the venue
-            definitively rejected the submit.
+            Exchange order ID if accepted.
 
         Raises:
             AmbiguousOrderSubmitError: If the venue call failed in a way
@@ -3347,16 +3332,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_client = self._require_exchange_client()
         result = await exchange_client.create_order(order_request)
         exchange_order_id = result.id if result else None
-        if exchange_order_id:
-            pending = self.pending_orders.get(order.client_order_id)
-            if pending is not None:
-                pending.exchange_order_id = exchange_order_id
-                pending.db_order_id = result.db_order_id
-                pending.order_public_id = result.db_order_public_id
-            logger.info(
-                f"[{exchange_name}] ExchangeOrderSnapshot submitted: {order.client_order_id} -> "
-                f"{exchange_order_id}, waiting for execution via WebSocket"
+        if not exchange_order_id:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=order.client_order_id,
+                instrument=order.instrument,
+                message=(
+                    f"{exchange_name} answered the submit without a usable exchange order id "
+                    "(order may exist)"
+                ),
+                venue_answered=True,
             )
+        pending = self.pending_orders.get(order.client_order_id)
+        if pending is not None:
+            pending.exchange_order_id = exchange_order_id
+            pending.db_order_id = result.db_order_id
+            pending.order_public_id = result.db_order_public_id
+        logger.info(
+            f"[{exchange_name}] ExchangeOrderSnapshot submitted: {order.client_order_id} -> "
+            f"{exchange_order_id}, waiting for execution via WebSocket"
+        )
         return exchange_order_id
 
     async def _publish_execution(self, topic: str, fill: ExecutionData) -> bool:
@@ -5273,7 +5267,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 pending.db_order_id, pending.order_public_id, _venue_id = existing
                 return
             request = _exchange_order_request_from_core(order, self.wallet_public_id)
-            logged = await self.exchange_client._log_order_to_db(request, snapshot)
+            durable_snapshot = snapshot
+            if not snapshot.amount_is_order_size:
+                durable_snapshot = replace(
+                    snapshot,
+                    amount=order.quantity,
+                    amount_decimal=str(order.quantity),
+                )
+            logged = await self.exchange_client._log_order_to_db(request, durable_snapshot)
             if logged is not None:
                 pending.db_order_id, pending.order_public_id = logged
         except Exception as e:

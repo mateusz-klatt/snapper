@@ -405,6 +405,11 @@ class ExchangeOrderSnapshot:
     counter-amount truth effective execution prices derive from under price
     improvement. ``None`` on venues that do not report it; ``filled`` semantics
     are untouched (the witness identity depends on them).
+
+    ``amount_is_order_size`` distinguishes venue snapshots whose ``amount`` is
+    the authoritative requested order quantity from synthesized observations
+    that can know only a cumulative fill. Durable repair must preserve the
+    original request size for the latter.
     """
 
     id: str
@@ -428,6 +433,7 @@ class ExchangeOrderSnapshot:
     fee_decimal: str | None = None
     counter_filled: float | None = None
     counter_filled_decimal: str | None = None
+    amount_is_order_size: bool = True
 
 
 @dataclass
@@ -562,8 +568,9 @@ class VenueAccountHistoryItem:
     balance. ``transaction_id`` is shared across the two currency legs of one
     fill (present on FX legs, absent on non-order rows), so the witness join
     groups a fill's legs by it; ``order_id`` correlates every leg of one order
-    (from ``operationDetails``) and is absent on non-order rows. ``ordered_by``
-    attributes the event (an ``API/`` prefix marks our own key).
+    (from ``operationDetails``) and is absent on non-order rows. ``submit_id``
+    is the caller-supplied placement identity echoed by Walutomat history.
+    ``ordered_by`` attributes the event (an ``API/`` prefix marks our own key).
     """
 
     item_id: int
@@ -574,6 +581,7 @@ class VenueAccountHistoryItem:
     transaction_id: str | None
     ordered_by: str
     order_id: str | None
+    submit_id: str | None = None
     correcting_entry: bool = False
 
 

@@ -131,6 +131,20 @@ _REPLAY_CLIENT_REPLACED_MSG = "WebSocket client replaced during subscription rep
 _CONNECT_OWNERSHIP_LOST_MSG = "WebSocket client replaced during connect"
 _QUEUE_MAX_SIZE = 10000
 _TICK_QUEUE_MAX_SIZE = 50000
+_FUTURES_PLACED_STATUSES = frozenset(_STATUS_MAP)
+_FUTURES_REFUSED_STATUSES = frozenset(
+    {
+        "authenticationError",
+        "insufficientAvailableFunds",
+        "requiredArgumentMissing",
+        "apiLimitExceeded",
+        "invalidUnit",
+        "Unavailable",
+        "invalidAccount",
+        "notFound",
+        "orderForEditNotFound",
+    }
+)
 """Boot-time absorption budget for ticker and candle producer queues.
 
 The Kraken Futures broker, like Spot, replays a wildcard snapshot of
@@ -258,6 +272,58 @@ def _map_kraken_status(raw: str) -> ExchangeOrderStatusEnum:
         Corresponding ExchangeOrderStatusEnum value.
     """
     return _STATUS_MAP.get(raw, ExchangeOrderStatusEnum.OPEN)
+
+
+def _require_futures_submit_identity(
+    result: dict[str, Any], request: ExchangeOrderRequest
+) -> tuple[str, str]:
+    """Return identity only when the response explicitly proves placement."""
+    send_status = result.get("sendStatus")
+    if not isinstance(send_status, dict):
+        raise AmbiguousOrderSubmitError(
+            client_order_id=request.client_order_id,
+            instrument=request.symbol,
+            message=(
+                "Kraken Futures answered create_order without a usable sendStatus "
+                f"(order may exist): {result}"
+            ),
+            venue_answered=True,
+        )
+    order_id = send_status.get("order_id")
+    status = send_status.get("status")
+    if not isinstance(order_id, str) or not order_id.strip():
+        raise AmbiguousOrderSubmitError(
+            client_order_id=request.client_order_id,
+            instrument=request.symbol,
+            message=(
+                "Kraken Futures answered create_order without a usable order id "
+                f"(order may exist): {result}"
+            ),
+            venue_answered=True,
+        )
+    if not isinstance(status, str) or not status:
+        raise AmbiguousOrderSubmitError(
+            client_order_id=request.client_order_id,
+            instrument=request.symbol,
+            message=(
+                "Kraken Futures answered create_order without a usable placement status "
+                f"(order may exist): {result}"
+            ),
+            venue_answered=True,
+        )
+    if status in _FUTURES_PLACED_STATUSES:
+        return order_id, status
+    if status in _FUTURES_REFUSED_STATUSES:
+        raise RuntimeError(f"Kraken Futures definitively refused order placement: {status}")
+    raise AmbiguousOrderSubmitError(
+        client_order_id=request.client_order_id,
+        instrument=request.symbol,
+        message=(
+            "Kraken Futures answered create_order with an unclassified placement status "
+            f"(order may exist): {result}"
+        ),
+        venue_answered=True,
+    )
 
 
 def _map_kraken_side(raw: str) -> OrderSideEnum:
@@ -1163,9 +1229,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 instrument=request.symbol,
                 message=f"Kraken Futures create_order transport failure (order may exist): {e}",
             ) from e
-        send_status = result.get("sendStatus", {})
-        order_id = send_status.get("order_id", "")
-        status_str = send_status.get("status", "placed")
+        order_id, status_str = _require_futures_submit_identity(result, request)
         order = ExchangeOrderSnapshot(
             id=order_id,
             client_order_id=request.client_order_id,

@@ -561,6 +561,7 @@ def _parse_walutomat_history_item(row: dict[str, Any]) -> VenueAccountHistoryIte
     """
     transaction_id = row.get("transactionId")
     ordered_by = row.get("orderedBy")
+    submit_id = row.get("submitId")
     return VenueAccountHistoryItem(
         item_id=int(row["historyItemId"]),
         operation_type=str(row["operationType"]),
@@ -570,7 +571,68 @@ def _parse_walutomat_history_item(row: dict[str, Any]) -> VenueAccountHistoryIte
         transaction_id=transaction_id if isinstance(transaction_id, str) else None,
         ordered_by=ordered_by if isinstance(ordered_by, str) else "",
         order_id=_walutomat_operation_detail(row.get("operationDetails"), "orderId"),
+        submit_id=submit_id if isinstance(submit_id, str) else None,
         correcting_entry=row.get("correctingEntry") is True,
+    )
+
+
+def _filled_order_from_history(
+    items: tuple[VenueAccountHistoryItem, ...],
+    client_order_id: str,
+    symbol: str,
+) -> ExchangeOrderSnapshot | None:
+    """Build a non-terminal existence witness from observed history fills."""
+    base_currency, quote_currency = symbol.split("-")
+    matching_order_ids = {
+        item.order_id
+        for item in items
+        if item.submit_id == client_order_id
+        and item.operation_type == "MARKET_FX"
+        and item.order_id is not None
+        and not item.correcting_entry
+    }
+    if len(matching_order_ids) != 1:
+        return None
+    order_id = next(iter(matching_order_ids))
+    order_items = [
+        item
+        for item in items
+        if item.order_id == order_id
+        and item.submit_id == client_order_id
+        and item.operation_type == "MARKET_FX"
+        and not item.correcting_entry
+    ]
+    base_amount = sum(
+        (item.operation_amount for item in order_items if item.currency == base_currency),
+        Decimal(0),
+    )
+    quote_amount = sum(
+        (item.operation_amount for item in order_items if item.currency == quote_currency),
+        Decimal(0),
+    )
+    if base_amount == 0 or quote_amount == 0 or base_amount * quote_amount >= 0:
+        return None
+    filled = abs(base_amount)
+    counter_filled = abs(quote_amount)
+    price = counter_filled / filled
+    return ExchangeOrderSnapshot(
+        id=order_id,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side=OrderSideEnum.BUY if base_amount > 0 else OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.MARKET,
+        amount=float(filled),
+        price=float(price),
+        status=ExchangeOrderStatusEnum.OPEN,
+        filled=float(filled),
+        remaining=float(filled),
+        timestamp=time.time(),
+        amount_decimal=str(filled),
+        price_decimal=str(price),
+        filled_decimal=str(filled),
+        counter_filled=float(counter_filled),
+        counter_filled_decimal=str(counter_filled),
+        amount_is_order_size=False,
     )
 
 
@@ -2344,16 +2406,16 @@ class WalutomatExchangeClient(ExchangeClientBase):
     async def find_order_by_client_id(
         self, client_order_id: str, symbol: str | None = None
     ) -> ExchangeOrderSnapshot | None:
-        """Verify an ambiguous submit by scanning Walutomat active orders.
+        """Verify an ambiguous submit from active orders or positive fill history.
 
         Walutomat echoes the submit ``submitId`` as ``client_order_id``
         on active order details, so an active hit is authoritative:
-        the order exists and can be adopted as ACCEPTED. Absence from
-        the active set is NOT authoritative because a fast-filled order
-        leaves that endpoint and the available history/order-id
-        endpoints do not provide a proven submitId lookup. Therefore
-        misses raise ``NotImplementedError`` instead of returning
-        ``None``; the executor must keep the command parked UNKNOWN.
+        the order exists and can be adopted as ACCEPTED. A fast-filled
+        order leaves that endpoint, but ``account/history`` positively
+        proves it when two opposite-signed ``MARKET_FX`` currency legs
+        carry the submit id and order id. History absence proves
+        nothing: an accepted-then-cancelled zero-fill order has no fill
+        legs, so every miss still raises and parks UNKNOWN.
 
         Args:
             client_order_id: Submit id sent with the original order.
@@ -2361,7 +2423,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 scan.
 
         Returns:
-            The matching active order snapshot.
+            A matching active-order snapshot or a positive history
+            existence witness synthesized from observed fills.
 
         Raises:
             NotImplementedError: When the active set contains no match
@@ -2372,6 +2435,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
         for order in orders:
             if order.client_order_id == client_order_id:
                 return order
+        if symbol is not None:
+            history_tip = await self.read_account_history_tip(200)
+            if history_tip is not None:
+                filled_order = _filled_order_from_history(
+                    history_tip.items, client_order_id, symbol
+                )
+                if filled_order is not None:
+                    return filled_order
         raise NotImplementedError("Walutomat cannot authoritatively verify absence by submitId")
 
     @staticmethod

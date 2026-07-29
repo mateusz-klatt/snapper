@@ -521,10 +521,13 @@ is the guard working as intended, not a regression.
 
 ### Ambiguous submits — the UNKNOWN order state
 
-On every venue (Kraken Spot ccxt + native, Kraken Futures, Walutomat)
-an order submit that fails *after the request may have left the
-process* (request timeout, connection reset, gateway 5xx, unparseable
-success body) no longer fabricates a REJECTED event. On the Kraken Spot
+On every venue client, an otherwise-successful submit response whose
+snapshot or venue order id is missing or empty is placement-unproven
+and enters this ambiguity path; it never directly fabricates REJECTED.
+The same applies to a submit that fails *after the request may have left
+the process* (request timeout, connection reset, gateway 5xx, or an
+unparseable success body) where the adapter can establish that timing.
+On the Kraken Spot
 ccxt path the same treatment covers a submit whose placement is simply
 *unproven*: a venue error ccxt could not classify — the bare
 `ccxt.ExchangeError` type — parks and verifies rather than rejecting,
@@ -547,7 +550,7 @@ order finalizes as accepted (an already-terminal one additionally
 projects its fills through the disappeared-order reconciler); two
 consecutive authoritative not-found answers make the rejection
 venue-truth-based and safe. Only when verification cannot resolve —
-venue unreachable or lookup unsupported (Walutomat active-order miss)
+venue unreachable or lookup unsupported
 — does the executor park the order, record a non-terminal
 `order_submit_unknown` venue event, and publish a single
 `orders.events.*.unknown` message:
@@ -568,18 +571,7 @@ venue unreachable or lookup unsupported (Walutomat active-order miss)
   matched on runtime TYPE, never on the venue's error text — Kraken
   documents no duplicate-`cl_ord_id` error and ccxt maps none, so the
   wire text for the motivating case is unknown and a string match would
-  be a guess. **This unclassified-error protection covers the Kraken
-  Spot ccxt path only.** Kraken Spot's *native* submit fallback (used
-  for instruments with no ccxt mapping) still has the defect: for a
-  venue error python-kraken-sdk does not recognise it raises nothing at
-  all — the error payload comes back as the result, the order snapshot
-  is built with an empty id, and the executor's empty-id branch
-  publishes a REJECTED plus a sweep-exempting `order_rejected` row for
-  an order that may be resting. Walutomat likewise has no such
-  classification. If you see a REJECTED with reason `rejected by
-  exchange` on a native-symbol Kraken order, treat it as UNPROVEN and
-  check the venue before assuming flat. Tracked as task #103. A
-  breaker-open refusal additionally lands a durable terminal
+  be a guess. A breaker-open refusal additionally lands a durable terminal
   disposition before its REJECTED — a venue event recording the
   refusal plus the command row moved to FAILED — and publishes the
   rejection with reason `circuit_breaker_open`, so consumers can tell
@@ -593,6 +585,30 @@ venue unreachable or lookup unsupported (Walutomat active-order miss)
   and `requests` transports cannot reliably distinguish sent from
   not-sent (a connection error can fire mid-body), and a false park
   merely alerts while a false rejection could double a position.
+
+Walutomat verification checks active orders first. When an order filled
+during the ambiguity window and is no longer active, the adapter also
+checks the newest account-history page for the submitted `submitId`.
+It adopts a non-terminal OPEN existence witness only when history
+positively supplies both opposite-signed `MARKET_FX` currency legs,
+each carrying the requested submit id, and one unambiguous venue order
+id. The witness carries the observed fill-so-far but never claims the
+requested amount or completion, which account history cannot prove.
+History absence, an incomplete leg pair, multiple matching order ids,
+or a zero-fill cancellation does not prove refusal and therefore
+continues to park UNKNOWN.
+
+Kraken Futures uses `python-kraken-sdk` for the private send-order call.
+The SDK's `check_send_status` raises only for status strings present in
+its exception assignment and otherwise returns the payload unchanged;
+it also returns payloads with no `sendStatus`. The Snapper Futures
+mutation call site therefore validates the returned `order_id` and
+raises a venue-answered ambiguity when `sendStatus` or its identity is
+malformed. It accepts only explicitly classified placement statuses,
+keeps the SDK's known definitive-refusal behavior, and parks any
+unmapped status even when an order id is present. This closes the
+unmapped-error path without patching the shared SDK boundary used by
+live market-data and read endpoints.
 
 Resolution: a late `accepted` event clears the UNKNOWN flag (the order
 resumes its normal lifecycle with the guard still held until fills); a

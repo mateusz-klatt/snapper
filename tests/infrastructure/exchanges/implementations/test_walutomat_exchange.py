@@ -1315,9 +1315,253 @@ async def test_find_order_by_client_id_miss_is_not_authoritative() -> None:
         return [_make_order_snapshot(order_id="ord-other", client_order_id="cid-other")]
 
     client.get_orders = _mock_get_orders
+    client.read_account_history_tip = AsyncMock(return_value=None)
 
     with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
         await client.find_order_by_client_id("cid-missing", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_resolves_positive_history_fill() -> None:
+    """History proves an order exists and has traded, but not completeness.
+
+    Given: No active order and two opposite-signed MARKET_FX history legs
+        carrying the requested submit id,
+    When: The adapter verifies the ambiguous submit by client id,
+    Then: It returns an OPEN snapshot carrying the observed fill-so-far.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    client.read_account_history_tip = AsyncMock(
+        return_value=VenueAccountHistoryTip(
+            item_id=11,
+            reached_genesis=True,
+            items=(
+                VenueAccountHistoryItem(
+                    item_id=11,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("10"),
+                    balance_after=Decimal("100"),
+                    currency="EUR",
+                    transaction_id="tx-1",
+                    ordered_by="API/key",
+                    order_id="ord-filled",
+                    submit_id="cid-filled",
+                ),
+                VenueAccountHistoryItem(
+                    item_id=10,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("-43"),
+                    balance_after=Decimal("1000"),
+                    currency="PLN",
+                    transaction_id="tx-1",
+                    ordered_by="API/key",
+                    order_id="ord-filled",
+                    submit_id="cid-filled",
+                ),
+            ),
+        )
+    )
+
+    found = await client.find_order_by_client_id("cid-filled", "EUR-PLN")
+
+    assert found is not None
+    assert found.id == "ord-filled"
+    assert found.status is ExchangeOrderStatusEnum.OPEN
+    assert found.side is OrderSideEnum.BUY
+    assert found.filled == 10.0
+    assert found.remaining != 0.0
+    assert found.counter_filled == 43.0
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_excludes_foreign_submit_id_legs() -> None:
+    """Every aggregated history leg must carry the requested submit id.
+
+    Given: One leg carries the requested submit id while the opposite
+        leg sharing its order id carries a foreign submit id,
+    When: The adapter verifies the ambiguous submit,
+    Then: It refuses to combine the unrelated legs and stays UNKNOWN.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    client.read_account_history_tip = AsyncMock(
+        return_value=VenueAccountHistoryTip(
+            item_id=14,
+            reached_genesis=True,
+            items=(
+                VenueAccountHistoryItem(
+                    item_id=14,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("10"),
+                    balance_after=Decimal("100"),
+                    currency="EUR",
+                    transaction_id="tx-requested",
+                    ordered_by="API/key",
+                    order_id="ord-shared",
+                    submit_id="cid-requested",
+                ),
+                VenueAccountHistoryItem(
+                    item_id=13,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("-43"),
+                    balance_after=Decimal("1000"),
+                    currency="PLN",
+                    transaction_id="tx-foreign",
+                    ordered_by="API/key",
+                    order_id="ord-shared",
+                    submit_id="cid-foreign",
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-requested", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_multiple_order_ids_stay_unknown() -> None:
+    """Multiple venue orders for one submit id are ambiguous and must park.
+
+    Given: Two complete fill-leg pairs share the requested submit id
+        but carry distinct venue order ids,
+    When: The adapter verifies the ambiguous submit,
+    Then: It refuses arbitrary selection and stays UNKNOWN.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    client.read_account_history_tip = AsyncMock(
+        return_value=VenueAccountHistoryTip(
+            item_id=18,
+            reached_genesis=True,
+            items=tuple(
+                VenueAccountHistoryItem(
+                    item_id=item_id,
+                    operation_type="MARKET_FX",
+                    operation_amount=amount,
+                    balance_after=Decimal("100"),
+                    currency=currency,
+                    transaction_id=f"tx-{order_id}",
+                    ordered_by="API/key",
+                    order_id=order_id,
+                    submit_id="cid-duplicate",
+                )
+                for item_id, amount, currency, order_id in (
+                    (18, Decimal("10"), "EUR", "ord-a"),
+                    (17, Decimal("-43"), "PLN", "ord-a"),
+                    (16, Decimal("20"), "EUR", "ord-b"),
+                    (15, Decimal("-86"), "PLN", "ord-b"),
+                )
+            ),
+        )
+    )
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-duplicate", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_zero_fill_history_stays_unknown() -> None:
+    """A submit-id history row without fill legs cannot prove placement outcome.
+
+    Given: No active order and only a zero-amount cancellation history row,
+    When: The adapter verifies the ambiguous submit by client id,
+    Then: It raises could-not-verify so the executor continues parking UNKNOWN.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    client.read_account_history_tip = AsyncMock(
+        return_value=VenueAccountHistoryTip(
+            item_id=12,
+            reached_genesis=True,
+            items=(
+                VenueAccountHistoryItem(
+                    item_id=12,
+                    operation_type="CANCEL",
+                    operation_amount=Decimal("0"),
+                    balance_after=Decimal("100"),
+                    currency="EUR",
+                    transaction_id=None,
+                    ordered_by="API/key",
+                    order_id="ord-cancelled",
+                    submit_id="cid-cancelled",
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-cancelled", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_same_signed_legs_prove_no_fill() -> None:
+    """Same-signed MARKET_FX legs are not an exchange and cannot prove a fill.
+
+    Given: History carries the submit id on two MARKET_FX legs of one order
+        whose amounts share a sign, so no currency was given up,
+    When: The adapter verifies the ambiguous submit by client id,
+    Then: The candidate is rejected and could-not-verify is raised, because
+        inferring a fill from legs that never crossed would convert a safe
+        UNKNOWN into a fabricated terminal state.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    client.read_account_history_tip = AsyncMock(
+        return_value=VenueAccountHistoryTip(
+            item_id=21,
+            reached_genesis=True,
+            items=(
+                VenueAccountHistoryItem(
+                    item_id=21,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("10"),
+                    balance_after=Decimal("100"),
+                    currency="EUR",
+                    transaction_id="tx-9",
+                    ordered_by="API/key",
+                    order_id="ord-same-sign",
+                    submit_id="cid-same-sign",
+                ),
+                VenueAccountHistoryItem(
+                    item_id=20,
+                    operation_type="MARKET_FX",
+                    operation_amount=Decimal("43"),
+                    balance_after=Decimal("1000"),
+                    currency="PLN",
+                    transaction_id="tx-9",
+                    ordered_by="API/key",
+                    order_id="ord-same-sign",
+                    submit_id="cid-same-sign",
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-same-sign", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_without_symbol_never_reads_history() -> None:
+    """An unsymbolled verification cannot name the legs, so it must not guess.
+
+    Given: The active-order scan misses and no symbol was supplied,
+    When: The adapter verifies the ambiguous submit by client id,
+    Then: History is never consulted and could-not-verify is raised, because
+        the base and quote currencies that decide which legs constitute a
+        fill are only derivable from the symbol.
+    """
+    client = WalutomatExchangeClient()
+    client.get_orders = AsyncMock(return_value=[])
+    history_tip = AsyncMock()
+    client.read_account_history_tip = history_tip
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-no-symbol", None)
+
+    history_tip.assert_not_awaited()
 
 
 @pytest.mark.asyncio()
@@ -5743,6 +5987,7 @@ def test_parse_walutomat_history_item_full() -> None:
             "currency": "EUR",
             "transactionId": "T1",
             "orderedBy": "API/key",
+            "submitId": "cid-1",
             "operationDetails": [{"key": "orderId", "value": "O1"}],
         }
     )
@@ -5754,6 +5999,7 @@ def test_parse_walutomat_history_item_full() -> None:
     assert item.transaction_id == "T1"
     assert item.ordered_by == "API/key"
     assert item.order_id == "O1"
+    assert item.submit_id == "cid-1"
 
 
 def test_parse_walutomat_history_item_missing_optional_fields_default() -> None:

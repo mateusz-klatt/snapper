@@ -2177,6 +2177,109 @@ class TestOrderMethods:
         mock_log.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_create_order_unmapped_sdk_payload_is_ambiguous(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """An unknown status remains ambiguous even when it carries an order id."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={
+                "result": "error",
+                "sendStatus": {
+                    "order_id": "ord-unknown-status",
+                    "status": "futureStatusNotMappedBySdk",
+                },
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=1.0,
+            client_order_id="cid-unmapped-futures",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await auth_client.create_order(request)
+        assert exc_info.value.venue_answered is True
+        assert exc_info.value.client_order_id == "cid-unmapped-futures"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "send_status",
+        [
+            None,
+            "not-an-object",
+            {},
+            {"order_id": None, "status": "placed"},
+            {"order_id": 12, "status": "placed"},
+            {"order_id": "", "status": "placed"},
+            {"order_id": "ord-missing-status"},
+            {"order_id": "ord-empty-status", "status": ""},
+        ],
+    )
+    async def test_create_order_malformed_send_status_is_ambiguous(
+        self, auth_client: KrakenFuturesExchangeClient, send_status: object
+    ) -> None:
+        """Malformed placement evidence parks instead of reaching rejection."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"result": "success", "sendStatus": send_status}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=1.0,
+            client_order_id="cid-malformed-futures",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await auth_client.create_order(request)
+        assert exc_info.value.venue_answered is True
+
+    @pytest.mark.asyncio
+    async def test_create_order_known_refusal_remains_definitive(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A classified refusal keeps the existing definitive rejection path."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={
+                "result": "error",
+                "sendStatus": {
+                    "order_id": "ord-refused",
+                    "status": "insufficientAvailableFunds",
+                },
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=1.0,
+            client_order_id="cid-refused-futures",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(RuntimeError, match="definitively refused"),
+        ):
+            await auth_client.create_order(request)
+
+    @pytest.mark.asyncio
     async def test_create_order_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
         """Create order raises RuntimeError without credentials.
 

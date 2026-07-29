@@ -1538,11 +1538,11 @@ class TestExecuteLiveOrderErrors:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     async def test_execute_live_order_no_order_id(self, mock_get_settings: MagicMock) -> None:
-        """Verify live order execution handles null order id.
+        """Verify live order execution treats a null order id as ambiguous.
 
         Given: Exchange client that returns None,
         When: _execute_live_order is called,
-        Then: Returns None.
+        Then: Placement remains unproven and the venue-answered ambiguity surfaces.
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -1552,8 +1552,9 @@ class TestExecuteLiveOrderErrors:
         mock_exchange_client.create_order = AsyncMock(return_value=None)
         service_any.exchange_client = mock_exchange_client
         order = self._create_order()
-        result = await service_any._execute_live_order(order)
-        assert result is None
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
+            await service_any._execute_live_order(order)
+        assert exc_info.value.venue_answered is True
 
 
 class TestProcessOrder:
@@ -4456,7 +4457,7 @@ class TestExecutorWebSocketExecutions:
                 service,
                 "_execute_live_order",
                 new_callable=AsyncMock,
-                return_value=None,
+                side_effect=RuntimeError("definitive pre-send refusal"),
             ),
             patch.object(
                 service, "_publish_order_status", new_callable=AsyncMock
@@ -6800,24 +6801,31 @@ class TestAmbiguousSubmitHandling:
         assert ex.client_by_exchange["ex-live-9"] == order.client_order_id
 
     @pytest.mark.asyncio
-    async def test_definitive_venue_reject_still_rejects(
+    async def test_falsy_id_submit_parks_instead_of_rejecting(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An empty exchange id remains the definitive-reject signal.
+        """A venue response without an id is never treated as refusal.
 
-        Given: _execute_live_order returning None (venue said no),
+        Given: _execute_live_order raising the falsy-id ambiguity,
         When: _process_order runs,
-        Then: REJECTED is published and the pending entry is dropped.
+        Then: UNKNOWN is published and no resolving rejection row is written.
         """
         ex = self._executor(monkeypatch)
-        ex._execute_live_order = AsyncMock(return_value=None)
+        ex._execute_live_order = AsyncMock(
+            side_effect=AmbiguousOrderSubmitError(
+                client_order_id="c1",
+                instrument="BTC-USD",
+                message="venue answered without an id",
+                venue_answered=True,
+            )
+        )
         order = make_order()
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
-        assert statuses == ["submitted", "rejected"]
-        assert order.client_order_id not in ex.pending_orders
+        assert statuses == ["submitted", "unknown"]
+        assert order.client_order_id in ex.pending_orders
         event_types = [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
-        assert event_types == ["order_rejected"]
+        assert event_types == ["order_submit_unknown"]
 
     @pytest.mark.asyncio
     async def test_accept_db_failure_without_pending_entry_still_accepts(
