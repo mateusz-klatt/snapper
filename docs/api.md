@@ -1266,13 +1266,18 @@ GET /api/positions
 The `position_cycle_public_id` field is `null` when no open position cycle exists
 for the position (e.g. flat positions or positions without cycle tracking).
 
-Truthful-valuation semantics: rows are written by the trader's
-position projection and NULLs are honest, never zero-coerced. `average_price`
+Truthful-valuation semantics: economic rows are written by the trader's
+position projection and NULLs are honest, never zero-coerced. Current reads
+overlay the stored event-time mark with the newest durable tick for the exact
+valuation instrument when it is no more than ten minutes old. Missing, stale,
+unmapped-paper, non-positive, and non-finite tick evidence returns
+`mark_price`, `marked_at`, and `unrealized_pnl` as `null`. Historical `as_of`
+reads retain the projection's event-time mark. `average_price`
 is `null` when an aggregate of opposing paper strategy shards has no single
 truthful entry (or a component entry is unknown). `mark_price` / `marked_at`
-echo the active market snapshot verbatim — `marked_at` is the snapshot's own
-bus timestamp with NO freshness gate, so consumers judge staleness themselves;
-both are `null` together with `unrealized_pnl` when no usable mark exists.
+on historical rows echo the active market snapshot captured by the triggering
+projection event; both are `null` together with `unrealized_pnl` when no usable
+mark exists.
 `source_venue_event_id` is the maximum durable venue-event watermark consumed
 into the row's state (a recovery watermark, not the exact causal fill), `null`
 when unknown.

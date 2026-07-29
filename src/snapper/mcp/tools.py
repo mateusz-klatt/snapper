@@ -1548,7 +1548,11 @@ async def _list_positions_tool(
     )
     if scope_envelope is not None:
         return scope_envelope
-    rows = await access.repo.get_positions(as_of=now, wallet_public_ids=wallet_ids)
+    rows = await access.repo.get_positions(
+        as_of=now,
+        wallet_public_ids=wallet_ids,
+        current_marks=True,
+    )
     filtered = [
         row
         for row in rows

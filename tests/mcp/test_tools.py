@@ -3186,6 +3186,20 @@ class TestListPositionsDelegateScopeRealRepository:
                     "bus_time": now,
                 }
             )
+        await repo.upsert_ticks(
+            [
+                {
+                    "instrument_public_id": inst_pid,
+                    "timestamp": now,
+                    "bid": 50190.0,
+                    "ask": 50210.0,
+                    "last": 50200.0,
+                    "volume": 1.0,
+                    "session_id": "s1",
+                    "sequence_id": 7,
+                }
+            ]
+        )
         server = _build_server(repository=repo)
         result = await call_raw_tool(server, "list_positions", {})
         envelope = _decode_envelope(result)
@@ -3194,7 +3208,7 @@ class TestListPositionsDelegateScopeRealRepository:
         position = envelope["details"]["positions"][0]
         assert position["wallet_public_id"] == granted_wallet
         assert position["quantity"] == 1.5
-        assert position["unrealized_pnl"] is None
-        assert position["mark_price"] == 50100.0
+        assert position["unrealized_pnl"] == 300.0
+        assert position["mark_price"] == 50200.0
         assert position["marked_at"] == now.isoformat()
         assert position["source_venue_event_id"] == 42

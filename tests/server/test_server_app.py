@@ -2596,6 +2596,7 @@ class MockRepository:
         self._read_granted_wallet_ids: list[str] = []
         self._duplicate_active_rows = duplicate_active_rows
         self.reconciliation_context_calls: list[list[str] | None] = []
+        self.position_calls: list[dict[str, object]] = []
 
     def grant_read_access(self, wallet_public_ids: list[str]) -> None:
         """Make wallets visible through the personal read-grant plane only.
@@ -2714,6 +2715,7 @@ class MockRepository:
     async def get_positions(self, **kwargs: Any) -> list[dict[str, Any]]:
         """Return mock position dicts."""
         self._raise_if_error()
+        self.position_calls.append(kwargs)
         return [
             {
                 "public_id": pos.public_id,
@@ -3871,6 +3873,20 @@ class TestPositionsSuccessPath:
         assert items[0]["average_price"] == pytest.approx(48000.0)
         assert items[0]["unrealized_pnl"] == pytest.approx(3000.0)
         assert items[0]["realized_pnl"] == pytest.approx(500.0)
+        assert repo.position_calls[0]["current_marks"] is True
+
+    def test_get_positions_as_of_preserves_historical_mark(self) -> None:
+        """An explicit knowledge horizon never receives a current-market overlay.
+
+        Given: a historical positions request,
+        When: GET /positions runs with ``as_of``,
+        Then: the repository is told to retain the projection's event-time mark.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/positions?as_of=2026-07-28T18:55:09Z")
+        assert response.status_code == 200
+        assert repo.position_calls[0]["current_marks"] is False
 
     def test_get_positions_empty(self) -> None:
         """Verify positions endpoint returns empty list when no data.

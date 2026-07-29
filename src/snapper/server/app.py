@@ -2731,7 +2731,11 @@ def _create_orders_executions_router() -> APIRouter:
             target_wallets = await resolve_readable_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
-            rows = await repo.get_positions(as_of=processing_date, wallet_public_ids=target_wallets)
+            rows = await repo.get_positions(
+                as_of=processing_date,
+                wallet_public_ids=target_wallets,
+                current_marks=as_of is None,
+            )
             items = [PositionData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id

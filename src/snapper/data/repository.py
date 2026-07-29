@@ -4113,12 +4113,15 @@ class Repository(ABC):
         self,
         as_of: datetime,
         wallet_public_ids: list[str] | None = None,
+        current_marks: bool = False,
     ) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
         Args:
             as_of: Point-in-time for temporal query.
             wallet_public_ids: Optional wallet scope filter.
+            current_marks: Replace the stored event-time mark with a fresh
+                durable tick for current-state display.
 
         Returns:
             Position dicts denormalized with instrument and symbol info.
@@ -18108,6 +18111,7 @@ class SQLAlchemyRepository(Repository):
         self,
         as_of: datetime,
         wallet_public_ids: list[str] | None = None,
+        current_marks: bool = False,
     ) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
@@ -18126,6 +18130,13 @@ class SQLAlchemyRepository(Repository):
         time-ordering — a semantic landmine if the generator ever
         changes. Self-exclusion uses the internal PK ``id`` so no
         UUID comparison is involved.
+
+        Current reads value each row from the newest positive finite
+        tick no older than the market-coverage freshness window. The
+        stored mark remains the event-time projection value for
+        historical reads. Missing, stale, unmapped-paper, or unusable
+        tick evidence clears the mark trio instead of carrying a
+        confident stale value into a current-money display.
         """
         async with self.session() as s:
             other_cycle = aliased(PositionCycle)
@@ -18193,7 +18204,7 @@ class SQLAlchemyRepository(Repository):
             if wallet_public_ids is not None:
                 query = query.where(Position.wallet_public_id.in_(wallet_public_ids))
             result = await s.execute(query)
-            return [
+            rows: list[PositionRow] = [
                 {
                     "public_id": pos.public_id,
                     "timestamp": pos.timestamp,
@@ -18215,6 +18226,100 @@ class SQLAlchemyRepository(Repository):
                 }
                 for pos, inst, sym, cycle_pid in result.all()
             ]
+            if not current_marks:
+                return rows
+            return [await self._position_with_current_mark(s, row, as_of) for row in rows]
+
+    async def _position_with_current_mark(
+        self,
+        session: AsyncSession,
+        row: PositionRow,
+        as_of: datetime,
+    ) -> PositionRow:
+        """Overlay one current position with fail-closed durable tick evidence."""
+        valuation_public_id = await self._position_valuation_instrument(
+            session, row["instrument_public_id"]
+        )
+        marked = dict(row)
+        quote = await self._fresh_tick_mark(session, valuation_public_id, as_of)
+        if quote is None:
+            marked["mark_price"] = None
+            marked["marked_at"] = None
+            marked["unrealized_pnl"] = None
+            return cast(PositionRow, marked)
+        price, marked_at = quote
+        marked["mark_price"] = price
+        marked["marked_at"] = marked_at
+        average_price = row["average_price"]
+        marked["unrealized_pnl"] = (
+            None if average_price is None else row["quantity"] * (price - average_price)
+        )
+        return cast(PositionRow, marked)
+
+    @staticmethod
+    async def _position_valuation_instrument(
+        session: AsyncSession,
+        instrument_public_id: str,
+    ) -> str | None:
+        """Resolve the proven source identity used to value one position."""
+        instrument = (
+            await session.execute(
+                select(
+                    Instrument.symbol_public_id,
+                    Instrument.exchange,
+                    Instrument.source_exchange,
+                ).where(
+                    Instrument.public_id == instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).one_or_none()
+        if instrument is None:
+            return None
+        symbol_public_id, exchange, source_exchange = instrument
+        if exchange != ExchangeEnum.PAPER.value:
+            return instrument_public_id
+        if source_exchange is None:
+            return None
+        return (
+            await session.execute(
+                select(Instrument.public_id).where(
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == source_exchange,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
+    async def _fresh_tick_mark(
+        session: AsyncSession,
+        instrument_public_id: str | None,
+        as_of: datetime,
+    ) -> tuple[float, datetime] | None:
+        """Return the newest usable tick inside the ten-minute live window."""
+        if instrument_public_id is None:
+            return None
+        cutoff = as_of - timedelta(minutes=10)
+        tick = (
+            await session.execute(
+                select(Tick.last, Tick.timestamp)
+                .where(
+                    Tick.instrument_public_id == instrument_public_id,
+                    Tick.timestamp >= cutoff,
+                    Tick.timestamp <= as_of,
+                    Tick.known_to > as_of,
+                )
+                .order_by(Tick.timestamp.desc(), Tick.id.desc())
+                .limit(1)
+            )
+        ).one_or_none()
+        if tick is None or tick.last is None:
+            return None
+        price = float(tick.last)
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return price, tick.timestamp
 
     async def get_pnl_scope_position_inventory_window(
         self,

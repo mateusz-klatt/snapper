@@ -16,6 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -387,6 +388,247 @@ async def test_projection_rows_surface_wallet_scoped_with_provenance(tmp_path: P
     assert row["source_venue_event_id"] == 42
     everything = await repo.get_positions(as_of=now)
     assert {r["wallet_public_id"] for r in everything} == {_WALLET, other_wallet}
+
+
+async def test_current_position_read_uses_fresh_tick_without_rewriting_history(
+    tmp_path: Path,
+) -> None:
+    """A current read overlays fresh market truth while history stays immutable.
+
+    Given: a live instrument whose stored position mark is old and whose
+        durable tick stream has a newer usable price,
+    When: current and historical position reads run,
+    Then: only the current read returns the tick mark and recomputed
+        unrealized PnL; the stored SCD2 row remains unchanged.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'current-mark.db'}")
+    await repo.create_all()
+    now = datetime.now(UTC)
+    old_marked_at = now - timedelta(hours=15)
+    async with repo.session() as s:
+        symbol = Symbol(
+            native_symbol="EUR-PLN",
+            base="EUR",
+            quote="PLN",
+            asset_type="forex",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(symbol)
+        await s.commit()
+        await s.refresh(symbol)
+    _, instrument_public_id = await repo.ensure_instrument(
+        symbol_public_id=symbol.public_id,
+        exchange="walutomat",
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    await repo.upsert_position_projection(
+        _row(
+            now,
+            instrument_public_id=instrument_public_id,
+            quantity=21.0,
+            average_price=4.382,
+            unrealized_pnl=-1.2201,
+            mark_price=4.3239,
+            marked_at=old_marked_at,
+        )
+    )
+    tick_at = now + timedelta(minutes=1)
+    await repo.upsert_ticks(
+        [
+            {
+                "instrument_public_id": instrument_public_id,
+                "timestamp": tick_at,
+                "bid": 4.34,
+                "ask": 4.35,
+                "last": 4.345,
+                "volume": 1.0,
+                "session_id": "s1",
+                "sequence_id": 3,
+            }
+        ]
+    )
+    current = (await repo.get_positions(as_of=tick_at, current_marks=True))[0]
+    historical = (await repo.get_positions(as_of=tick_at))[0]
+    assert current["mark_price"] == 4.345
+    assert current["marked_at"] == tick_at
+    assert current["unrealized_pnl"] == pytest.approx(21.0 * (4.345 - 4.382))
+    assert historical["mark_price"] == 4.3239
+    assert historical["marked_at"] == old_marked_at
+    stored = await _all_rows(repo)
+    assert len(stored) == 1
+    assert stored[0].mark_price == 4.3239
+    invalid_at = tick_at + timedelta(seconds=1)
+    await repo.upsert_ticks(
+        [
+            {
+                "instrument_public_id": instrument_public_id,
+                "timestamp": invalid_at,
+                "bid": 4.34,
+                "ask": 4.35,
+                "last": 0.0,
+                "volume": 1.0,
+                "session_id": "s1",
+                "sequence_id": 4,
+            }
+        ]
+    )
+    refused = (await repo.get_positions(as_of=invalid_at, current_marks=True))[0]
+    assert refused["mark_price"] is None
+    assert refused["unrealized_pnl"] is None
+    entry_unknown_at = invalid_at + timedelta(seconds=1)
+    await repo.upsert_position_projection(
+        _row(
+            entry_unknown_at,
+            instrument_public_id=instrument_public_id,
+            average_price=None,
+            unrealized_pnl=None,
+        )
+    )
+    await repo.upsert_ticks(
+        [
+            {
+                "instrument_public_id": instrument_public_id,
+                "timestamp": entry_unknown_at,
+                "bid": 4.34,
+                "ask": 4.35,
+                "last": 4.345,
+                "volume": 1.0,
+                "session_id": "s1",
+                "sequence_id": 5,
+            }
+        ]
+    )
+    entry_unknown = (await repo.get_positions(as_of=entry_unknown_at, current_marks=True))[0]
+    assert entry_unknown["mark_price"] == 4.345
+    assert entry_unknown["unrealized_pnl"] is None
+
+
+async def test_current_position_read_clears_stale_mark_without_fresh_tick(tmp_path: Path) -> None:
+    """A current-money read refuses to carry a stale stored mark forward.
+
+    Given: a position with a confident stored valuation but no tick in
+        the ten-minute freshness window,
+    When: the current position read runs,
+    Then: the mark trio is NULL while entry and quantity remain visible.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'missing-mark.db'}")
+    await repo.create_all()
+    now = datetime.now(UTC)
+    async with repo.session() as s:
+        symbol = Symbol(
+            native_symbol="EUR-PLN",
+            base="EUR",
+            quote="PLN",
+            asset_type="forex",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(symbol)
+        await s.commit()
+        await s.refresh(symbol)
+    _, instrument_public_id = await repo.ensure_instrument(
+        symbol_public_id=symbol.public_id,
+        exchange="paper",
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+        source_exchange="walutomat",
+    )
+    await repo.upsert_position_projection(_row(now, instrument_public_id=instrument_public_id))
+    current = (await repo.get_positions(as_of=now, current_marks=True))[0]
+    assert current["mark_price"] is None
+    assert current["marked_at"] is None
+    assert current["unrealized_pnl"] is None
+    assert current["average_price"] == 50000.0
+    async with repo.session() as s:
+        assert await repo._position_valuation_instrument(s, "missing") is None
+        unmapped_symbol = Symbol(
+            native_symbol="USD-PLN",
+            base="USD",
+            quote="PLN",
+            asset_type="forex",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=3,
+        )
+        s.add(unmapped_symbol)
+        await s.commit()
+        await s.refresh(unmapped_symbol)
+    _, unmapped_public_id = await repo.ensure_instrument(
+        symbol_public_id=unmapped_symbol.public_id,
+        exchange="paper",
+        session_id="s1",
+        sequence_id=4,
+        timestamp=now,
+    )
+    async with repo.session() as s:
+        assert await repo._position_valuation_instrument(s, unmapped_public_id) is None
+
+
+async def test_current_position_read_refuses_a_quote_only_tick(tmp_path: Path) -> None:
+    """A tick carrying no traded price cannot value a position.
+
+    Given: a fresh tick inside the freshness window whose bid and ask are
+        present but whose last is NULL, as a quote-only update leaves it,
+    When: the current position read runs,
+    Then: the mark trio is NULL rather than derived from a price the venue
+        never traded at, because a confident wrong mark misleads where an
+        absent one merely reports incompleteness.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'quote-only.db'}")
+    await repo.create_all()
+    now = datetime.now(UTC)
+    async with repo.session() as s:
+        symbol = Symbol(
+            native_symbol="EUR-PLN",
+            base="EUR",
+            quote="PLN",
+            asset_type="forex",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(symbol)
+        await s.commit()
+        await s.refresh(symbol)
+    _, instrument_public_id = await repo.ensure_instrument(
+        symbol_public_id=symbol.public_id,
+        exchange="walutomat",
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    await repo.upsert_position_projection(_row(now, instrument_public_id=instrument_public_id))
+    await repo.upsert_ticks(
+        [
+            {
+                "instrument_public_id": instrument_public_id,
+                "timestamp": now,
+                "bid": 4.34,
+                "ask": 4.35,
+                "last": None,
+                "volume": 1.0,
+                "session_id": "s1",
+                "sequence_id": 3,
+            }
+        ]
+    )
+
+    current = (await repo.get_positions(as_of=now, current_marks=True))[0]
+
+    assert current["mark_price"] is None
+    assert current["marked_at"] is None
+    assert current["unrealized_pnl"] is None
+    assert current["quantity"] == 0.5
 
 
 async def test_active_identity_scan_is_clock_free(tmp_path: Path) -> None:
