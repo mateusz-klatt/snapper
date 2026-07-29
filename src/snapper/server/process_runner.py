@@ -46,11 +46,15 @@ import importlib
 import inspect
 import json
 import os
+import signal
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
+from typing import Final
+from typing import Protocol
 from typing import cast
+from typing import runtime_checkable
 
 from loguru import logger
 
@@ -64,6 +68,22 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_p
 from snapper.utils.logging import resolve_subprocess_logfile
 from snapper.utils.logging import set_log_context
 from snapper.utils.logging import setup_logging
+
+_SIGTERM_DRAIN_TIMEOUT_S: Final = 8.0
+"""Reserve two seconds of the spawner's 10-second grace for cancellation and teardown."""
+
+
+@runtime_checkable
+class _SigtermDrainable(Protocol):
+    """Async process that can drain and report pending trade writes."""
+
+    async def stop(self) -> None:
+        """Stop the process and drain its writers."""
+        ...
+
+    def pending_trade_write_rows(self) -> int:
+        """Return trade rows that remain queued or retained in flight."""
+        ...
 
 
 async def _await_result[Result](awaitable: Awaitable[Result]) -> Result:
@@ -132,6 +152,75 @@ def _run_event_loop[Result](awaitable: Awaitable[Result]) -> Result:
         event_loop_module.run,
     )
     return run_event_loop(_await_result(awaitable))
+
+
+async def _run_with_sigterm_drain[Result](
+    drainable: _SigtermDrainable,
+    awaitable: Awaitable[Result],
+) -> Result | None:
+    """Run an async publisher target and drain it when SIGTERM arrives.
+
+    Args:
+        drainable: Publisher-like process owning the writer drain.
+        awaitable: Target invocation driven by the subprocess runner.
+
+    Returns:
+        The target result on ordinary completion, otherwise ``None`` after
+        SIGTERM drain completion or deadline.
+    """
+    ev_loop = asyncio.get_running_loop()
+    signal_received = asyncio.Event()
+    try:
+        ev_loop.add_signal_handler(signal.SIGTERM, signal_received.set)
+    except NotImplementedError:
+        return await awaitable
+    target_task = asyncio.ensure_future(awaitable)
+    signal_task = asyncio.create_task(signal_received.wait())
+    drain_task: asyncio.Task[None] | None = None
+    try:
+        done, _ = await asyncio.wait(
+            {target_task, signal_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if target_task in done:
+            return await target_task
+        logger.info(
+            f"SIGTERM received; draining publisher writers for up to "
+            f"{_SIGTERM_DRAIN_TIMEOUT_S:.1f}s"
+        )
+        drain_task = asyncio.create_task(drainable.stop())
+        drained, _ = await asyncio.wait(
+            {drain_task},
+            timeout=_SIGTERM_DRAIN_TIMEOUT_S,
+        )
+        if drain_task not in drained:
+            logger.warning(
+                f"SIGTERM drain deadline exceeded; "
+                f"undrained_trade_rows={drainable.pending_trade_write_rows()}"
+            )
+        return None
+    finally:
+        if not target_task.done():
+            target_task.cancel()
+        await asyncio.gather(target_task, return_exceptions=True)
+        if drain_task is not None:
+            if not drain_task.done():
+                drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+        if not signal_task.done():
+            signal_task.cancel()
+        await asyncio.gather(signal_task, return_exceptions=True)
+        ev_loop.remove_signal_handler(signal.SIGTERM)
+
+
+def _run_instance_awaitable[Result](
+    instance: object,
+    awaitable: Awaitable[Result],
+) -> Result | None:
+    """Drive an instance awaitable with SIGTERM draining when supported."""
+    if isinstance(instance, _SigtermDrainable):
+        return _run_event_loop(_run_with_sigterm_drain(instance, awaitable))
+    return _run_event_loop(awaitable)
 
 
 async def _run_async_method(method: Callable[[], Awaitable[Any]]) -> Any:
@@ -254,16 +343,22 @@ def main() -> int:
         logger.info(f"Process '{name}' calling {class_path}.{method}()")
         if inspect.iscoroutinefunction(target_method):
             if uses_ai_review_listener:
-                _run_event_loop(_run_async_method_with_listener(target_method))
+                _run_instance_awaitable(
+                    instance,
+                    _run_async_method_with_listener(target_method),
+                )
             else:
-                _run_event_loop(_run_async_method(target_method))
+                _run_instance_awaitable(instance, _run_async_method(target_method))
         else:
             result = target_method()
             if inspect.isawaitable(result):
                 if uses_ai_review_listener:
-                    _run_event_loop(_await_result_with_listener(result))
+                    _run_instance_awaitable(
+                        instance,
+                        _await_result_with_listener(result),
+                    )
                 else:
-                    _run_event_loop(_await_result(result))
+                    _run_instance_awaitable(instance, _await_result(result))
         logger.info(f"Process '{name}' completed successfully")
         return 0
     except Exception as e:

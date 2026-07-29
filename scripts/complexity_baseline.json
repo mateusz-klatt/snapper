@@ -1137,7 +1137,7 @@
     },
     "src/snapper/messaging/publishers/base.py": {
       "MarketDataPublisherService.__init__": {
-        "PLR0915": 64
+        "PLR0915": 61
       },
       "MarketDataPublisherService._read_writer_row_or_flush_timeout": {
         "PLR0913": 6

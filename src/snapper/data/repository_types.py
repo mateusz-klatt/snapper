@@ -13,6 +13,7 @@ from typing import Any
 from typing import Final
 from typing import Literal
 from typing import NotRequired
+from typing import Required
 from typing import TypedDict
 
 from snapper.core.json_types import JsonObject
@@ -85,7 +86,7 @@ class TradeUpsertRow(TypedDict, total=False):
     size: float
     side: str
     trade_id: str | None
-    executed_at: datetime | None
+    executed_at: Required[datetime]
     session_id: str
     sequence_id: int
     public_id: str

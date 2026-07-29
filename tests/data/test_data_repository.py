@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
+from typing import get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,12 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetr
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
+
+
+def test_trade_upsert_row_requires_non_nullable_executed_at() -> None:
+    """Declare executed_at as a required, non-nullable trade upsert field."""
+    assert TradeUpsertRow.__required_keys__ == frozenset({"executed_at"})
+    assert get_type_hints(TradeUpsertRow)["executed_at"] is datetime
 
 
 class TestZmqMessageLogger:
@@ -581,6 +588,7 @@ async def test_upsert_trades_same_trade_id_same_instrument_deduped(tmp_path: Pat
         "trade_id": "99999",
         "instrument_public_id": inst_a,
         "timestamp": ts,
+        "executed_at": ts,
         "price": 50.0,
         "size": 1.0,
         "side": "sell",

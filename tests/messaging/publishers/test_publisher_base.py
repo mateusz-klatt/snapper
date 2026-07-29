@@ -3904,6 +3904,36 @@ class TestPublisherDedup:
         assert publisher._trade_write_queue.qsize() == 1
 
     @pytest.mark.asyncio
+    async def test_trade_loop_counts_obligated_duplicate_drops(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Count obligated trade duplicates without logging every drop.
+
+        Given: Three deliveries of one trade whose first row reaches the writer queue,
+        When: The next two deliveries are dropped by the obligated dedup state,
+        Then: One rate-limited counter summary is logged and one drop remains pending.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        trade = _trade_update(trade_id="trade-counter")
+        publisher._exchange_client = TradeSequenceClient([trade, trade, trade])
+        publisher.running = True
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            await publisher._trade_loop(["BTC-USD"])
+        finally:
+            logger.remove(sink_id)
+
+        summaries = [
+            record for record in caplog.records if "trade_dedup_dropped_total" in record.message
+        ]
+        assert publish_mock.await_count == 1
+        assert len(summaries) == 1
+        assert "exchange=kraken" in summaries[0].message
+        assert "count=1" in summaries[0].message
+        assert publisher._trade_dedup_drop_counters["kraken"][0] == 1
+
+    @pytest.mark.asyncio
     async def test_trade_loop_persist_rejection_keeps_redelivery_eligible(self) -> None:
         """Keep a policy-rejected trade eligible for later persistence.
 
@@ -5427,6 +5457,7 @@ async def test_build_trade_row_handles_null_trade_id() -> None:
         sequence_id=1,
         public_id="trade-pub-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        executed_at=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         exchange="kraken",
         price=100.0,
@@ -5453,6 +5484,7 @@ async def test_build_trade_row_persists_when_no_trade_id() -> None:
         sequence_id=1,
         public_id="trade-pub-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        executed_at=datetime(2024, 1, 1, tzinfo=UTC),
         instrument="BTC-USD",
         exchange="kraken",
         price=100.0,
@@ -5464,6 +5496,29 @@ async def test_build_trade_row_persists_when_no_trade_id() -> None:
     await publisher._flush_trade_batch([row])
     assert len(repo.trade_calls) == 1
     assert repo.trade_calls[0][0]["trade_id"] is None
+
+
+def test_build_trade_row_rejects_missing_executed_at() -> None:
+    """Reject a trade upsert producer input without the required venue time.
+
+    Given: TradeData without an executed_at venue timestamp,
+    When: The publisher builds its TradeUpsertRow,
+    Then: It fails before producing a row that violates the repository contract.
+    """
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    trade_msg = TradeData(
+        session_id="test-session",
+        sequence_id=1,
+        public_id="trade-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument="BTC-USD",
+        exchange="kraken",
+        price=100.0,
+        volume=1.0,
+        side="buy",
+    )
+    with pytest.raises(ValueError, match="executed_at is required"):
+        publisher._build_trade_row(trade_msg, "inst-pub-1")
 
 
 @pytest.mark.asyncio
@@ -7045,6 +7100,61 @@ async def test_trade_writer_queue_drop_oldest_balances_task_done() -> None:
         queue.get_nowait()
         queue.task_done()
     await asyncio.wait_for(queue.join(), timeout=0.5)
+
+
+def test_trade_writer_queue_bound_matches_measured_memory_budget() -> None:
+    """Use the measured queue capacity that stays near 500 MiB per publisher.
+
+    Given: A newly initialized publisher,
+    When: Its bounded trade writer queue is inspected,
+    Then: The queue uses the measured 400,000-row capacity.
+    """
+    publisher = DummyPublisher(symbols=["BTC-USD"])
+    assert publisher._trade_write_queue.maxsize == 400_000
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_depth_alarm_fires_at_high_water_and_rate_limits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warn at the 80 percent high-water crossing without repeated alerts.
+
+    Given: A trade writer queue that crosses 80 percent depth twice,
+    When: Both crossings occur inside the rate-limit interval,
+    Then: One warning reports the depth and approaching eviction.
+    """
+    queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(maxsize=5)
+    await queue.put(_publisher_trade_row("depth-0"))
+    await queue.put(_publisher_trade_row("depth-1"))
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        _enqueue_or_drop_oldest_trade_write(
+            queue,
+            _publisher_trade_row("depth-2"),
+            "depth-alarm-test",
+        )
+        _enqueue_or_drop_oldest_trade_write(
+            queue,
+            _publisher_trade_row("depth-3"),
+            "depth-alarm-test",
+        )
+        queue.get_nowait()
+        queue.task_done()
+        _enqueue_or_drop_oldest_trade_write(
+            queue,
+            _publisher_trade_row("depth-4"),
+            "depth-alarm-test",
+        )
+    finally:
+        logger.remove(sink_id)
+
+    alarms = [
+        record for record in caplog.records if "trade-writer queue high-water" in record.message
+    ]
+    assert len(alarms) == 1
+    assert "depth=4/5" in alarms[0].message
+    assert "80%" in alarms[0].message
+    assert "approaching eviction" in alarms[0].message
 
 
 @pytest.mark.asyncio

@@ -108,12 +108,24 @@ _CANDLE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _CANDLE_WRITER_SHUTDOWN_POLL_S = 0.5
 _candle_writer_drop_counters: dict[str, list[float]] = {}
 
-_TRADE_WRITE_QUEUE_MAX = 5_000
+_TRADE_WRITE_QUEUE_MAX: Final = 400_000
+"""Measured trade-writer queue cap that stays near 500 MiB per publisher.
+
+A Python 3.14 measurement of the retained ``TradeUpsertRow`` dict, keys,
+and values was 1,293 bytes; the measured ``asyncio.Queue`` slot was
+8.29 bytes. At 1,301.29 bytes per entry, 400,000 rows retain about
+496.40 MiB while rounding below the raw 500 MiB capacity of 402,900.
+"""
+_TRADE_WRITER_HIGH_WATER_FRACTION: Final = 0.8
+"""Warn at 80 percent depth, leaving about 99 MiB before eviction."""
+_TRADE_WRITER_DEPTH_LOG_INTERVAL_S: Final = 60.0
 _TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
+_trade_writer_depth_counters: dict[str, list[float]] = {}
 _trade_writer_drop_counters: dict[str, list[float]] = {}
 _TRADE_ID_LRU_MAX_PER_SYMBOL: int = 1000
 """Bounded per-symbol LRU cache size for trade-id deduplication."""
+_TRADE_DEDUP_DROP_LOG_INTERVAL_S: Final = 60.0
 
 _CONSUMER_RESTART_BACKOFF_S = 2.0
 _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
@@ -595,6 +607,35 @@ def _enqueue_or_drop_oldest_trade_write(
         queue.task_done()
         del evicted
         queue.put_nowait(row)
+    _warn_if_trade_writer_queue_high_water(queue, label)
+
+
+def _warn_if_trade_writer_queue_high_water(
+    queue: asyncio.Queue[TradeUpsertRow],
+    label: str,
+) -> None:
+    """Rate-limit an alert when the trade writer crosses its high-water depth.
+
+    Args:
+        queue: Bounded trade writer queue after a successful admission.
+        label: Human-readable label, typically the exchange name.
+    """
+    depth = queue.qsize()
+    threshold = math.ceil(queue.maxsize * _TRADE_WRITER_HIGH_WATER_FRACTION)
+    if depth != threshold:
+        return
+    counters = _trade_writer_depth_counters.setdefault(label, [0.0, 0.0])
+    counters[0] += 1
+    now = monotonic()
+    if now - counters[1] < _TRADE_WRITER_DEPTH_LOG_INTERVAL_S:
+        return
+    logger.warning(
+        f"{label}:trade-writer queue high-water crossed: depth={depth}/{queue.maxsize} "
+        f"({_TRADE_WRITER_HIGH_WATER_FRACTION:.0%}), crossings={int(counters[0])}; "
+        "persistence backlog approaching eviction"
+    )
+    counters[0] = 0.0
+    counters[1] = now
 
 
 def _cleanup_pending_future(fut: asyncio.Future[Any] | None) -> None:
@@ -694,17 +735,23 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._persist_intermediate_candles: bool = False
         self._candle_writer_task: asyncio.Task[None] | None = None
         self._candle_writer_session: AsyncSession | None = None
-        self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
-            maxsize=_TRADE_WRITE_QUEUE_MAX
-        )
-        self._trade_consumer_task: asyncio.Task[None] | None = None
-        self._trade_writer_task: asyncio.Task[None] | None = None
-        self._trade_writer_session: AsyncSession | None = None
+        self._initialize_trade_pipeline_state()
         self._persist_policy: MarketPersistPolicy | None = None
         self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
         self._feed_health_loop_task: asyncio.Task[None] | None = None
         self._extra_background_tasks: list[asyncio.Task[None]] = []
         self._egress_snapshot_publisher: EgressSnapshotPublisher | None = None
+
+    def _initialize_trade_pipeline_state(self) -> None:
+        """Initialize the trade queue, writer handles, retained batch, and counters."""
+        self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
+            maxsize=_TRADE_WRITE_QUEUE_MAX
+        )
+        self._trade_writer_pending_batch: list[TradeUpsertRow] = []
+        self._trade_consumer_task: asyncio.Task[None] | None = None
+        self._trade_writer_task: asyncio.Task[None] | None = None
+        self._trade_writer_session: AsyncSession | None = None
+        self._trade_dedup_drop_counters: dict[str, list[float]] = {}
 
     def _require_repository(self) -> Repository:
         """Return initialized repository or raise an explicit runtime error.
@@ -830,6 +877,23 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             )
             counters[0] = 0.0
             counters[1] = now
+
+    def _record_trade_dedup_drop(self, exchange: MarketDataExchange) -> None:
+        """Increment and rate-limit the obligated trade dedup drop counter."""
+        label = str(exchange)
+        counters = self._trade_dedup_drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] < _TRADE_DEDUP_DROP_LOG_INTERVAL_S:
+            return
+        logger.info(
+            "trade_dedup_dropped_total exchange={} count={} window_s={:.1f}",
+            label,
+            int(counters[0]),
+            now - counters[1],
+        )
+        counters[0] = 0.0
+        counters[1] = now
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -1571,6 +1635,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await self._join_shutdown_queue(self._trade_write_queue)
         await self._await_shutdown_task(self._trade_writer_task)
         self._trade_writer_task = None
+
+    def pending_trade_write_rows(self) -> int:
+        """Return queued plus retained in-flight trade rows not yet disposed.
+
+        Returns:
+            Number of trade rows still awaiting a durable disposition.
+        """
+        return self._trade_write_queue.qsize() + len(self._trade_writer_pending_batch)
 
     async def _close_runtime_resources(self) -> None:
         """Disconnect exchange and release ZMQ resources."""
@@ -3893,7 +3965,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         trade reported by the exchange), so the queue cap is
         ``_TRADE_WRITE_QUEUE_MAX``.
         """
-        state = _WriterBatchState[TradeUpsertRow]([])
+        state = _WriterBatchState[TradeUpsertRow](self._trade_writer_pending_batch)
         backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         while True:
             try:
@@ -4029,6 +4101,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         dedup_state = self._get_trade_dedup_state(trade)
         if dedup_state is _TradeDedupState.OBLIGATED:
+            self._record_trade_dedup_drop(exchange)
             return None
         skip_publish = dedup_state is _TradeDedupState.PUBLISHED
         if dedup_state is None:
@@ -4452,11 +4525,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             Fully materialized row dict ready for repository upsert.
         """
+        executed_at = trade_msg.executed_at
+        if executed_at is None:
+            raise ValueError("TradeData.executed_at is required for trade persistence")
         return {
             "public_id": trade_msg.public_id,
             "instrument_public_id": instrument_public_id,
             "timestamp": trade_msg.timestamp,
-            "executed_at": trade_msg.executed_at,
+            "executed_at": executed_at,
             "price": trade_msg.price,
             "size": trade_msg.volume,
             "side": trade_msg.side or "",

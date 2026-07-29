@@ -1128,8 +1128,14 @@ async def test_upsert_trades_other_dialect_with_caller_session_skips_duplicates(
     repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect="custom")
     monkeypatch.setattr(repository, "insert", fake_insert)
     rows: list[TradeUpsertRow] = [
-        {"trade_id": "trade-1"},
-        {"trade_id": "trade-2"},
+        {
+            "trade_id": "trade-1",
+            "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+        },
+        {
+            "trade_id": "trade-2",
+            "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+        },
     ]
 
     inserted = await repo.upsert_trades(rows, session=cast(AsyncSession, session))

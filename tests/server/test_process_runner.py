@@ -10,6 +10,7 @@ the fast-path even when launched via
 """
 
 import asyncio
+import signal
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -438,3 +439,69 @@ def test_main_logs_to_container_subprocess_logfile(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("sys.argv", ["process_runner", "--config", "not-json"])
     assert process_runner.main() == 1
     assert captured["logfile"] == expected_logfile
+
+
+def test_main_sigterm_drains_and_reports_rows_left_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGTERM invokes publisher drain and reports rows left after its deadline.
+
+    Given: A publisher whose drain cannot finish within the runner deadline,
+    When: The subprocess runner receives SIGTERM,
+    Then: It invokes stop and warns with the seven undrained trade rows.
+    """
+    state: dict[str, bool] = {}
+    registered_signals: list[int] = []
+
+    class _Instance:
+        async def start(self) -> None:
+            await asyncio.Event().wait()
+
+        async def stop(self) -> None:
+            state["stop_called"] = True
+            await asyncio.Event().wait()
+
+        def pending_trade_write_rows(self) -> int:
+            return 7
+
+    def _run(awaitable: Awaitable[object]) -> object | None:
+        async def _drive() -> object | None:
+            loop = asyncio.get_running_loop()
+
+            def _add_signal_handler(
+                signal_number: int,
+                callback: Callable[[], None],
+            ) -> None:
+                registered_signals.append(signal_number)
+                callback()
+
+            with (
+                patch.object(loop, "add_signal_handler", side_effect=_add_signal_handler),
+                patch.object(loop, "remove_signal_handler", return_value=True),
+            ):
+                try:
+                    return await asyncio.wait_for(awaitable, timeout=0.1)
+                except TimeoutError:
+                    return None
+
+        return asyncio.run(_drive())
+
+    config = (
+        '{"name": "fake", "class_path": "fake.module.Publisher", '
+        '"method": "start", "parameters": {}, "role": "core"}'
+    )
+    monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
+    monkeypatch.setattr(process_runner, "_SIGTERM_DRAIN_TIMEOUT_S", 0.001, raising=False)
+    with (
+        patch("snapper.server.process_runner.setup_logging"),
+        patch("snapper.server.process_runner.log_kraken_sdk_patches_status"),
+        patch("snapper.server.process_runner._resolve_process_class", return_value=_Instance),
+        patch("snapper.server.process_runner._run_event_loop", side_effect=_run),
+        patch.object(process_runner.logger, "warning") as warning_mock,
+    ):
+        assert process_runner.main() == 0
+
+    warning_messages = [str(call.args[0]) for call in warning_mock.call_args_list]
+    assert registered_signals == [signal.SIGTERM]
+    assert state == {"stop_called": True}
+    assert any("undrained_trade_rows=7" in message for message in warning_messages)
