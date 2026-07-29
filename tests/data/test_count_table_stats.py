@@ -396,13 +396,14 @@ class TestDialectAwareTotalEstimate:
     """
 
     @pytest.mark.asyncio
-    async def test_postgresql_path_uses_schema_aware_pg_class_query(
+    async def test_postgresql_path_aggregates_ordinary_and_partition_leaf_estimates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """PG dialect must query pg_class JOIN pg_namespace with both relname + nspname.
+        """PG totals include ordinary roots and every leaf below partitioned roots.
 
-        Catches: dropping the namespace filter (multi-schema deploys), or
-        regressing to ``SELECT count(*)`` on PG (which is the original bug).
+        The recursive catalog walk keeps multi-schema deployments safe,
+        avoids a full table scan, and does not trust the unmaintained
+        ``reltuples`` value on a partitioned parent.
         """
         captured: dict[str, object] = {}
 
@@ -422,18 +423,23 @@ class TestDialectAwareTotalEstimate:
         monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
         result = await repo._count_total_estimate(_StubSession(), Order)
         assert result == 12345
-        sql = str(captured["stmt"]).lower()
+        sql = " ".join(str(captured["stmt"]).lower().split())
+        assert sql.startswith("with recursive")
         assert "pg_class" in sql
         assert "pg_namespace" in sql
         assert "n.nspname" in sql
-        assert "c.relkind = 'r'" in sql
+        assert "c.relkind in ('r', 'p')" in sql
+        assert "join pg_inherits i on i.inhparent = parent.oid" in sql
+        assert "join pg_class child on child.oid = i.inhrelid" in sql
+        assert "where parent.relkind = 'p'" in sql
+        assert "sum(greatest(reltuples, 0)) filter (where relkind = 'r')" in sql
         assert captured["params"] == {"table": "orders", "schema": "public"}
 
     @pytest.mark.asyncio
-    async def test_postgresql_index_estimate_uses_schema_aware_pg_class_query(
+    async def test_postgresql_index_estimate_aggregates_partition_leaf_indexes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Given a PG active-index estimate, When queried, Then the index stats are schema scoped."""
+        """PG index estimates include ordinary indexes and partitioned index leaves."""
         captured: dict[str, object] = {}
 
         class _StubResult:
@@ -452,11 +458,17 @@ class TestDialectAwareTotalEstimate:
         monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
         result = await repo._count_index_estimate(_StubSession(), Candle, "uq_candle_itf_open")
         assert result == 272000000
-        sql = str(captured["stmt"]).lower()
+        raw_sql = " ".join(str(captured["stmt"]).split())
+        sql = raw_sql.lower()
+        assert sql.startswith("with recursive")
         assert "pg_class" in sql
         assert "pg_namespace" in sql
         assert "n.nspname" in sql
-        assert "c.relkind = 'i'" in sql
+        assert "c.relkind IN ('i', 'I')" in raw_sql
+        assert "join pg_inherits i on i.inhparent = parent.oid" in sql
+        assert "join pg_class child on child.oid = i.inhrelid" in sql
+        assert "WHERE parent.relkind = 'I'" in raw_sql
+        assert "sum(greatest(reltuples, 0)) filter (where relkind = 'i')" in sql
         assert captured["params"] == {"index": "uq_candle_itf_open", "schema": "public"}
 
     @pytest.mark.asyncio

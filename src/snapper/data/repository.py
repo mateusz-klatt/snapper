@@ -32604,10 +32604,13 @@ class SQLAlchemyRepository(Repository):
 
         PostgreSQL uses planner statistics from ``pg_class`` joined with
         ``pg_namespace`` for schema safety — this is microseconds vs
-        minutes for ``count(*)`` on a multi-GB table. Accuracy is
-        bounded by ``ANALYZE`` freshness (typically within a few percent;
-        worse during high-velocity write bursts before autovacuum
-        catches up). Adequate for monitoring growth trends.
+        minutes for ``count(*)`` on a multi-GB table. Partitioned tables
+        recursively aggregate the non-negative ``reltuples`` estimates
+        of their ordinary leaf partitions because autovacuum does not
+        analyze the storage-less parent. Accuracy is bounded by
+        ``ANALYZE`` freshness (typically within a few percent; worse
+        during high-velocity write bursts before autovacuum catches up).
+        Adequate for monitoring growth trends.
 
         SQLite uses an exact ``count(*)`` — at dev scale (<10M rows)
         this is bounded and matches developer expectations. The guard
@@ -32624,12 +32627,25 @@ class SQLAlchemyRepository(Repository):
         if dialect == "postgresql":
             schema_name = model.__table__.schema or "public"
             stmt = text(
-                "SELECT GREATEST(c.reltuples::bigint, 0) "
+                "WITH RECURSIVE relation_tree AS ("
+                "SELECT c.oid, c.relkind, c.reltuples "
                 "FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE c.relname = :table "
                 "AND n.nspname = :schema "
-                "AND c.relkind = 'r'"
+                "AND c.relkind IN ('r', 'p') "
+                "UNION ALL "
+                "SELECT child.oid, child.relkind, child.reltuples "
+                "FROM relation_tree parent "
+                "JOIN pg_inherits i ON i.inhparent = parent.oid "
+                "JOIN pg_class child ON child.oid = i.inhrelid "
+                "WHERE parent.relkind = 'p'"
+                ") "
+                "SELECT COALESCE("
+                "SUM(GREATEST(reltuples, 0)) FILTER (WHERE relkind = 'r'), "
+                "0"
+                ")::bigint "
+                "FROM relation_tree"
             )
             result = await s.execute(stmt, {"table": table_name, "schema": schema_name})
             scalar = result.scalar_one_or_none()
@@ -32657,9 +32673,12 @@ class SQLAlchemyRepository(Repository):
             snapshotter timeout budget.
 
         Behavior:
-            PostgreSQL reads ``pg_class.reltuples`` for the named index,
-            joined through ``pg_namespace`` using the model schema so
-            identically named indexes in other schemas are ignored.
+            PostgreSQL reads ``pg_class.reltuples`` for an ordinary
+            named index. A partitioned index recursively aggregates the
+            non-negative estimates of its physical leaf indexes through
+            ``pg_inherits``. The root lookup joins ``pg_namespace`` using
+            the model schema so identically named indexes in other
+            schemas are ignored.
 
         Outcome:
             The returned value is a non-negative active-row estimate.
@@ -32671,12 +32690,25 @@ class SQLAlchemyRepository(Repository):
         if dialect == "postgresql":
             schema_name = model.__table__.schema or "public"
             stmt = text(
-                "SELECT GREATEST(c.reltuples::bigint, 0) "
+                "WITH RECURSIVE relation_tree AS ("
+                "SELECT c.oid, c.relkind, c.reltuples "
                 "FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE c.relname = :index "
                 "AND n.nspname = :schema "
-                "AND c.relkind = 'i'"
+                "AND c.relkind IN ('i', 'I') "
+                "UNION ALL "
+                "SELECT child.oid, child.relkind, child.reltuples "
+                "FROM relation_tree parent "
+                "JOIN pg_inherits i ON i.inhparent = parent.oid "
+                "JOIN pg_class child ON child.oid = i.inhrelid "
+                "WHERE parent.relkind = 'I'"
+                ") "
+                "SELECT COALESCE("
+                "SUM(GREATEST(reltuples, 0)) FILTER (WHERE relkind = 'i'), "
+                "0"
+                ")::bigint "
+                "FROM relation_tree"
             )
             result = await s.execute(stmt, {"index": index_name, "schema": schema_name})
             scalar = result.scalar_one_or_none()
