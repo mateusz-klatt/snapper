@@ -96,3 +96,29 @@ class TestInterceptStdLogHandler:
             args = mock_opt.log.call_args[0]
             assert args[0] == "INFO"
             assert args[1] == "Test message"
+
+    def test_emit_reports_bad_format_instead_of_killing_the_caller(self) -> None:
+        """Verify an unrenderable message is reported, not propagated.
+
+        This handler is the ROOT handler, so anything escaping emit() kills
+        whichever code called logging. A message carrying Loguru-style ``{}``
+        placeholders renders through ``msg % args``, leaves both arguments
+        unconsumed and raises TypeError inside ``record.getMessage()``.
+
+        Given a record whose placeholders cannot consume its args,
+        When handler.emit() is called,
+        Then handleError receives the record and nothing propagates.
+        """
+        handler = InterceptStdLogHandler()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="wallet {} window {}",
+            args=("W1", "T2"),
+            exc_info=None,
+        )
+        with patch.object(handler, "handleError") as mock_handle_error:
+            handler.emit(record)
+            mock_handle_error.assert_called_once_with(record)
