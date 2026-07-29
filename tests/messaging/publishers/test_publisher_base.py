@@ -125,6 +125,26 @@ class DummyClient(SimpleNamespace):
             yield None
 
 
+class TradeSequenceClient(DummyClient):
+    """Exchange-client stub that streams a fixed trade sequence."""
+
+    def __init__(self, trades: list[TradeUpdate]) -> None:
+        """Initialize the client with trades to stream."""
+        super().__init__()
+        self._trades = trades
+        self.subscribed_symbols: list[str] = []
+
+    def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+        """Record subscribed symbols and return the configured trade stream."""
+        self.subscribed_symbols = list(symbols)
+        return self._stream_trades()
+
+    async def _stream_trades(self) -> AsyncIterator[TradeUpdate]:
+        """Yield the configured trades in order."""
+        for trade in self._trades:
+            yield trade
+
+
 class RecordingCandleClient(DummyClient):
     """Client stub that records candle subscription calls."""
 
@@ -331,7 +351,7 @@ def _dedup_publisher(symbols: list[str] | None = None) -> tuple[DummyPublisher, 
     publisher = DummyPublisher(symbols=symbols or ["BTC-USD"])
     publish_mock = AsyncMock()
     publisher._publish_message = publish_mock
-    publisher._ensure_instrument = AsyncMock(return_value=None)
+    publisher._ensure_instrument = AsyncMock(return_value="inst-1")
     return publisher, publish_mock
 
 
@@ -3803,12 +3823,12 @@ class TestPublisherDedup:
         assert publish_mock.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_process_trade_drops_already_seen_trade_id(self) -> None:
-        """Drop a repeated trade id for the same symbol.
+    async def test_process_trade_suppresses_republish_for_published_trade_id(self) -> None:
+        """Suppress republication for a published trade id.
 
-        Given: A publisher that processed trade id trade-1 for BTC,
+        Given: A publisher that published trade id trade-1 for BTC,
         When: The same trade id is processed again for BTC,
-        Then: The duplicate trade is not published.
+        Then: The trade is not published a second time.
         """
         publisher, publish_mock = _dedup_publisher()
         trade = _trade_update(trade_id="trade-1")
@@ -3817,6 +3837,98 @@ class TestPublisherDedup:
         await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
 
         assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_trade_redelivery_after_unknown_instrument_builds_row(self) -> None:
+        """Allow redelivery after the first instrument resolution fails.
+
+        Given: A trade whose instrument is initially unknown,
+        When: The instrument becomes resolvable and the same trade id is redelivered,
+        Then: The redelivery builds a persistence row while the published state is retained.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        publisher._ensure_instrument = AsyncMock(side_effect=[None, "inst-1"])
+        trade = _trade_update(trade_id="trade-1")
+
+        first_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+        cached_after_first = "trade-1" in publisher._seen_trade_ids.get("BTC-USD", {})
+        second_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+
+        assert second_row is not None
+        assert second_row["trade_id"] == "trade-1"
+        assert first_row is None
+        assert cached_after_first is True
+        assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_trade_redelivery_after_unknown_instrument_does_not_republish(
+        self,
+    ) -> None:
+        """Suppress republication while retrying persistence on redelivery.
+
+        Given: A trade published before its instrument can be resolved,
+        When: The same trade id is redelivered after resolution becomes possible,
+        Then: A persistence row is built without publishing the trade a second time.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        publisher._ensure_instrument = AsyncMock(side_effect=[None, "inst-1"])
+        trade = _trade_update(trade_id="trade-1")
+
+        first_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+        publish_mock.reset_mock()
+        second_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+
+        assert first_row is None
+        assert second_row is not None
+        publish_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_trade_loop_obligated_duplicate_skips_publish_and_persistence(self) -> None:
+        """Short-circuit both output paths after successful queue admission.
+
+        Given: Two deliveries of a trade whose first row reaches the writer queue,
+        When: The second delivery is classified as already obligated,
+        Then: It is neither republished nor admitted as a second persistence row.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        ensure_mock = AsyncMock(return_value="inst-1")
+        publisher._ensure_instrument = ensure_mock
+        trade = _trade_update(trade_id="trade-1")
+        publisher._exchange_client = TradeSequenceClient([trade, trade])
+        publisher.running = True
+
+        await publisher._trade_loop(["BTC-USD"])
+
+        publish_mock.assert_awaited_once()
+        ensure_mock.assert_awaited_once()
+        assert publisher._trade_write_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_trade_loop_persist_rejection_keeps_redelivery_eligible(self) -> None:
+        """Keep a policy-rejected trade eligible for later persistence.
+
+        Given: Two deliveries where persistence policy rejects only the first row,
+        When: The same trade id is redelivered and policy then accepts it,
+        Then: The trade is not republished but its second row reaches the writer queue.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        ensure_mock = AsyncMock(return_value="inst-1")
+        publisher._ensure_instrument = ensure_mock
+        trade = _trade_update(trade_id="trade-1")
+        publisher._exchange_client = TradeSequenceClient([trade, trade])
+        publisher.running = True
+
+        with patch.object(
+            publisher,
+            "_should_persist_row",
+            side_effect=[False, True],
+        ) as persist_mock:
+            await publisher._trade_loop(["BTC-USD"])
+
+        publish_mock.assert_awaited_once()
+        assert ensure_mock.await_count == 2
+        assert persist_mock.call_count == 2
+        assert publisher._trade_write_queue.qsize() == 1
 
     @pytest.mark.asyncio
     async def test_process_trade_publishes_new_trade_id(self) -> None:
@@ -5283,19 +5395,21 @@ async def test_flush_tick_batch_logs_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_flush_trade_batch_logs_errors() -> None:
-    """Verify _flush_trade_batch increments flush_errors on failure.
+    """Verify _flush_trade_batch increments errors and fails closed.
 
     Given: A publisher with a failing repository,
     When: upsert_trades raises,
-    Then: flush_errors['trade'] is incremented.
+    Then: The unknown failure escapes and flush_errors['trade'] is incremented.
     """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.repository = SimpleNamespace(
-        upsert_trades=AsyncMock(side_effect=RuntimeError("db fail")),
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = cast(
+        Repository,
+        SimpleNamespace(upsert_trades=AsyncMock(side_effect=RuntimeError("db fail"))),
     )
     trade_msg = _build_trade_message("BTC-USD")
     row = pub._build_trade_row(trade_msg, "inst-pub-1")
-    await pub._flush_trade_batch([row])
+    with pytest.raises(RuntimeError, match="db fail"):
+        await pub._flush_trade_batch([row])
     assert pub._flush_errors["trade"] == 1
 
 
@@ -5928,6 +6042,20 @@ def _publisher_trade_row(public_id: str) -> TradeUpsertRow:
     }
 
 
+class _FakeTradePgError(Exception):
+    """PostgreSQL-shaped driver error for trade-writer taxonomy tests."""
+
+    def __init__(self, sqlstate: str) -> None:
+        """Initialize the fake with a structured SQLSTATE."""
+        super().__init__(f"PostgreSQL error {sqlstate}")
+        self.sqlstate = sqlstate
+
+
+def _trade_integrity_error(sqlstate: str) -> IntegrityError:
+    """Build a SQLAlchemy integrity error carrying a PostgreSQL SQLSTATE."""
+    return IntegrityError("INSERT", {}, _FakeTradePgError(sqlstate))
+
+
 @pytest.mark.asyncio
 async def test_flush_candle_batch_commits_writer_session() -> None:
     """Verify candle flush commits the held writer session.
@@ -6077,12 +6205,132 @@ async def test_flush_trade_batch_commits_writer_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flush_trade_writer_batch_bisects_unique_violation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Persist valid rows and quarantine only a row that raises SQLSTATE 23505.
+
+    Given: A trade batch containing one row-dependent unique violation,
+    When: The writer flushes the batch,
+    Then: It bisects until the bad row is isolated, logs its full payload,
+        persists every valid row, and acknowledges the complete batch.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    rows = [
+        _publisher_trade_row("good-1"),
+        _publisher_trade_row("bad"),
+        _publisher_trade_row("good-2"),
+    ]
+    persisted_public_ids: list[str] = []
+
+    async def upsert_trades(candidate: list[TradeUpsertRow]) -> int:
+        if any(row["public_id"] == "bad" for row in candidate):
+            raise _trade_integrity_error("23505")
+        persisted_public_ids.extend(row["public_id"] for row in candidate)
+        return len(candidate)
+
+    pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
+    for row in rows:
+        await pub._trade_write_queue.put(row)
+    batch = [await pub._trade_write_queue.get() for _ in rows]
+    sink_id = logger.add(caplog.handler, format="{message}", level="ERROR")
+    try:
+        await pub._flush_trade_writer_batch(batch)
+    finally:
+        logger.remove(sink_id)
+
+    assert persisted_public_ids == ["good-1", "good-2"]
+    assert any(
+        "quarantined" in record.message and f"payload={rows[1]!r}" in record.message
+        for record in caplog.records
+    )
+    assert batch == []
+    assert pub._trade_write_queue._unfinished_tasks == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_writer_batch_retains_invalid_conflict_statement() -> None:
+    """Retain and do not acknowledge a batch that raises SQLSTATE 42P10.
+
+    Given: A whole-statement invalid conflict-target failure,
+    When: The trade writer attempts the batch,
+    Then: The error escapes without bisection, clearing, or queue acknowledgement.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    rows = [_publisher_trade_row("row-1"), _publisher_trade_row("row-2")]
+    calls: list[list[TradeUpsertRow]] = []
+
+    async def upsert_trades(candidate: list[TradeUpsertRow]) -> int:
+        calls.append(list(candidate))
+        raise DBAPIError("INSERT", {}, _FakeTradePgError("42P10"))
+
+    pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
+    for row in rows:
+        await pub._trade_write_queue.put(row)
+    batch = [await pub._trade_write_queue.get() for _ in rows]
+
+    with pytest.raises(DBAPIError):
+        await pub._flush_trade_writer_batch(batch)
+
+    assert calls == [rows]
+    assert batch == rows
+    assert pub._trade_write_queue._unfinished_tasks == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_retries_blocked_batch_before_dequeueing_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry a statement-blocked batch before reading later queued trades.
+
+    Given: A full held batch that raises SQLSTATE 42P10 once and a queued tail row,
+    When: The writer retries through its blocked-statement backoff,
+    Then: It retries the exact held batch before dequeuing and persisting the tail.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._trade_batch_max_rows = 2
+    pub.running = False
+    calls: list[list[str]] = []
+    queued_during_calls: list[int] = []
+    session_opens = 0
+
+    async def upsert_trades(candidate: list[TradeUpsertRow]) -> int:
+        calls.append([row["public_id"] for row in candidate])
+        queued_during_calls.append(pub._trade_write_queue.qsize())
+        if len(calls) == 1:
+            raise DBAPIError("INSERT", {}, _FakeTradePgError("42P10"))
+        return len(candidate)
+
+    @contextlib.asynccontextmanager
+    async def open_session() -> AsyncIterator[AsyncSession | None]:
+        nonlocal session_opens
+        session_opens += 1
+        yield None
+
+    async def no_sleep(delay: float) -> None:
+        assert delay == pytest.approx(1.0)
+
+    pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
+    monkeypatch.setattr(pub, "_open_trade_writer_session", open_session)
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", no_sleep)
+    for public_id in ("row-1", "row-2", "tail"):
+        await pub._trade_write_queue.put(_publisher_trade_row(public_id))
+
+    await pub._trade_writer_loop()
+    await asyncio.wait_for(pub._trade_write_queue.join(), timeout=0.5)
+
+    assert calls == [["row-1", "row-2"], ["row-1", "row-2"], ["tail"]]
+    assert queued_during_calls == [1, 1, 0]
+    assert session_opens == 2
+
+
+@pytest.mark.asyncio
 async def test_flush_trade_batch_rolls_back_writer_session_on_error() -> None:
-    """Verify trade flush errors roll back the held writer session.
+    """Verify blocked trade flushes roll back the held writer session.
 
     Given: A held trade writer session and a failing repository,
-    When: _flush_trade_batch catches the exception,
-    Then: The held writer session is rolled back and the error counter increments.
+    When: _flush_trade_batch classifies an unknown exception as statement-shaped,
+    Then: The exception escapes after rollback and the error counter increments.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
     writer_session, commit, rollback = _publisher_writer_session()
@@ -6090,7 +6338,8 @@ async def test_flush_trade_batch_rolls_back_writer_session_on_error() -> None:
     pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
     pub._trade_writer_session = writer_session
 
-    await pub._flush_trade_batch([_publisher_trade_row("tr1")])
+    with pytest.raises(RuntimeError, match="db fail"):
+        await pub._flush_trade_batch([_publisher_trade_row("tr1")])
 
     commit.assert_not_awaited()
     rollback.assert_awaited_once()
@@ -7548,16 +7797,17 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
             await pub._flush_candle_batch(batch)
 
     @pytest.mark.asyncio
-    async def test_flush_trade_batch_does_not_raise_on_non_disconnect(self) -> None:
-        """Non-disconnect errors stay swallowed (existing behavior).
+    async def test_flush_trade_batch_fails_closed_on_unknown_error(self) -> None:
+        """Unknown errors escape as statement-shaped failures.
 
         Given: A publisher whose upsert_trades raises a constraint error,
         When: _flush_trade_batch is called,
-        Then: No exception escapes; flush_errors counter is incremented.
+        Then: The error escapes and the flush_errors counter is incremented.
         """
-        pub: Any = DummyPublisher(symbols=["BTC-USD"])
-        pub.repository = SimpleNamespace(
-            upsert_trades=AsyncMock(side_effect=RuntimeError("duplicate key")),
+        pub = DummyPublisher(symbols=["BTC-USD"])
+        pub.repository = cast(
+            Repository,
+            SimpleNamespace(upsert_trades=AsyncMock(side_effect=RuntimeError("duplicate key"))),
         )
         batch = [
             {
@@ -7573,7 +7823,8 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
                 "sequence_id": 0,
             }
         ]
-        await pub._flush_trade_batch(batch)
+        with pytest.raises(RuntimeError, match="duplicate key"):
+            await pub._flush_trade_batch(batch)
         assert pub._flush_errors["trade"] == 1
 
 

@@ -19,6 +19,7 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from enum import Enum
 from functools import partial
 from time import monotonic
 from time import perf_counter_ns
@@ -255,6 +256,12 @@ connection died (Postgres restart, network reset, fwall idle-out) rather
 than a query-level problem (constraint violation, syntax error, timeout
 on a still-live connection)."""
 
+_TRADE_TRANSIENT_SQLSTATES: Final = frozenset({"40001", "57P03"})
+"""Retryable PostgreSQL trade-writer failures outside connection class 08."""
+
+_TRADE_ROW_INTEGRITY_SQLSTATES: Final = frozenset({"23505", "23514", "23502"})
+"""Integrity failures whose outcome can depend on one trade row."""
+
 
 class FeedDarkTooLongError(RuntimeError):
     """Raised by the heartbeat loop when a feed stays dark past the exit ceiling.
@@ -269,14 +276,18 @@ class FeedDarkTooLongError(RuntimeError):
 
 
 class _WriterSessionLostError(Exception):
-    """Pinned writer session lost its underlying DB connection.
+    """Pinned writer attempt needs a fresh session and retained-batch retry.
 
     The writer loop catches this to dispose the dead session and
     re-enter ``_open_*_writer_session()`` so a fresh connection is
-    acquired. Separate from generic flush errors so transient SQL
-    failures (constraint violations on a still-live session, timeouts
-    that did not break the connection) do not trigger session churn.
+    acquired. Connection failures and serialization aborts use this
+    retry path; row-dependent and statement-shaped failures have
+    separate dispositions.
     """
+
+
+class _TradeWriterBlockedError(RuntimeError):
+    """Trade statement failure that must retain and retry the whole batch."""
 
 
 def _is_disconnect_error(exc: BaseException) -> bool:
@@ -300,6 +311,48 @@ def _is_disconnect_error(exc: BaseException) -> bool:
         return True
     msg = str(exc).lower()
     return any(hint in msg for hint in _DISCONNECT_HINTS)
+
+
+def _database_sqlstate(exc: BaseException) -> str | None:
+    """Extract a structured SQLSTATE from SQLAlchemy or driver exceptions.
+
+    Args:
+        exc: Exception raised by the trade persistence call.
+
+    Returns:
+        The first driver SQLSTATE found, or ``None`` when unavailable.
+    """
+    sources: list[object] = [exc]
+    if isinstance(exc, DBAPIError):
+        sources.insert(0, exc.orig)
+    for source in sources:
+        for attribute in ("sqlstate", "pgcode"):
+            value = getattr(source, attribute, None)
+            if isinstance(value, str):
+                return value
+        diag = getattr(source, "diag", None)
+        diag_sqlstate = getattr(diag, "sqlstate", None)
+        if isinstance(diag_sqlstate, str):
+            return diag_sqlstate
+    return None
+
+
+def _is_transient_trade_write_error(exc: BaseException) -> bool:
+    """Return whether a trade write should use the writer retry/backoff path.
+
+    Args:
+        exc: Exception raised by the trade persistence call.
+
+    Returns:
+        ``True`` for lost connections, connection-class SQLSTATEs,
+        unavailable servers, and serialization failures.
+    """
+    if _is_disconnect_error(exc):
+        return True
+    sqlstate = _database_sqlstate(exc)
+    return sqlstate in _TRADE_TRANSIENT_SQLSTATES or (
+        sqlstate is not None and sqlstate.startswith("08")
+    )
 
 
 _DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles")
@@ -564,6 +617,13 @@ def _cleanup_pending_future(fut: asyncio.Future[Any] | None) -> None:
             fut.result()
 
 
+class _TradeDedupState(Enum):
+    """Track which delivery obligations a trade id has reached."""
+
+    PUBLISHED = "published"
+    OBLIGATED = "obligated"
+
+
 class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for publishing market data via ZMQ messaging."""
 
@@ -591,7 +651,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.heartbeat_seq = 0
         self._last_data_timestamps: dict[str, float] = {}
         self._last_tick_payload: dict[str, tuple[TickPayloadValue, ...]] = {}
-        self._seen_trade_ids: dict[str, collections.OrderedDict[str, None]] = {}
+        self._seen_trade_ids: dict[str, collections.OrderedDict[str, _TradeDedupState]] = {}
         self._last_message_at: float = monotonic()
         self._last_candle_msg_at: float = monotonic()
         self._consumes_native_candles: bool = False
@@ -3804,13 +3864,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 trade = done.pop().result()
                 if trade is _STREAM_END:
                     break
-                row = await self._process_trade(cast(TradeUpdate, trade), exchange)
+                trade_update = cast(TradeUpdate, trade)
+                row = await self._process_trade(trade_update, exchange)
                 if row is not None and self._should_persist_row(
-                    "trades", exchange, cast(TradeUpdate, trade).symbol
+                    "trades", exchange, trade_update.symbol
                 ):
                     _enqueue_or_drop_oldest_trade_write(
                         self._trade_write_queue, row, exchange_label
                     )
+                    self._set_trade_dedup_state(trade_update, _TradeDedupState.OBLIGATED)
                 t_iter_end = perf_counter_ns()
                 trade_probe.record("trade_iter_total", t_iter_end - t_iter_start)
                 trade_probe.maybe_flush()
@@ -3851,9 +3913,40 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             except _WriterSessionLostError as exc:
                 if self._writer_recovery_finished(self._trade_write_queue, state):
                     return
+                state.started_at = 0.0
                 backoff_s = await self._writer_recovery_backoff(
                     "trade", backoff_s, len(state.batch), exc
                 )
+            except (DBAPIError, _TradeWriterBlockedError) as exc:
+                if self._writer_recovery_finished(self._trade_write_queue, state):
+                    return
+                state.started_at = 0.0
+                backoff_s = await self._trade_writer_blocked_backoff(
+                    backoff_s, len(state.batch), exc
+                )
+
+    @staticmethod
+    async def _trade_writer_blocked_backoff(
+        backoff_s: float,
+        held_rows: int,
+        exc: BaseException,
+    ) -> float:
+        """Pause before retrying a retained statement-blocked trade batch.
+
+        Args:
+            backoff_s: Current exponential backoff delay.
+            held_rows: Rows retained in the in-flight batch.
+            exc: Statement-shaped failure that blocked persistence.
+
+        Returns:
+            The next capped exponential backoff delay.
+        """
+        logger.error(
+            f"trade writer blocked by statement error ({exc}); retrying in "
+            f"{backoff_s:.1f}s with {held_rows} rows held"
+        )
+        await asyncio.sleep(backoff_s)
+        return min(backoff_s * 2.0, _WRITER_RECONNECT_MAX_BACKOFF_S)
 
     @contextlib.asynccontextmanager
     async def _open_trade_writer_session(self) -> AsyncIterator[AsyncSession | None]:
@@ -3889,8 +3982,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         plus the in-place clear.
 
         Args:
-            batch: In-flight write batch. Cleared in place on a
-                successful flush; left empty otherwise.
+            batch: In-flight write batch. Cleared after commit or
+                completed bad-row isolation and retained on retryable
+                or statement-shaped failure.
         """
         if not batch:
             return
@@ -3908,16 +4002,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     ) -> TradeUpsertRow | None:
         """Build trade message, publish to ZMQ, and return a DB row.
 
-        Publish-first: ZMQ delivery happens before instrument resolution.
-        Returns None when instrument is unknown (ZMQ still delivered).
+        First sightings reach ZMQ before instrument resolution. Redeliveries
+        already marked published retry row construction without publishing
+        again. Returns None while the instrument remains unknown.
 
         Trade-probe stages recorded here (enabled by
         ``SNAPPER_TRADE_PROBE``):
 
         * ``build_topic`` -- topic f-string assembly
         * ``build_trade_model`` -- Pydantic ``TradeData(...)`` construction
-        * ``publish`` -- end-to-end ``_publish_message`` cost (model
-          copy + JSON serialise + topic validate + socket send)
+        * ``publish`` -- end-to-end ``_publish_message`` cost for first
+          sightings, or the skipped stage for published redeliveries
         * ``ensure_instrument`` -- symbol -> instrument cache lookup
         * ``build_row`` -- ``_build_trade_row`` dict assembly
         * ``trade_total`` -- end-to-end cost from method entry
@@ -3932,8 +4027,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         native_symbol = trade.symbol
         received_at = datetime.now(UTC)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-        if self._is_duplicate_trade(trade):
+        dedup_state = self._get_trade_dedup_state(trade)
+        if dedup_state is _TradeDedupState.OBLIGATED:
             return None
+        skip_publish = dedup_state is _TradeDedupState.PUBLISHED
+        if dedup_state is None:
+            self._set_trade_dedup_state(trade, _TradeDedupState.PUBLISHED)
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
         t_after_topic = perf_counter_ns()
         trade_probe.record("build_topic", t_after_topic - t_start)
@@ -3956,7 +4055,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         t_after_build = perf_counter_ns()
         trade_probe.record("build_trade_model", t_after_build - t_after_topic)
-        await self._publish_message(topic, trade_msg)
+        if not skip_publish:
+            await self._publish_message(topic, trade_msg)
         t_after_publish = perf_counter_ns()
         trade_probe.record("publish", t_after_publish - t_after_build)
         instrument_public_id = await self._ensure_instrument(native_symbol)
@@ -3971,21 +4071,30 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         trade_probe.record("trade_total", t_end - t_start)
         return row
 
-    def _is_duplicate_trade(self, trade: TradeUpdate) -> bool:
-        """Return True when a trade id was already seen for the same symbol."""
+    def _get_trade_dedup_state(self, trade: TradeUpdate) -> _TradeDedupState | None:
+        """Return a trade id's delivery state and refresh its LRU position."""
         if trade.trade_id is None:
-            return False
+            return None
         cache = self._seen_trade_ids.get(trade.symbol)
         if cache is None:
-            cache = collections.OrderedDict[str, None]()
-            self._seen_trade_ids[trade.symbol] = cache
-        if trade.trade_id in cache:
+            return None
+        state = cache.get(trade.trade_id)
+        if state is not None:
             cache.move_to_end(trade.trade_id)
-            return True
-        cache[trade.trade_id] = None
+        return state
+
+    def _set_trade_dedup_state(self, trade: TradeUpdate, state: _TradeDedupState) -> None:
+        """Set a trade id's delivery state while enforcing the LRU bound."""
+        if trade.trade_id is None:
+            return
+        cache = self._seen_trade_ids.get(trade.symbol)
+        if cache is None:
+            cache = collections.OrderedDict[str, _TradeDedupState]()
+            self._seen_trade_ids[trade.symbol] = cache
+        cache[trade.trade_id] = state
+        cache.move_to_end(trade.trade_id)
         while len(cache) > _TRADE_ID_LRU_MAX_PER_SYMBOL:
             cache.popitem(last=False)
-        return False
 
     async def _publish_message(
         self, topic: str, message: MarketDataMessage
@@ -4542,47 +4651,94 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if _is_disconnect_error(e):
                 raise _WriterSessionLostError(str(e)) from e
 
+    async def _commit_trade_rows(self, batch: list[TradeUpsertRow]) -> None:
+        """Persist and commit one trade batch or bisection partition.
+
+        Args:
+            batch: Trade rows to write in one repository statement.
+        """
+        repository = self._require_repository()
+        writer_session = self._trade_writer_session
+        if writer_session is not None:
+            await repository.upsert_trades(batch, session=writer_session)
+            await writer_session.commit()
+            return
+        await repository.upsert_trades(batch)
+
+    async def _rollback_trade_writer_session(self) -> None:
+        """Roll back the pinned trade session after a failed partition."""
+        writer_session = self._trade_writer_session
+        if writer_session is None:
+            return
+        with contextlib.suppress(Exception):
+            await writer_session.rollback()
+
+    async def _flush_trade_batch_partition(self, batch: list[TradeUpsertRow]) -> int:
+        """Persist a partition and bisect only row-dependent integrity failures.
+
+        Args:
+            batch: Non-empty trade partition to persist.
+
+        Returns:
+            The number of singleton rows quarantined from this partition.
+
+        Raises:
+            _WriterSessionLostError: When the failure is transient.
+            DBAPIError: When a database error is statement-shaped.
+            _TradeWriterBlockedError: When an unstructured error must fail closed.
+        """
+        try:
+            await self._commit_trade_rows(batch)
+            return 0
+        except Exception as exc:
+            await self._rollback_trade_writer_session()
+            if _is_transient_trade_write_error(exc):
+                raise _WriterSessionLostError(str(exc)) from exc
+            sqlstate = _database_sqlstate(exc)
+            if sqlstate not in _TRADE_ROW_INTEGRITY_SQLSTATES:
+                if isinstance(exc, DBAPIError):
+                    raise
+                raise _TradeWriterBlockedError(str(exc)) from exc
+            if len(batch) == 1:
+                logger.error(
+                    f"Trade row quarantined: sqlstate={sqlstate}, payload={batch[0]!r}, error={exc}"
+                )
+                return 1
+            midpoint = len(batch) // 2
+            left_quarantined = await self._flush_trade_batch_partition(batch[:midpoint])
+            right_quarantined = await self._flush_trade_batch_partition(batch[midpoint:])
+            return left_quarantined + right_quarantined
+
     async def _flush_trade_batch(self, batch: list[TradeUpsertRow]) -> None:
-        """Flush trade batch to DB (ON CONFLICT DO NOTHING).
+        """Flush trades with retry, statement-block, and row-isolation taxonomy.
 
-        Mirrors :meth:`_flush_tick_batch`'s writer-session pattern:
-        when the trade writer task injected a pinned session via
-        :meth:`_open_trade_writer_session`, the upsert runs on that
-        session without acquiring a fresh DBAPI connection per
-        flush, and this method commits explicitly afterwards.
-
-        Records ``writer_upsert_call`` on the trade probe (enabled by
-        ``SNAPPER_TRADE_PROBE``) covering just the
-        ``upsert_trades + commit`` await pair so the operator can
-        attribute writer-side latency to the DB I/O round-trip vs the
-        surrounding bookkeeping captured by ``writer_flush_total``.
+        Connection and serialization failures escape to the writer's
+        existing retry/backoff path. Statement-shaped and unknown
+        failures escape without mutating the batch. SQLSTATEs 23505,
+        23514, and 23502 are bisected until each offending singleton
+        can be logged with its full payload while valid partitions commit.
 
         Args:
             batch: List of trade rows to persist.
         """
         if not batch:
             return
-        repository = self._require_repository()
         trade_probe = get_trade_probe()
         t_start = perf_counter_ns()
         try:
-            writer_session = self._trade_writer_session
-            if writer_session is not None:
-                await repository.upsert_trades(batch, session=writer_session)
-                await writer_session.commit()
-            else:
-                await repository.upsert_trades(batch)
-            self._flush_errors["trade"] = 0
-            trade_probe.record("writer_upsert_call", perf_counter_ns() - t_start)
-        except Exception as e:
+            quarantined_rows = await self._flush_trade_batch_partition(batch)
+        except Exception as exc:
             self._flush_errors["trade"] += 1
-            logger.error(f"Trade batch flush failed ({len(batch)} rows): {e}")
-            writer_session = self._trade_writer_session
-            if writer_session is not None:
-                with contextlib.suppress(Exception):
-                    await writer_session.rollback()
-            if _is_disconnect_error(e):
-                raise _WriterSessionLostError(str(e)) from e
+            sqlstate = _database_sqlstate(exc) or "unavailable"
+            logger.error(
+                f"Trade batch flush blocked ({len(batch)} rows, sqlstate={sqlstate}): {exc}"
+            )
+            raise
+        if quarantined_rows == 0:
+            self._flush_errors["trade"] = 0
+        else:
+            self._flush_errors["trade"] += quarantined_rows
+        trade_probe.record("writer_upsert_call", perf_counter_ns() - t_start)
 
     async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""
