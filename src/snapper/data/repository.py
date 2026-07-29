@@ -242,6 +242,7 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Tick
 from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
+from snapper.data.models import TradeIntegrityWorkItem
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
@@ -392,6 +393,9 @@ from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeCommandDispatchUpdate
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import TradeIntegrityMonitor
+from snapper.data.repository_types import TradeIntegrityRunResult
+from snapper.data.repository_types import TradeIntegrityWorkItemInsertRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
@@ -413,6 +417,10 @@ from snapper.data.repository_types import VenueFeeScheduleRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 from snapper.data.repository_types import WalletUserReadGrantRow
+from snapper.data.trade_integrity import TradeIntegrityPassRequest
+from snapper.data.trade_integrity import (
+    run_trade_integrity_monitor as run_trade_integrity_monitor_pass,
+)
 
 __all__ = [
     "Repository",
@@ -2653,6 +2661,28 @@ class Repository(ABC):
 
         Optional ``session`` lets writer tasks share a pinned
         connection across many flushes.
+        """
+        ...
+
+    @abstractmethod
+    async def run_trade_integrity_monitor(
+        self,
+        *,
+        monitor: TradeIntegrityMonitor,
+        now: datetime,
+        sweep_limit: int,
+        worklog_limit: int,
+    ) -> TradeIntegrityRunResult:
+        """Run one bounded, durable M1 or M2 pass.
+
+        Args:
+            monitor: Integrity invariant to evaluate.
+            now: Reference instant for scan settlement and lag.
+            sweep_limit: Maximum recent trades read.
+            worklog_limit: Maximum outstanding restore identities read.
+
+        Returns:
+            Durable pass result with bounded findings and cursor state.
         """
         ...
 
@@ -9549,6 +9579,28 @@ class SQLAlchemyRepository(Repository):
         return await self._upsert_batch(
             Trade, rows, ["instrument_public_id", "trade_id"], session=session
         )
+
+    async def run_trade_integrity_monitor(
+        self,
+        *,
+        monitor: TradeIntegrityMonitor,
+        now: datetime,
+        sweep_limit: int,
+        worklog_limit: int,
+    ) -> TradeIntegrityRunResult:
+        """Run one bounded M1 or M2 pass and commit its durable state."""
+        request = TradeIntegrityPassRequest(
+            monitor=monitor,
+            now=now,
+            sweep_limit=sweep_limit,
+            worklog_limit=worklog_limit,
+        )
+        async with self.session() as session:
+            return await run_trade_integrity_monitor_pass(
+                session,
+                self.dialect_name,
+                request,
+            )
 
     async def upsert_ticks(
         self, rows: list[TickUpsertRow], session: AsyncSession | None = None
@@ -33923,6 +33975,24 @@ class DatabaseRepository:
             return 0
         with self.get_session() as session:
             session.execute(insert(model), rows)
+            if _resolve_physical_table_name(model) == Trade.__tablename__:
+                work_items: list[TradeIntegrityWorkItemInsertRow] = []
+                for row in rows:
+                    trade_id = cast(str | None, row["trade_id"])
+                    work_items.append(
+                        TradeIntegrityWorkItemInsertRow(
+                            public_id=cast(str, row["public_id"]),
+                            instrument_public_id=cast(
+                                str,
+                                row["instrument_public_id"],
+                            ),
+                            trade_id=trade_id,
+                            executed_at=cast(datetime | None, row["executed_at"]),
+                            m1_pending=trade_id is not None,
+                            m2_pending=True,
+                        )
+                    )
+                session.execute(insert(TradeIntegrityWorkItem), work_items)
             session.commit()
         return len(rows)
 

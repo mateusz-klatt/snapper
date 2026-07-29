@@ -19,6 +19,71 @@ from typing import TypedDict
 from snapper.core.json_types import JsonObject
 from snapper.core.types import OrderExchange
 
+TradeIntegrityMonitor = Literal["m1", "m2"]
+
+
+class TradeIntegrityWorkItemInsertRow(TypedDict):
+    """Transactional worklog row emitted by a direct trade mutator."""
+
+    public_id: str
+    instrument_public_id: str
+    trade_id: str | None
+    executed_at: datetime | None
+    m1_pending: bool
+    m2_pending: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TradeIntegrityFinding:
+    """One identity that violates a trade-integrity invariant.
+
+    Attributes:
+        monitor: Monitor that found the violation.
+        public_id: Logical row identity for M2 findings.
+        instrument_public_id: Instrument half of an M1 venue identity.
+        trade_id: Venue trade identity for M1 findings.
+        expected_executed_at: Execution time carried by the candidate row.
+        conflicting_executed_at: Differing execution time found by M1.
+        active_count: Bounded active-row count for M2.
+    """
+
+    monitor: TradeIntegrityMonitor
+    public_id: str | None
+    instrument_public_id: str | None
+    trade_id: str | None
+    expected_executed_at: datetime | None
+    conflicting_executed_at: datetime | None
+    active_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TradeIntegrityRunResult:
+    """Bounded outcome of one durable integrity-monitor pass.
+
+    Attributes:
+        monitor: Monitor that ran.
+        findings: Violating identities, capped by the repository.
+        sweep_rows: Recent-window trade rows examined.
+        worklog_rows: Outstanding restore identities examined.
+        cursor_timestamp: Durable page cursor after the pass.
+        cursor_id: Durable ID tie-breaker after the pass.
+        covered_through: End of the last fully completed overlap pass.
+        lag_seconds: Distance from the settled horizon to completed coverage.
+        lagged: Whether lag breached half of the fixed overlap.
+        pass_completed: Whether this pass reached its fixed scan end.
+    """
+
+    monitor: TradeIntegrityMonitor
+    findings: tuple[TradeIntegrityFinding, ...]
+    sweep_rows: int
+    worklog_rows: int
+    cursor_timestamp: datetime
+    cursor_id: int
+    covered_through: datetime
+    lag_seconds: int
+    lagged: bool
+    pass_completed: bool
+
 
 class CandleUpsertRow(TypedDict, total=False):
     """Row dict for upsert_candles.

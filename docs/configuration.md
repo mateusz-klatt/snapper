@@ -57,12 +57,16 @@ The `Default` column reflects the Pydantic defaults on
 `BootstrapSettingsLoader` (`src/snapper/config/bootstrap.py`) for
 the server / encryption / ZMQ / coordinator / trade-safety rows. The
 observability rows further down (`SYSTEM_METRICS_*`, `RETENTION_*`,
-`DB_METRICS_*`, `DB_POOL_*`, `SNAPPER_*_PROBE`) and the notify-sidecar
+`DB_METRICS_*`, `DB_POOL_*`, `TRADE_INTEGRITY_*`,
+`SNAPPER_*_PROBE`) and the notify-sidecar
 `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` row are NOT loaded
 through that class.
 `application/system_metrics/snapshotter.py` and
 `application/db_stats/snapshotter.py` read their env vars directly
-via `os.environ`. The retention env vars are read in two places:
+via `os.environ`. The trade-integrity watchdog reads
+`TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS` directly in
+`application/data_quality/trade_integrity.py`. The retention env vars
+are read in two places:
 `application/retention/scheduler.py` (`RETENTION_INTERVAL_SECONDS`,
 `RETENTION_DISABLED`, `RETENTION_OUTPUT_DIR`) and
 `application/retention/service.py` (`RETENTION_DRY_RUN`), with
@@ -174,6 +178,7 @@ underlying snapshots and the retention window math.
 | `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` | `60` | Poll cadence for the per-exchange candle-freshness check (floor 5) |
 | `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` | `600` | Whole-exchange silence threshold before the `critical_system_error` alert path fires (floor 120) |
 | `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS` | unset | Per-exchange overrides as `exchange=seconds` CSV; `0` disables one exchange (e.g. `walutomat=1200,kraken_equities=900`) |
+| `TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS` | `60` | Coordinator-0 M1/M2 cadence, clamped to 30–60 seconds; row and timeout bounds are fixed in code |
 | `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` | `60` | Notify-sidecar cadence for scanning current open drift episodes whose owning users lack the lifetime `drift.<episode_public_id>` page; malformed or non-positive values use the default |
 | `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 | `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
@@ -639,6 +644,9 @@ MARKET_DATA_WATCHDOG_DISABLED=false
 MARKET_DATA_WATCHDOG_INTERVAL_SECONDS=60
 MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS=600
 # MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS=
+
+# Incremental trade-integrity monitors (coordinator instance 0 only)
+TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS=60
 
 # Notify-sidecar durable drift-page recovery
 PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS=60

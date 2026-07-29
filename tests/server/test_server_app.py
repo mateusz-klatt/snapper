@@ -217,6 +217,8 @@ class TestLifespan:
         stop_ai_research_trigger = AsyncMock()
         start_ai_review_maintenance = AsyncMock()
         stop_ai_review_maintenance = AsyncMock()
+        start_trade_integrity_watchdog = MagicMock()
+        stop_trade_integrity_watchdog = AsyncMock()
         with (
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch(
@@ -263,6 +265,8 @@ class TestLifespan:
                 _stop_system_metrics_snapshotter=AsyncMock(),
                 _start_market_data_watchdog=AsyncMock(),
                 _stop_market_data_watchdog=AsyncMock(),
+                _start_trade_integrity_watchdog=start_trade_integrity_watchdog,
+                _stop_trade_integrity_watchdog=stop_trade_integrity_watchdog,
                 _start_ai_research_trigger=start_ai_research_trigger,
                 _stop_ai_research_trigger=stop_ai_research_trigger,
                 _start_ai_review_maintenance=start_ai_review_maintenance,
@@ -311,6 +315,8 @@ class TestLifespan:
         stop_ai_research_trigger.assert_awaited_once()
         start_ai_review_maintenance.assert_awaited_once()
         stop_ai_review_maintenance.assert_awaited_once()
+        start_trade_integrity_watchdog.assert_called_once()
+        stop_trade_integrity_watchdog.assert_awaited_once()
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio

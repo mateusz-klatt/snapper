@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from snapper.application.ai_research.trigger import ENV_VARS as AI_RESEARCH_TRIGGER_ENV_VARS
 from snapper.application.ai_review.maintenance import ENV_VARS as AI_REVIEW_MAINTENANCE_ENV_VARS
+from snapper.application.data_quality.trade_integrity import ENV_VARS as TRADE_INTEGRITY_ENV_VARS
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
 from snapper.application.notify.portfolio_drift_recovery import (
     ENV_VARS as PORTFOLIO_DRIFT_RECOVERY_ENV_VARS,
@@ -87,6 +88,11 @@ class TestKnownEnvKeys:
         """The AI-review maintenance driver contributes its cadence key."""
         assert AI_REVIEW_MAINTENANCE_ENV_VARS.issubset(KNOWN_ENV_KEYS)
         assert "AI_REVIEW_MAINTENANCE_INTERVAL_SECONDS" in KNOWN_ENV_KEYS
+
+    def test_includes_trade_integrity_monitor_key(self) -> None:
+        """The trade-integrity watchdog contributes only its cadence key."""
+        assert TRADE_INTEGRITY_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        assert frozenset({"TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS"}) == TRADE_INTEGRITY_ENV_VARS
 
     def test_includes_retention_keys(self) -> None:
         """The retention subsystem contributes its ENV_VARS."""

@@ -119,6 +119,7 @@ from snapper.application.ai_review.maintenance import AiReviewMaintenanceService
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.ai_review.watchdog import AiDelegateWatchdog
+from snapper.application.data_quality.trade_integrity import TradeIntegrityWatchdog
 from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
 from snapper.application.db_stats.snapshotter import (
     resolve_disabled as _resolve_db_metrics_disabled,
@@ -579,6 +580,63 @@ async def _stop_market_data_watchdog(app: FastAPI) -> None:
         app: FastAPI application instance.
     """
     watchdog: MarketDataWatchdog | None = getattr(app.state, "market_data_watchdog", None)
+    if watchdog is None:
+        return
+    await watchdog.stop()
+
+
+def _start_trade_integrity_watchdog(
+    app: FastAPI,
+    *,
+    db_url: str,
+    settings: AppSettings,
+    msg_publisher: MessagePublisher | None = None,
+) -> None:
+    """Build and start the shared trade-integrity watchdog on instance zero.
+
+    The durable cursors and worklog are deployment-wide state, so exactly
+    one coordinator owns recurrence. Startup remains fail-soft and attaches
+    state only after the watchdog task is created.
+
+    Args:
+        app: FastAPI application whose state holds the watchdog.
+        db_url: SQLAlchemy URL for the durable monitor repository.
+        settings: Runtime coordinator partition identity.
+        msg_publisher: Shared publisher for synthetic health frames.
+    """
+    if settings.coordinator_instance_id != 0:
+        logger.info(
+            "Skipping TradeIntegrityWatchdog on coordinator instance {}/{}; instance 0 owns it",
+            settings.coordinator_instance_id,
+            settings.coordinator_instance_count,
+        )
+        return
+    try:
+        watchdog = TradeIntegrityWatchdog(
+            repo=get_repository(db_url),
+            msg_publisher=msg_publisher,
+        )
+        watchdog.start()
+    except Exception:
+        logger.exception(
+            "TradeIntegrityWatchdog startup failed — integrity baseline monitoring is offline"
+        )
+        return
+    app.state.trade_integrity_watchdog = watchdog
+    logger.info("TradeIntegrityWatchdog started")
+
+
+async def _stop_trade_integrity_watchdog(app: FastAPI) -> None:
+    """Stop the trade-integrity watchdog when attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    watchdog: TradeIntegrityWatchdog | None = getattr(
+        app.state,
+        "trade_integrity_watchdog",
+        None,
+    )
     if watchdog is None:
         return
     await watchdog.stop()
@@ -1122,6 +1180,31 @@ async def _sync_process_registry_for_instance(
     )
 
 
+def _initialize_lifespan_state(app: FastAPI) -> None:
+    """Initialize optional service handles before partial startup.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    app.state.zmq_bridge_task = None
+    app.state.system_metrics_snapshotter = None
+    app.state.retention_scheduler = None
+    app.state.db_stats_snapshotter = app.state.pnl_snapshotter = None
+    app.state.market_data_watchdog = None
+    app.state.trade_integrity_watchdog = None
+    app.state.ai_research_trigger = None
+    app.state.ai_review_maintenance = None
+    app.state.ai_delegate_watchdog = None
+    app.state.market_persist_policy = None
+    app.state.market_cache = None
+    app.state.market_stats_worker = None
+    app.state.remote_summary_cache = None
+    app.state.command_ack_registry = None
+    app.state.egress_snapshot_cache = None
+    app.state.egress_snapshot_publisher = None
+    app.state.egress_container = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan context manager.
@@ -1142,22 +1225,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
     settings_service: SettingsService | None = None
     process_factory: ProcessLauncherService | None = None
-    app.state.zmq_bridge_task = None
-    app.state.system_metrics_snapshotter = None
-    app.state.retention_scheduler = None
-    app.state.db_stats_snapshotter = app.state.pnl_snapshotter = None
-    app.state.market_data_watchdog = None
-    app.state.ai_research_trigger = None
-    app.state.ai_review_maintenance = None
-    app.state.ai_delegate_watchdog = None
-    app.state.market_persist_policy = None
-    app.state.market_cache = None
-    app.state.market_stats_worker = None
-    app.state.remote_summary_cache = None
-    app.state.command_ack_registry = None
-    app.state.egress_snapshot_cache = None
-    app.state.egress_snapshot_publisher = None
-    app.state.egress_container = None
+    _initialize_lifespan_state(app)
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -1259,6 +1327,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             app, db_url=settings.db_url, msg_publisher=user_publisher
         )
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
+        _start_trade_integrity_watchdog(
+            app,
+            db_url=settings.db_url,
+            settings=settings,
+            msg_publisher=user_publisher,
+        )
         await _start_ai_research_trigger(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_ai_review_maintenance(app, db_url=settings.db_url)
         _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
@@ -1318,6 +1392,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_ai_delegate_watchdog(app)
         await _stop_ai_review_maintenance(app)
         await _stop_ai_research_trigger(app)
+        await _stop_trade_integrity_watchdog(app)
         await _stop_market_data_watchdog(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)

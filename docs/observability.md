@@ -92,6 +92,63 @@ parks the watchdog entirely. Detection runs level-triggered — an
 exchange that stays silent keeps re-bursting each tick, so a notify
 sidecar restart cannot permanently miss an ongoing outage.
 
+### Trade-integrity monitors
+
+Coordinator instance 0 runs two incremental database monitors every
+`TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS` (default 60, clamped to
+30–60 seconds). M1 detects one non-null
+`(instrument_public_id, trade_id)` at differing
+`executed_at` values; M2 detects more than one active `trades` row for
+one `public_id`. The current U2 constraint and active-identity partial
+unique index make those conditions impossible, establishing the
+required zero baseline before U2 is widened.
+First startup does not pre-credit the window: completed coverage starts
+at the overlap boundary and becomes current only after the full initial
+pass completes.
+
+Each monitor returns at most 25,000 recent sweep rows and 2,000 durable
+restore/import worklog rows per run, then performs only targeted
+index-backed identity probes for at most 27,000 distinct candidates;
+each probe reads at most two matching index entries. The repository
+rejects larger row limits. Each repository call has a 30-second timeout;
+one timeout does not prevent the other monitor from running.
+Across both monitors the scheduler therefore requests at most 50,000
+sweep rows and 4,000 worklog rows per tick. Under normal production
+load each monitor is expected to finish well inside its 30-second
+ceiling.
+
+Findings or excessive completed-coverage lag publish three WARNING
+heartbeats, two seconds apart, on
+`system.heartbeats.trade_integrity.{m1|m2}`. Clean passes publish one
+HEALTHY frame. The existing `critical_system_error` rule handles the
+three-frame gate, hourly deduplication, and operator fan-out. With
+successful calls and an available publisher, committed worklog
+identities with no backlog are normally detected in about 65 seconds
+for M1 and 99 seconds for M2 at the default cadence; worst tick ordering
+with successful calls consuming their full timeout is about 94 seconds
+for M1 and 128 seconds for M2. The raw six-hour
+overlap contains about 1.68 million rows at the current ingestion rate;
+arrivals during pagination expand a steady pass to about 2.06 million
+rows, or roughly 82 minutes at 25,000 rows per minute. Including the
+five-minute settlement grace, cadence, and warning spacing, a newly
+settled cursor-only violation normally takes at most about 89 minutes
+to alert. If every successful database call consumes nearly all of its
+30-second budget, the same throughput calculation grows to roughly four
+hours. These
+are operational bounds, not mathematical guarantees: the publisher
+retries retained batches without a time limit, so a commit stalled for
+more than the six-hour overlap is outside enforced live-row coverage.
+Restore and import do not share that exposure because their trade write
+and exact monitor obligations commit in one transaction.
+
+An M1 or M2 finding blocks the U2-to-U3 widening: inspect the identities
+in heartbeat metadata and database logs, stop the responsible
+ingestion/restore/import writer, preserve the pending worklog evidence,
+and repair or quarantine the conflicting rows.
+A lag-only warning means the zero observation is not current; restore
+monitor coverage before treating the baseline as proven or proceeding
+with schema work.
+
 ### AI-delegate watchdog
 
 The API lifespan also runs `AiDelegateWatchdog`

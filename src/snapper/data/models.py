@@ -196,6 +196,8 @@ __all__ = [
     "Candle",
     "Tick",
     "Trade",
+    "TradeIntegrityWorkItem",
+    "TradeIntegrityMonitorCursor",
     "Order",
     "Execution",
     "Position",
@@ -841,6 +843,74 @@ class Trade(TemporalMixin, Base):
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class TradeIntegrityWorkItem(Base):
+    """Durable integrity checks requested by out-of-order trade writers."""
+
+    __tablename__ = "trade_integrity_worklog"
+    __table_args__ = (
+        Index(
+            "ix_trade_integrity_worklog_m1_pending",
+            "id",
+            sqlite_where=text("m1_pending = 1"),
+            postgresql_where=text("m1_pending IS TRUE"),
+        ),
+        Index(
+            "ix_trade_integrity_worklog_m2_pending",
+            "id",
+            sqlite_where=text("m2_pending = 1"),
+            postgresql_where=text("m2_pending IS TRUE"),
+        ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    enqueued_at: Mapped[datetime] = mapped_column(
+        TZDateTime(),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    m1_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    m2_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+
+
+class TradeIntegrityMonitorCursor(Base):
+    """Durable bounded-sweep progress for one trade integrity monitor."""
+
+    __tablename__ = "trade_integrity_monitor_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "monitor IN ('m1', 'm2')",
+            name="ck_trade_integrity_monitor_cursors_monitor",
+        ),
+        CheckConstraint(
+            "scan_cursor_id >= 0",
+            name="ck_trade_integrity_monitor_cursors_scan_cursor_id",
+        ),
+    )
+    monitor: Mapped[str] = mapped_column(String(2), primary_key=True)
+    covered_through: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    scan_cursor_timestamp: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    scan_cursor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    scan_end: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
 class Order(TemporalMixin, Base):

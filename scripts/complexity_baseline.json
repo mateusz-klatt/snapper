@@ -1225,7 +1225,7 @@
       "lifespan": {
         "C901": 12,
         "PLR0912": 13,
-        "PLR0915": 157
+        "PLR0915": 144
       }
     },
     "src/snapper/server/authenticated_websocket.py": {

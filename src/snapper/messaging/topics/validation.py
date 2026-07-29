@@ -674,6 +674,24 @@ def _validate_ai_delegate_heartbeat(segments: list[str]) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_trade_integrity_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate a trade-integrity monitor heartbeat topic.
+
+    Args:
+        segments: Split topic segments starting with
+            ``system.heartbeats.trade_integrity``.
+
+    Returns:
+        Validation success and an explanatory error string.
+    """
+    expected = "system.heartbeats.trade_integrity.{m1|m2}"
+    if len(segments) != 4:
+        return False, f"system.heartbeats.trade_integrity requires exactly 4 segments: {expected}"
+    if segments[3] not in {"m1", "m2"}:
+        return False, f"system.heartbeats.trade_integrity supports only m1 or m2: {expected}"
+    return True, ""
+
+
 _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str]]] = {
     "strategy": _validate_strategy_heartbeat,
     "executor": _validate_executor_heartbeat,
@@ -681,6 +699,7 @@ _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str
     "feed": _validate_feed_heartbeat,
     "marketdata": _validate_marketdata_heartbeat,
     "ai_delegate": _validate_ai_delegate_heartbeat,
+    "trade_integrity": _validate_trade_integrity_heartbeat,
 }
 
 
@@ -705,6 +724,8 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
       exchange-silence heartbeats from the API market-data watchdog.
     - ``system.heartbeats.ai_delegate.global`` (4 seg) — synthetic
       liveness and response heartbeats from the API AI-delegate watchdog.
+    - ``system.heartbeats.trade_integrity.{m1|m2}`` (4 seg) — bounded
+      database-integrity monitor status.
 
     Args:
         segments: Split topic segments (first two are 'system.heartbeats').
