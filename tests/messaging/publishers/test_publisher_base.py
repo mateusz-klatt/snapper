@@ -5398,6 +5398,7 @@ async def test_build_trade_row_materializes_fields() -> None:
     publisher.repository = repo
     trade_msg = _build_trade_message("BTC-USD")
     row = publisher._build_trade_row(trade_msg, "inst-pub-100")
+    assert row is not None
     assert row["instrument_public_id"] == "inst-pub-100"
     assert row["price"] == 100.0
     assert row["size"] == 1.5
@@ -5441,6 +5442,7 @@ async def test_flush_trade_batch_logs_errors() -> None:
     )
     trade_msg = _build_trade_message("BTC-USD")
     row = pub._build_trade_row(trade_msg, "inst-pub-1")
+    assert row is not None
     with pytest.raises(RuntimeError, match="db fail"):
         await pub._flush_trade_batch([row])
     assert pub._flush_errors["trade"] == 1
@@ -5468,6 +5470,7 @@ async def test_build_trade_row_handles_null_trade_id() -> None:
         side="buy",
     )
     row = publisher._build_trade_row(trade_msg, "inst-pub-1")
+    assert row is not None
     assert row["trade_id"] is None
 
 
@@ -5495,33 +5498,100 @@ async def test_build_trade_row_persists_when_no_trade_id() -> None:
         side="buy",
     )
     row = publisher._build_trade_row(trade_msg, "inst-pub-1")
+    assert row is not None
     assert row["trade_id"] is None
     await publisher._flush_trade_batch([row])
     assert len(repo.trade_calls) == 1
     assert repo.trade_calls[0][0]["trade_id"] is None
 
 
-def test_build_trade_row_rejects_missing_executed_at() -> None:
-    """Reject a trade upsert producer input without the required venue time.
+@pytest.mark.asyncio
+async def test_trade_loop_reports_missing_executed_at(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Expose missing venue execution times without flooding the error log.
 
-    Given: TradeData without an executed_at venue timestamp,
-    When: The publisher builds its TradeUpsertRow,
-    Then: It fails before producing a row that violates the repository contract.
+    Given: A trade loop receiving two timestamp-less trades in one burst,
+    When: Both trades are published and rejected from persistence,
+    Then: One ERROR identifies the exchange, symbol, and first trade while the
+        rate-limited counter retains the second drop.
     """
-    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
-    trade_msg = TradeData(
-        session_id="test-session",
-        sequence_id=1,
-        public_id="trade-pub-id",
-        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        instrument="BTC-USD",
-        exchange="kraken",
-        price=100.0,
-        volume=1.0,
-        side="buy",
-    )
-    with pytest.raises(ValueError, match="executed_at is required"):
-        publisher._build_trade_row(trade_msg, "inst-pub-1")
+    publisher, publish_mock = _dedup_publisher()
+    first_trade = _trade_update(trade_id="missing-time-1")
+    first_trade.timestamp = cast(datetime, None)
+    second_trade = _trade_update(trade_id="missing-time-2")
+    second_trade.timestamp = cast(datetime, None)
+    publisher._exchange_client = TradeSequenceClient([first_trade, second_trade])
+    publisher.running = True
+    sink_id = logger.add(caplog.handler, format="{message}", level="ERROR")
+    try:
+        await publisher._trade_loop(["BTC-USD"])
+    finally:
+        logger.remove(sink_id)
+
+    summaries = [
+        record
+        for record in caplog.records
+        if "trade_missing_executed_at_dropped_total" in record.message
+    ]
+    assert publish_mock.await_count == 2
+    assert publisher._trade_write_queue.empty()
+    assert len(summaries) == 1
+    assert summaries[0].levelname == "ERROR"
+    assert "exchange=kraken" in summaries[0].message
+    assert "symbol=BTC-USD" in summaries[0].message
+    assert "trade_id=missing-time-1" in summaries[0].message
+    assert publisher._trade_missing_executed_at_drop_counters["kraken"][0] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_skips_missing_executed_at_and_survives() -> None:
+    """Keep consuming after one trade lacks its venue execution time.
+
+    Given: An open trade stream with a timestamp-less trade followed by a valid trade,
+    When: The publisher loop consumes both trades and waits for the next one,
+    Then: The valid row reaches the writer queue, both trades reach ZMQ, and the
+        consumer loop remains alive.
+    """
+    publisher, publish_mock = _dedup_publisher()
+    release_stream = asyncio.Event()
+    bad_trade = _trade_update(trade_id="missing-time")
+    bad_trade.timestamp = cast(datetime, None)
+    good_trade = _trade_update(trade_id="good-time")
+
+    async def stream_trades() -> AsyncIterator[TradeUpdate]:
+        yield bad_trade
+        yield good_trade
+        await release_stream.wait()
+
+    def subscribe_trades(symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+        assert symbols == ["BTC-USD"]
+        return stream_trades()
+
+    publisher._exchange_client = SimpleNamespace(subscribe_trades=subscribe_trades)
+    publisher.running = True
+    loop_task = asyncio.create_task(publisher._trade_loop(["BTC-USD"]))
+    queued_row_task = asyncio.create_task(publisher._trade_write_queue.get())
+    try:
+        completed, _ = await asyncio.wait(
+            {loop_task, queued_row_task},
+            timeout=1.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert queued_row_task in completed, "trade loop exited before the valid trade was queued"
+        queued_row = queued_row_task.result()
+        publisher._trade_write_queue.task_done()
+        assert queued_row["trade_id"] == "good-time"
+        assert publish_mock.await_count == 2
+        assert not loop_task.done()
+    finally:
+        if not queued_row_task.done():
+            queued_row_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await queued_row_task
+        publisher.running = False
+        release_stream.set()
+        await asyncio.wait_for(loop_task, timeout=1.0)
 
 
 @pytest.mark.asyncio

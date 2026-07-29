@@ -126,6 +126,7 @@ _trade_writer_drop_counters: dict[str, list[float]] = {}
 _TRADE_ID_LRU_MAX_PER_SYMBOL: int = 1000
 """Bounded per-symbol LRU cache size for trade-id deduplication."""
 _TRADE_DEDUP_DROP_LOG_INTERVAL_S: Final = 60.0
+_TRADE_MISSING_EXECUTED_AT_DROP_LOG_INTERVAL_S: Final = 60.0
 
 _CONSUMER_RESTART_BACKOFF_S = 2.0
 _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
@@ -752,6 +753,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._trade_writer_task: asyncio.Task[None] | None = None
         self._trade_writer_session: AsyncSession | None = None
         self._trade_dedup_drop_counters: dict[str, list[float]] = {}
+        self._trade_missing_executed_at_drop_counters: dict[str, list[float]] = {}
 
     def _require_repository(self) -> Repository:
         """Return initialized repository or raise an explicit runtime error.
@@ -889,6 +891,30 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         logger.info(
             "trade_dedup_dropped_total exchange={} count={} window_s={:.1f}",
             label,
+            int(counters[0]),
+            now - counters[1],
+        )
+        counters[0] = 0.0
+        counters[1] = now
+
+    def _record_trade_missing_executed_at_drop(self, trade_msg: TradeData) -> None:
+        """Increment and rate-limit the missing execution-time drop counter.
+
+        Args:
+            trade_msg: Published trade that cannot be persisted without executed_at.
+        """
+        label = str(trade_msg.exchange)
+        counters = self._trade_missing_executed_at_drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] < _TRADE_MISSING_EXECUTED_AT_DROP_LOG_INTERVAL_S:
+            return
+        logger.error(
+            "trade_missing_executed_at_dropped_total exchange={} symbol={} "
+            "trade_id={} count={} window_s={:.1f}",
+            label,
+            trade_msg.instrument,
+            trade_msg.trade_id,
             int(counters[0]),
             now - counters[1],
         )
@@ -4515,7 +4541,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "sequence_id": tick_msg.sequence_id,
         }
 
-    def _build_trade_row(self, trade_msg: TradeData, instrument_public_id: str) -> TradeUpsertRow:
+    def _build_trade_row(
+        self, trade_msg: TradeData, instrument_public_id: str
+    ) -> TradeUpsertRow | None:
         """Build a TradeUpsertRow from a published TradeData message.
 
         Args:
@@ -4523,11 +4551,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             instrument_public_id: Resolved instrument identity.
 
         Returns:
-            Fully materialized row dict ready for repository upsert.
+            Fully materialized row ready for repository upsert, or ``None``
+            when the required venue execution time is missing.
         """
         executed_at = trade_msg.executed_at
         if executed_at is None:
-            raise ValueError("TradeData.executed_at is required for trade persistence")
+            self._record_trade_missing_executed_at_drop(trade_msg)
+            return None
         return {
             "public_id": trade_msg.public_id,
             "instrument_public_id": instrument_public_id,
