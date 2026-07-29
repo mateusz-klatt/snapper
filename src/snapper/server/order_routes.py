@@ -45,6 +45,8 @@ from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.execution_venue import ExecutionVenueError
+from snapper.application.trade.execution_venue import resolve_execution_venue
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -301,50 +303,19 @@ async def _resolve_execution_venue(
         HTTPException: 400 on any matrix violation, with a structured
             ``error_code`` detail.
     """
-    wants_paper = body.mode == ExecutionModeEnum.PAPER.value
-    wallets = await repo.list_active_wallets(as_of=as_of)
-    wallet = next((w for w in wallets if w["public_id"] == wallet_public_id), None)
-    if wallet is None:
+    try:
+        return await resolve_execution_venue(
+            repo,
+            body.exchange,
+            ExecutionModeEnum(body.mode),
+            wallet_public_id,
+            as_of,
+        )
+    except ExecutionVenueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_wallet",
-                "wallet_public_id": wallet_public_id,
-                "reason": "no active wallet row for the supplied wallet_public_id",
-            },
-        )
-    if wallet["is_paper"] != wants_paper:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "mode_wallet_mismatch",
-                "mode": body.mode,
-                "wallet_public_id": wallet_public_id,
-                "wallet_is_paper": wallet["is_paper"],
-                "reason": "mode='paper' requires a paper wallet and mode='live' a live wallet",
-            },
-        )
-    effective_exchange = ExchangeEnum.PAPER.value if wants_paper else body.exchange
-    credentials = await repo.list_active_wallet_credentials(as_of=as_of)
-    has_credential = any(
-        credential["wallet_public_id"] == wallet_public_id
-        and credential["exchange"] == effective_exchange
-        for credential in credentials
-    )
-    if not has_credential:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "wallet_credential_missing",
-                "wallet_public_id": wallet_public_id,
-                "exchange": effective_exchange,
-                "reason": (
-                    "no active wallet credential for the execution venue; "
-                    "no executor instance exists to consume the command"
-                ),
-            },
-        )
-    return effective_exchange
+            detail={"error_code": exc.error_code, **exc.details},
+        ) from exc
 
 
 _PAPER_SNAPSHOT_MAX_AGE = timedelta(seconds=30)

@@ -66,6 +66,9 @@ from snapper.application.portfolio.account_view import build_portfolio_account_s
 from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.execution_venue import ExecutionVenueError
+from snapper.application.trade.execution_venue import derive_manual_execution_mode
+from snapper.application.trade.execution_venue import resolve_execution_venue
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
@@ -735,9 +738,8 @@ async def _prepare_manual_order(
 ) -> _PreparedManualOrder | CallToolResult:
     """Validate access and precompute immutable rows for manual-order dispatch.
 
-    MCP manual orders are live-only because ``submit_manual_order``
-    exposes no mode parameter. The local mode value feeds both
-    persisted rows and the canonical shard-key helper.
+    MCP manual orders derive mode from the requested venue because the
+    public tool intentionally exposes no mode parameter.
     """
     claims = claims_getter()
     _require_permission(claims, Permission.CREATE_ORDERS)
@@ -751,7 +753,7 @@ async def _prepare_manual_order(
     )
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
     created_at = datetime.now(UTC)
-    manual_order_mode = ExecutionModeEnum.LIVE
+    manual_order_mode = derive_manual_execution_mode(order.exchange)
     ensure_operator_in_claims(claims, order.operator_public_id)
     if order.wallet_public_id is not None and order.wallet_public_id.strip() == "":
         return _manual_order_wallet_blank_result()
@@ -768,6 +770,21 @@ async def _prepare_manual_order(
     except (WalletAmbiguousError, WalletUnresolvedError) as exc:
         return _manual_order_wallet_resolution_result(exc)
     await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    try:
+        execution_exchange = await resolve_execution_venue(
+            repo,
+            order.exchange,
+            manual_order_mode,
+            wallet_public_id,
+            created_at,
+        )
+    except ExecutionVenueError as exc:
+        return to_call_tool_result(
+            success=False,
+            error_code=exc.error_code,
+            message=str(exc.details["reason"]),
+            details=sanitize_output(exc.details),
+        )
     resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
         order.instrument, order.exchange, created_at
     )
@@ -786,7 +803,7 @@ async def _prepare_manual_order(
     bus_time = dt.datetime.now(dt.UTC)
     shard_key = compute_shard_key(
         instrument=order.instrument,
-        exchange=cast(OrderExchange, order.exchange),
+        exchange=cast(OrderExchange, execution_exchange),
         mode=manual_order_mode,
         wallet_public_id=wallet_public_id,
         strategy_tag=None,
@@ -813,7 +830,7 @@ async def _prepare_manual_order(
         "created_by_user_id": user_public_id,
         "created_via": "api",
         "instrument_public_id": order.instrument_public_id,
-        "exchange": order.exchange,
+        "exchange": execution_exchange,
         "mode": manual_order_mode,
         "shard_key": shard_key,
         "wallet_public_id": wallet_public_id,
@@ -840,7 +857,7 @@ async def _prepare_manual_order(
         enforcer=enforcer,
         submission=submission,
         plan_row=plan_row,
-        exchange=order.exchange,
+        exchange=execution_exchange,
         instrument=order.instrument,
         mode=manual_order_mode,
         side=order.side,

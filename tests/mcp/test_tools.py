@@ -99,7 +99,27 @@ def _allow_wallet(repo: Any, wallet_public_id: str = "wallet-1") -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_wallet_row(wallet_public_id)]
     )
+    repo.list_active_wallets = AsyncMock(return_value=[_wallet_row(wallet_public_id)])
+    repo.list_active_wallet_credentials = AsyncMock(
+        return_value=[{"wallet_public_id": wallet_public_id, "exchange": "kraken"}]
+    )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+
+
+def _allow_execution_venue(
+    repo: Any,
+    wallet_public_id: str,
+    *,
+    is_paper: bool = False,
+    exchange: str = "kraken",
+) -> None:
+    """Configure active wallet and credential rows for venue validation."""
+    repo.list_active_wallets = AsyncMock(
+        return_value=[_wallet_row(wallet_public_id, is_paper=is_paper)]
+    )
+    repo.list_active_wallet_credentials = AsyncMock(
+        return_value=[{"wallet_public_id": wallet_public_id, "exchange": exchange}]
+    )
 
 
 def _build_server(
@@ -345,6 +365,123 @@ class TestSubmitManualOrderTool:
         assert cmd_row["ai_review_public_id"] is None
 
     @pytest.mark.asyncio
+    async def test_paper_exchange_writes_paper_mode_rows_and_shard(self) -> None:
+        """Paper MCP submits persist a consistent paper command-plane scope."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-paper"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-paper"))
+        _allow_wallet(repo, "paper-wallet")
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("paper-wallet", is_paper=True)]
+        )
+        repo.list_active_wallets = AsyncMock(
+            return_value=[_wallet_row("paper-wallet", is_paper=True)]
+        )
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[{"wallet_public_id": "paper-wallet", "exchange": "paper"}]
+        )
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="paper-inst")
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await call_raw_tool(
+            server,
+            "submit_manual_order",
+            {
+                "exchange": "paper",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "paper-inst",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "wallet_public_id": "paper-wallet",
+                "idempotency_key": "idem-paper",
+                "price": 50000.0,
+            },
+        )
+        assert result["command_public_id"] == "cmd-paper"
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        command_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["exchange"] == "paper"
+        assert plan_row["mode"] == "paper"
+        assert plan_row["shard_key"] == "paper.BTC-USD.paper.wpaperwallet"
+        assert command_row["exchange"] == "paper"
+        assert command_row["mode"] == "paper"
+        assert command_row["shard_key"] == "paper.BTC-USD.paper.wpaperwallet"
+
+    @pytest.mark.asyncio
+    async def test_explicit_paper_wallet_on_live_venue_is_refused_before_writes(self) -> None:
+        """An explicit paper wallet cannot bypass live-mode wallet parity."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo, "paper-wallet")
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("paper-wallet", is_paper=True)]
+        )
+        repo.list_active_wallets = AsyncMock(
+            return_value=[_wallet_row("paper-wallet", is_paper=True)]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await call_raw_tool(
+            server,
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "wallet_public_id": "paper-wallet",
+                "idempotency_key": "idem-paper-live",
+                "price": 50000.0,
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "mode_wallet_mismatch"
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_execution_credential_is_refused_before_writes(self) -> None:
+        """A wallet without a venue executor credential fails closed."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[])
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await call_raw_tool(
+            server,
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-no-credential",
+                "price": 50000.0,
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "wallet_credential_missing"
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_provenance_rows_carry_uuid7_session_id(self) -> None:
         """Plan and command rows stamp a canonical UUID7 session_id.
 
@@ -480,6 +617,7 @@ class TestSubmitManualOrderTool:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[_wallet_row("wallet-live")]
         )
+        _allow_execution_venue(repo, "wallet-live")
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         server = _build_server(
             repository=repo,
@@ -708,6 +846,7 @@ class TestSubmitManualOrderTool:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[_wallet_row("wallet-1"), _wallet_row("wallet-2")]
         )
+        _allow_execution_venue(repo, "wallet-1")
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         server = _build_server(
             repository=repo,

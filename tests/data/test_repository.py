@@ -59,6 +59,7 @@ from snapper.data.models import Tick
 from snapper.data.models import Trade
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueFeeSchedule
+from snapper.data.models import Wallet
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
@@ -10351,6 +10352,79 @@ async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: P
     assert found is not None
     assert found["plan_public_id"] == plan_pid
     assert found["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_paper_mcp_command_scope_finds_order(tmp_path: Path) -> None:
+    """Paper MCP command scope matches the executor-written paper order."""
+    r, symbol_pid, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    wallet_pid = "00000000-0000-7000-8000-000000000099"
+    async with r.session() as session:
+        session.add(
+            Wallet(
+                public_id=wallet_pid,
+                label="paper-mcp",
+                is_paper=True,
+                timestamp=now,
+                session_id="s-paper",
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+    _, paper_inst_pid = await r.ensure_instrument(
+        symbol_public_id=symbol_pid,
+        exchange="paper",
+        session_id="s-paper",
+        sequence_id=2,
+        timestamp=now,
+    )
+    _, command_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "paper.BTC-USD.paper.wpaper",
+            "exchange": "paper",
+            "instrument": "BTC-USD",
+            "mode": "paper",
+            "strategy_id": "manual",
+            "client_order_id": "cid-901",
+            "venue_client_id": "cid-901",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-901",
+            "session_id": "s-paper",
+            "sequence_id": 3,
+            "timestamp": now,
+            "wallet_public_id": wallet_pid,
+            "plan_public_id": "00000000-0000-7000-8000-0000000b0901",
+            "source_surface": "mcp",
+        }
+    )
+    await r.insert_order(
+        instrument_public_id=paper_inst_pid,
+        wallet_public_id=wallet_pid,
+        client_order_id="cid-901",
+        exchange_order_id="ex-901",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s-paper",
+        sequence_id=4,
+        timestamp=now,
+        plan_public_id="00000000-0000-7000-8000-0000000b0901",
+        mode="paper",
+    )
+    found = await r.get_order_by_command_public_id(command_pid, as_of=datetime.now(UTC))
+    assert found is not None
+    assert found["mode"] == "paper"
+    assert found["exchange"] == "paper"
 
 
 @pytest.mark.asyncio
