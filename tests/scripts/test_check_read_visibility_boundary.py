@@ -1779,8 +1779,12 @@ class TestRunScan:
         )
         assert boundary.run_scan(tmp_path, strict_mode=False) == 0
 
+    @pytest.mark.timeout(60)
     def test_real_repository_passes_strict_mode(self) -> None:
         """The shipped tree honors its own read/trade split.
+
+        The repository-scale AST contract deliberately has a larger deadline
+        than unit tests while retaining the complete strict scan.
 
         Given: The real repository root,
         When: The boundary is scanned in strict mode,
@@ -1789,10 +1793,14 @@ class TestRunScan:
         root = Path(boundary.__file__).resolve().parent.parent
         assert boundary.run_scan(root, strict_mode=True) == 0
 
+    @pytest.mark.timeout(60)
     def test_main_strict_passes_on_the_real_repository(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The strict CLI entry point returns success on the shipped tree.
+
+        The repository-scale AST contract deliberately has a larger deadline
+        than unit tests while retaining the complete strict scan.
 
         Given: The process invoked with the --strict flag,
         When: main resolves the repository root and scans it,

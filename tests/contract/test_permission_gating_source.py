@@ -16,6 +16,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _AUTH_ROLE_VALUES = frozenset(
     {"admin", "operator", "viewer", "ai_delegate", "ai_reviewer", "ai_researcher"}
@@ -600,8 +602,12 @@ def _format_occurrences(findings: Iterable[Finding]) -> str:
     )
 
 
+@pytest.mark.timeout(60)
 def test_capability_decisions_never_branch_on_roles() -> None:
     """Reject capability decisions that branch on an authentication role.
+
+    The cross-language whole-tree contract deliberately has a larger deadline
+    than unit tests while retaining every production source root.
 
     Given: Every handwritten backend, frontend, iOS, and MCP production source,
     When: Executable role decisions are compared with the reviewed exceptions,
