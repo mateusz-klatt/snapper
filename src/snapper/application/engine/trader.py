@@ -30,6 +30,7 @@ from uuid import uuid7
 import zmq
 import zmq.asyncio
 from loguru import logger
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
@@ -122,6 +123,7 @@ from snapper.messaging.topics.builders import parse_signal_topic
 
 _bootstrap_settings = get_bootstrap_settings()
 
+_RECOVERY_MAX_ATTEMPTS = 3
 _REARM_RETIRED_CIDS_MAX = 10_000
 """Bound of the retired-cid LRU guarding late adopted re-arm frames (#155).
 
@@ -470,7 +472,7 @@ class TraderCoordinator(RegisterableProcess):
         self._setup_trading_components()
         self._setup_signal_subscriber()
         self._setup_trade_services()
-        await self._recover_engine_state()
+        await self._recover_engine_state_with_retry()
         await self._recover_paired_execution_leg_fills()
         await self._recover_paired_execution_guard_state()
         await self._run_trading_loop()
@@ -695,6 +697,72 @@ class TraderCoordinator(RegisterableProcess):
             f"{len(self.engines)} engines, "
             f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight"
         )
+
+    async def _recover_engine_state_with_retry(self) -> None:
+        """Run a clean recovery pass, retrying transient database outages.
+
+        Each failed transient pass is discarded in full before the readiness
+        gate runs. Three complete passes bound startup while allowing two
+        recoveries from a database restart. The readiness gate supplies the
+        one-second bounded backoff and its own 120-second outage budget.
+        Exhaustion remains a distinct uncertified outcome and raises out of
+        startup so the process supervisor owns escalation.
+
+        Raises:
+            RuntimeError: If all recovery attempts encounter transient
+                database failures.
+        """
+        last_transient: OSError | DBAPIError | None = None
+        for attempt in range(1, _RECOVERY_MAX_ATTEMPTS + 1):
+            try:
+                await self._recover_engine_state()
+                return
+            except (OSError, DBAPIError) as exc:
+                if not self.repository._is_transient_db_connection_error(exc):
+                    raise
+                last_transient = exc
+                self._discard_partial_recovery_state()
+                await self.repository.wait_until_ready()
+                logger.warning(
+                    "ZMQTrader: transient database failure discarded recovery "
+                    "pass {}/{}; database ready for a clean retry",
+                    attempt,
+                    _RECOVERY_MAX_ATTEMPTS,
+                )
+        self._recovery_certification_failed = True
+        raise RuntimeError(
+            f"engine recovery exhausted {_RECOVERY_MAX_ATTEMPTS} transient attempts"
+        ) from last_transient
+
+    def _discard_partial_recovery_state(self) -> None:
+        """Replace every in-memory projection and index built by recovery.
+
+        Recovery also performs durable checkpoint, cycle, and position
+        projection upserts. Those repository operations are idempotent; this
+        reset removes the non-durable partial pass so the next pass derives its
+        result only from the durable database snapshot it reads.
+        """
+        self.trade_service = TradeService()
+        self.balance_service = BalanceService()
+        self._engines_by_pending_coid.clear()
+        self._engines_by_scope.clear()
+        self._engines_by_scope_legacy.clear()
+        self.engines = _EngineRegistry(self._register_engine_for_lookup)
+        self._order_shard_keys.clear()
+        self._order_shard_wallets.clear()
+        self._poisoned_client_order_ids.clear()
+        self._scope_shard_keys.clear()
+        self._legacy_scope_shard_keys.clear()
+        self._consumed_venue_event_watermarks.clear()
+        self._projection_identities.clear()
+        self._projection_locks.clear()
+        self._trusted_recovery_shards.clear()
+        self._recovery_baseline_shards.clear()
+        self._failed_recovery_shard_prefixes.clear()
+        self._failed_recovery_identities.clear()
+        self._checkpoint_recovered_shard_keys.clear()
+        self._checkpoint_recovered_shard_wallets.clear()
+        self._recovery_certification_failed = False
 
     async def _recover_paired_execution_leg_fills(self) -> None:
         """Re-project paired-execution leg fills from authoritative venue_events on startup.
@@ -945,6 +1013,10 @@ class TraderCoordinator(RegisterableProcess):
         try:
             checkpoints = await self.repository.get_all_checkpoints(as_of=now)
         except Exception as e:
+            if isinstance(e, OSError | DBAPIError) and (
+                self.repository._is_transient_db_connection_error(e)
+            ):
+                raise
             logger.error(f"ZMQTrader: Failed to query checkpoints for recovery: {e}")
             self._recovery_certification_failed = True
             return set()
@@ -2011,6 +2083,10 @@ class TraderCoordinator(RegisterableProcess):
         try:
             shard_keys = await self.repository.get_shard_keys_with_fills()
         except Exception as e:
+            if isinstance(e, OSError | DBAPIError) and (
+                self.repository._is_transient_db_connection_error(e)
+            ):
+                raise
             logger.error(f"ZMQTrader: Failed to query shards with fills for gap recovery: {e}")
             self._recovery_certification_failed = True
             return
@@ -2657,6 +2733,10 @@ class TraderCoordinator(RegisterableProcess):
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=None)
         except Exception as e:
+            if isinstance(e, OSError | DBAPIError) and (
+                self.repository._is_transient_db_connection_error(e)
+            ):
+                raise
             logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
             self._recovery_certification_failed = True
             return []
@@ -3291,6 +3371,10 @@ class TraderCoordinator(RegisterableProcess):
                 as_of=now,
             )
         except Exception as e:
+            if isinstance(e, OSError | DBAPIError) and (
+                self.repository._is_transient_db_connection_error(e)
+            ):
+                raise
             logger.error(
                 f"ZMQTrader: Failed to query active orders: {e} — failing the "
                 f"whole projection certification (an undiscovered in-flight "

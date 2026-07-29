@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 from loguru import logger
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 import snapper.application.engine.trader as trader_module
@@ -919,6 +920,232 @@ async def test_trader_coordinator_start_runs_guard_recovery_after_engine_recover
     coordinator_any._run_trading_loop = AsyncMock(side_effect=lambda: _record("loop"))
     await coordinator.start()
     assert calls == ["engine_recover", "leg_fills", "guard_recover", "loop"]
+
+
+def _db_error(sqlstate: str) -> DBAPIError:
+    """Build a database error carrying a PostgreSQL SQLSTATE.
+
+    Args:
+        sqlstate: PostgreSQL error code exposed by the driver exception.
+
+    Returns:
+        A SQLAlchemy database error wrapping the driver error.
+    """
+    return DBAPIError(None, None, SimpleNamespace(sqlstate=sqlstate))
+
+
+@pytest.mark.asyncio
+async def test_recovery_transient_error_retries_clean_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient recovery failure discards state and retries successfully.
+
+    Given: A recovery pass that leaves partial state before a transient DB error,
+    When: Recovery runs through the bounded retry coordinator,
+    Then: Readiness is awaited and the successful pass starts from empty state.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = coordinator.repository
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    repository.wait_until_ready = AsyncMock()
+    attempts = 0
+
+    async def _recover() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            coordinator.trade_service.get_position("partial")
+            coordinator._trusted_recovery_shards.add("partial")
+            raise OSError("database restarting")
+        assert coordinator.trade_service.known_shard_keys() == set()
+        assert coordinator._trusted_recovery_shards == set()
+
+    coordinator._recover_engine_state = _recover
+    await coordinator._recover_engine_state_with_retry()
+    assert attempts == 2
+    repository.wait_until_ready.assert_awaited_once()
+    assert coordinator._recovery_certification_failed is False
+
+
+@pytest.mark.asyncio
+async def test_persistent_recovery_error_quarantines_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permanent database failure keeps the existing immediate quarantine.
+
+    Given: A checkpoint discovery query failing with invalid credentials,
+    When: The checkpoint recovery site classifies the database error,
+    Then: It quarantines immediately without entering the readiness gate.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = MagicMock(spec=SQLAlchemyRepository)
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    repository.get_all_checkpoints = AsyncMock(side_effect=_db_error("28P01"))
+    repository.wait_until_ready = AsyncMock()
+    coordinator.repository = repository
+    recovered = await coordinator._recover_from_checkpoints(datetime.now(UTC))
+    assert recovered == set()
+    assert coordinator._recovery_certification_failed is True
+    repository.get_all_checkpoints.assert_awaited_once()
+    repository.wait_until_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recovery_method", "repository_method"),
+    [
+        ("_recover_from_checkpoints", "get_all_checkpoints"),
+        ("_recover_venue_event_gaps", "get_shard_keys_with_fills"),
+        ("_load_execution_recovery_rows", "get_executions_for_recovery"),
+        ("_load_active_orders_for_recovery", "get_active_orders_for_recovery"),
+    ],
+)
+async def test_recovery_discovery_sites_propagate_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_method: str,
+    repository_method: str,
+) -> None:
+    """Every recovery discovery site propagates transient DB failures.
+
+    Given: One recovery discovery query failing while PostgreSQL is restarting,
+    When: The corresponding recovery phase runs,
+    Then: The classified transient error escapes to the whole-pass retry boundary.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = MagicMock(spec=SQLAlchemyRepository)
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    setattr(repository, repository_method, AsyncMock(side_effect=_db_error("57P03")))
+    coordinator.repository = repository
+    method = cast(
+        Callable[..., Coroutine[object, object, object]],
+        getattr(coordinator, recovery_method),
+    )
+    arguments = (
+        (datetime.now(UTC),)
+        if recovery_method in ("_recover_from_checkpoints", "_recover_venue_event_gaps")
+        or recovery_method == "_load_active_orders_for_recovery"
+        else ()
+    )
+    with pytest.raises(DBAPIError):
+        await method(*arguments)
+
+
+@pytest.mark.asyncio
+async def test_retry_boundary_does_not_retry_permanent_database_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry boundary refuses permanent database failures.
+
+    Given: A nested recovery operation surfacing an invalid-credentials error,
+    When: The whole-pass retry boundary classifies it,
+    Then: The original permanent error escapes without readiness or retry.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = coordinator.repository
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    repository.wait_until_ready = AsyncMock()
+    coordinator._recover_engine_state = AsyncMock(side_effect=_db_error("28P01"))
+    with pytest.raises(DBAPIError):
+        await coordinator._recover_engine_state_with_retry()
+    coordinator._recover_engine_state.assert_awaited_once()
+    repository.wait_until_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_pass_contradiction_does_not_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contradiction from a transiently interrupted pass is discarded.
+
+    Given: A pass that records a contradiction before a transient DB failure,
+    When: Readiness clears and the next complete pass is clean,
+    Then: The interrupted contradiction does not quarantine recovery.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = coordinator.repository
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    repository.wait_until_ready = AsyncMock()
+    attempts = 0
+
+    async def _recover() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            coordinator._recovery_certification_failed = True
+            raise _db_error("57P03")
+
+    coordinator._recover_engine_state = _recover
+    await coordinator._recover_engine_state_with_retry()
+    assert attempts == 2
+    assert coordinator._recovery_certification_failed is False
+
+
+@pytest.mark.asyncio
+async def test_clean_pass_contradiction_quarantines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contradiction observed by a clean pass remains quarantined.
+
+    Given: A complete recovery pass that records a durable contradiction,
+    When: The pass finishes without a transient database error,
+    Then: Recovery remains uncertified and no retry is attempted.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = coordinator.repository
+    repository.wait_until_ready = AsyncMock()
+    attempts = 0
+
+    async def _recover() -> None:
+        nonlocal attempts
+        attempts += 1
+        coordinator._recovery_certification_failed = True
+
+    coordinator._recover_engine_state = _recover
+    await coordinator._recover_engine_state_with_retry()
+    assert attempts == 1
+    assert coordinator._recovery_certification_failed is True
+    repository.wait_until_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_retry_exhaustion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry exhaustion raises and leaves execution certification closed.
+
+    Given: Every bounded recovery pass fails with a transient DB error,
+    When: The final readiness gate succeeds but no clean pass completes,
+    Then: Startup raises its own exhaustion outcome and remains uncertified.
+    """
+    _configure_settings(monkeypatch)
+    coordinator = TraderCoordinator()
+    repository = coordinator.repository
+    repository._is_transient_db_connection_error = (
+        SQLAlchemyRepository._is_transient_db_connection_error
+    )
+    repository.wait_until_ready = AsyncMock()
+    coordinator._recover_engine_state = AsyncMock(side_effect=OSError("database restarting"))
+    with pytest.raises(RuntimeError, match="exhausted 3 transient attempts"):
+        await coordinator._recover_engine_state_with_retry()
+    assert coordinator._recovery_certification_failed is True
+    assert coordinator._recover_engine_state.await_count == 3
+    assert repository.wait_until_ready.await_count == 3
 
 
 def test_trader_coordinator_repr() -> None:
