@@ -543,7 +543,8 @@ class PortfolioPnlSnapshotter:
             key = (minutes[0], tuple(sorted(selected.reason_codes)))
             if self._self_heal_logged.get(ctx.wallet_public_id) != key:
                 logger.info(
-                    "PortfolioPnlSnapshotter: wallet {} self-heal window starts at {} with reasons {}",
+                    "PortfolioPnlSnapshotter: wallet %s self-heal window starts at %s "
+                    "with reasons %s",
                     ctx.wallet_public_id,
                     key[0],
                     key[1],
@@ -951,7 +952,7 @@ def _parse_baseline(watermarks_json: str) -> dict[str, int]:
     """
     try:
         payload = json.loads(watermarks_json)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return {}
     if not isinstance(payload, dict):
         return {}
@@ -992,7 +993,7 @@ def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]
         return set()
     try:
         payload = json.loads(balances_json)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return set()
     if not isinstance(payload, list):
         return set()
@@ -1024,7 +1025,7 @@ def _extract_reason_codes(audit_json: str) -> frozenset[str]:
     """
     try:
         payload = json.loads(audit_json)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return frozenset()
     if not isinstance(payload, dict):
         return frozenset()
