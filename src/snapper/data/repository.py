@@ -3657,8 +3657,9 @@ class Repository(ABC):
 
         Built for high-cardinality replays (paper backtest,
         multi-day windows). Implementations yield rows in
-        ``event_time ASC`` order using the
-        ``coalesce(executed_at, timestamp)`` event time.
+        ``executed_at ASC`` order. Exchange execution time is the sole event
+        boundary; ``timestamp`` remains the ingestion-time knowledge boundary
+        and must never substitute for a missing execution time.
         """
         ...
 

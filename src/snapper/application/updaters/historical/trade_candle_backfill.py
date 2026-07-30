@@ -377,13 +377,9 @@ class TradeCandleBackfillService(RegisterableProcess):
             trade: Repository trade row.
 
         Returns:
-            ``executed_at`` when present, otherwise ``timestamp``,
-            normalized to UTC.
+            ``executed_at`` normalized to UTC.
         """
-        executed_at = trade["executed_at"]
-        if executed_at is not None:
-            return _as_utc(executed_at)
-        return _as_utc(trade["timestamp"])
+        return _as_utc(trade["executed_at"])
 
     async def _append_completed_candles(
         self,

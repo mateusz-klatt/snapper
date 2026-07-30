@@ -349,6 +349,58 @@ async def test_single_instrument_multiple_minutes_skips_trailing_partial() -> No
 
 
 @pytest.mark.asyncio
+async def test_trade_bucketing_uses_executed_at_across_timestamp_minutes() -> None:
+    """Exchange execution time must be the sole candle event-time boundary.
+
+    Given: Trades whose persisted timestamps fall in a different minute from
+        their exchange execution timestamps.
+    When: The service reconstructs complete one-minute candles.
+    Then: Each trade is bucketed by ``executed_at`` and never by ``timestamp``.
+    """
+    repo = FakeRepository(
+        ["BTC-USD"],
+        {"BTC-USD": "inst-btc"},
+        [
+            (
+                "inst-btc",
+                _trade(
+                    _dt(1, 5),
+                    100.0,
+                    executed_at=_dt(0, 55),
+                    trade_id="executed-minute-zero",
+                ),
+            ),
+            (
+                "inst-btc",
+                _trade(
+                    _dt(0, 30),
+                    110.0,
+                    executed_at=_dt(1, 5),
+                    trade_id="executed-minute-one",
+                ),
+            ),
+        ],
+    )
+    service = _make_service(["BTC-USD"], False, end=_dt(2))
+
+    await _run_service(service, repo)
+
+    rows = repo.upsert_batches[0]
+    assert [
+        (
+            row["open_at"],
+            row["open"],
+            row["close"],
+            row["trades"],
+        )
+        for row in rows
+    ] == [
+        (_dt(0), 100.0, 100.0, 1),
+        (_dt(1), 110.0, 110.0, 1),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_all_symbols_processes_multiple_instruments_and_skips_unresolved() -> None:
     """All-symbol mode processes active instruments and skips unresolved rows.
 

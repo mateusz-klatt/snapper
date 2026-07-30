@@ -7,6 +7,7 @@ connection so scratch and convergence tests never inherit ``DB_URL``.
 """
 
 import os
+from collections.abc import Callable
 from datetime import date
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +68,16 @@ def _engine() -> Engine:
     return create_engine(_sync_database_url(settings.db_url), future=True)
 
 
+def _dispose_engine(engine: Engine | None) -> None:
+    """Dispose a constructed lifecycle engine after every command outcome.
+
+    Args:
+        engine: Short-lived engine, or no engine after an early refusal.
+    """
+    if engine is not None:
+        engine.dispose()
+
+
 def _effective_anchor(raw: str | None) -> datetime:
     """Resolve an optional strict anchor to current UTC midnight.
 
@@ -84,11 +95,24 @@ def _host_load() -> float:
 
     Returns:
         Current one-minute load average.
+
+    Raises:
+        DailyPartitionError: If the host exposes no supported load source.
     """
     load_path = Path("/proc/loadavg")
     if load_path.exists():
         return float(load_path.read_text(encoding="utf-8").split(maxsplit=1)[0])
-    return os.getloadavg()[0]
+    load_reader: Callable[[], tuple[float, float, float]] | None = getattr(
+        os,
+        "getloadavg",
+        None,
+    )
+    if load_reader is None:
+        raise DailyPartitionError(
+            "refused: cannot determine one-minute host load because "
+            "/proc/loadavg and os.getloadavg are unavailable"
+        )
+    return load_reader()[0]
 
 
 def _require_safe_adoption_load() -> None:
@@ -179,8 +203,7 @@ def inspect_command(
     except (DailyPartitionError, ValueError, OSError) as error:
         _fatal(error)
     finally:
-        if engine is not None:
-            engine.dispose()
+        _dispose_engine(engine)
 
 
 @daily_partitions_app.command(name="adopt")
@@ -222,8 +245,7 @@ def adopt_command(
     except (DailyPartitionError, ValueError, OSError) as error:
         _fatal(error)
     finally:
-        if engine is not None:
-            engine.dispose()
+        _dispose_engine(engine)
 
 
 @daily_partitions_app.command(name="ensure")
@@ -263,8 +285,7 @@ def ensure_command(
     except (DailyPartitionError, ValueError, OSError) as error:
         _fatal(error)
     finally:
-        if engine is not None:
-            engine.dispose()
+        _dispose_engine(engine)
 
 
 @daily_partitions_app.command(name="detach")
@@ -308,5 +329,4 @@ def detach_command(
     except (DailyPartitionError, ValueError, OSError) as error:
         _fatal(error)
     finally:
-        if engine is not None:
-            engine.dispose()
+        _dispose_engine(engine)

@@ -222,6 +222,20 @@ def test_manual_cutover_plan_preserves_legacy_and_builds_fourteen_days(
     assert statements[-1] == (f"ALTER SEQUENCE {table}_id_seq OWNED BY {table}.id")
 
 
+def test_manual_cutover_refuses_to_drop_every_ordinary_check() -> None:
+    """Adoption must not silently discard an unrecognized CHECK manifest.
+
+    Given: A validated ordinary table whose CHECK catalog resolved to no rows.
+    When: The independent runtime cutover planner is asked to render DDL.
+    Then: It refuses before emitting a parent or renaming the source table.
+    """
+    with pytest.raises(
+        lifecycle.DailyPartitionError,
+        match="no ordinary CHECK constraints to preserve",
+    ):
+        lifecycle._cutover_statements(lifecycle._spec("ticks"), _ANCHOR, ())
+
+
 def test_parent_unique_indexes_are_standalone_and_keep_the_exact_keys() -> None:
     """Unique parent arbiters must use index form and table-specific semantics.
 
