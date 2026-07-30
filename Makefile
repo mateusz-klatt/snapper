@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-server-uat dev-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite _force-test-db check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-server-uat dev-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -283,40 +283,45 @@ lint-fix:
 typecheck:
 	$(PYRUN) mypy $(PY_DIRS)
 
-TEST_DB_FILE := ./data/dev.db
+override TEST_DB_FILE := ./data/dev.db
 TEST_DB_URL ?= sqlite+aiosqlite:///$(TEST_DB_FILE)
+override TEST_DB_PREREQUISITE :=
+
+ifneq ($(filter sqlite%,$(TEST_DB_URL)),)
+  override TEST_DB_PREREQUISITE := $(TEST_DB_FILE)
+endif
 
 ifeq ($(OS),Windows_NT)
-  WITH_TEST_DB := set DB_URL=$(TEST_DB_URL)&&
+  WITH_TEST_DB := set "DB_URL=$(TEST_DB_URL)"&&
 else
   WITH_TEST_DB := DB_URL="$(TEST_DB_URL)"
 endif
 
-# Depend on the migration set so a cached dev.db is rebuilt whenever a migration
-# is added or changed; without this the file target is reused stale and newly
-# added columns are missing (db-init runs `alembic upgrade head` incrementally;
-# db-seed is idempotent, so re-running the recipe in place is safe and needs no
-# delete, keeping it cross-platform under both cmd and sh).
-$(TEST_DB_FILE): $(wildcard src/snapper/data/migrations/versions/*.py)
+# The helper owns the literal destructive target, lock, staging, validation,
+# and atomic publish. The force prerequisite rebuilds SQLite for every test or
+# coverage invocation. PostgreSQL overrides have no local fixture prerequisite.
+_force-test-db:
+	@:
+
+$(TEST_DB_FILE): _force-test-db
 	@echo "Bootstrapping local SQLite test fixture at $(TEST_DB_FILE)..."
-	$(WITH_TEST_DB) $(PYRUN) snapper db-init
-	$(WITH_TEST_DB) $(PYRUN) snapper db-seed --profile dev
+	@$(VENV_PY) scripts/rebuild_test_db.py
 
 migrate-dev-sqlite: $(TEST_DB_FILE)
 
-test: $(TEST_DB_FILE)
+test: $(TEST_DB_PREREQUISITE)
 	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
 
-test-serial: $(TEST_DB_FILE)
+test-serial: $(TEST_DB_PREREQUISITE)
 	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_TIMEOUT)
 
-test-integration: $(TEST_DB_FILE)
+test-integration: $(TEST_DB_PREREQUISITE)
 	$(WITH_TEST_DB) $(PYRUN) pytest tests/integration/ -v -m integration --timeout=120
 
-cov: $(TEST_DB_FILE)
+cov: $(TEST_DB_PREREQUISITE)
 	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
 
-cov-serial: $(TEST_DB_FILE)
+cov-serial: $(TEST_DB_PREREQUISITE)
 	$(WITH_TEST_DB) $(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
 
 cov-xml:

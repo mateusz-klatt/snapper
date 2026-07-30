@@ -565,23 +565,27 @@ def test_ack_barrier_rejects_terminal_and_short_lease_windows() -> None:
 def test_every_ack_barrier_receives_the_full_required_lease_window() -> None:
     """Every fence caller preserves both timeout and cleanup components.
 
-    Given: All five controller and retention flows that wait for publisher acknowledgements,
+    Given: Five controller and retention flows with six bounded fence consumers,
     When: Their call sites and the acknowledgement loop are inspected,
-    Then: Each supplies timeout plus cleanup and the loop enforces the live-window predicate.
+    Then: Each flow keeps its exact full-window count and the loop enforces the live predicate.
     """
-    callers = "\n".join(
-        inspect.getsource(function)
-        for function in (
-            rehearsal._run_normal_cutover,
-            rehearsal._run_kill_scenario,
-            rehearsal._ensure_post,
-            rehearsal._prove_pending_reconciliation,
-            rehearsal._prepare_retention_detach,
-        )
-    )
+    expected_call_counts = {
+        rehearsal._run_normal_cutover: 1,
+        rehearsal._run_kill_scenario: 1,
+        rehearsal._ensure_post: 1,
+        rehearsal._prove_pending_reconciliation: 1,
+        rehearsal._prepare_retention_detach: 2,
+    }
+    expression = "config.transaction_timeout_seconds + config.cleanup_margin_seconds"
     barrier = inspect.getsource(rehearsal._wait_fence_acks)
 
-    assert callers.count("config.transaction_timeout_seconds + config.cleanup_margin_seconds") == 5
+    actual_call_counts = {
+        function.__name__: inspect.getsource(function).count(expression)
+        for function in expected_call_counts
+    }
+    assert actual_call_counts == {
+        function.__name__: count for function, count in expected_call_counts.items()
+    }
     assert "_require_live_fence_window(" in barrier
 
 

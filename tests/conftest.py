@@ -36,6 +36,7 @@ Note:
 import asyncio
 import contextlib
 import gc
+import json
 import os
 import shutil
 import socket
@@ -44,6 +45,7 @@ import sys
 import tracemalloc
 import types
 import weakref
+from collections import Counter
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
 from pathlib import Path
@@ -52,10 +54,13 @@ from typing import cast
 from unittest import mock
 from unittest.mock import Mock
 
+import bcrypt
 import pytest
 import pytest_asyncio
 import zmq
 import zmq.asyncio
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -69,13 +74,16 @@ from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config import settings
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _repository_cache
 from snapper.data.repository import dispose_repositories
-from snapper.data.seed.loader import run_seed
+from snapper.data.seed.loader import _build_credential_envelope
+from snapper.data.seed.loader import load_seed_profile
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
+from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.server.rate_limiting import limiter
@@ -444,6 +452,248 @@ def _extract_sqlite_path(db_url: str) -> Path | None:
     return None
 
 
+def _sqlite_contract_rows(
+    connection: sqlite3.Connection,
+    statement: str,
+    parameters: dict[str, object] | None = None,
+) -> Counter[tuple[object, ...]]:
+    """Return one fixture-contract query while preserving row multiplicity."""
+    return Counter(tuple(row) for row in connection.execute(statement, parameters or {}).fetchall())
+
+
+def _require_fresh_seed_fixture(db_path: Path) -> None:
+    """Verify an isolated SQLite copy exactly matches the resolved dev seed."""
+    profile = load_seed_profile("dev")
+    declared_wallets = profile.wallets
+    expected_wallets = Counter(
+        (
+            wallet.label,
+            int(wallet.is_paper),
+            wallet.description,
+            1,
+        )
+        for wallet in declared_wallets
+    )
+    expected_credentials = Counter(
+        (
+            wallet.label,
+            int(wallet.is_paper),
+            credential.exchange,
+            credential.credential_type,
+            credential.label,
+            json.dumps(
+                json.loads(_build_credential_envelope(credential)),
+                sort_keys=True,
+            ),
+            1,
+            1,
+        )
+        for wallet in declared_wallets
+        for credential in wallet.credentials
+    )
+    expected_methods = Counter(
+        (
+            wallet.label,
+            int(wallet.is_paper),
+            credential.exchange,
+            "live",
+            credential.reconciliation_method,
+            1,
+            1,
+        )
+        for wallet in declared_wallets
+        for credential in wallet.credentials
+        if credential.reconciliation_method != "unclassified"
+    )
+    if not declared_wallets:
+        expected_wallets = Counter(
+            {
+                (
+                    "default",
+                    1,
+                    "Default paper-mode wallet seeded for single-user deployment",
+                    1,
+                ): 1
+            }
+        )
+        expected_credentials = Counter(
+            {
+                (
+                    "default",
+                    1,
+                    "paper",
+                    "paper",
+                    "default paper bootstrap",
+                    '{"initial_balance": "10000.0"}',
+                    1,
+                    1,
+                ): 1
+            }
+        )
+    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    expected_heads = Counter(
+        (head,) for head in ScriptDirectory.from_config(alembic_config).get_heads()
+    )
+    expected_passwords = {user.username: user.password for user in profile.users}
+    active_parameters: dict[str, object] = {
+        "known_to": KNOWN_TO_MAX.replace(tzinfo=None).isoformat(
+            sep=" ",
+            timespec="microseconds",
+        )
+    }
+    connection_resources = contextlib.ExitStack()
+    try:
+        connection = connection_resources.enter_context(
+            contextlib.closing(sqlite3.connect(db_path))
+        )
+        credential_rows = connection.execute(
+            "SELECT w.label, w.is_paper, c.exchange, c.credential_type, c.label, "
+            "c.encrypted_payload, "
+            "(c.known_to = :known_to), "
+            "(w.known_to = :known_to) "
+            "FROM wallet_credentials c "
+            "LEFT JOIN wallets w ON w.public_id = c.wallet_public_id",
+            active_parameters,
+        ).fetchall()
+        actual_credentials = Counter(
+            (
+                *tuple(row[:5]),
+                json.dumps(
+                    json.loads(get_encryption_service().decrypt(str(row[5]))),
+                    sort_keys=True,
+                ),
+                row[6],
+                row[7],
+            )
+            for row in credential_rows
+        )
+        password_rows = connection.execute("SELECT username, password_hash FROM users").fetchall()
+        password_contract: Counter[tuple[object, ...]] = Counter()
+        for username, password_hash in password_rows:
+            expected_password = expected_passwords.get(str(username))
+            valid = False
+            if expected_password is not None:
+                with contextlib.suppress(ValueError):
+                    valid = bcrypt.checkpw(
+                        expected_password.encode(),
+                        str(password_hash).encode(),
+                    )
+            password_contract[(username, valid)] += 1
+        setting_rows = connection.execute(
+            "SELECT key, value, category, description, is_encrypted, "
+            "(known_to = :known_to) FROM settings",
+            active_parameters,
+        ).fetchall()
+        actual_settings = Counter(
+            (
+                key,
+                get_encryption_service().decrypt(str(value)) if is_encrypted else value,
+                category,
+                description,
+                int(is_encrypted),
+                int(active),
+            )
+            for key, value, category, description, is_encrypted, active in setting_rows
+        )
+        actual = {
+            "users": _sqlite_contract_rows(
+                connection,
+                "SELECT username, email, role, is_active, (known_to = :known_to) FROM users",
+                active_parameters,
+            ),
+            "passwords": password_contract,
+            "operators": _sqlite_contract_rows(
+                connection,
+                "SELECT label, description, (known_to = :known_to) FROM operators",
+                active_parameters,
+            ),
+            "memberships": _sqlite_contract_rows(
+                connection,
+                "SELECT u.username, o.label, m.is_primary, "
+                "(u.known_to = :known_to), "
+                "(o.known_to = :known_to), "
+                "(m.known_to = :known_to) "
+                "FROM user_operator_memberships m "
+                "LEFT JOIN users u ON u.public_id = m.user_public_id "
+                "LEFT JOIN operators o ON o.public_id = m.operator_public_id",
+                active_parameters,
+            ),
+            "wallets": _sqlite_contract_rows(
+                connection,
+                "SELECT label, is_paper, description, (known_to = :known_to) FROM wallets",
+                active_parameters,
+            ),
+            "credentials": actual_credentials,
+            "methods": _sqlite_contract_rows(
+                connection,
+                "SELECT w.label, w.is_paper, c.exchange, c.mode, c.method, "
+                "(c.known_to = :known_to), "
+                "(w.known_to = :known_to) "
+                "FROM portfolio_reconciliation_method_configs c "
+                "LEFT JOIN wallets w ON w.public_id = c.wallet_public_id",
+                active_parameters,
+            ),
+            "settings": actual_settings,
+            "grants": _sqlite_contract_rows(
+                connection,
+                "SELECT "
+                "(SELECT COUNT(*) FROM wallet_operator_scope_grants), "
+                "(SELECT COUNT(*) FROM wallet_user_read_grants)",
+            ),
+            "alembic_heads": _sqlite_contract_rows(
+                connection,
+                "SELECT version_num FROM alembic_version",
+            ),
+        }
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "SQLite test fixture is missing required schema; run `make migrate-dev-sqlite`"
+        ) from exc
+    finally:
+        connection_resources.close()
+    expected = {
+        "users": Counter((user.username, user.email, user.role, 1, 1) for user in profile.users),
+        "passwords": Counter((user.username, True) for user in profile.users),
+        "operators": Counter(
+            (operator.label, operator.description, 1) for operator in profile.operators
+        ),
+        "memberships": Counter(
+            (
+                user.username,
+                operator_label,
+                int(operator_label == user.primary_operator),
+                1,
+                1,
+                1,
+            )
+            for user in profile.users
+            for operator_label in user.operators
+        ),
+        "wallets": expected_wallets,
+        "credentials": expected_credentials,
+        "methods": expected_methods,
+        "settings": Counter(
+            (
+                setting.key,
+                setting.value,
+                setting.category,
+                setting.description,
+                int(SettingsEncryptionService.is_sensitive_setting(setting.key)),
+                1,
+            )
+            for setting in profile.settings
+        ),
+        "grants": Counter({(0, 0): 1}),
+        "alembic_heads": expected_heads,
+    }
+    mismatches = sorted(key for key in expected if actual[key] != expected[key])
+    if mismatches:
+        raise RuntimeError(
+            "SQLite test fixture is stale or partial for "
+            f"{', '.join(mismatches)}; run `make migrate-dev-sqlite`"
+        )
+
+
 def _clear_lru_cache(func: object) -> None:
     """Clear a cache-enabled callable when the cache API is available."""
     cache_clear = getattr(func, "cache_clear", None)
@@ -533,10 +783,10 @@ def _patch_create_all(db_template_path: Path) -> Generator[None]:
 def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[None]:
     """Provide an isolated database for the test session.
 
-    SQLite: copies the file to a temp directory so the original is
-    never modified.  Other engines (Postgres, etc.): keeps DB_URL
-    as-is but still seeds dev users.  In both cases ``run_seed``
-    ensures test credentials are available.
+    SQLite: copies the complete fresh-seeded template to a temp directory
+    so the original is never modified, then verifies its exact seed and
+    migration contract. Other engines (Postgres, etc.) keep DB_URL as-is
+    and are not required to equal the disposable dev profile.
     """
     original_db_url = os.environ.get("DB_URL")
     _clear_lru_cache(settings.get_bootstrap_settings)
@@ -548,15 +798,11 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
         temp_dir = tmp_path_factory.mktemp(f"sqlite-{worker_id}")
         db_path = temp_dir / "snapper.db"
         shutil.copy2(sqlite_path, db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute("DELETE FROM users")
-        conn.commit()
-        conn.close()
         os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
         _clear_lru_cache(settings.get_bootstrap_settings)
+        _require_fresh_seed_fixture(db_path)
 
     _clear_lru_cache(settings.get_settings)
-    run_seed("dev")
     try:
         yield
     finally:

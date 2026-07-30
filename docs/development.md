@@ -56,7 +56,7 @@ Executes the complete quality gate:
 12. Frontend checks (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks)
 13. Generated frontend/iOS type and backend i18n drift check (`ui-check-types`)
 14. No pragma/noqa/ignore exclusions
-15. Backend tests with 100% coverage
+15. Backend tests with 100% coverage of the configured unit-testable scope
 16. Frontend tests with coverage
 
 ### Individual Steps
@@ -294,7 +294,16 @@ make cov
 
 Coverage is configured under `[tool.coverage.run]` /
 `[tool.coverage.report]` in `pyproject.toml`. The `fail_under = 100`
-threshold enforces the TDD requirement.
+threshold enforces the TDD requirement over the configured unit-testable
+scope, and a contract test pins the complete omit allowlist.
+
+`scripts/trades_partition_rehearsal.py` is the sole executable exception.
+It is a full-system PostgreSQL 18.4 proof harness that drives real process
+faults, partition DDL, archival, and destructive cleanup against a large
+throwaway dataset. Its fast contract tests remain part of `make cov`, but a
+green `make check-all` is not a rehearsal PASS and must never authorize
+production partition DDL; that operation requires the separate retained
+rehearsal report.
 
 ## Frontend
 

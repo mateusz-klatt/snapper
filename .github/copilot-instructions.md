@@ -125,7 +125,12 @@ every agent, every session, and every host sees the same notes.
 8) Coverage (must be 100% - TDD requirement)
 
 - `make cov`
-    - The repo enforces 100% coverage threshold via the `[tool.coverage.report]` `fail_under = 100` setting in `pyproject.toml` (TDD).
+    - The repo enforces 100% coverage over the configured unit-testable scope
+      via `[tool.coverage.report]` `fail_under = 100` in `pyproject.toml`.
+      The exact omit allowlist is contract-tested. The PostgreSQL trades
+      partition rehearsal supervisor is the sole executable exception: its
+      fast contract tests still run here, while production partition DDL
+      requires a separate full-system rehearsal PASS report.
 - `make ui-cov`
     - The frontend enforces 100% coverage thresholds via `frontend/vite.config.ts`.
 
@@ -138,19 +143,21 @@ every agent, every session, and every host sees the same notes.
 Two distinct DB usages, do not mix:
 
 1. **Tests and coverage** (`make test`, `make cov`, `make test-serial`,
-    `make cov-serial`, `make check-all`) always use an **isolated SQLite
-    fixture at `./data/dev.db`** regardless of what's in `.env`. The
-    Makefile sets `DB_URL=sqlite+aiosqlite:///./data/dev.db` inline so
-    tests never touch the running server's database (which may be
-    Postgres in production-like configurations) and CI without a
-    Postgres service still passes. The fixture is auto-built on first
-    run via `migrate-dev-sqlite` and reused across runs.
+    `make cov-serial`, `make check-all`) use an **isolated SQLite fixture
+    at the fixed path `./data/dev.db`** by default, regardless of what's in
+    `.env`. Every SQLite test or coverage invocation rebuilds that fixture
+    from scratch. The builder holds a cross-platform lock, migrates and
+    seeds a unique same-directory staging database, validates its WAL
+    checkpoint and integrity, then atomically publishes it. The destructive
+    target is literal and cannot be redirected with a Make command-line
+    variable.
 2. **Local server runs** (`make dev-backend`, `make run-server`,
     `make run-static`, `make dev-all`) read `DB_URL` from `.env`. Snapper
     deployments use Postgres there; local-only setups can keep SQLite.
 
 To run tests against Postgres (staging integration only, never against
 a production database): `make test TEST_DB_URL=postgresql+asyncpg://USER:PASS@HOST/DB`.
+A Postgres `TEST_DB_URL` bypasses the local SQLite bootstrap entirely.
 Never override `TEST_DB_URL` to point at the live server's database —
 tests mutate state and `isolated_sqlite_db` only protects SQLite paths.
 

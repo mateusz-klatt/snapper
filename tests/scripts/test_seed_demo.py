@@ -18,10 +18,13 @@ Tests cover:
   the end-to-end proof that ONE wallet spelling reaches every consumer
   and that production ingest CONTINUES the seeded counter scope rather
   than opening a rival one.
-- The happy path that inserts 4 orders, 2 executions, 2 positions,
+- The happy path that inserts 4 orders, 2 executions, 2 canonical fill
+  witnesses, 2 positions,
   4 backtest runs (BTC RSI/MACD perp + CLM6 RSI + GCM6 MACD daily),
   and one pending CLM6 ``ai_review``.
 - Idempotency: re-running with existing orders is a no-op.
+- Legacy/incomplete P&L rows fail loudly because append-only execution
+  identities cannot be repaired in place.
 - Hard-fail branches when required pre-reqs (paper wallet, default
   operator, BTC-USD-PERP, ETH-USD-PERP) are missing.
 - Optional-instrument branches: CLM6/GCM6 absence skips their
@@ -35,6 +38,7 @@ tautologically.
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid7
@@ -48,6 +52,7 @@ from sqlalchemy.engine import Connection
 
 from scripts import seed_demo
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 SEED_DEMO_SOURCE = Path(seed_demo.__file__)
@@ -197,11 +202,11 @@ def _seed_required_instruments(conn: Connection) -> None:
     )
 
 
-def _seed_demo_users(conn: Connection) -> dict[str, str]:
-    """Insert admin / operator / viewer users so the alerts seed loop finds them.
+def _seed_demo_users(conn: Connection, operator_public_id: str) -> dict[str, str]:
+    """Insert the three human users and attach each to the default desk.
 
     Returns a mapping from role name to the inserted ``public_id`` so
-    individual tests can verify per-user alert counts.
+    individual tests can verify per-user alert counts and desk visibility.
     """
     out: dict[str, str] = {}
     for role in ("admin", "operator", "viewer"):
@@ -224,7 +229,68 @@ def _seed_demo_users(conn: Connection) -> dict[str, str]:
                 "ka": KNOWN_TO_MAX_STR,
             },
         )
+        conn.execute(
+            text(
+                "INSERT INTO user_operator_memberships "
+                "(public_id, user_public_id, operator_public_id, is_primary, "
+                " timestamp, known_to, session_id, sequence_id) "
+                "VALUES (:public_id, :user, :operator, 1, "
+                " :timestamp, :known_to, 's', :sequence_id)"
+            ),
+            {
+                "public_id": str(uuid7()),
+                "user": public_id,
+                "operator": operator_public_id,
+                "timestamp": str(datetime.now(UTC)),
+                "known_to": KNOWN_TO_MAX_STR,
+                "sequence_id": len(out),
+            },
+        )
     return out
+
+
+def _seed_additional_viewer(
+    conn: Connection,
+    username: str,
+    operator_public_id: str | None,
+) -> str:
+    """Insert another active viewer with an optional default-desk membership."""
+    public_id = str(uuid7())
+    now = str(datetime.now(UTC))
+    conn.execute(
+        text(
+            "INSERT INTO users "
+            "(public_id, username, email, password_hash, role, is_active, "
+            " created_at, timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, :username, :email, 'x', 'viewer', 1, "
+            " :timestamp, :timestamp, :known_to, 's', 1)"
+        ),
+        {
+            "public_id": public_id,
+            "username": username,
+            "email": f"{username}@snapper.local",
+            "timestamp": now,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    if operator_public_id is not None:
+        conn.execute(
+            text(
+                "INSERT INTO user_operator_memberships "
+                "(public_id, user_public_id, operator_public_id, is_primary, "
+                " timestamp, known_to, session_id, sequence_id) "
+                "VALUES (:public_id, :user, :operator, 1, "
+                " :timestamp, :known_to, 's', 1)"
+            ),
+            {
+                "public_id": str(uuid7()),
+                "user": public_id,
+                "operator": operator_public_id,
+                "timestamp": now,
+                "known_to": KNOWN_TO_MAX_STR,
+            },
+        )
+    return public_id
 
 
 def _seed_sealed_execution(
@@ -271,6 +337,129 @@ def _seed_sealed_execution(
         },
     )
     return public_id
+
+
+def _seed_sealed_venue_event(conn: Connection, *, wallet: str) -> str:
+    """Insert one append-only venue event whose wallet spelling must not change."""
+    public_id = str(uuid7())
+    observed_at = datetime(2026, 4, 20, 8, 0, tzinfo=UTC)
+    conn.execute(
+        text(
+            "INSERT INTO venue_events "
+            "(public_id, event_type, shard_key, wallet_public_id, command_public_id, "
+            " exchange, instrument, mode, exchange_order_id, client_order_id, "
+            " venue_client_id, side, status, fill_price, fill_size, cum_fill_size, "
+            " fee, fee_asset, exec_id, trade_id, error, venue_timestamp, received_at, "
+            " payload_json, liquidity_role, paired_group_id, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES "
+            "(:public_id, 'order_accepted', :shard_key, :wallet, NULL, "
+            " 'kraken_futures', 'BTC-USD-PERP', 'paper', 'sealed-order', "
+            " 'sealed-client-order', 'sealed-venue-client', 'buy', 'open', "
+            " NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, :observed_at, "
+            " :observed_at, NULL, 'unknown', NULL, :observed_at, :known_to, "
+            " 'sealed-session', 1)"
+        ),
+        {
+            "public_id": public_id,
+            "shard_key": f"kraken_futures.BTC-USD-PERP.paper.{wallet}",
+            "wallet": wallet,
+            "observed_at": str(observed_at),
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    return public_id
+
+
+def _seed_legacy_demo_execution(
+    conn: Connection,
+    *,
+    wallet: str,
+    order_public_id: str,
+    scope_sequence: int,
+    executed_at: datetime,
+) -> str:
+    """Insert one old-style demo execution with a truncated shared identity."""
+    public_id = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO executions "
+            "(public_id, order_public_id, wallet_public_id, operator_public_id, "
+            " exchange, mode, scope_sequence, "
+            " exec_id, trade_id, side, status, price, size, fee, fee_asset, "
+            " executed_at, liquidity_role, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES "
+            "(:public_id, :order_public_id, :wallet, NULL, "
+            " 'kraken_futures', 'paper', :scope_sequence, "
+            " 'exec-019fb1f7', 'trade-019fb1f7', "
+            " 'buy', 'filled', 100.0, 1.0, 0.1, 'USD', "
+            " :executed_at, 'taker', "
+            " :executed_at, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": public_id,
+            "order_public_id": order_public_id,
+            "wallet": wallet,
+            "scope_sequence": scope_sequence,
+            "executed_at": str(executed_at),
+            "known_to": KNOWN_TO_MAX_STR,
+            "session_id": seed_demo._DEMO_SESSION_ID,
+            "sequence_id": scope_sequence,
+        },
+    )
+    return public_id
+
+
+def _seed_legacy_demo_pnl_rows(
+    conn: Connection,
+    wallet: str,
+    operator: str,
+) -> None:
+    """Recreate the old four-order, duplicate-identity, witness-free seed."""
+    tracker = SequenceTracker()
+    tracker._session_id = seed_demo._DEMO_SESSION_ID
+    instrument = str(
+        conn.execute(
+            text(
+                "SELECT i.public_id FROM instruments i "
+                "JOIN symbols s ON s.public_id = i.symbol_public_id "
+                "WHERE s.native_symbol = 'BTC-USD-PERP' "
+                "AND i.exchange = 'kraken_futures' "
+                "AND i.known_to = :known_to AND s.known_to = :known_to"
+            ),
+            {"known_to": KNOWN_TO_MAX_STR},
+        ).scalar_one()
+    )
+    executed_at = datetime(2026, 4, 21, 9, 14, 32, tzinfo=UTC)
+    order_public_ids: list[str] = []
+    for index in range(4):
+        filled = index < 2
+        order_public_ids.append(
+            seed_demo._insert_order(
+                conn,
+                tracker,
+                wallet=wallet,
+                operator=operator,
+                instrument=instrument,
+                side="buy",
+                order_type="market",
+                price=None,
+                size=1.0,
+                status="filled" if filled else "open",
+                filled_size=1.0 if filled else 0.0,
+                average_price=100.0 if filled else None,
+                created_at=executed_at + timedelta(seconds=index),
+            )
+        )
+    for scope_sequence, order_public_id in enumerate(order_public_ids[:2], start=1):
+        _seed_legacy_demo_execution(
+            conn,
+            wallet=wallet,
+            order_public_id=order_public_id,
+            scope_sequence=scope_sequence,
+            executed_at=executed_at + timedelta(seconds=scope_sequence),
+        )
 
 
 def _seed_spot_reconciliation_anchor(conn: Connection, *, wallet: str) -> str:
@@ -342,6 +531,82 @@ def _seed_optional_commodity_instruments(conn: Connection) -> None:
     )
 
 
+def _seed_other_desk_underlying_grant(
+    conn: Connection,
+    wallet: str,
+    instrument: str,
+    grantor: str,
+) -> str:
+    """Give another desk an underlying scope that covers one instrument."""
+    now = str(datetime.now(UTC))
+    operator = str(uuid7())
+    underlying = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO operators "
+            "(public_id, label, description, timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, 'desk-b', NULL, :timestamp, :known_to, 's', 1)"
+        ),
+        {
+            "public_id": operator,
+            "timestamp": now,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO underlying_assets "
+            "(public_id, name, ticker, asset_class, sector, description, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, :name, 'CL', 'commodity', NULL, NULL, "
+            " :timestamp, :known_to, 's', 1)"
+        ),
+        {
+            "public_id": underlying,
+            "name": '{"en":"Crude oil"}',
+            "timestamp": now,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO instrument_underlying_mappings "
+            "(public_id, instrument_public_id, underlying_public_id, relationship_type, "
+            " contract_family, timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, :instrument, :underlying, 'derivative', "
+            " 'CL', :timestamp, :known_to, 's', 1)"
+        ),
+        {
+            "public_id": str(uuid7()),
+            "instrument": instrument,
+            "underlying": underlying,
+            "timestamp": now,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO wallet_operator_scope_grants "
+            "(public_id, operator_public_id, wallet_public_id, granted_by_user_public_id, "
+            " scope_kind, underlying_public_id, instrument_public_id, note, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, :operator, :wallet, :grantor, "
+            " 'underlying', :underlying, NULL, 'other desk CL family', "
+            " :timestamp, :known_to, 's', 1)"
+        ),
+        {
+            "public_id": str(uuid7()),
+            "operator": operator,
+            "wallet": wallet,
+            "grantor": grantor,
+            "underlying": underlying,
+            "timestamp": now,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    )
+    return operator
+
+
 WALLET_SCOPED_SCHEMA_TABLES = frozenset(
     {
         "accrual_ledger",
@@ -398,6 +663,7 @@ WALLET_SCOPED_SEED_TABLES = frozenset(
     {
         "orders",
         "executions",
+        "venue_events",
         "positions",
         "backtest_runs",
         "alert_events",
@@ -413,9 +679,9 @@ with the canonical spelling. Membership is a standing obligation: a declared
 table that stops being seeded fails the populated-coverage check rather than
 silently going unproven.
 
-``wallet_operator_scope_grants`` and ``ai_reviews`` are reachable only when
-CLM6-NYMEX exists, so the alias test must seed the optional commodity pair —
-without it both tables stay empty and their wallet spelling is never asserted.
+``wallet_operator_scope_grants`` is always populated with the required BTC
+demo desk scope. ``ai_reviews`` remains reachable only when CLM6-NYMEX exists,
+so the alias test seeds the optional commodity pair to exercise that table.
 
 ``execution_annulments`` is deliberately EXCLUDED. Its only writer is the
 guarded ``record_execution_annulment`` maintenance surface, which exists to
@@ -754,13 +1020,12 @@ class TestImmutableLedgerExclusion:
     """Tests that the seeder never rewrites an append-only ledger row.
 
     The normalization loop rewrites ``wallet_public_id`` across EVERY
-    wallet-scoped table it discovers by introspection. ``executions`` and
-    ``portfolio_spot_reconciliation_anchors`` carry that column but are
-    immutable ledgers whose ``(wallet, exchange, mode, scope_sequence)``
+    wallet-scoped table it discovers by introspection. ``executions``,
+    ``venue_events`` and ``portfolio_spot_reconciliation_anchors`` carry
+    that column but are immutable ledgers whose counter scope, shard
     identity and certified inventory are theorem inputs to the
-    authoritative reconciliation verdict — re-keying either would split a
-    counter scope or restate a sealed inventory. These tests prove the
-    exclusion holds against the PHYSICAL table the ORM maps.
+    authoritative reconciliation verdict. These tests prove the exclusion
+    holds against the PHYSICAL table the ORM maps.
     """
 
     def test_excluded_names_are_the_physical_ledger_tables(
@@ -772,16 +1037,20 @@ class TestImmutableLedgerExclusion:
         Given: the migrated schema,
         When: :func:`seed_demo._immutable_ledger_table_names` is compared
             against the physical schema,
-        Then: it names exactly ``executions`` and the spot reconciliation
-            anchor, and BOTH carry a ``wallet_public_id`` column — so absent
-            the skip the introspection loop WOULD rewrite them. Deriving the
-            set from the mapped models' ``__table__.name`` binds the guard to
-            the physical table, not a call-site string that a rename could
-            desync.
+        Then: it names exactly ``executions``, ``venue_events`` and the
+            spot reconciliation anchor, and all carry a
+            ``wallet_public_id`` column — so absent the skip the
+            introspection loop WOULD rewrite them. Deriving the set from
+            mapped models binds the guard to the physical table, not a
+            call-site string that a rename could desync.
         """
         engine, _ = migrated_db
         excluded = seed_demo._immutable_ledger_table_names()
-        assert excluded == {"executions", "portfolio_spot_reconciliation_anchors"}
+        assert excluded == {
+            "executions",
+            "portfolio_spot_reconciliation_anchors",
+            "venue_events",
+        }
         with engine.connect() as conn:
             wallet_scoped = _wallet_scoped_schema_tables(conn)
         assert excluded <= wallet_scoped, (
@@ -789,21 +1058,19 @@ class TestImmutableLedgerExclusion:
             "the exclusion is vacuous and proves nothing"
         )
 
-    def test_sealed_execution_and_anchor_survive_seeding_byte_identical(
+    def test_sealed_ledgers_survive_seeding_byte_identical(
         self,
         migrated_db: tuple[sa.Engine, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A pre-seeded sealed execution and anchor are untouched by ``main()``.
+        """Pre-seeded execution, venue-event and anchor rows remain untouched.
 
-        Given: an alias-spelled paper wallet, plus a sealed execution row and
-            a spot reconciliation anchor row BOTH hand-written in that same
-            alias spelling with a fixed ``scope_sequence``,
+        Given: an alias-spelled paper wallet plus one row in each immutable
+            wallet-scoped ledger, all carrying that exact alias,
         When: ``main()`` runs (which canonicalizes the root wallet and every
             NON-ledger reference),
-        Then: the ledger rows keep their EXACT alias ``wallet_public_id`` and
-            ``scope_sequence`` — the seeder issues no ``UPDATE`` against
-            either physical table — while the root ``wallets`` row and the
+        Then: all ledger rows keep their exact wallet spelling and the
+            execution keeps its ``scope_sequence`` while the root wallet and
             seeder's OWN freshly inserted executions carry the canonical
             spelling and remain a contiguous ``1, 2`` scope.
 
@@ -814,11 +1081,13 @@ class TestImmutableLedgerExclusion:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn, ALIAS_WALLET)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
             sealed_execution_pid = _seed_sealed_execution(
                 conn, wallet=ALIAS_WALLET, scope_sequence=7
             )
+            sealed_event_pid = _seed_sealed_venue_event(conn, wallet=ALIAS_WALLET)
             anchor_pid = _seed_spot_reconciliation_anchor(conn, wallet=ALIAS_WALLET)
 
         monkeypatch.setenv("DB_URL", db_url)
@@ -838,6 +1107,10 @@ class TestImmutableLedgerExclusion:
                 ),
                 {"pid": anchor_pid},
             ).scalar_one()
+            event_wallet = conn.execute(
+                text("SELECT wallet_public_id FROM venue_events WHERE public_id = :pid"),
+                {"pid": sealed_event_pid},
+            ).scalar_one()
             root_wallet = conn.execute(text("SELECT public_id FROM wallets")).scalar_one()
             seeded_scope = conn.execute(
                 text(
@@ -854,6 +1127,9 @@ class TestImmutableLedgerExclusion:
         assert (
             anchor_wallet == ALIAS_WALLET
         ), f"the sealed anchor ledger row must be untouched; got {anchor_wallet!r}"
+        assert (
+            event_wallet == ALIAS_WALLET
+        ), f"the sealed venue event must be untouched; got {event_wallet!r}"
         assert root_wallet == CANONICAL_WALLET
         assert [row[1] for row in seeded_scope] == [1, 2]
         assert {row[0] for row in seeded_scope} == {CANONICAL_WALLET}
@@ -865,20 +1141,34 @@ class TestImmutableLedgerExclusion:
     ) -> None:
         """A re-run still canonicalizes the root wallet even when the seed skips.
 
-        Given: an already-seeded database (an order carrying the demo
-            ``session_id`` trips the idempotency gate) whose root ``wallets``
-            row and a NON-ledger reference are still in the alias spelling,
+        Given: a complete current-version demo seed whose root ``wallets``
+            row and a NON-ledger reference are later put back into the alias
+            spelling,
         When: ``main()`` runs again,
-        Then: the normalization runs BEFORE the skip gate and commits, so the
+        Then: the complete-state preflight admits the idempotent skip and
+            normalization commits, so the
             root wallet and the reference converge to the canonical spelling
             while NO new demo rows are inserted — a first-run alias is not
             frozen forever behind the idempotency early return.
         """
         engine, db_url = migrated_db
         with engine.begin() as conn:
-            wallet = _seed_paper_wallet(conn, ALIAS_WALLET)
+            _seed_paper_wallet(conn, ALIAS_WALLET)
             operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE wallets SET public_id = :alias WHERE public_id = :canonical"),
+                {
+                    "alias": ALIAS_WALLET,
+                    "canonical": CANONICAL_WALLET,
+                },
+            )
             conn.execute(
                 text(
                     "CREATE TABLE _preexisting_wallet_scoped ("
@@ -889,34 +1179,7 @@ class TestImmutableLedgerExclusion:
                 text("INSERT INTO _preexisting_wallet_scoped (wallet_public_id) VALUES (:w)"),
                 {"w": ALIAS_WALLET},
             )
-            inst_pid = str(uuid7())
-            conn.execute(
-                text(
-                    "INSERT INTO orders "
-                    "(public_id, instrument_public_id, mode, wallet_public_id, "
-                    " operator_public_id, client_order_id, exchange_order_id, "
-                    " created_at, updated_at, side, order_type, price, size, "
-                    " status, time_in_force, filled_size, average_price, error, "
-                    " leverage, reduce_only, plan_public_id, "
-                    " timestamp, known_to, session_id, sequence_id) "
-                    "VALUES (:pid, :inst, 'paper', :wal, :op, "
-                    " 'prior-demo', NULL, :ts, :ts, 'buy', 'market', "
-                    " 100.0, 1.0, 'filled', 'gtc', 1.0, 100.0, NULL, "
-                    " NULL, 0, NULL, "
-                    " :ts, :ka, :sid, 1)"
-                ),
-                {
-                    "pid": str(uuid7()),
-                    "inst": inst_pid,
-                    "wal": wallet,
-                    "op": operator,
-                    "ts": str(datetime.now(UTC)),
-                    "ka": KNOWN_TO_MAX_STR,
-                    "sid": seed_demo._DEMO_SESSION_ID,
-                },
-            )
 
-        monkeypatch.setenv("DB_URL", db_url)
         assert seed_demo.main() == 0
 
         with engine.connect() as conn:
@@ -928,10 +1191,15 @@ class TestImmutableLedgerExclusion:
                 text("SELECT COUNT(*) FROM orders WHERE session_id = :sid"),
                 {"sid": seed_demo._DEMO_SESSION_ID},
             ).scalar()
+            demo_venue_events = conn.execute(
+                text("SELECT COUNT(*) FROM venue_events WHERE session_id = :sid"),
+                {"sid": seed_demo._DEMO_SESSION_ID},
+            ).scalar()
 
         assert root == CANONICAL_WALLET
         assert reference == CANONICAL_WALLET
-        assert demo_orders == 1, "the skip gate must not insert a second demo dataset"
+        assert demo_orders == 4, "the skip gate must not insert a second demo dataset"
+        assert demo_venue_events == 2
 
 
 class TestMain:
@@ -948,16 +1216,16 @@ class TestMain:
             operator, BTC/ETH perps and CLM6/GCM6 commodity instruments,
         When: ``main()`` runs,
         Then: 4 orders, 2 executions, 2 positions, 4 backtest runs,
-            and one pending ``ai_review`` are inserted; the function
-            returns 0.
+            2 canonical ``fill_observed`` witnesses, and one pending
+            ``ai_review`` are inserted; the function returns 0.
         """
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
             _seed_optional_commodity_instruments(conn)
-            _seed_demo_users(conn)
+            _seed_demo_users(conn, operator)
 
         monkeypatch.setenv("DB_URL", db_url)
         rc = seed_demo.main()
@@ -966,12 +1234,18 @@ class TestMain:
         with engine.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == 4
             assert conn.execute(text("SELECT COUNT(*) FROM executions")).scalar() == 2
+            assert conn.execute(text("SELECT COUNT(*) FROM venue_events")).scalar() == 2
             assert conn.execute(text("SELECT COUNT(*) FROM positions")).scalar() == 2
             assert conn.execute(text("SELECT COUNT(*) FROM backtest_runs")).scalar() == 4
             assert conn.execute(text("SELECT COUNT(*) FROM ai_reviews")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_delegates")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_review_events")).scalar() == 2
             assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 21
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM wallet_operator_scope_grants")).scalar()
+                == 2
+            )
+            assert conn.execute(text("SELECT COUNT(*) FROM wallet_user_read_grants")).scalar() == 0
             for role in ("admin", "operator", "viewer"):
                 row_count = conn.execute(
                     text(
@@ -981,6 +1255,430 @@ class TestMain:
                     {"role": role},
                 ).scalar()
                 assert row_count == 7, f"expected 7 alerts for role {role}, got {row_count}"
+
+    def test_optional_ai_scope_refuses_cross_desk_underlying_overlap(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The optional CLM6 grant obeys the same cross-kind ownership preflight."""
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            wallet = _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_optional_commodity_instruments(conn)
+            users = _seed_demo_users(conn, operator)
+            clm6 = seed_demo._lookup_instrument(
+                conn,
+                "CLM6-NYMEX",
+                "kraken_equities",
+            )
+            assert clm6 is not None
+            other_operator = _seed_other_desk_underlying_grant(
+                conn,
+                wallet,
+                clm6,
+                users["admin"],
+            )
+
+        monkeypatch.setenv("DB_URL", db_url)
+        with pytest.raises(
+            RuntimeError,
+            match="demo instrument scope overlaps.*another desk",
+        ):
+            seed_demo.main()
+
+        with engine.connect() as conn:
+            owners = {
+                str(row[0])
+                for row in conn.execute(
+                    text("SELECT operator_public_id FROM wallet_operator_scope_grants")
+                ).all()
+            }
+            assert owners == {other_operator}
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one() == 0
+            assert conn.execute(text("SELECT COUNT(*) FROM ai_reviews")).scalar_one() == 0
+
+    async def test_viewer_membership_inherits_demo_desk_wallet_without_read_grant(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The required BTC scope makes membership sufficient on both read planes.
+
+        Given: a fresh default desk with admin/operator/viewer members,
+        When: the demo seed provisions its required BTC instrument scope,
+        Then: the viewer sees the paper wallet through both the readable and
+            operator-accessible repository planes, with zero personal grants.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            wallet = _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            users = _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        with engine.connect() as conn:
+            membership_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM user_operator_memberships "
+                    "WHERE user_public_id = :viewer AND operator_public_id = :operator"
+                ),
+                {"viewer": users["viewer"], "operator": operator},
+            ).scalar_one()
+            scope_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM wallet_operator_scope_grants "
+                    "WHERE wallet_public_id = :wallet AND operator_public_id = :operator"
+                ),
+                {"wallet": wallet, "operator": operator},
+            ).scalar_one()
+            personal_count = conn.execute(
+                text("SELECT COUNT(*) FROM wallet_user_read_grants WHERE user_public_id = :viewer"),
+                {"viewer": users["viewer"]},
+            ).scalar_one()
+        assert membership_count == 1
+        assert scope_count == 1
+        assert personal_count == 0
+
+        repository = SQLAlchemyRepository(db_url.replace("sqlite://", "sqlite+aiosqlite://"))
+        as_of = datetime.now(UTC) + timedelta(seconds=1)
+        try:
+            readable = await repository.list_readable_wallets_for_user(
+                users["viewer"],
+                [operator],
+                as_of,
+            )
+            accessible = await repository.list_accessible_wallets_for_operators(
+                [operator],
+                as_of,
+            )
+        finally:
+            await repository.engine.dispose()
+        assert [row["public_id"] for row in readable] == [wallet]
+        assert [row["public_id"] for row in accessible] == [wallet]
+
+    def test_exact_viewer_username_drives_membership_check(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An earlier unrelated viewer cannot replace the seeded viewer identity."""
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_additional_viewer(conn, "observer", None)
+            _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+    def test_missing_seeded_admin_or_viewer_fails_before_demo_writes(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Desk visibility requires both exact seeded human identities.
+
+        Given: A paper wallet, default desk, and instruments but no seeded
+            admin or viewer identity,
+        When: The demo seed prepares viewer desk visibility,
+        Then: It fails before inserting a scope grant or any P&L row.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        with pytest.raises(RuntimeError, match="active admin/viewer users not found"):
+            seed_demo.main()
+        with engine.connect() as conn:
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM wallet_operator_scope_grants")).scalar_one()
+                == 0
+            )
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one() == 0
+
+    def test_existing_viewer_without_membership_fails_with_attach_path(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The demo seed never attaches an established viewer by username.
+
+        Given: active human users but the viewer's default-desk membership
+            has been removed,
+        When: the demo seed tries to provision desk visibility,
+        Then: it fails before inserting scope or P&L rows and names the
+            supported runtime attachment path.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            users = _seed_demo_users(conn, operator)
+            _seed_additional_viewer(conn, "observer", operator)
+            conn.execute(
+                text("DELETE FROM user_operator_memberships WHERE user_public_id = :viewer"),
+                {"viewer": users["viewer"]},
+            )
+
+        monkeypatch.setenv("DB_URL", db_url)
+        with pytest.raises(
+            RuntimeError,
+            match=r"POST /api/auth/desks/\{operator_public_id\}/members/\{username\}",
+        ):
+            seed_demo.main()
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one() == 0
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM wallet_operator_scope_grants")).scalar_one()
+                == 0
+            )
+
+    def test_inactive_optional_alert_recipient_is_skipped(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An absent optional alert recipient does not block the canonical demo.
+
+        Given: Exact seeded admin and viewer identities but an inactive
+            operator recipient,
+        When: The demo alert fanout is inserted,
+        Then: The two active recipients receive their seven alerts and the
+            remaining demo state still commits.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
+            conn.execute(text("UPDATE users SET is_active = 0 WHERE username = 'operator'"))
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar_one() == 14
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one() == 4
+
+    async def test_seeded_executions_have_injective_fill_witnesses(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two seeded executions certify against two distinct venue witnesses.
+
+        Given: the required demo wallet, operator, and BTC/ETH instruments,
+        When: ``main()`` inserts its two completed executions,
+        Then: each row carries the full execution UUID in distinct
+            ``exec_id`` and ``trade_id`` values, exactly one economically
+            identical ``fill_observed`` event owns that identity, and the
+            real P&L prefix loader consumes both witnesses injectively.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        with engine.connect() as conn:
+            witness_rows = (
+                conn.execute(
+                    text(
+                        "SELECT "
+                        "e.public_id AS execution_public_id, "
+                        "e.wallet_public_id AS execution_wallet, "
+                        "e.exchange AS execution_exchange, e.mode AS execution_mode, "
+                        "e.exec_id, e.trade_id, e.side AS execution_side, "
+                        "e.status AS execution_status, e.price AS execution_price, "
+                        "e.size AS execution_size, e.fee AS execution_fee, "
+                        "e.executed_at, o.client_order_id, o.exchange_order_id, "
+                        "v.public_id AS venue_event_public_id, v.event_type, v.shard_key, "
+                        "v.instrument AS event_instrument, "
+                        "v.wallet_public_id AS event_wallet, "
+                        "v.exchange AS event_exchange, v.mode AS event_mode, "
+                        "v.client_order_id AS event_client_order_id, "
+                        "v.exchange_order_id AS event_exchange_order_id, "
+                        "v.venue_client_id, v.exec_id AS event_exec_id, "
+                        "v.trade_id AS event_trade_id, v.side AS event_side, "
+                        "v.status AS event_status, v.fill_price, v.fill_size, "
+                        "v.cum_fill_size, v.fee AS event_fee, v.venue_timestamp, "
+                        "v.received_at, v.timestamp AS event_timestamp, "
+                        "v.known_to, v.session_id, v.sequence_id "
+                        "FROM executions e "
+                        "JOIN orders o ON o.public_id = e.order_public_id "
+                        "JOIN venue_events v ON v.wallet_public_id = e.wallet_public_id "
+                        "AND v.exchange = e.exchange AND v.mode = e.mode "
+                        "AND v.exec_id = e.exec_id AND v.trade_id = e.trade_id "
+                        "WHERE e.session_id = :session_id "
+                        "ORDER BY e.scope_sequence ASC"
+                    ),
+                    {"session_id": seed_demo._DEMO_SESSION_ID},
+                )
+                .mappings()
+                .all()
+            )
+            venue_event_count = conn.execute(
+                text("SELECT COUNT(*) FROM venue_events WHERE session_id = :session_id"),
+                {"session_id": seed_demo._DEMO_SESSION_ID},
+            ).scalar_one()
+
+        assert venue_event_count == 2
+        assert len(witness_rows) == 2
+        assert len({row["exec_id"] for row in witness_rows}) == 2
+        assert len({row["trade_id"] for row in witness_rows}) == 2
+        assert len({row["venue_event_public_id"] for row in witness_rows}) == 2
+        for row in witness_rows:
+            assert row["exec_id"] == f"exec-{row['execution_public_id']}"
+            assert row["trade_id"] == f"trade-{row['execution_public_id']}"
+            assert row["event_exec_id"] == row["exec_id"]
+            assert row["event_trade_id"] == row["trade_id"]
+            assert row["event_type"] == "fill_observed"
+            assert row["event_wallet"] == row["execution_wallet"]
+            assert row["event_exchange"] == row["execution_exchange"]
+            assert row["event_mode"] == row["execution_mode"]
+            assert row["shard_key"] == seed_demo.compute_shard_key(
+                instrument=str(row["event_instrument"]),
+                exchange=seed_demo.ExchangeEnum(str(row["event_exchange"])),
+                mode=seed_demo.ExecutionModeEnum(str(row["event_mode"])),
+                wallet_public_id=str(row["event_wallet"]),
+                strategy_tag=None,
+            )
+            assert row["event_client_order_id"] == row["client_order_id"]
+            assert row["event_exchange_order_id"] == row["exchange_order_id"]
+            assert row["venue_client_id"] == f"venue-{row['client_order_id']}"
+            assert row["event_side"] == row["execution_side"]
+            assert row["event_status"] == row["execution_status"]
+            assert row["fill_price"] == row["execution_price"]
+            assert row["fill_size"] == row["execution_size"]
+            assert row["cum_fill_size"] == row["execution_size"]
+            assert row["event_fee"] == row["execution_fee"]
+            assert row["venue_timestamp"] == row["executed_at"]
+            assert row["received_at"] == row["executed_at"]
+            assert row["event_timestamp"] == row["executed_at"]
+            assert row["known_to"] == KNOWN_TO_MAX_STR
+            assert row["session_id"] == seed_demo._DEMO_SESSION_ID
+        assert [row["sequence_id"] for row in witness_rows] == [1, 1]
+
+        repository = SQLAlchemyRepository(db_url.replace("sqlite://", "sqlite+aiosqlite://"))
+        try:
+            prefix = await repository.get_pnl_timeline_execution_prefix(
+                str(witness_rows[0]["execution_wallet"]),
+                "paper",
+                None,
+            )
+        finally:
+            await repository.engine.dispose()
+
+        assert prefix["watermarks"] == {"kraken_futures": 2}
+        assert prefix["annulments"] == []
+        assert {row["public_id"]: row["shard_key"] for row in prefix["executions"]} == {
+            str(row["execution_public_id"]): str(row["shard_key"]) for row in witness_rows
+        }
+
+    @pytest.mark.parametrize(
+        ("corruption", "expected_exact", "expected_canonical_shards"),
+        [
+            ("duplicate_first_witness", 1, 1),
+            ("wrong_shard", 2, 1),
+        ],
+    )
+    def test_corrupt_fill_witness_state_refuses_idempotent_skip(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+        corruption: str,
+        expected_exact: int,
+        expected_canonical_shards: int,
+    ) -> None:
+        """A count-complete but non-injective or cross-shard seed fails loud.
+
+        Given: a freshly complete demo seed whose two event rows are then
+            corrupted either into duplicate witnesses for one execution or
+            by moving one witness to a non-canonical shard,
+        When: ``main()`` performs its locked preflight,
+        Then: it refuses the idempotent skip even though the raw row counts
+            remain 4 orders, 2 executions and 2 venue events.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        with engine.begin() as conn:
+            if corruption == "duplicate_first_witness":
+                conn.execute(
+                    text(
+                        "UPDATE venue_events SET "
+                        "shard_key = (SELECT shard_key FROM venue_events ORDER BY id LIMIT 1), "
+                        "instrument = (SELECT instrument FROM venue_events ORDER BY id LIMIT 1), "
+                        "exchange_order_id = (SELECT exchange_order_id FROM venue_events "
+                        " ORDER BY id LIMIT 1), "
+                        "client_order_id = (SELECT client_order_id FROM venue_events "
+                        " ORDER BY id LIMIT 1), "
+                        "venue_client_id = (SELECT venue_client_id FROM venue_events "
+                        " ORDER BY id LIMIT 1), "
+                        "side = (SELECT side FROM venue_events ORDER BY id LIMIT 1), "
+                        "status = (SELECT status FROM venue_events ORDER BY id LIMIT 1), "
+                        "fill_price = (SELECT fill_price FROM venue_events ORDER BY id LIMIT 1), "
+                        "fill_size = (SELECT fill_size FROM venue_events ORDER BY id LIMIT 1), "
+                        "cum_fill_size = (SELECT cum_fill_size FROM venue_events "
+                        " ORDER BY id LIMIT 1), "
+                        "fee = (SELECT fee FROM venue_events ORDER BY id LIMIT 1), "
+                        "fee_asset = (SELECT fee_asset FROM venue_events ORDER BY id LIMIT 1), "
+                        "exec_id = (SELECT exec_id FROM venue_events ORDER BY id LIMIT 1), "
+                        "trade_id = (SELECT trade_id FROM venue_events ORDER BY id LIMIT 1), "
+                        "venue_timestamp = (SELECT venue_timestamp FROM venue_events "
+                        " ORDER BY id LIMIT 1), "
+                        "received_at = (SELECT received_at FROM venue_events ORDER BY id LIMIT 1), "
+                        "timestamp = (SELECT timestamp FROM venue_events ORDER BY id LIMIT 1) "
+                        "WHERE id = (SELECT MAX(id) FROM venue_events)"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE venue_events SET shard_key = 'corrupt.cross-scope' "
+                        "WHERE id = (SELECT MAX(id) FROM venue_events)"
+                    )
+                )
+
+        with engine.connect() as conn:
+            state = seed_demo._read_demo_pnl_seed_state(conn)
+        assert state == seed_demo._DemoPnlSeedState(
+            orders=4,
+            executions=2,
+            venue_events=2,
+            canonical_execution_ids=2,
+            exact_witnesses=expected_exact,
+            canonical_shards=expected_canonical_shards,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match=f"exact_witnesses={expected_exact} canonical_shards={expected_canonical_shards}",
+        ):
+            seed_demo.main()
 
     def test_refuses_non_sqlite_dialect_before_touching_the_database(
         self,
@@ -1119,10 +1817,10 @@ class TestMain:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn, ALIAS_WALLET)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
             _seed_optional_commodity_instruments(conn)
-            _seed_demo_users(conn)
+            _seed_demo_users(conn, operator)
 
         monkeypatch.setenv("DB_URL", db_url)
         assert seed_demo.main() == 0
@@ -1182,8 +1880,9 @@ class TestMain:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn, ALIAS_WALLET)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
 
         monkeypatch.setenv("DB_URL", db_url)
         assert seed_demo.main() == 0
@@ -1242,10 +1941,10 @@ class TestMain:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
             _seed_optional_commodity_instruments(conn)
-            _seed_demo_users(conn)
+            _seed_demo_users(conn, operator)
 
         monkeypatch.setenv("DB_URL", db_url)
         first_rc = seed_demo.main()
@@ -1263,6 +1962,59 @@ class TestMain:
         with engine.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == first_orders
             assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == first_alerts
+
+    def test_legacy_demo_seed_refuses_silent_skip(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An old witness-free append-only ledger requires a local DB rebuild.
+
+        Given: the exact legacy P&L shape of four demo orders, two
+            executions sharing the old eight-character ``exec_id`` and
+            ``trade_id`` suffix, and zero ``fill_observed`` rows,
+        When: ``main()`` is rerun,
+        Then: it raises an actionable error instead of reporting a
+            successful idempotent skip, because immutable execution
+            identities cannot be repaired safely in place.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            wallet = _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_legacy_demo_pnl_rows(conn, wallet, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "legacy or incomplete demo P&L seed.*"
+                "orders=4 executions=2 fill_observed=0 "
+                "canonical_execution_ids=0 exact_witnesses=0.*"
+                "append-only"
+            ),
+        ):
+            seed_demo.main()
+
+        with engine.connect() as conn:
+            state = seed_demo._read_demo_pnl_seed_state(conn)
+            distinct_exec_ids = conn.execute(
+                text(
+                    "SELECT COUNT(DISTINCT exec_id) FROM executions WHERE session_id = :session_id"
+                ),
+                {"session_id": seed_demo._DEMO_SESSION_ID},
+            ).scalar_one()
+
+        assert state == seed_demo._DemoPnlSeedState(
+            orders=4,
+            executions=2,
+            venue_events=0,
+            canonical_execution_ids=0,
+            exact_witnesses=0,
+            canonical_shards=0,
+        )
+        assert distinct_exec_ids == 1
 
     def test_runs_alongside_unrelated_orders(
         self,
@@ -1285,7 +2037,7 @@ class TestMain:
             wallet = _seed_paper_wallet(conn)
             operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
-            _seed_demo_users(conn)
+            _seed_demo_users(conn, operator)
             inst_pid = str(uuid7())
             conn.execute(
                 text(
@@ -1436,8 +2188,9 @@ class TestMain:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
         monkeypatch.setenv("DB_URL", db_url)
         rc = seed_demo.main()
         assert rc == 0
@@ -1464,8 +2217,9 @@ class TestMain:
         engine, db_url = migrated_db
         with engine.begin() as conn:
             _seed_paper_wallet(conn)
-            _seed_default_operator(conn)
+            operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn, operator)
             _seed_instrument(
                 conn,
                 native_symbol="CLM6-NYMEX",

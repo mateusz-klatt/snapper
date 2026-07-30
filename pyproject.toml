@@ -189,7 +189,7 @@ max-statements = 50
 "scripts/generate_types.py" = ["PLR0915"]
 "scripts/pnl_uat_fixture.py" = ["PLR0913"]
 "scripts/resilience_fault_injection.py" = ["PLR0913"]
-"scripts/seed_demo.py" = ["PLR0913", "PLR0915"]
+"scripts/seed_demo.py" = ["PLR0913"]
 "scripts/test_live_orders.py" = ["PLR0915"]
 "src/snapper/application/ai_review/service.py" = ["PLR0913"]
 "src/snapper/application/ai_review/strategy_primitive.py" = ["PLR0913"]
@@ -535,6 +535,11 @@ omit = [
     # produces "ambiguity, the file exists in several 'source'" warnings.
     "*/__init__.py",
     "src/snapper/data/migrations/*",
+    # Full-system PostgreSQL 18.4 rehearsal: real fault injection, DDL,
+    # archive/drop, and large-data proofs run through its own retained gate.
+    # Its fast contract tests remain in the default suite; make check-all is
+    # not evidence that the destructive rehearsal itself passed.
+    "scripts/trades_partition_rehearsal.py",
 ]
 
 [tool.coverage.report]

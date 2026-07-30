@@ -43,6 +43,7 @@ data/*.db
 data/*.db-journal
 data/*.db-shm
 data/*.db-wal
+data/*.db.lock
 data/*.db.bak*
 data/*.log
 data/log/

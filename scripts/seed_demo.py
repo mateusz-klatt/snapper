@@ -32,10 +32,13 @@ pretending to support one it cannot serialize allocations against.
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import cast
 from uuid import UUID
+from uuid import uuid5
 from uuid import uuid7
 
 import bcrypt
@@ -45,9 +48,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from snapper.application.engine.service import compute_shard_key
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import OrderExchange
 from snapper.data.models import Execution
 from snapper.data.models import PortfolioSpotReconciliationAnchor
+from snapper.data.models import VenueEvent
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 KNOWN_TO_MAX_STR = "9999-12-31 23:59:59.000000"
@@ -60,6 +68,59 @@ to detect a previous seed run. Manually-inserted orders / e2e-test rows
 use different session_ids, so they no longer trip the skip gate and
 the demo data lands as a complete additive set on top of them.
 """
+
+_DEMO_VENUE_EVENT_NAMESPACE = UUID("019e0500-0000-0000-0000-0000000d3e71")
+"""Stable namespace for execution-derived demo venue-event identities."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SeedExecutionFill:
+    """Exact execution facts used to append its canonical fill witness."""
+
+    public_id: str
+    order_public_id: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    instrument: str
+    exec_id: str
+    trade_id: str
+    side: str
+    status: str
+    price: float
+    size: float
+    fee: float
+    executed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _DemoPnlSeedState:
+    """Counts proving whether the append-only demo P&L seed is complete."""
+
+    orders: int
+    executions: int
+    venue_events: int
+    canonical_execution_ids: int
+    exact_witnesses: int
+    canonical_shards: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DemoInstrumentScope:
+    """One exact desk grant requested by the additive demo seed."""
+
+    operator: str
+    wallet: str
+    grantor: str
+    instrument: str
+    note: str
+
+
+_EMPTY_DEMO_PNL_SEED = _DemoPnlSeedState(0, 0, 0, 0, 0, 0)
+"""State of a database that has never received the demo P&L rows."""
+
+_COMPLETE_DEMO_PNL_SEED = _DemoPnlSeedState(4, 2, 2, 2, 2, 2)
+"""State produced by the current atomic demo P&L seed."""
 
 
 def _sync_db_url(url: str) -> str:
@@ -170,17 +231,19 @@ def _acquire_execution_fence(conn: Connection) -> None:
 def _immutable_ledger_table_names() -> frozenset[str]:
     """Return the PHYSICAL table names the seeder must never rewrite.
 
-    ``executions`` and ``portfolio_spot_reconciliation_anchors`` are
-    append-only ledgers: an execution row's
+    ``executions``, ``venue_events`` and
+    ``portfolio_spot_reconciliation_anchors`` are append-only ledgers:
+    an execution row's
     ``(wallet_public_id, exchange, mode, scope_sequence)`` tuple and an
-    anchor row's certified inventory are THEOREM inputs to the
-    authoritative reconciliation verdict, and a re-keying of either by a
-    screenshot tool would either split a counter scope (a published fill
-    silently missing from the canonical watermark capture) or restate a
-    sealed inventory — the exact false-authoritative failure this program
-    exists to prevent. Execution-scope alias normalization is migration
-    0029's job exclusively (``_normalize_wallet_aliases``), taken under
-    the migration write fence; the seeder must not duplicate it.
+    event's shard key are one fused certification identity; an anchor
+    row's certified inventory is another theorem input to the
+    authoritative reconciliation verdict. Re-keying any of them by a
+    screenshot tool would either split a counter scope, detach a durable
+    witness from its shard, or restate sealed inventory — the exact
+    false-authoritative failure this program exists to prevent.
+    Execution-scope alias normalization is migration 0029's job
+    exclusively (``_normalize_wallet_aliases``), taken under the
+    migration write fence; the seeder must not duplicate it.
 
     The names are read from the mapped models' ``__tablename__`` rather
     than hard-coded, so the exclusion binds the PHYSICAL table the ORM
@@ -195,6 +258,7 @@ def _immutable_ledger_table_names() -> frozenset[str]:
         {
             Execution.__tablename__,
             PortfolioSpotReconciliationAnchor.__tablename__,
+            VenueEvent.__tablename__,
         }
     )
 
@@ -295,12 +359,15 @@ def _lookup_paper_wallet(conn: Connection) -> str | None:
     return row[0] if row else None
 
 
-def _lookup_user_by_role(conn: Connection, role: str) -> str | None:
-    """Find an active user public_id by role (admin / operator / viewer).
+def _lookup_seeded_user(conn: Connection, username: str, role: str) -> str | None:
+    """Find one exact active seeded human identity.
 
     The demo alerts seed loops over the three seeded roles so each
     iOS Alerts tab renders a non-empty list when the matching user
-    is the authenticated principal. The lookup intentionally compares
+    is the authenticated principal. Username and role are both bound:
+    another human with the same role must never stand in for the
+    profile-owned ``admin``, ``operator`` or ``viewer`` account.
+    The lookup intentionally compares
     ``known_to`` with a strftime-derived sentinel rather than
     ``KNOWN_TO_MAX_STR`` because seeded users are written with a
     timezone-aware string (``9999-12-31 23:59:59+00:00``) while other
@@ -309,11 +376,11 @@ def _lookup_user_by_role(conn: Connection, role: str) -> str | None:
     row = conn.execute(
         text(
             "SELECT public_id FROM users "
-            "WHERE role = :role AND is_active = 1 "
+            "WHERE username = :username AND role = :role AND is_active = 1 "
             "AND known_to > strftime('%Y-%m-%dT%H:%M:%S','now') "
             "ORDER BY id ASC LIMIT 1"
         ),
-        {"role": role},
+        {"username": username, "role": role},
     ).first()
     return row[0] if row else None
 
@@ -324,6 +391,161 @@ def _lookup_operator(conn: Connection) -> str | None:
         text("SELECT public_id FROM operators WHERE label = 'default' ORDER BY id ASC LIMIT 1"),
     ).first()
     return row[0] if row else None
+
+
+def _ensure_demo_viewer_desk_scope(
+    conn: Connection,
+    tracker: SequenceTracker,
+    *,
+    operator: str,
+    wallet: str,
+    instrument: str,
+) -> int:
+    """Ensure the seeded viewer can see the demo wallet through its desk.
+
+    Membership supplies the viewer's desk identity; one operator scope
+    grant on the wallet supplies that desk's wallet visibility. This
+    helper never creates a personal read grant and never silently attaches
+    an existing user: a missing viewer membership must be repaired through
+    the supported administration endpoint and takes effect on next login.
+
+    An existing instrument or underlying grant from the same operator
+    that covers the required instrument already proves visibility and is
+    left untouched. An overlap owned by a different operator fails loud
+    instead of bypassing the runtime grant service's exclusivity rules.
+
+    Returns:
+        One when a BTC demo scope grant was inserted, otherwise zero.
+    """
+    admin = _lookup_seeded_user(conn, "admin", "admin")
+    viewer = _lookup_seeded_user(conn, "viewer", "viewer")
+    if admin is None or viewer is None:
+        raise RuntimeError(
+            "active admin/viewer users not found — run `make migrate-dev` against "
+            "a fresh database before `scripts/seed_demo.py`"
+        )
+    membership = conn.execute(
+        text(
+            "SELECT 1 FROM user_operator_memberships "
+            "WHERE user_public_id = :viewer AND operator_public_id = :operator "
+            "AND known_to > strftime('%Y-%m-%dT%H:%M:%S','now') LIMIT 1"
+        ),
+        {"viewer": viewer, "operator": operator},
+    ).first()
+    if membership is None:
+        raise RuntimeError(
+            "viewer is not attached to the default desk; use "
+            "`POST /api/auth/desks/{operator_public_id}/members/{username}` "
+            "with the resolved default operator and viewer username, then log in again"
+        )
+    return _ensure_demo_instrument_scope(
+        conn,
+        tracker,
+        _DemoInstrumentScope(
+            operator=operator,
+            wallet=wallet,
+            grantor=admin,
+            instrument=instrument,
+            note="Demo BTC desk scope for seeded viewer visibility",
+        ),
+    )
+
+
+def _demo_instrument_scope_owners(
+    conn: Connection,
+    wallet: str,
+    instrument: str,
+) -> set[str]:
+    """Return every active desk whose scope covers one wallet instrument."""
+    rows = conn.execute(
+        text(
+            "SELECT grants.operator_public_id "
+            "FROM wallet_operator_scope_grants AS grants "
+            "WHERE grants.wallet_public_id = :wallet "
+            "AND grants.instrument_public_id = :instrument "
+            "AND grants.known_to > strftime('%Y-%m-%dT%H:%M:%S','now') "
+            "UNION "
+            "SELECT grants.operator_public_id "
+            "FROM wallet_operator_scope_grants AS grants "
+            "JOIN instrument_underlying_mappings AS mappings "
+            "ON mappings.underlying_public_id = grants.underlying_public_id "
+            "AND mappings.instrument_public_id = :instrument "
+            "AND mappings.known_to > strftime('%Y-%m-%dT%H:%M:%S','now') "
+            "WHERE grants.wallet_public_id = :wallet "
+            "AND grants.known_to > strftime('%Y-%m-%dT%H:%M:%S','now') "
+        ),
+        {"wallet": wallet, "instrument": instrument},
+    ).all()
+    return {str(row[0]) for row in rows}
+
+
+def _ensure_demo_instrument_scope(
+    conn: Connection,
+    tracker: SequenceTracker,
+    scope: _DemoInstrumentScope,
+) -> int:
+    """Insert one non-overlapping demo instrument grant or reuse its desk owner."""
+    owners = _demo_instrument_scope_owners(conn, scope.wallet, scope.instrument)
+    conflicting_owners = sorted(owners - {scope.operator})
+    if conflicting_owners:
+        raise RuntimeError(
+            "demo instrument scope overlaps an active grant owned by another desk; "
+            f"wallet={scope.wallet} instrument={scope.instrument} "
+            f"operators={conflicting_owners}"
+        )
+    if owners:
+        return 0
+    now = datetime.now(tz=UTC)
+    conn.execute(
+        text(
+            "INSERT INTO wallet_operator_scope_grants "
+            "(public_id, operator_public_id, wallet_public_id, granted_by_user_public_id, "
+            " scope_kind, underlying_public_id, instrument_public_id, note, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES (:public_id, :operator, :wallet, :grantor, "
+            " 'instrument', NULL, :instrument, :note, "
+            " :timestamp, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": str(uuid7()),
+            "operator": scope.operator,
+            "wallet": scope.wallet,
+            "grantor": scope.grantor,
+            "instrument": scope.instrument,
+            "note": scope.note,
+            "timestamp": str(now),
+            "known_to": KNOWN_TO_MAX_STR,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence("wallet_operator_scope_grants"),
+        },
+    )
+    return 1
+
+
+def _prepare_demo_instruments(
+    conn: Connection,
+    tracker: SequenceTracker,
+    operator: str,
+    wallet: str,
+) -> tuple[str, str, str | None, str | None]:
+    """Resolve required demo instruments and provision viewer desk visibility."""
+    btc_perp = _lookup_instrument(conn, "BTC-USD-PERP", "kraken_futures")
+    eth_perp = _lookup_instrument(conn, "ETH-USD-PERP", "kraken_futures")
+    clm6 = _lookup_instrument(conn, "CLM6-NYMEX", "kraken_equities")
+    gcm6 = _lookup_instrument(conn, "GCM6-COMEX", "kraken_equities")
+    if not btc_perp or not eth_perp:
+        raise RuntimeError(
+            f"required instruments not found — btc_perp={btc_perp} eth_perp={eth_perp}; "
+            "run `make run-static` to populate symbols"
+        )
+    _ensure_demo_viewer_desk_scope(
+        conn,
+        tracker,
+        operator=operator,
+        wallet=wallet,
+        instrument=btc_perp,
+    )
+    return btc_perp, eth_perp, clm6, gcm6
 
 
 def _insert_order(
@@ -364,8 +586,8 @@ def _insert_order(
             "instrument": instrument,
             "wallet": wallet,
             "operator": operator,
-            "coid": f"demo-{public_id}",
-            "exoid": f"ex-{public_id}",
+            "coid": _demo_client_order_id(public_id),
+            "exoid": _demo_exchange_order_id(public_id),
             "created_at": str(created_at),
             "updated_at": str(created_at),
             "side": side,
@@ -382,6 +604,190 @@ def _insert_order(
         },
     )
     return public_id
+
+
+def _demo_client_order_id(order_public_id: str) -> str:
+    """Return the stable client-order identity shared by order and fill."""
+    return f"demo-{order_public_id}"
+
+
+def _demo_exchange_order_id(order_public_id: str) -> str:
+    """Return the stable exchange-order identity shared by order and fill."""
+    return f"ex-{order_public_id}"
+
+
+def _lookup_order_native_symbol(conn: Connection, order_public_id: str) -> str:
+    """Resolve the active native symbol owned by one freshly seeded order."""
+    native_symbol = conn.execute(
+        text(
+            "SELECT s.native_symbol FROM orders o "
+            "JOIN instruments i ON i.public_id = o.instrument_public_id "
+            "JOIN symbols s ON s.public_id = i.symbol_public_id "
+            "WHERE o.public_id = :order_public_id "
+            "AND o.known_to = :known_to AND i.known_to = :known_to "
+            "AND s.known_to = :known_to"
+        ),
+        {
+            "order_public_id": order_public_id,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    ).scalar_one()
+    return str(native_symbol)
+
+
+def _insert_fill_observed(
+    conn: Connection,
+    tracker: SequenceTracker,
+    fill: _SeedExecutionFill,
+) -> None:
+    """Append exactly one canonical venue witness for one seeded execution."""
+    event_public_id = str(uuid5(_DEMO_VENUE_EVENT_NAMESPACE, fill.public_id))
+    client_order_id = _demo_client_order_id(fill.order_public_id)
+    exchange_order_id = _demo_exchange_order_id(fill.order_public_id)
+    shard_key = compute_shard_key(
+        instrument=fill.instrument,
+        exchange=cast(OrderExchange, ExchangeEnum(fill.exchange)),
+        mode=ExecutionModeEnum(fill.mode),
+        wallet_public_id=fill.wallet_public_id,
+        strategy_tag=None,
+    )
+    conn.execute(
+        text(
+            "INSERT INTO venue_events "
+            "(public_id, event_type, shard_key, wallet_public_id, command_public_id, "
+            " exchange, instrument, mode, exchange_order_id, client_order_id, "
+            " venue_client_id, side, status, fill_price, fill_size, cum_fill_size, "
+            " fee, fee_asset, exec_id, trade_id, error, venue_timestamp, received_at, "
+            " payload_json, liquidity_role, paired_group_id, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES "
+            "(:public_id, 'fill_observed', :shard_key, :wallet, NULL, "
+            " :exchange, :instrument, :mode, :exchange_order_id, :client_order_id, "
+            " :venue_client_id, :side, :status, :price, :size, :size, "
+            " :fee, 'USD', :exec_id, :trade_id, NULL, :event_time, :event_time, "
+            " NULL, 'taker', NULL, "
+            " :event_time, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": event_public_id,
+            "shard_key": shard_key,
+            "wallet": fill.wallet_public_id,
+            "exchange": fill.exchange,
+            "instrument": fill.instrument,
+            "mode": fill.mode,
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": client_order_id,
+            "venue_client_id": f"venue-{client_order_id}",
+            "side": fill.side,
+            "status": fill.status,
+            "price": fill.price,
+            "size": fill.size,
+            "fee": fill.fee,
+            "exec_id": fill.exec_id,
+            "trade_id": fill.trade_id,
+            "event_time": str(fill.executed_at),
+            "known_to": KNOWN_TO_MAX_STR,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence(f"venue.{shard_key}"),
+        },
+    )
+
+
+def _read_demo_pnl_seed_state(conn: Connection) -> _DemoPnlSeedState:
+    """Read the exact append-only P&L evidence shape owned by this seed."""
+    row = conn.execute(
+        text(
+            "SELECT "
+            "(SELECT COUNT(*) FROM orders WHERE session_id = :session_id), "
+            "(SELECT COUNT(*) FROM executions WHERE session_id = :session_id), "
+            "(SELECT COUNT(*) FROM venue_events WHERE session_id = :session_id), "
+            "(SELECT COUNT(*) FROM executions "
+            " WHERE session_id = :session_id "
+            " AND exec_id = 'exec-' || public_id "
+            " AND trade_id = 'trade-' || public_id)"
+        ),
+        {
+            "session_id": _DEMO_SESSION_ID,
+        },
+    ).one()
+    witness_rows = conn.execute(
+        text(
+            "SELECT e.public_id, e.wallet_public_id, e.exchange, e.mode, "
+            "s.native_symbol, v.shard_key "
+            "FROM executions e "
+            "JOIN orders o ON o.public_id = e.order_public_id "
+            "JOIN instruments i ON i.public_id = o.instrument_public_id "
+            " AND i.known_to = :known_to "
+            "JOIN symbols s ON s.public_id = i.symbol_public_id "
+            " AND s.known_to = :known_to "
+            "JOIN venue_events v ON v.session_id = :session_id "
+            " AND v.event_type = 'fill_observed' "
+            " AND v.wallet_public_id = e.wallet_public_id "
+            " AND v.exchange = e.exchange AND v.mode = e.mode "
+            " AND v.instrument = s.native_symbol "
+            " AND v.client_order_id = o.client_order_id "
+            " AND v.exchange_order_id = o.exchange_order_id "
+            " AND v.exec_id = e.exec_id AND v.trade_id = e.trade_id "
+            " AND v.side = e.side AND v.status = e.status "
+            " AND v.fill_price = e.price AND v.fill_size = e.size "
+            " AND v.cum_fill_size = e.size AND v.fee = e.fee "
+            " AND v.fee_asset = e.fee_asset "
+            " AND v.venue_timestamp = e.executed_at "
+            " AND v.received_at = e.executed_at AND v.timestamp = e.timestamp "
+            " AND v.known_to = e.known_to "
+            "WHERE e.session_id = :session_id "
+            "AND o.known_to = :known_to"
+        ),
+        {
+            "session_id": _DEMO_SESSION_ID,
+            "known_to": KNOWN_TO_MAX_STR,
+        },
+    ).all()
+    exact_execution_ids = {str(witness[0]) for witness in witness_rows}
+    canonical_shard_execution_ids = {
+        str(execution_public_id)
+        for (
+            execution_public_id,
+            wallet_public_id,
+            exchange,
+            mode,
+            instrument,
+            shard_key,
+        ) in witness_rows
+        if shard_key
+        == compute_shard_key(
+            instrument=str(instrument),
+            exchange=cast(OrderExchange, ExchangeEnum(str(exchange))),
+            mode=ExecutionModeEnum(str(mode)),
+            wallet_public_id=str(wallet_public_id),
+            strategy_tag=None,
+        )
+    }
+    return _DemoPnlSeedState(
+        orders=int(row[0]),
+        executions=int(row[1]),
+        venue_events=int(row[2]),
+        canonical_execution_ids=int(row[3]),
+        exact_witnesses=len(exact_execution_ids),
+        canonical_shards=len(canonical_shard_execution_ids),
+    )
+
+
+def _require_repairable_demo_pnl_seed(state: _DemoPnlSeedState) -> None:
+    """Refuse legacy or partial rows that append-only execution IDs cannot repair."""
+    if state in {_EMPTY_DEMO_PNL_SEED, _COMPLETE_DEMO_PNL_SEED}:
+        return
+    raise RuntimeError(
+        "legacy or incomplete demo P&L seed detected — refusing silent skip: "
+        f"orders={state.orders} executions={state.executions} "
+        f"fill_observed={state.venue_events} "
+        f"canonical_execution_ids={state.canonical_execution_ids} "
+        f"exact_witnesses={state.exact_witnesses} "
+        f"canonical_shards={state.canonical_shards}. "
+        "Executions are append-only, so this script cannot repair old or duplicate "
+        "venue identities in place. Rebuild the configured local SQLite database, "
+        "run `make migrate-dev`, then rerun `scripts/seed_demo.py`."
+    )
 
 
 def _insert_execution(
@@ -409,9 +815,14 @@ def _insert_execution(
     max + 1 — the same allocation rule ``insert_execution`` applies,
     race-free because ``main`` acquired the same per-wallet execution
     fence (``_acquire_execution_fence``) before the first insert and
-    holds it to the script's single commit.
+    holds it to the script's single commit. The full execution UUID is
+    retained in both venue identities, and the same transaction appends
+    exactly one canonical ``fill_observed`` witness carrying the stored
+    execution economics and order lineage.
     """
     public_id = str(uuid7())
+    exec_id = f"exec-{public_id}"
+    trade_id = f"trade-{public_id}"
     conn.execute(
         text(
             "INSERT INTO executions "
@@ -437,8 +848,8 @@ def _insert_execution(
             "operator": operator,
             "exchange": exchange,
             "mode": mode,
-            "exid": f"exec-{public_id[:8]}",
-            "tid": f"trade-{public_id[:8]}",
+            "exid": exec_id,
+            "tid": trade_id,
             "side": side,
             "status": status,
             "price": price,
@@ -450,6 +861,26 @@ def _insert_execution(
             "sid": tracker.session_id,
             "seq": tracker.next_sequence("executions"),
         },
+    )
+    _insert_fill_observed(
+        conn,
+        tracker,
+        _SeedExecutionFill(
+            public_id=public_id,
+            order_public_id=order_public_id,
+            wallet_public_id=wallet,
+            exchange=exchange,
+            mode=mode,
+            instrument=_lookup_order_native_symbol(conn, order_public_id),
+            exec_id=exec_id,
+            trade_id=trade_id,
+            side=side,
+            status=status,
+            price=price,
+            size=size,
+            fee=fee,
+            executed_at=executed_at,
+        ),
     )
     return public_id
 
@@ -819,27 +1250,16 @@ def _seed_ai_delegate_review(
         },
     )
 
-    conn.execute(
-        text(
-            "INSERT INTO wallet_operator_scope_grants "
-            "(public_id, operator_public_id, wallet_public_id, granted_by_user_public_id, "
-            " scope_kind, instrument_public_id, note, "
-            " timestamp, known_to, session_id, sequence_id) "
-            "VALUES (:pid, :op, :wal, :grantor, 'instrument', :inst, "
-            "  'Demo CLM6 oil scope for ai_demo delegate', "
-            "  :now, :ka, :sid, :seq)"
+    _ensure_demo_instrument_scope(
+        conn,
+        tracker,
+        _DemoInstrumentScope(
+            operator=operator,
+            wallet=wallet,
+            grantor=delegate_user_pid,
+            instrument=instrument,
+            note="Demo CLM6 oil scope for ai_demo delegate",
         ),
-        {
-            "pid": str(uuid7()),
-            "op": operator,
-            "wal": wallet,
-            "grantor": delegate_user_pid,
-            "inst": instrument,
-            "now": str(now),
-            "ka": KNOWN_TO_MAX_STR,
-            "sid": tracker.session_id,
-            "seq": tracker.next_sequence("wallet_operator_scope_grants"),
-        },
     )
 
     review_pid = str(uuid7())
@@ -945,14 +1365,22 @@ def _seed_ai_delegate_review(
 def main() -> int:
     """Run the demo seed end-to-end.
 
-    The write fence and the non-ledger root-wallet normalization run
-    BEFORE the idempotency skip gate, and the skip path commits, so a
-    re-run against an already-seeded database still converges the root
-    ``wallets`` row and every non-ledger ``wallet_public_id`` reference to
-    the canonical spelling instead of leaving a first-run alias frozen
-    forever. The append-only ledgers (``executions`` and the spot
-    reconciliation anchor) are excluded from that normalization — their
-    alias handling belongs to migration 0029 alone.
+    The write fence protects an exact P&L seed-state preflight before
+    either insertion or the idempotency skip. A current complete seed
+    may skip, while legacy duplicate execution identities, missing
+    ``fill_observed`` witnesses, and every other partial shape fail
+    loudly because the append-only execution ledger cannot be repaired
+    in place.
+
+    The non-ledger root-wallet normalization then runs before either
+    insertion or a valid skip, and the skip path commits, so a re-run
+    against an already-seeded database still converges the root
+    ``wallets`` row and every non-ledger ``wallet_public_id`` reference
+    to the canonical spelling instead of leaving a first-run alias
+    frozen forever. The append-only ledgers (``executions``,
+    ``venue_events`` and the spot reconciliation anchor) are excluded
+    from that normalization — their alias handling belongs to migration
+    0029 alone.
 
     Returns:
         ``0`` on successful completion. Errors raise ``RuntimeError``
@@ -973,30 +1401,20 @@ def main() -> int:
             )
         wallet = _canonical_wallet(wallet_identity)
 
-        btc_perp = _lookup_instrument(conn, "BTC-USD-PERP", "kraken_futures")
-        eth_perp = _lookup_instrument(conn, "ETH-USD-PERP", "kraken_futures")
-        clm6 = _lookup_instrument(conn, "CLM6-NYMEX", "kraken_equities")
-        gcm6 = _lookup_instrument(conn, "GCM6-COMEX", "kraken_equities")
-
-        if not btc_perp or not eth_perp:
-            raise RuntimeError(
-                f"required instruments not found — btc_perp={btc_perp} eth_perp={eth_perp}; "
-                "run `make run-static` to populate symbols"
-            )
-
         _acquire_execution_fence(conn)
+        seed_state = _read_demo_pnl_seed_state(conn)
+        _require_repairable_demo_pnl_seed(seed_state)
         _normalize_wallet_identity(conn, wallet_identity, wallet)
 
-        existing_demo_rows = (
-            conn.execute(
-                text("SELECT COUNT(*) FROM orders WHERE session_id = :sid"),
-                {"sid": _DEMO_SESSION_ID},
-            ).scalar()
-            or 0
+        btc_perp, eth_perp, clm6, gcm6 = _prepare_demo_instruments(
+            conn,
+            tracker,
+            operator,
+            wallet,
         )
-        if existing_demo_rows > 0:
+        if seed_state == _COMPLETE_DEMO_PNL_SEED:
             conn.commit()
-            print(f"demo seed already inserted ({existing_demo_rows} demo orders), skipping")
+            print(f"demo seed already inserted ({seed_state.orders} demo orders), skipping")
             return 0
 
         order1_t = datetime(2026, 4, 21, 9, 14, 32, tzinfo=UTC)
@@ -1204,7 +1622,7 @@ def main() -> int:
         alerts_base = datetime(2026, 5, 7, 9, 0, tzinfo=UTC)
         alerts_inserted = 0
         for role in ("admin", "operator", "viewer"):
-            user_pid = _lookup_user_by_role(conn, role)
+            user_pid = _lookup_seeded_user(conn, role, role)
             if user_pid:
                 alerts_inserted += _seed_demo_alerts_for_user(
                     conn,

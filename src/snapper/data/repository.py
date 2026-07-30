@@ -84,6 +84,7 @@ from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from inspect import isawaitable
+from itertools import pairwise
 from struct import pack
 from typing import Any
 from typing import Final
@@ -361,6 +362,7 @@ from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
+from snapper.data.repository_types import PnlVenueOrderMinimumVersionRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
@@ -1549,6 +1551,762 @@ def _pnl_crypto_usd_spot_proof_filters(as_of: datetime) -> list[ColumnElement[bo
         ~denomination_conflict,
         ~classification_conflict,
     ]
+
+
+def _pnl_spot_order_minimum_proof_filters(
+    as_of: datetime,
+) -> list[ColumnElement[bool]]:
+    """Build the identity and stability guards for venue minimum evidence.
+
+    The first two expressions bound the outer author-time identity to the
+    caller's knowledge horizon and refuse PAPER instruments. The final two are
+    correlated disclosure expressions rather than WHERE exclusions:
+    ``identity_conflict`` proves that another symbol version known by ``as_of``
+    assigns a different asset type to the same venue/base identity, while
+    ``minimum_instability`` proves that the same instrument has carried two
+    distinct non-null minimums. Returning those conditions to the pure layer is
+    load-bearing: SQL must never erase the evidence that makes P3 or P7 resolve
+    UNKNOWN.
+
+    Lifecycle, certification, quantity-unit, capability and positivity checks
+    are deliberately absent. They are projected as evidence and interpreted by
+    the pure realizability rule.
+
+    Args:
+        as_of: Knowledge horizon for every identity and minimum version.
+
+    Returns:
+        Outer identity filters followed by correlated conflict expressions.
+    """
+    identity_symbol = aliased(Symbol)
+    identity_instrument = aliased(Instrument)
+    overlapping_symbol_left = aliased(Symbol)
+    overlapping_symbol_right = aliased(Symbol)
+    overlapping_instrument_left = aliased(Instrument)
+    overlapping_instrument_right = aliased(Instrument)
+    minimum_version = aliased(InstrumentSpec)
+    denomination_conflict = (
+        select(literal(1))
+        .select_from(identity_symbol)
+        .join(
+            identity_instrument,
+            identity_instrument.symbol_public_id == identity_symbol.public_id,
+        )
+        .where(
+            identity_instrument.exchange == Instrument.exchange,
+            identity_instrument.timestamp <= as_of,
+            identity_symbol.timestamp <= as_of,
+            identity_symbol.base == Symbol.base,
+            identity_symbol.asset_type.is_distinct_from(Symbol.asset_type),
+        )
+        .correlate(Instrument, Symbol)
+        .exists()
+    )
+    symbol_interval_overlap = (
+        select(literal(1))
+        .select_from(overlapping_symbol_left)
+        .join(
+            overlapping_symbol_right,
+            and_(
+                overlapping_symbol_right.public_id == overlapping_symbol_left.public_id,
+                overlapping_symbol_right.id > overlapping_symbol_left.id,
+                overlapping_symbol_right.timestamp < overlapping_symbol_left.known_to,
+                overlapping_symbol_left.timestamp < overlapping_symbol_right.known_to,
+            ),
+        )
+        .where(
+            overlapping_symbol_left.public_id == Symbol.public_id,
+            overlapping_symbol_left.timestamp <= as_of,
+            overlapping_symbol_right.timestamp <= as_of,
+        )
+        .correlate(Symbol)
+        .exists()
+    )
+    instrument_interval_overlap = (
+        select(literal(1))
+        .select_from(overlapping_instrument_left)
+        .join(
+            overlapping_instrument_right,
+            and_(
+                overlapping_instrument_right.public_id == overlapping_instrument_left.public_id,
+                overlapping_instrument_right.id > overlapping_instrument_left.id,
+                overlapping_instrument_right.timestamp < overlapping_instrument_left.known_to,
+                overlapping_instrument_left.timestamp < overlapping_instrument_right.known_to,
+            ),
+        )
+        .where(
+            overlapping_instrument_left.public_id == Instrument.public_id,
+            overlapping_instrument_left.timestamp <= as_of,
+            overlapping_instrument_right.timestamp <= as_of,
+        )
+        .correlate(Instrument)
+        .exists()
+    )
+    identity_conflict = or_(
+        denomination_conflict,
+        symbol_interval_overlap,
+        instrument_interval_overlap,
+    )
+    minimum_instability = (
+        exists()
+        .where(
+            minimum_version.instrument_public_id == InstrumentSpec.instrument_public_id,
+            minimum_version.timestamp <= as_of,
+            InstrumentSpec.min_order_size.is_not(None),
+            minimum_version.min_order_size.is_not(None),
+            minimum_version.min_order_size.is_distinct_from(InstrumentSpec.min_order_size),
+        )
+        .correlate(InstrumentSpec)
+    )
+    return [
+        Symbol.timestamp <= as_of,
+        Instrument.exchange != "paper",
+        identity_conflict,
+        minimum_instability,
+    ]
+
+
+def _pnl_order_minimum_role_values(
+    base: str,
+    quote: str | None,
+) -> tuple[
+    tuple[Literal["base", "quote"], str | None, str | None],
+    ...,
+]:
+    """Project one pair identity into its base- and quote-side views.
+
+    Args:
+        base: Symbol base currency.
+        quote: Optional symbol quote currency.
+
+    Returns:
+        Role, currency and counter-currency tuples for both pair sides.
+    """
+    return (
+        ("base", base, quote),
+        ("quote", quote, base),
+    )
+
+
+def _pnl_order_minimum_interval_complement(
+    valid_from: datetime,
+    valid_to: datetime,
+    occupied: Sequence[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Return the uncovered pieces of one half-open identity interval.
+
+    Args:
+        valid_from: Inclusive start of the identity interval.
+        valid_to: Exclusive end of the identity interval.
+        occupied: Spec intervals to subtract.
+
+    Returns:
+        Sorted, disjoint half-open intervals with no spec evidence.
+    """
+    gaps: list[tuple[datetime, datetime]] = []
+    cursor = valid_from
+    for occupied_from, occupied_to in sorted(occupied):
+        bounded_from = min(max(occupied_from, valid_from), valid_to)
+        bounded_to = min(max(occupied_to, valid_from), valid_to)
+        if bounded_from > cursor:
+            gaps.append((cursor, bounded_from))
+        cursor = max(cursor, bounded_to)
+    if cursor < valid_to:
+        gaps.append((cursor, valid_to))
+    return gaps
+
+
+def _pnl_order_minimum_capability_segments(
+    valid_from: datetime,
+    valid_to: datetime,
+    capabilities: Sequence[tuple[datetime, datetime, bool]],
+) -> list[tuple[datetime, datetime, bool | None]]:
+    """Overlay capability versions onto one interval without electing overlaps.
+
+    Missing capability and multiple simultaneously active versions both become
+    ``None``. Only one exact in-force row can assert ``True`` or ``False``.
+
+    Args:
+        valid_from: Inclusive interval start.
+        valid_to: Exclusive interval end.
+        capabilities: Capability intervals for one symbol and exchange.
+
+    Returns:
+        Complete, sorted segments carrying tri-state capability evidence.
+    """
+    boundaries = {valid_from, valid_to}
+    clipped: list[tuple[datetime, datetime, bool]] = []
+    for capability_from, capability_to, can_trade in capabilities:
+        clipped_from = max(valid_from, capability_from)
+        clipped_to = min(valid_to, capability_to)
+        if clipped_from >= clipped_to:
+            continue
+        clipped.append((clipped_from, clipped_to, can_trade))
+        boundaries.update((clipped_from, clipped_to))
+    ordered = sorted(boundaries)
+    segments: list[tuple[datetime, datetime, bool | None]] = []
+    for segment_from, segment_to in pairwise(ordered):
+        active = [
+            can_trade
+            for capability_from, capability_to, can_trade in clipped
+            if capability_from <= segment_from < capability_to
+        ]
+        resolved = active[0] if len(active) == 1 else None
+        segments.append((segment_from, segment_to, resolved))
+    return segments
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlOrderMinimumWindow:
+    """Normalized dimensions for one venue-minimum evidence read."""
+
+    exchanges: tuple[str, ...]
+    currencies: frozenset[str]
+    start: datetime
+    end: datetime
+    as_of: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlOrderMinimumEvidence:
+    """Raw SQL planes needed to prove a complete venue sibling set."""
+
+    spec_records: list[Row[Any]]
+    identity_records: list[Row[Any]]
+    capability_records: list[Row[Any]]
+    instrument_records: list[Row[Any]]
+    orphan_spec_records: list[Row[Any]]
+
+
+type _PnlOrderMinimumCapabilities = dict[
+    tuple[str, str],
+    list[tuple[datetime, datetime, bool]],
+]
+type _PnlOrderMinimumOccupied = dict[
+    tuple[str, str, str, Literal["base", "quote"], str],
+    list[tuple[datetime, datetime]],
+]
+type _PnlOrderMinimumIdentityIntervals = dict[
+    tuple[int, str, str],
+    list[tuple[datetime, datetime]],
+]
+
+
+async def _pnl_order_minimum_records(
+    session: AsyncSession,
+    window: _PnlOrderMinimumWindow,
+) -> _PnlOrderMinimumEvidence:
+    """Load every raw plane needed for a fail-closed sibling-set proof."""
+    (
+        symbol_known,
+        real_venue,
+        identity_conflicted,
+        minimum_unstable,
+    ) = _pnl_spot_order_minimum_proof_filters(window.as_of)
+    spec_records = list(
+        (
+            await session.execute(
+                select(
+                    Instrument.exchange,
+                    Symbol.base,
+                    Symbol.quote,
+                    Symbol.asset_type,
+                    Instrument.public_id,
+                    Symbol.public_id,
+                    Symbol.native_symbol,
+                    InstrumentSpec.instrument_kind,
+                    InstrumentSpec.quantity_unit,
+                    InstrumentSpec.status,
+                    InstrumentSpec.public_id,
+                    InstrumentSpec.spec_source,
+                    InstrumentSpec.spec_version,
+                    InstrumentSpec.spec_observed_at,
+                    InstrumentSpec.min_order_size,
+                    identity_conflicted,
+                    minimum_unstable,
+                    InstrumentSpec.timestamp,
+                    InstrumentSpec.known_to,
+                )
+                .select_from(InstrumentSpec)
+                .join(
+                    Instrument,
+                    and_(
+                        InstrumentSpec.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= InstrumentSpec.timestamp,
+                        Instrument.known_to > InstrumentSpec.timestamp,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        Symbol.timestamp <= InstrumentSpec.timestamp,
+                        Symbol.known_to > InstrumentSpec.timestamp,
+                    ),
+                )
+                .where(
+                    Instrument.exchange.in_(window.exchanges),
+                    InstrumentSpec.timestamp <= window.as_of,
+                    InstrumentSpec.timestamp < window.end,
+                    InstrumentSpec.known_to > window.start,
+                    or_(
+                        Symbol.base.in_(window.currencies),
+                        Symbol.quote.in_(window.currencies),
+                    ),
+                    symbol_known,
+                    real_venue,
+                )
+            )
+        ).all()
+    )
+    instrument_records = list(
+        (
+            await session.execute(
+                select(
+                    Instrument.exchange,
+                    Instrument.public_id,
+                    Instrument.symbol_public_id,
+                    Instrument.timestamp,
+                    Instrument.known_to,
+                    Instrument.id,
+                )
+                .select_from(Instrument)
+                .where(
+                    Instrument.exchange.in_(window.exchanges),
+                    Instrument.timestamp <= window.as_of,
+                    Instrument.timestamp < window.end,
+                    Instrument.known_to > window.start,
+                    real_venue,
+                )
+                .order_by(
+                    Instrument.exchange,
+                    Instrument.public_id,
+                    Instrument.timestamp,
+                )
+            )
+        ).all()
+    )
+    instrument_ids = [record[5] for record in instrument_records]
+    identity_records: list[Row[Any]] = []
+    if instrument_ids:
+        identity_records = list(
+            (
+                await session.execute(
+                    select(
+                        Instrument.exchange,
+                        Symbol.base,
+                        Symbol.quote,
+                        Symbol.asset_type,
+                        Instrument.public_id,
+                        Symbol.public_id,
+                        Symbol.native_symbol,
+                        identity_conflicted,
+                        Instrument.timestamp,
+                        Instrument.known_to,
+                        Symbol.timestamp,
+                        Symbol.known_to,
+                        Instrument.id,
+                    )
+                    .select_from(Instrument)
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            Symbol.timestamp < Instrument.known_to,
+                            Instrument.timestamp < Symbol.known_to,
+                        ),
+                    )
+                    .where(
+                        Instrument.id.in_(instrument_ids),
+                        Instrument.exchange.in_(window.exchanges),
+                        Instrument.timestamp <= window.as_of,
+                        Instrument.timestamp < window.end,
+                        Instrument.known_to > window.start,
+                        Symbol.timestamp < window.end,
+                        Symbol.known_to > window.start,
+                        symbol_known,
+                        real_venue,
+                    )
+                )
+            ).all()
+        )
+    symbol_public_ids = list(
+        dict.fromkeys(
+            [
+                *(record[5] for record in spec_records),
+                *(record[5] for record in identity_records),
+            ]
+        )
+    )
+    capability_records: list[Row[Any]] = []
+    if symbol_public_ids:
+        capability_records = list(
+            (
+                await session.execute(
+                    select(
+                        SymbolExchangeCapability.symbol_public_id,
+                        SymbolExchangeCapability.exchange,
+                        SymbolExchangeCapability.can_trade,
+                        SymbolExchangeCapability.timestamp,
+                        SymbolExchangeCapability.known_to,
+                    ).where(
+                        SymbolExchangeCapability.symbol_public_id.in_(symbol_public_ids),
+                        SymbolExchangeCapability.exchange.in_(window.exchanges),
+                        SymbolExchangeCapability.timestamp <= window.as_of,
+                        SymbolExchangeCapability.timestamp < window.end,
+                        SymbolExchangeCapability.known_to > window.start,
+                    )
+                )
+            ).all()
+        )
+    author_instrument = aliased(Instrument)
+    author_symbol = aliased(Symbol)
+    author_identity_count = (
+        select(func.count())
+        .select_from(author_instrument)
+        .join(
+            author_symbol,
+            and_(
+                author_instrument.symbol_public_id == author_symbol.public_id,
+                author_symbol.timestamp <= InstrumentSpec.timestamp,
+                author_symbol.known_to > InstrumentSpec.timestamp,
+            ),
+        )
+        .where(
+            author_instrument.public_id == InstrumentSpec.instrument_public_id,
+            author_instrument.timestamp <= InstrumentSpec.timestamp,
+            author_instrument.known_to > InstrumentSpec.timestamp,
+        )
+        .correlate(InstrumentSpec)
+        .scalar_subquery()
+    )
+    orphan_spec_records = list(
+        (
+            await session.execute(
+                select(
+                    InstrumentSpec.instrument_public_id,
+                    InstrumentSpec.public_id,
+                    InstrumentSpec.timestamp,
+                    InstrumentSpec.known_to,
+                ).where(
+                    InstrumentSpec.timestamp <= window.as_of,
+                    InstrumentSpec.timestamp < window.end,
+                    InstrumentSpec.known_to > window.start,
+                    author_identity_count != 1,
+                )
+            )
+        ).all()
+    )
+    return _PnlOrderMinimumEvidence(
+        spec_records=spec_records,
+        identity_records=identity_records,
+        capability_records=capability_records,
+        instrument_records=instrument_records,
+        orphan_spec_records=orphan_spec_records,
+    )
+
+
+def _pnl_order_minimum_capability_index(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+) -> _PnlOrderMinimumCapabilities:
+    """Index clipped capability intervals by logical symbol and venue."""
+    capabilities: _PnlOrderMinimumCapabilities = {}
+    for symbol_public_id, exchange, can_trade, valid_from, valid_to in records:
+        capabilities.setdefault((symbol_public_id, exchange), []).append(
+            (
+                max(valid_from, window.start),
+                min(valid_to, window.end),
+                bool(can_trade),
+            )
+        )
+    return capabilities
+
+
+def _pnl_order_minimum_spec_rows(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+    capabilities: _PnlOrderMinimumCapabilities,
+) -> list[PnlVenueOrderMinimumVersionRow]:
+    """Project author-time spec records and split them by capability seams."""
+    rows: list[PnlVenueOrderMinimumVersionRow] = []
+    for (
+        exchange,
+        base,
+        quote,
+        asset_type,
+        instrument_public_id,
+        symbol_public_id,
+        native_symbol,
+        instrument_kind,
+        quantity_unit,
+        status,
+        spec_public_id,
+        spec_source,
+        spec_version,
+        spec_observed_at,
+        min_order_size,
+        identity_conflict,
+        unstable_minimum,
+        valid_from,
+        valid_to,
+    ) in records:
+        clipped_from = max(valid_from, window.start)
+        clipped_to = min(valid_to, window.end)
+        for role, currency, counter_currency in _pnl_order_minimum_role_values(
+            base,
+            quote,
+        ):
+            if currency is None or currency not in window.currencies:
+                continue
+            for capability_from, capability_to, can_trade in _pnl_order_minimum_capability_segments(
+                clipped_from,
+                clipped_to,
+                capabilities.get((symbol_public_id, exchange), ()),
+            ):
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "currency": currency,
+                        "role": role,
+                        "asset_type": asset_type,
+                        "instrument_public_id": instrument_public_id,
+                        "symbol_public_id": symbol_public_id,
+                        "native_symbol": native_symbol,
+                        "counter_currency": counter_currency,
+                        "instrument_kind": instrument_kind,
+                        "quantity_unit": quantity_unit,
+                        "status": status,
+                        "spec_public_id": spec_public_id,
+                        "spec_source": spec_source,
+                        "spec_version": spec_version,
+                        "spec_observed_at": spec_observed_at,
+                        "min_order_size": min_order_size,
+                        "can_trade": can_trade,
+                        "identity_conflicted": bool(identity_conflict),
+                        "minimum_unstable": bool(unstable_minimum),
+                        "valid_from": capability_from,
+                        "valid_to": capability_to,
+                    }
+                )
+    return rows
+
+
+def _pnl_order_minimum_occupied(
+    rows: Sequence[PnlVenueOrderMinimumVersionRow],
+) -> _PnlOrderMinimumOccupied:
+    """Index spec-covered intervals by the projected instrument role."""
+    occupied: _PnlOrderMinimumOccupied = {}
+    for row in rows:
+        identity_key = (
+            row["instrument_public_id"],
+            row["symbol_public_id"],
+            row["exchange"],
+            row["role"],
+            row["currency"],
+        )
+        occupied.setdefault(identity_key, []).append((row["valid_from"], row["valid_to"]))
+    return occupied
+
+
+def _pnl_order_minimum_current_symbol_intervals(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+) -> _PnlOrderMinimumIdentityIntervals:
+    """Index every interval in which an instrument has a current Symbol fact."""
+    intervals: _PnlOrderMinimumIdentityIntervals = {}
+    for record in records:
+        exchange = record[0]
+        symbol_public_id = record[5]
+        instrument_id = record[12]
+        clipped_from = max(record[8], record[10], window.start)
+        clipped_to = min(record[9], record[11], window.end)
+        if clipped_from < clipped_to:
+            intervals.setdefault((instrument_id, symbol_public_id, exchange), []).append(
+                (clipped_from, clipped_to)
+            )
+    return intervals
+
+
+def _pnl_order_minimum_identity_rows(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+    capabilities: _PnlOrderMinimumCapabilities,
+    occupied: _PnlOrderMinimumOccupied,
+) -> list[PnlVenueOrderMinimumVersionRow]:
+    """Project explicit no-spec complements for interval-current identities."""
+    rows: list[PnlVenueOrderMinimumVersionRow] = []
+    for (
+        exchange,
+        base,
+        quote,
+        asset_type,
+        instrument_public_id,
+        symbol_public_id,
+        native_symbol,
+        identity_conflict,
+        instrument_from,
+        instrument_to,
+        symbol_from,
+        symbol_to,
+        _instrument_id,
+    ) in records:
+        clipped_from = max(instrument_from, symbol_from, window.start)
+        clipped_to = min(instrument_to, symbol_to, window.end)
+        for role, currency, counter_currency in _pnl_order_minimum_role_values(
+            base,
+            quote,
+        ):
+            if currency is None or currency not in window.currencies:
+                continue
+            identity_key = (
+                instrument_public_id,
+                symbol_public_id,
+                exchange,
+                role,
+                currency,
+            )
+            uncovered = (
+                [(clipped_from, clipped_to)]
+                if identity_conflict
+                else _pnl_order_minimum_interval_complement(
+                    clipped_from,
+                    clipped_to,
+                    occupied.get(identity_key, ()),
+                )
+            )
+            for gap_from, gap_to in uncovered:
+                for (
+                    capability_from,
+                    capability_to,
+                    can_trade,
+                ) in _pnl_order_minimum_capability_segments(
+                    gap_from,
+                    gap_to,
+                    capabilities.get((symbol_public_id, exchange), ()),
+                ):
+                    rows.append(
+                        {
+                            "exchange": exchange,
+                            "currency": currency,
+                            "role": role,
+                            "asset_type": asset_type,
+                            "instrument_public_id": instrument_public_id,
+                            "symbol_public_id": symbol_public_id,
+                            "native_symbol": native_symbol,
+                            "counter_currency": counter_currency,
+                            "instrument_kind": None,
+                            "quantity_unit": None,
+                            "status": None,
+                            "spec_public_id": None,
+                            "spec_source": None,
+                            "spec_version": None,
+                            "spec_observed_at": None,
+                            "min_order_size": None,
+                            "can_trade": can_trade,
+                            "identity_conflicted": bool(identity_conflict),
+                            "minimum_unstable": False,
+                            "valid_from": capability_from,
+                            "valid_to": capability_to,
+                        }
+                    )
+    return rows
+
+
+def _pnl_order_minimum_missing_symbol_rows(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+    current_symbol_intervals: _PnlOrderMinimumIdentityIntervals,
+) -> list[PnlVenueOrderMinimumVersionRow]:
+    """Project venue-wide conflict markers for every missing-Symbol interval."""
+    rows: list[PnlVenueOrderMinimumVersionRow] = []
+    for (
+        exchange,
+        instrument_public_id,
+        symbol_public_id,
+        instrument_from,
+        instrument_to,
+        instrument_id,
+    ) in records:
+        clipped_from = max(instrument_from, window.start)
+        clipped_to = min(instrument_to, window.end)
+        if clipped_from >= clipped_to:
+            continue
+        missing_intervals = _pnl_order_minimum_interval_complement(
+            clipped_from,
+            clipped_to,
+            current_symbol_intervals.get(
+                (instrument_id, symbol_public_id, exchange),
+                (),
+            ),
+        )
+        for gap_from, gap_to in missing_intervals:
+            for currency in sorted(window.currencies):
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "currency": currency,
+                        "role": "base",
+                        "asset_type": "unknown",
+                        "instrument_public_id": instrument_public_id,
+                        "symbol_public_id": symbol_public_id,
+                        "native_symbol": f"<missing-symbol:{symbol_public_id}>",
+                        "counter_currency": None,
+                        "instrument_kind": None,
+                        "quantity_unit": None,
+                        "status": None,
+                        "spec_public_id": None,
+                        "spec_source": None,
+                        "spec_version": None,
+                        "spec_observed_at": None,
+                        "min_order_size": None,
+                        "can_trade": None,
+                        "identity_conflicted": True,
+                        "minimum_unstable": False,
+                        "valid_from": gap_from,
+                        "valid_to": gap_to,
+                    }
+                )
+    return rows
+
+
+def _pnl_order_minimum_orphan_spec_rows(
+    records: Sequence[Row[Any]],
+    window: _PnlOrderMinimumWindow,
+) -> list[PnlVenueOrderMinimumVersionRow]:
+    """Project venue-wide conflict markers for specs without one author identity."""
+    rows: list[PnlVenueOrderMinimumVersionRow] = []
+    for instrument_public_id, spec_public_id, valid_from, valid_to in records:
+        clipped_from = max(valid_from, window.start)
+        clipped_to = min(valid_to, window.end)
+        for exchange in window.exchanges:
+            for currency in sorted(window.currencies):
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "currency": currency,
+                        "role": "base",
+                        "asset_type": "unknown",
+                        "instrument_public_id": instrument_public_id,
+                        "symbol_public_id": f"<unresolved-spec:{spec_public_id}>",
+                        "native_symbol": f"<unresolved-spec:{spec_public_id}>",
+                        "counter_currency": None,
+                        "instrument_kind": None,
+                        "quantity_unit": None,
+                        "status": None,
+                        "spec_public_id": spec_public_id,
+                        "spec_source": None,
+                        "spec_version": None,
+                        "spec_observed_at": None,
+                        "min_order_size": None,
+                        "can_trade": None,
+                        "identity_conflicted": True,
+                        "minimum_unstable": False,
+                        "valid_from": clipped_from,
+                        "valid_to": clipped_to,
+                    }
+                )
+    return rows
 
 
 def _candle_row_from_result(r: Row[Any]) -> CandleRow:
@@ -4125,6 +4883,39 @@ class Repository(ABC):
 
         Returns:
             Position dicts denormalized with instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_spot_order_minimum_window(
+        self,
+        exchanges: Sequence[str],
+        currencies: Sequence[str],
+        window_start: datetime,
+        window_end: datetime,
+        as_of: datetime,
+    ) -> list[PnlVenueOrderMinimumVersionRow]:
+        """Return temporal venue-order-minimum evidence for a P&L window.
+
+        Every real-venue instrument whose author-time symbol has a requested
+        currency on either side is considered. Instrument-spec versions known
+        by ``as_of`` and overlapping ``[window_start, window_end)`` are returned
+        undeduplicated, with base and quote roles projected separately.
+        Interval-current identity supplies explicit nullable-spec complements,
+        and independently interval-current capability splits every row. Missing
+        or overlapping capability is ``None`` rather than explicit ``False``.
+        Identity conflicts and non-null minimum changes are projected rather
+        than filtered away.
+
+        Args:
+            exchanges: Holding venues whose order minima may be considered.
+            currencies: Observed balance currencies to match on either pair side.
+            window_start: Inclusive start of the requested temporal window.
+            window_end: Exclusive end of the requested temporal window.
+            as_of: Knowledge horizon for identity and minimum evidence.
+
+        Returns:
+            Undeduplicated version rows clipped to the requested window.
         """
         ...
 
@@ -18317,6 +19108,94 @@ class SQLAlchemyRepository(Repository):
         if not math.isfinite(price) or price <= 0:
             return None
         return price, tick.timestamp
+
+    async def get_pnl_spot_order_minimum_window(
+        self,
+        exchanges: Sequence[str],
+        currencies: Sequence[str],
+        window_start: datetime,
+        window_end: datetime,
+        as_of: datetime,
+    ) -> list[PnlVenueOrderMinimumVersionRow]:
+        """Load temporal spot-order-minimum evidence without electing a winner.
+
+        Instrument specs form the market-time version stream and retain their
+        author-time instrument/symbol identity. A second interval-overlap
+        identity read supplies the complement before, between and after spec
+        versions as explicit nullable-spec intervals, including later symbol
+        corrections. Exchange capability is resolved independently at each
+        valued interval: one in-force row yields its boolean, while missing or
+        overlapping rows yield ``None``. Correlated identity/minimum conflicts,
+        lifecycle, certification and quantity unit all remain projected
+        evidence for the pure fail-closed rule.
+
+        Args:
+            exchanges: Exact real venues to query.
+            currencies: Balance currencies matched on either symbol side.
+            window_start: Inclusive version-window start.
+            window_end: Exclusive version-window end.
+            as_of: Knowledge horizon for every considered version.
+
+        Returns:
+            Base- and quote-role rows in deterministic order.
+        """
+        window = _PnlOrderMinimumWindow(
+            exchanges=tuple(dict.fromkeys(exchanges)),
+            currencies=frozenset(currencies),
+            start=window_start,
+            end=window_end,
+            as_of=as_of,
+        )
+        if not window.exchanges or not window.currencies or window.start >= window.end:
+            return []
+        async with self.session() as session:
+            evidence = await _pnl_order_minimum_records(session, window)
+        capabilities = _pnl_order_minimum_capability_index(
+            evidence.capability_records,
+            window,
+        )
+        rows = _pnl_order_minimum_spec_rows(
+            evidence.spec_records,
+            window,
+            capabilities,
+        )
+        rows.extend(
+            _pnl_order_minimum_identity_rows(
+                evidence.identity_records,
+                window,
+                capabilities,
+                _pnl_order_minimum_occupied(rows),
+            )
+        )
+        rows.extend(
+            _pnl_order_minimum_missing_symbol_rows(
+                evidence.instrument_records,
+                window,
+                _pnl_order_minimum_current_symbol_intervals(
+                    evidence.identity_records,
+                    window,
+                ),
+            )
+        )
+        rows.extend(
+            _pnl_order_minimum_orphan_spec_rows(
+                evidence.orphan_spec_records,
+                window,
+            )
+        )
+        rows.sort(
+            key=lambda row: (
+                row["exchange"],
+                row["currency"],
+                row["role"],
+                row["instrument_public_id"],
+                row["native_symbol"],
+                row["valid_from"],
+                row["valid_to"],
+                row["spec_public_id"] or "",
+            )
+        )
+        return rows
 
     async def get_pnl_scope_position_inventory_window(
         self,

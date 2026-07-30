@@ -5,17 +5,18 @@ Loads seed profiles from TOML files using a three-tier lookup:
 -> ``proprietary/data/seed/{profile}.toml`` (CWD, local dev)
 -> package-bundled ``snapper/data/seed/{profile}.toml`` (installed wheel).
 
-A seed profile is a complete, self-sufficient description of a database
-state: format version 2 declares operators, per-user operator
-memberships, wallet read grants and operator scope grants in the file
-instead of leaving them to be synthesized in code. Every file stands
-alone — there is no cross-file inheritance and no base/overlay merging.
+A seed profile is a self-sufficient declaration: format version 2 owns
+operators and per-user operator memberships instead of leaving them to
+be synthesized from roles in code. Wallet read grants and operator scope
+grants are parsed and validated but are not written by ``db-seed``.
+Every file stands alone — there is no cross-file inheritance and no
+base/overlay merging.
 
 Provides idempotent semantics so ``db-seed`` can be run repeatedly
-without duplicating data. Users are skipped entirely when any account
-already exists; settings use INSERT OR IGNORE to preserve manually
-configured values; operator/wallet bootstrap is skipped when active
-operators or wallets already exist.
+without duplicating data. User creation and the complete multi-tenant
+bootstrap run as one fresh-only unit: any historical row in users,
+operators, memberships, wallets, credentials, or reconciliation-method
+configs skips both. Settings retain per-key insert-if-absent semantics.
 
 Example:
     >>> from snapper.data.seed.loader import run_seed
@@ -511,7 +512,17 @@ def _parse_users(document: JsonObject, source: str) -> list[SeedUser]:
         seen.add(username)
         role = str(entry["role"])
         operators = _as_texts(entry["operators"])
+        if len(operators) != len(set(operators)):
+            raise ValueError(
+                f"Seed profile '{source}' user '{username}' declares duplicate "
+                f"operator memberships {operators}"
+            )
         primary_operator = str(entry["primary_operator"])
+        if operators and not primary_operator:
+            raise ValueError(
+                f"Seed profile '{source}' user '{username}' declares operator "
+                f"memberships {operators} but no primary_operator"
+            )
         if primary_operator and primary_operator not in operators:
             raise ValueError(
                 f"Seed profile '{source}' user '{username}' declares primary_operator "
@@ -816,10 +827,15 @@ def _known_to_value(conn: Connection) -> datetime | str:
         conn: Active SQLAlchemy connection.
 
     Returns:
-        KNOWN_TO_MAX datetime for non-SQLite engines, ISO string for SQLite.
+        KNOWN_TO_MAX datetime for non-SQLite engines. SQLite receives the
+        microsecond-precise naive UTC spelling used by ``TZDateTime`` and
+        the active-row partial indexes.
     """
     if conn.dialect.name == "sqlite":
-        return str(KNOWN_TO_MAX)
+        return KNOWN_TO_MAX.replace(tzinfo=None).isoformat(
+            sep=" ",
+            timespec="microseconds",
+        )
     return KNOWN_TO_MAX
 
 
@@ -827,17 +843,22 @@ def _timestamp_value(conn: Connection) -> datetime | str:
     """Build a UTC timestamp value compatible with the current SQL driver.
 
     sqlite3 no longer provides an implicit datetime adapter. Returning
-    an ISO-8601 string for SQLite avoids errors while keeping UTC data.
+    the same naive UTC spelling as ``TZDateTime`` keeps direct seed SQL
+    comparable with ORM-bound timestamps.
 
     Args:
         conn: Active SQLAlchemy connection.
 
     Returns:
-        UTC datetime for non-SQLite engines, ISO string for SQLite.
+        UTC datetime for non-SQLite engines, canonical naive UTC string
+        for SQLite.
     """
     now = datetime.now(tz=UTC)
     if conn.dialect.name == "sqlite":
-        return str(now)
+        return now.replace(tzinfo=None).isoformat(
+            sep=" ",
+            timespec="microseconds",
+        )
     return now
 
 
@@ -1100,18 +1121,107 @@ def _seed_wallet_with_credentials(
     return inserted
 
 
+def _seed_declared_operators(
+    conn: Connection,
+    operators: list[SeedOperator],
+    tracker: SequenceTracker,
+    now: datetime | str,
+) -> dict[str, str]:
+    """Insert exactly the operators declared by a fresh seed profile."""
+    known_to = _known_to_value(conn)
+    public_ids: dict[str, str] = {}
+    for operator in operators:
+        public_id = str(uuid7())
+        conn.execute(
+            text(
+                "INSERT INTO operators"
+                " (public_id, label, description, timestamp, known_to, session_id, sequence_id)"
+                " VALUES"
+                " (:public_id, :label, :description, :timestamp, :known_to,"
+                "  :session_id, :sequence_id)"
+            ),
+            {
+                "public_id": public_id,
+                "label": operator.label,
+                "description": operator.description,
+                "timestamp": now,
+                "known_to": known_to,
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("operators"),
+            },
+        )
+        public_ids[operator.label] = public_id
+    return public_ids
+
+
+def _seed_declared_memberships(
+    conn: Connection,
+    users: list[SeedUser],
+    operator_public_ids: dict[str, str],
+    tracker: SequenceTracker,
+    now: datetime | str,
+) -> int:
+    """Insert the profile's exact user-to-operator membership relation."""
+    known_to = _known_to_value(conn)
+    user_rows = conn.execute(
+        text("SELECT public_id, username FROM users WHERE known_to = :known_to ORDER BY id ASC"),
+        {"known_to": known_to},
+    ).all()
+    user_public_ids = {str(row[1]): str(row[0]) for row in user_rows}
+    inserted = 0
+    for user in users:
+        if not user.operators:
+            continue
+        user_public_id = user_public_ids.get(user.username)
+        if user_public_id is None:
+            raise ValueError(
+                f"Cannot seed memberships for declared user '{user.username}': "
+                "no active user row exists"
+            )
+        for operator_label in user.operators:
+            operator_public_id = operator_public_ids.get(operator_label)
+            if operator_public_id is None:
+                raise ValueError(
+                    f"Cannot seed membership for user '{user.username}': "
+                    f"operator '{operator_label}' was not declared"
+                )
+            conn.execute(
+                text(
+                    "INSERT INTO user_operator_memberships"
+                    " (public_id, user_public_id, operator_public_id, is_primary,"
+                    "  timestamp, known_to, session_id, sequence_id)"
+                    " VALUES"
+                    " (:public_id, :user_public_id, :operator_public_id, :is_primary,"
+                    "  :timestamp, :known_to, :session_id, :sequence_id)"
+                ),
+                {
+                    "public_id": str(uuid7()),
+                    "user_public_id": user_public_id,
+                    "operator_public_id": operator_public_id,
+                    "is_primary": operator_label == user.primary_operator,
+                    "timestamp": now,
+                    "known_to": known_to,
+                    "session_id": tracker.session_id,
+                    "sequence_id": tracker.next_sequence("user_operator_memberships"),
+                },
+            )
+            inserted += 1
+    return inserted
+
+
 def seed_default_multi_tenant(
     conn: Connection,
     tracker: SequenceTracker,
     wallets: list[SeedWallet] | None = None,
+    operators: list[SeedOperator] | None = None,
+    users: list[SeedUser] | None = None,
 ) -> int:
-    """Seed the default Operator, Wallets (with credentials), and memberships.
+    """Seed declared operators, wallets, credentials, and memberships.
 
     Creates:
 
-    1. Operator ``label="default"`` — the seed trading identity used
-       by the single-user deployment until an admin introduces
-       additional operators.
+    1. Exactly the operators declared by the profile, preserving each
+       label and description.
     2. One ``Wallet`` + nested ``WalletCredential`` rows and requested
        real reconciliation-method configs per entry in the ``wallets``
        argument. Each wallet is identified by the
@@ -1121,9 +1231,8 @@ def seed_default_multi_tenant(
        created as the bootstrap fallback so fresh ``make migrate-dev``
        runs against seed profiles that predate the ``[[wallets]]``
        TOML format still produce a working paper sandbox.
-    3. UserOperatorMembership rows linking every user whose named
-       permission set includes ``READ_ACCOUNT_STATE`` to the default
-       operator as ``is_primary=TRUE``.
+    3. Exactly the memberships declared by each user's ``operators``
+       and ``primary_operator`` fields. Roles do not imply membership.
 
     Idempotent: the function checks the ``operators`` and ``wallets``
     tables and skips the entire bootstrap when either is non-empty.
@@ -1141,6 +1250,10 @@ def seed_default_multi_tenant(
             ``default``/paper wallet with an ``{"initial_balance":
             "10000.0"}`` credential envelope is inserted as the
             legacy bootstrap path.
+        operators: Operator declarations from the profile. ``None``
+            inserts no operators.
+        users: User declarations carrying the exact membership relation.
+            ``None`` inserts no memberships.
 
     Returns:
         Count of rows inserted across operators + wallets + memberships
@@ -1158,25 +1271,8 @@ def seed_default_multi_tenant(
         )
         return 0
 
-    operator_public_id = str(uuid7())
-    conn.execute(
-        text(
-            "INSERT INTO operators"
-            " (public_id, label, description, timestamp, known_to, session_id, sequence_id)"
-            " VALUES"
-            " (:public_id, :label, :description, :timestamp, :known_to, :session_id, :sequence_id)"
-        ),
-        {
-            "public_id": operator_public_id,
-            "label": "default",
-            "description": "Default seed operator for single-user deployment",
-            "timestamp": now,
-            "known_to": known_to,
-            "session_id": tracker.session_id,
-            "sequence_id": tracker.next_sequence("operators"),
-        },
-    )
-    inserted += 1
+    operator_public_ids = _seed_declared_operators(conn, operators or [], tracker, now)
+    inserted += len(operator_public_ids)
 
     wallet_list: list[SeedWallet] = wallets or []
     if not wallet_list:
@@ -1209,44 +1305,18 @@ def seed_default_multi_tenant(
         )
         inserted += wallet_rows
 
-    membership_role_values = frozenset(
-        role.value
-        for role, permissions in ROLE_PERMISSIONS.items()
-        if Permission.READ_ACCOUNT_STATE in permissions
+    membership_count = _seed_declared_memberships(
+        conn,
+        users or [],
+        operator_public_ids,
+        tracker,
+        now,
     )
-    membership_user_rows = conn.execute(
-        text("SELECT public_id, role FROM users WHERE known_to = :known_to ORDER BY id ASC"),
-        {"known_to": known_to},
-    ).all()
-    membership_count = 0
-    for membership_user_row in membership_user_rows:
-        if membership_user_row[1] not in membership_role_values:
-            continue
-        conn.execute(
-            text(
-                "INSERT INTO user_operator_memberships"
-                " (public_id, user_public_id, operator_public_id, is_primary,"
-                "  timestamp, known_to, session_id, sequence_id)"
-                " VALUES"
-                " (:public_id, :user_public_id, :operator_public_id, :is_primary,"
-                "  :timestamp, :known_to, :session_id, :sequence_id)"
-            ),
-            {
-                "public_id": str(uuid7()),
-                "user_public_id": membership_user_row[0],
-                "operator_public_id": operator_public_id,
-                "is_primary": True,
-                "timestamp": now,
-                "known_to": known_to,
-                "session_id": tracker.session_id,
-                "sequence_id": tracker.next_sequence("user_operator_memberships"),
-            },
-        )
-        membership_count += 1
-        inserted += 1
+    inserted += membership_count
 
     logger.info(
-        f"Seeded multi-tenant bootstrap: 1 operator, {wallet_count} wallet(s), "
+        f"Seeded multi-tenant bootstrap: {len(operator_public_ids)} operator(s), "
+        f"{wallet_count} wallet(s), "
         f"{membership_count} membership(s), "
         f"{credential_count} wallet credential(s), "
         f"{method_config_count} reconciliation method config(s)"
@@ -1284,7 +1354,7 @@ def run_seed(profile: str) -> tuple[int, int]:
     """Load a seed profile and apply it to the database.
 
     Creates a synchronous SQLAlchemy engine, loads the TOML profile,
-    and seeds users, settings, and default multi-tenant rows in a
+    and seeds users, settings, and declared multi-tenant rows in a
     single transaction.
 
     Args:
@@ -1300,9 +1370,38 @@ def run_seed(profile: str) -> tuple[int, int]:
     engine = create_engine(db_url, poolclass=NullPool)
     tracker = SequenceTracker()
     with engine.connect() as conn:
-        users_count = seed_users(conn, seed_data.users, tracker)
+        existing_bootstrap_rows = {
+            "users": conn.execute(text("SELECT COUNT(*) FROM users")).scalar_one(),
+            "operators": conn.execute(text("SELECT COUNT(*) FROM operators")).scalar_one(),
+            "wallets": conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar_one(),
+            "memberships": conn.execute(
+                text("SELECT COUNT(*) FROM user_operator_memberships")
+            ).scalar_one(),
+            "credentials": conn.execute(
+                text("SELECT COUNT(*) FROM wallet_credentials")
+            ).scalar_one(),
+            "method_configs": conn.execute(
+                text("SELECT COUNT(*) FROM portfolio_reconciliation_method_configs")
+            ).scalar_one(),
+        }
+        bootstrap_is_fresh = not any(existing_bootstrap_rows.values())
+        if bootstrap_is_fresh:
+            users_count = seed_users(conn, seed_data.users, tracker)
+        else:
+            users_count = 0
+            logger.info(
+                "Tenant bootstrap tables were non-empty before db-seed "
+                f"({existing_bootstrap_rows}); skipping users and multi-tenant bootstrap"
+            )
         settings_count = seed_settings(conn, seed_data.settings, tracker)
-        seed_default_multi_tenant(conn, tracker, wallets=seed_data.wallets)
+        if bootstrap_is_fresh:
+            seed_default_multi_tenant(
+                conn,
+                tracker,
+                wallets=seed_data.wallets,
+                operators=seed_data.operators,
+                users=seed_data.users,
+            )
         conn.commit()
     engine.dispose()
     return users_count, settings_count

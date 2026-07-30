@@ -85,9 +85,6 @@
       },
       "_seed_demo_alerts_for_user": {
         "PLR0913": 6
-      },
-      "main": {
-        "PLR0915": 54
       }
     },
     "scripts/test_live_orders.py": {

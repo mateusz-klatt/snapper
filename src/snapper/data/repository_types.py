@@ -1258,6 +1258,42 @@ class PnlCryptoUsdPlaneRow(TypedDict):
     candle_timestamp: datetime
 
 
+class PnlVenueOrderMinimumVersionRow(TypedDict):
+    """One temporal venue-order-minimum evidence row for Phase-5B.
+
+    Returned by ``get_pnl_spot_order_minimum_window`` without SQL
+    deduplication. Each row describes one base- or quote-side view of an
+    instrument/spec version known by the requested horizon. ``valid_from`` and
+    ``valid_to`` form the half-open interval in which the projected spec version
+    is in force, or an explicit complementary interval in which no spec exists.
+    Missing or overlapping capability evidence remains visible as
+    ``can_trade=None`` so the pure realizability rule can distinguish UNKNOWN
+    from an explicit venue capability of ``False``.
+    """
+
+    exchange: str
+    currency: str
+    role: Literal["base", "quote"]
+    asset_type: str
+    instrument_public_id: str
+    symbol_public_id: str
+    native_symbol: str
+    counter_currency: str | None
+    instrument_kind: str | None
+    quantity_unit: str | None
+    status: str | None
+    spec_public_id: str | None
+    spec_source: str | None
+    spec_version: str | None
+    spec_observed_at: datetime | None
+    min_order_size: float | None
+    can_trade: bool | None
+    identity_conflicted: bool
+    minimum_unstable: bool
+    valid_from: datetime
+    valid_to: datetime
+
+
 class PnlScopePositionVersionRow(TypedDict):
     """One temporal position version labelling the Phase-5B partition per minute.
 

@@ -34,6 +34,7 @@ from snapper.data.seed.loader import _hash_password
 from snapper.data.seed.loader import _known_to_value
 from snapper.data.seed.loader import _package_dir
 from snapper.data.seed.loader import _parse_seed_profile
+from snapper.data.seed.loader import _seed_declared_memberships
 from snapper.data.seed.loader import _sync_db_url
 from snapper.data.seed.loader import _timestamp_value
 from snapper.data.seed.loader import _validate_seed_reconciliation_method
@@ -44,6 +45,8 @@ from snapper.data.seed.loader import seed_default_multi_tenant
 from snapper.data.seed.loader import seed_settings
 from snapper.data.seed.loader import seed_users
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+_SQLITE_KNOWN_TO_MAX = "9999-12-31 23:59:59.000000"
 
 
 class TestResolveSeedPath:
@@ -392,6 +395,46 @@ primary_operator = "default"
 readable_wallets = []
 """
         with pytest.raises(ValueError, match="declares primary_operator 'default' outside"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_non_empty_operators_require_primary_operator(self, tmp_path: Path) -> None:
+        """Every declared membership set has exactly one primary.
+
+        Given: a user with one declared operator but an empty primary,
+        When: the profile is loaded,
+        Then: parsing fails before the write path can create zero primaries.
+        """
+        body = _V2_PREAMBLE + """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = ["default"]
+primary_operator = ""
+readable_wallets = []
+"""
+        with pytest.raises(ValueError, match="but no primary_operator"):
+            _load_inline_profile(tmp_path, body)
+
+    def test_duplicate_user_operator_membership_is_rejected(self, tmp_path: Path) -> None:
+        """A user cannot declare the same desk membership twice.
+
+        Given: a user whose operators list repeats one label,
+        When: the profile is loaded,
+        Then: parsing fails instead of reaching a database uniqueness error.
+        """
+        body = _V2_PREAMBLE + """
+[[users]]
+username = "admin"
+email = "admin@test.local"
+password = "unit-test-password"
+role = "admin"
+operators = ["default", "default"]
+primary_operator = "default"
+readable_wallets = []
+"""
+        with pytest.raises(ValueError, match="declares duplicate operator memberships"):
             _load_inline_profile(tmp_path, body)
 
     def test_user_operator_must_be_declared(self, tmp_path: Path) -> None:
@@ -955,17 +998,17 @@ class TestTimestampValue:
     """Tests for timestamp value conversion by database dialect."""
 
     def test_returns_iso_string_for_sqlite(self) -> None:
-        """Test SQLite timestamp is serialized to UTC ISO string.
+        """Test SQLite timestamp matches SQLAlchemy's naive UTC storage.
 
         Given: a connection dialect named "sqlite",
         When: building a seed timestamp value,
-        Then: value is an ISO string with UTC offset.
+        Then: value is a microsecond-precise string with no offset suffix.
         """
         conn_mock = Mock()
         conn_mock.dialect.name = "sqlite"
         value = _timestamp_value(cast(Connection, conn_mock))
         assert isinstance(value, str)
-        assert value.endswith("+00:00")
+        assert datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f").tzinfo is None
 
     def test_returns_datetime_for_non_sqlite(self) -> None:
         """Test non-SQLite timestamp remains a timezone-aware datetime.
@@ -985,17 +1028,16 @@ class TestKnownToValue:
     """Tests for KNOWN_TO_MAX value conversion by database dialect."""
 
     def test_returns_iso_string_for_sqlite(self) -> None:
-        """Test SQLite known_to is serialized to ISO string.
+        """Test SQLite known_to matches the active-index sentinel exactly.
 
         Given: a connection dialect named "sqlite",
         When: building a known_to value,
-        Then: value is an ISO string ending with UTC offset.
+        Then: value equals SQLAlchemy's microsecond-precise naive UTC binding.
         """
         conn_mock = Mock()
         conn_mock.dialect.name = "sqlite"
         value = _known_to_value(cast(Connection, conn_mock))
-        assert isinstance(value, str)
-        assert value.endswith("+00:00")
+        assert value == "9999-12-31 23:59:59.000000"
 
     def test_returns_datetime_for_non_sqlite(self) -> None:
         """Test non-SQLite known_to remains the KNOWN_TO_MAX datetime.
@@ -1462,6 +1504,50 @@ class TestRunSeed:
             users_count, settings_count = run_seed("dev")
         assert users_count == 3
         assert settings_count >= 1
+        engine = create_engine(db_url, poolclass=NullPool)
+        with engine.connect() as conn:
+            operator = conn.execute(text("SELECT label, description FROM operators")).one()
+            memberships = conn.execute(
+                text(
+                    "SELECT users.username, operators.label, memberships.is_primary"
+                    " FROM user_operator_memberships AS memberships"
+                    " JOIN users ON users.public_id = memberships.user_public_id"
+                    " JOIN operators"
+                    " ON operators.public_id = memberships.operator_public_id"
+                    " ORDER BY users.username"
+                )
+            ).all()
+            read_grant_count = conn.execute(
+                text("SELECT COUNT(*) FROM wallet_user_read_grants")
+            ).scalar_one()
+            active_sentinel = "9999-12-31 23:59:59.000000"
+            sentinel_counts = {
+                table: (
+                    conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one(),
+                    conn.execute(
+                        text(f"SELECT COUNT(*) FROM {table} WHERE known_to = :known_to"),
+                        {"known_to": active_sentinel},
+                    ).scalar_one(),
+                )
+                for table in (
+                    "users",
+                    "operators",
+                    "user_operator_memberships",
+                    "wallets",
+                    "wallet_credentials",
+                    "portfolio_reconciliation_method_configs",
+                    "settings",
+                )
+            }
+        engine.dispose()
+        assert operator == ("default", "Default seed operator for single-user deployment")
+        assert memberships == [
+            ("admin", "default", 1),
+            ("operator", "default", 1),
+            ("viewer", "default", 1),
+        ]
+        assert read_grant_count == 0
+        assert all(total == active for total, active in sentinel_counts.values())
 
     def test_run_seed_missing_profile_raises(self) -> None:
         """Test run_seed raises for missing profile.
@@ -1472,6 +1558,142 @@ class TestRunSeed:
         """
         with pytest.raises(FileNotFoundError, match="nonexistent"):
             run_seed("nonexistent")
+
+    @pytest.mark.parametrize(
+        "preexisting_table",
+        [
+            "users",
+            "operators",
+            "wallets",
+            "user_operator_memberships",
+            "wallet_credentials",
+            "portfolio_reconciliation_method_configs",
+        ],
+    )
+    def test_existing_tenant_state_prevents_partial_bootstrap(
+        self,
+        tmp_path: Path,
+        preexisting_table: str,
+    ) -> None:
+        """Established tenant state cannot be partially merged with a profile.
+
+        Given: one row in any seed-owned tenant-bootstrap table,
+        When: the dev profile is seeded,
+        Then: settings may seed but users, operators, wallets, and memberships
+            remain unchanged.
+        """
+        db_path = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_path}"
+        engine = create_engine(db_url, poolclass=NullPool)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE users ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "username TEXT UNIQUE, email TEXT,"
+                    "password_hash TEXT, role TEXT, is_active INTEGER,"
+                    "created_at TIMESTAMP, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE TABLE settings ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                    "key TEXT UNIQUE, value TEXT, category TEXT,"
+                    "description TEXT, is_encrypted INTEGER, timestamp TIMESTAMP,"
+                    "known_to DATETIME NOT NULL,"
+                    "session_id TEXT NOT NULL DEFAULT '',"
+                    "sequence_id INTEGER NOT NULL DEFAULT 0)"
+                )
+            )
+            _create_multi_tenant_tables(conn)
+            now = str(datetime.now(UTC))
+            known_to = _SQLITE_KNOWN_TO_MAX
+            existing_rows = {
+                "users": (
+                    "INSERT INTO users (public_id, username, email, password_hash,"
+                    " role, is_active, created_at, timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('existing-user', 'admin', 'existing@test.local', 'hash',"
+                    " 'admin', 1, :now, :now, :known_to, 'existing', 1)"
+                ),
+                "operators": (
+                    "INSERT INTO operators (public_id, label, description, timestamp,"
+                    " known_to, session_id, sequence_id)"
+                    " VALUES ('existing-operator', 'existing', 'existing desk', :now,"
+                    " :known_to, 'existing', 1)"
+                ),
+                "wallets": (
+                    "INSERT INTO wallets (public_id, label, description, is_paper,"
+                    " timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('existing-wallet', 'existing', 'existing wallet', 1,"
+                    " :now, :known_to, 'existing', 1)"
+                ),
+                "user_operator_memberships": (
+                    "INSERT INTO user_operator_memberships"
+                    " (public_id, user_public_id, operator_public_id, is_primary,"
+                    " timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('existing-membership', 'orphan-user', 'orphan-operator', 1,"
+                    " :now, :known_to, 'existing', 1)"
+                ),
+                "wallet_credentials": (
+                    "INSERT INTO wallet_credentials"
+                    " (public_id, wallet_public_id, exchange, credential_type,"
+                    " encrypted_payload, label, timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('existing-credential', 'orphan-wallet', 'paper', 'paper',"
+                    " '{}', 'orphan credential', :now, :known_to, 'existing', 1)"
+                ),
+                "portfolio_reconciliation_method_configs": (
+                    "INSERT INTO portfolio_reconciliation_method_configs"
+                    " (public_id, wallet_public_id, exchange, mode, method,"
+                    " timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('existing-method', 'orphan-wallet', 'paper', 'paper',"
+                    " 'unclassified', :now, :known_to, 'existing', 1)"
+                ),
+            }
+            conn.execute(
+                text(existing_rows[preexisting_table]),
+                {"now": now, "known_to": known_to},
+            )
+            conn.commit()
+        engine.dispose()
+
+        with patch("snapper.data.seed.loader.BootstrapSettingsLoader") as mock_bootstrap:
+            mock_bootstrap.return_value.db_url = db_url
+            users_count, settings_count = run_seed("dev")
+
+        assert users_count == 0
+        assert settings_count >= 1
+        engine = create_engine(db_url, poolclass=NullPool)
+        with engine.connect() as conn:
+            actual_counts = {
+                "users": conn.execute(text("SELECT COUNT(*) FROM users")).scalar_one(),
+                "operators": conn.execute(text("SELECT COUNT(*) FROM operators")).scalar_one(),
+                "wallets": conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar_one(),
+                "user_operator_memberships": conn.execute(
+                    text("SELECT COUNT(*) FROM user_operator_memberships")
+                ).scalar_one(),
+                "wallet_credentials": conn.execute(
+                    text("SELECT COUNT(*) FROM wallet_credentials")
+                ).scalar_one(),
+                "portfolio_reconciliation_method_configs": conn.execute(
+                    text("SELECT COUNT(*) FROM portfolio_reconciliation_method_configs")
+                ).scalar_one(),
+            }
+            assert actual_counts == {
+                table: int(table == preexisting_table)
+                for table in (
+                    "users",
+                    "operators",
+                    "wallets",
+                    "user_operator_memberships",
+                    "wallet_credentials",
+                    "portfolio_reconciliation_method_configs",
+                )
+            }
+        engine.dispose()
 
     def test_run_seed_converts_async_url(self, tmp_path: Path) -> None:
         """Test run_seed converts async database URL to sync.
@@ -1538,13 +1760,15 @@ class TestSeedDefaultMultiTenant:
         conn.commit()
         return engine, conn
 
-    def test_inserts_operator_wallet_membership_and_paper_credential(self, tmp_path: Path) -> None:
-        """Bootstrap creates operator + wallet + admin membership + paper credential.
+    def test_inserts_declared_operators_memberships_and_paper_credential(
+        self, tmp_path: Path
+    ) -> None:
+        """Bootstrap preserves declared operators and the primary membership.
 
         Given: An SQLite database with an admin user already seeded and
             empty multi-tenant tables,
         When: ``seed_default_multi_tenant`` is invoked,
-        Then: Default operator, paper wallet, primary admin membership,
+        Then: The declared desk, paper wallet, primary admin membership,
             and a paper-mode wallet credential row are inserted (
             bootstrap so the dynamic per-wallet executor spawner finds at
             least one credential at boot).
@@ -1559,17 +1783,44 @@ class TestSeedDefaultMultiTenant:
                     " VALUES ('user-admin', 'admin', 'a@t.com', 'hash',"
                     " 'admin', 1, :ts, :ts, :known_to, 's', 1)"
                 ),
-                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+                {"ts": str(datetime.now(UTC)), "known_to": _SQLITE_KNOWN_TO_MAX},
             )
             conn.commit()
 
-            count = seed_default_multi_tenant(conn, SequenceTracker())
+            operators = [
+                SeedOperator(
+                    label="desk-alpha",
+                    description="Alpha desk declared by the seed profile",
+                ),
+                SeedOperator(
+                    label="desk-beta",
+                    description="Beta desk declared by the seed profile",
+                ),
+            ]
+            user = SeedUser(
+                username="admin",
+                email="a@t.com",
+                password="unused",
+                role="admin",
+                operators=["desk-alpha", "desk-beta"],
+                primary_operator="desk-beta",
+            )
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                operators=operators,
+                users=[user],
+            )
             conn.commit()
 
-            assert count == 4
-            op_row = conn.execute(text("SELECT label FROM operators")).first()
-            assert op_row is not None
-            assert op_row[0] == "default"
+            assert count == 6
+            op_rows = conn.execute(
+                text("SELECT label, description FROM operators ORDER BY label")
+            ).all()
+            assert op_rows == [
+                ("desk-alpha", "Alpha desk declared by the seed profile"),
+                ("desk-beta", "Beta desk declared by the seed profile"),
+            ]
             wallet_row = conn.execute(
                 text("SELECT public_id, label, is_paper FROM wallets")
             ).first()
@@ -1577,12 +1828,20 @@ class TestSeedDefaultMultiTenant:
             wallet_public_id = wallet_row[0]
             assert wallet_row[1] == "default"
             assert wallet_row[2] == 1
-            membership_row = conn.execute(
-                text("SELECT user_public_id, is_primary FROM user_operator_memberships")
-            ).first()
-            assert membership_row is not None
-            assert membership_row[0] == "user-admin"
-            assert membership_row[1] == 1
+            membership_rows = conn.execute(
+                text(
+                    "SELECT operators.label, memberships.user_public_id,"
+                    " memberships.is_primary"
+                    " FROM user_operator_memberships AS memberships"
+                    " JOIN operators"
+                    " ON operators.public_id = memberships.operator_public_id"
+                    " ORDER BY operators.label"
+                )
+            ).all()
+            assert membership_rows == [
+                ("desk-alpha", "user-admin", 0),
+                ("desk-beta", "user-admin", 1),
+            ]
             credential_row = conn.execute(
                 text(
                     "SELECT wallet_public_id, exchange, credential_type,"
@@ -1600,13 +1859,91 @@ class TestSeedDefaultMultiTenant:
             conn.close()
             cast(Any, engine).dispose()
 
-    def test_memberships_follow_read_account_state_permission(self, tmp_path: Path) -> None:
-        """Bootstrap memberships follow the named account-read permission.
+    def test_declared_membership_requires_an_active_seeded_user(self, tmp_path: Path) -> None:
+        """Membership seeding refuses a declaration with no active user row.
+
+        Given: A declared viewer membership but an empty users table,
+        When: The exact membership relation is materialized,
+        Then: The missing active user fails loudly before any membership insert.
+        """
+        engine, conn = self._make_db(tmp_path)
+        viewer = SeedUser(
+            username="viewer",
+            email="viewer@t.com",
+            password="unused",
+            role="viewer",
+            operators=["default"],
+            primary_operator="default",
+        )
+        try:
+            with pytest.raises(ValueError, match="no active user row exists"):
+                _seed_declared_memberships(
+                    conn,
+                    [viewer],
+                    {"default": "operator-default"},
+                    SequenceTracker(),
+                    str(datetime.now(UTC)),
+                )
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM user_operator_memberships")).scalar_one()
+                == 0
+            )
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+    def test_declared_membership_requires_a_seeded_operator(self, tmp_path: Path) -> None:
+        """Membership seeding refuses a declaration whose operator is absent.
+
+        Given: An active viewer row and a membership naming an unmaterialized desk,
+        When: The exact membership relation is materialized,
+        Then: The missing operator fails loudly before any membership insert.
+        """
+        engine, conn = self._make_db(tmp_path)
+        now = str(datetime.now(UTC))
+        viewer = SeedUser(
+            username="viewer",
+            email="viewer@t.com",
+            password="unused",
+            role="viewer",
+            operators=["default"],
+            primary_operator="default",
+        )
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO users (public_id, username, email, password_hash,"
+                    " role, is_active, created_at, timestamp, known_to,"
+                    " session_id, sequence_id)"
+                    " VALUES ('user-viewer', 'viewer', 'viewer@t.com', 'hash',"
+                    " 'viewer', 1, :now, :now, :known_to, 's', 1)"
+                ),
+                {"now": now, "known_to": _SQLITE_KNOWN_TO_MAX},
+            )
+            with pytest.raises(ValueError, match="operator 'default' was not declared"):
+                _seed_declared_memberships(
+                    conn,
+                    [viewer],
+                    {},
+                    SequenceTracker(),
+                    now,
+                )
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM user_operator_memberships")).scalar_one()
+                == 0
+            )
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+    def test_memberships_follow_declared_profile_exactly(self, tmp_path: Path) -> None:
+        """Bootstrap memberships follow declarations rather than role permissions.
 
         Given: Active admin, operator, viewer, and AI-role users,
-        When: ``seed_default_multi_tenant`` creates the default operator,
-        Then: Every account-state reader receives a primary membership and
-            unrelated AI roles receive none.
+        When: The profile declares one primary default-desk membership for
+            admin, operator, and viewer only,
+        Then: Exactly those three memberships exist and no personal wallet
+            read grants are synthesized.
         """
         engine, conn = self._make_db(tmp_path)
         try:
@@ -1628,25 +1965,59 @@ class TestSeedDefaultMultiTenant:
                     " ('user-ai-delegate', 'ai-delegate', NULL, 'hash', 'ai_delegate',"
                     " 1, :ts, :ts, :known_to, 's', 6)"
                 ),
-                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+                {"ts": str(datetime.now(UTC)), "known_to": _SQLITE_KNOWN_TO_MAX},
             )
             conn.commit()
 
-            count = seed_default_multi_tenant(conn, SequenceTracker())
+            operator = SeedOperator(
+                label="default",
+                description="Default seed operator for single-user deployment",
+            )
+            declared_users = [
+                SeedUser(
+                    username=username,
+                    email=f"{username}@t.com",
+                    password="unused",
+                    role=role,
+                    operators=["default"] if username in {"admin", "operator", "viewer"} else [],
+                    primary_operator=(
+                        "default" if username in {"admin", "operator", "viewer"} else ""
+                    ),
+                )
+                for username, role in (
+                    ("admin", "admin"),
+                    ("operator", "operator"),
+                    ("viewer", "viewer"),
+                    ("ai-researcher", "ai_researcher"),
+                    ("ai-reviewer", "ai_reviewer"),
+                    ("ai-delegate", "ai_delegate"),
+                )
+            ]
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                operators=[operator],
+                users=declared_users,
+            )
             conn.commit()
 
             memberships = conn.execute(
                 text(
-                    "SELECT user_public_id, is_primary"
-                    " FROM user_operator_memberships ORDER BY user_public_id"
+                    "SELECT users.username, operators.label, memberships.is_primary"
+                    " FROM user_operator_memberships AS memberships"
+                    " JOIN users ON users.public_id = memberships.user_public_id"
+                    " JOIN operators"
+                    " ON operators.public_id = memberships.operator_public_id"
+                    " ORDER BY users.username"
                 )
             ).all()
             assert count == 6
-            assert [(row[0], row[1]) for row in memberships] == [
-                ("user-admin", 1),
-                ("user-operator", 1),
-                ("user-viewer", 1),
+            assert memberships == [
+                ("admin", "default", 1),
+                ("operator", "default", 1),
+                ("viewer", "default", 1),
             ]
+            assert conn.execute(text("SELECT COUNT(*) FROM wallet_user_read_grants")).scalar() == 0
         finally:
             conn.close()
             cast(Any, engine).dispose()
@@ -1666,11 +2037,15 @@ class TestSeedDefaultMultiTenant:
                     " known_to, session_id, sequence_id)"
                     " VALUES ('op-1', 'pre-existing', NULL, :ts, :known_to, 's', 1)"
                 ),
-                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+                {"ts": str(datetime.now(UTC)), "known_to": _SQLITE_KNOWN_TO_MAX},
             )
             conn.commit()
 
-            count = seed_default_multi_tenant(conn, SequenceTracker())
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                operators=[SeedOperator(label="new", description="must not be merged")],
+            )
             conn.commit()
 
             assert count == 0
@@ -1695,11 +2070,15 @@ class TestSeedDefaultMultiTenant:
                     " timestamp, known_to, session_id, sequence_id)"
                     " VALUES ('w-1', 'pre-existing', NULL, 0, :ts, :known_to, 's', 1)"
                 ),
-                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+                {"ts": str(datetime.now(UTC)), "known_to": _SQLITE_KNOWN_TO_MAX},
             )
             conn.commit()
 
-            count = seed_default_multi_tenant(conn, SequenceTracker())
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                operators=[SeedOperator(label="new", description="must not be merged")],
+            )
             conn.commit()
 
             assert count == 0
@@ -1708,17 +2087,40 @@ class TestSeedDefaultMultiTenant:
             conn.close()
             cast(Any, engine).dispose()
 
-    def test_skips_membership_when_no_entitled_user(self, tmp_path: Path) -> None:
-        """Bootstrap skips membership rows when no entitled user is present.
+    def test_viewer_without_declared_operator_gets_no_membership(self, tmp_path: Path) -> None:
+        """A viewer role alone does not imply desk membership.
 
-        Given: A database with the users table empty,
-        When: ``seed_default_multi_tenant`` is invoked,
+        Given: A viewer exists but its profile entry declares ``operators=[]``,
+        When: ``seed_default_multi_tenant`` is invoked with a declared desk,
         Then: Operator + wallet + paper credential are inserted but no
             membership row (count == 3 instead of 4).
         """
         engine, conn = self._make_db(tmp_path)
         try:
-            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.execute(
+                text(
+                    "INSERT INTO users (public_id, username, email, password_hash,"
+                    " role, is_active, created_at, timestamp, known_to,"
+                    " session_id, sequence_id)"
+                    " VALUES ('user-viewer', 'viewer', 'v@t.com', 'hash',"
+                    " 'viewer', 1, :ts, :ts, :known_to, 's', 1)"
+                ),
+                {"ts": str(datetime.now(UTC)), "known_to": _SQLITE_KNOWN_TO_MAX},
+            )
+            viewer = SeedUser(
+                username="viewer",
+                email="v@t.com",
+                password="unused",
+                role="viewer",
+                operators=[],
+                primary_operator="",
+            )
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                operators=[SeedOperator(label="default", description="Default desk")],
+                users=[viewer],
+            )
             conn.commit()
 
             assert count == 3
@@ -1749,7 +2151,12 @@ class TestSeedDefaultMultiTenant:
             ],
         )
         try:
-            count = seed_default_multi_tenant(conn, SequenceTracker(), wallets=[wallet])
+            count = seed_default_multi_tenant(
+                conn,
+                SequenceTracker(),
+                wallets=[wallet],
+                operators=[SeedOperator(label="default", description="Default desk")],
+            )
             conn.commit()
 
             assert count == 4
@@ -1983,6 +2390,17 @@ def _create_multi_tenant_tables(conn: Connection) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
             " user_public_id TEXT, operator_public_id TEXT,"
             " is_primary INTEGER NOT NULL DEFAULT 0,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE wallet_user_read_grants ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " user_public_id TEXT, wallet_public_id TEXT,"
+            " note TEXT, granted_by_user_public_id TEXT,"
             " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
             " session_id TEXT NOT NULL DEFAULT '',"
             " sequence_id INTEGER NOT NULL DEFAULT 0)"

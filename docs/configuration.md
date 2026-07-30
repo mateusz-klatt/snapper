@@ -250,12 +250,12 @@ Envelope shapes by `credential_type`:
 
 #### Seed profile format version 2
 
-A seed profile is a complete, self-sufficient description of a database
-state. Every file stands alone: there is no cross-file inheritance and no
-base/overlay merging. Format version 2 adds the sections that version 1
-left to code-side synthesis, and the loader rejects any other version at
-parse time so a stale profile fails loud instead of seeding a state no
-file describes.
+A seed profile is a self-contained declarative input. Every file stands
+alone: there is no cross-file inheritance and no base/overlay merging.
+Format version 2 makes operators and user memberships authoritative for
+fresh bootstrap instead of deriving them from role permissions. The
+loader rejects any other version at parse time so a stale profile fails
+loud instead of silently receiving code-side defaults.
 
 Required sections, all validated when the profile is parsed:
 
@@ -275,8 +275,9 @@ Required sections, all validated when the profile is parsed:
     entry may hold a role the same file calls runtime-owned.
 - `[[operators]]` entries with `label` and `description`. Labels are unique.
 - Per-user `operators`, `primary_operator` and `readable_wallets`. They may
-    be empty but never absent. `primary_operator` is either `""` or a member
-    of that user's own `operators` list. Usernames are unique.
+    be empty but never absent. A non-empty, duplicate-free `operators` list
+    requires exactly one `primary_operator` from that list; an empty list
+    requires `primary_operator = ""`. Usernames are unique.
 - `[[settings]]` entries with `key`, `value`, `category` and `description`.
 - `[[wallets]]` entries with `label` and `is_paper` (plus optional
     `description` and nested `[[wallets.credentials]]`, which require
@@ -290,9 +291,8 @@ Required sections, all validated when the profile is parsed:
     `scope_kind = "instrument"`).
 
 Unknown top-level sections and unknown keys inside any table are
-rejected rather than ignored. A profile only describes a database state
-completely if everything it states is actually read, so a misspelled
-`[[scope_grant]]` fails loud instead of vanishing.
+rejected rather than ignored, so a misspelled `[[scope_grant]]` fails
+loud instead of vanishing.
 
 Wallets are addressed by the natural `(wallet, wallet_is_paper)` key
 because the `wallets` table is unique on `(label, is_paper)`. Every
@@ -328,13 +328,9 @@ username = "viewer"
 email = "viewer@snapper.local"
 password = "change-me-after-first-login"
 role = "viewer"
-operators = []
-primary_operator = ""
-
-  [[users.readable_wallets]]
-  wallet = "paper"
-  wallet_is_paper = true
-  note = "read-only oversight of the paper book"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
 
 [[wallets]]
 label = "paper"
@@ -348,39 +344,50 @@ description = "Paper-mode wallet (10k USD bootstrap)"
   initial_balance = "10000.0"
   label = "paper bootstrap"
 
-[[scope_grants]]
-operator = "default"
-wallet = "paper"
-wallet_is_paper = true
-granted_by = "admin"
-scope_kind = "underlying"
-underlying = "BTC"
-note = "heartbeat AI reviews"
 ```
-
-Declaring these facts does not yet change what `db-seed` writes: the
-current bootstrap still synthesizes the default operator and the
-memberships described below. The declarations become authoritative in a
-follow-up change.
 
 Seed profiles are resolved in three tiers:
 `data/seed/{profile}.toml`, then `proprietary/data/seed/{profile}.toml`,
 then the package-bundled `src/snapper/data/seed/{profile}.toml`. The
 bundled `dev.toml` seeds an open-source paper wallet with a paper
 credential; maintainers may have a proprietary override with live
-wallet credentials. On a fresh database, `db-seed` creates the default
-operator, every `[[wallets]]` entry, nested
-`[[wallets.credentials]]` rows, each requested live reconciliation-method
-config, and a primary membership on the default operator for every seeded user
-whose named permission set contains `read:account_state` (currently `admin`,
-`operator`, and `viewer`). No default scope grants are inserted, so callers
-without global `impersonate:operator` still need an active grant before a
-wallet becomes visible. If the profile has no wallets, the loader falls back
-to a single `default` paper wallet with a `10000.0` initial balance. Re-running
-seed on an established database does not merge wallets: users are skipped when
-any user exists, settings are inserted only when the key is absent, and the
-whole operator/wallet bootstrap is skipped when either operators or wallets
-already exist.
+wallet credentials. On a fresh database, `db-seed` creates every declared
+`[[operators]]` entry with its exact label and description, every
+`[[wallets]]` entry, nested `[[wallets.credentials]]` rows, each requested
+live reconciliation-method config, and exactly the user/operator
+memberships declared by each user's `operators` and `primary_operator`
+fields. A role does not imply a membership: a viewer with `operators = []`
+receives no desk membership.
+
+`readable_wallets` and `[[scope_grants]]` are currently parse-and-validation
+only; `db-seed` writes neither `wallet_user_read_grants` nor operator scope
+rows. Personal read grants are never synthesized from a role or a desk
+membership. Scope grants cannot safely be materialized during this phase:
+`db-seed` runs before `run-static` has populated the symbol and underlying
+reference rows, and the version-2 `instrument` field does not include an
+exchange, so an instrument symbol can be ambiguous across venues. Provision
+wallet scope through the supported runtime administration path after static
+reference data exists.
+
+For local UAT, `scripts/seed_demo.py` runs after static reference data is
+available. It verifies that the seeded viewer is already a member of the
+default desk, then idempotently gives that desk an instrument scope on the
+required paper BTC demo market. The script fails on a missing membership or a
+scope owned by another desk; it never creates a personal read grant.
+
+If the profile has no wallets, the loader falls back to a single `default`
+paper wallet with a `10000.0` initial balance. Re-running seed on an
+established database does not repair or merge multi-tenant state: if any
+seed-owned tenant row existed before the run (users, operators, memberships,
+wallets, credentials, or reconciliation-method configs), both user creation
+and the operator/wallet bootstrap are skipped as one unit. Settings retain
+their independent insert-if-absent behavior. In particular, production
+seeding does not add a viewer account, attach an existing viewer to a desk, or
+reset any password unless that account is explicitly present in the selected
+production profile on a fresh database. Attach an existing viewer with
+`POST /api/auth/desks/{operator_public_id}/members/{username}` and have that user
+log in again; membership exposes the wallet scopes already provisioned for
+that desk, but does not create a scope grant.
 
 The seed loader supports the `api_key_secret`, `rsa_pem`, and `paper`
 envelope shapes. The `oauth` shape is accepted at the
