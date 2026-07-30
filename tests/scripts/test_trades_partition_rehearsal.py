@@ -276,17 +276,54 @@ def _detach_evidence() -> dict[str, object]:
         },
         "legacy_drop_exercised": True,
         "pending_reconciliation": {
+            "acknowledgements": [
+                {
+                    "data_sessions_observed": 0,
+                    "fence_generation": 11,
+                    "fence_token": "00000000-0000-4000-8000-000000000011",
+                    "inflight": 0,
+                    "publisher_id": "publisher-1",
+                    "retention_generation": 1,
+                    "session_closed": True,
+                },
+                {
+                    "data_sessions_observed": 0,
+                    "fence_generation": 11,
+                    "fence_token": "00000000-0000-4000-8000-000000000011",
+                    "inflight": 0,
+                    "publisher_id": "publisher-2",
+                    "retention_generation": 1,
+                    "session_closed": True,
+                },
+            ],
+            "fence_generation": 11,
+            "fence_token": "00000000-0000-4000-8000-000000000011",
+            "last_resume_at": "2030-01-02T00:00:06+00:00",
+            "observed_fence_token": "00000000-0000-4000-8000-000000000011",
+            "opened_at": "2030-01-02T00:00:04.500000+00:00",
             "resolution": "POST_COMMITTED",
+            "resolved_at": "2030-01-02T00:00:05+00:00",
             "resume_count": 2,
             "stale_pending_rejection": "U3_PENDING fence is already terminal",
             "stale_pending_setter_denied": True,
             "terminal_catalog": "POST",
             "winner_count": 1,
+            "writer_commit_target": 21,
+            "writer_commits_after": {
+                "publisher-1": 21,
+                "publisher-2": 21,
+            },
+            "writer_commits_before": {
+                "publisher-1": 20,
+                "publisher-2": 19,
+            },
         },
         "pending_state_before_detach": "PENDING",
         "retention_authorization": {
             "backend_pid": 1234,
             "cleanup_margin_seconds": 1.0,
+            "fence_generation": 12,
+            "fence_token": "00000000-0000-4000-8000-000000000012",
             "initial_timezone": "Europe/Warsaw",
             "pinned_timezone": "UTC",
             "remaining_lease_seconds": 5.0,
@@ -295,6 +332,8 @@ def _detach_evidence() -> dict[str, object]:
         "retention_first_authorization": {
             "backend_pid": 1234,
             "cleanup_margin_seconds": 1.0,
+            "fence_generation": 12,
+            "fence_token": "00000000-0000-4000-8000-000000000012",
             "initial_timezone": "Europe/Warsaw",
             "pinned_timezone": "UTC",
             "remaining_lease_seconds": 5.0,
@@ -303,26 +342,42 @@ def _detach_evidence() -> dict[str, object]:
         "retention_acknowledgements": [
             {
                 "data_sessions_observed": 0,
+                "fence_generation": 12,
+                "fence_token": "00000000-0000-4000-8000-000000000012",
                 "inflight": 0,
+                "publisher_id": "publisher-1",
                 "retention_generation": 1,
                 "session_closed": True,
             },
             {
                 "data_sessions_observed": 0,
+                "fence_generation": 12,
+                "fence_token": "00000000-0000-4000-8000-000000000012",
                 "inflight": 0,
+                "publisher_id": "publisher-2",
                 "retention_generation": 1,
                 "session_closed": True,
             },
         ],
         "retention_barrier": {
+            "active_fences_after_clearance": 0,
+            "active_fences_before_clearance": 0,
+            "cleared_retention_generation": 1,
             "dispositioned_quarantine_rows": 2,
             "final_blockers": [],
+            "final_fence_generation": 12,
+            "final_lease_opened_at": "2030-01-02T00:00:07+00:00",
+            "final_fence_token": "00000000-0000-4000-8000-000000000012",
+            "historical_fence_overlaps": 0,
             "final_snapshot": {
                 "actual_pre_generation_pending": 0,
                 "backscan_complete": True,
                 "blocked_batches": 0,
                 "expected_fence_acknowledgements": 2,
                 "fence_acknowledgements": 2,
+                "fence_generation": 12,
+                "fence_resolution": None,
+                "fence_token": "00000000-0000-4000-8000-000000000012",
                 "fixed_safe_cutoff": "2030-01-02T00:00:00+00:00",
                 "horizon": "2030-01-02T00:00:00+00:00",
                 "m1_cursor": "2030-01-02T00:00:00+00:00",
@@ -330,19 +385,43 @@ def _detach_evidence() -> dict[str, object]:
                 "monitor_lag_breach": True,
                 "pre_generation_obligations": 0,
                 "remaining_lease_seconds": 5.0,
+                "required_lease_seconds": 3.0,
+                "retention_generation": 1,
                 "unresolved_quarantine": 0,
                 "worklog_pending": 0,
                 "wrong_generation_acknowledgements": 0,
             },
+            "initial_snapshot": {
+                "actual_pre_generation_pending": 0,
+                "backscan_complete": False,
+                "blocked_batches": 1,
+                "expected_fence_acknowledgements": 2,
+                "fence_acknowledgements": 2,
+                "fence_generation": 10,
+                "fence_resolution": None,
+                "fence_token": "00000000-0000-4000-8000-000000000010",
+                "fixed_safe_cutoff": None,
+                "horizon": "2030-01-02T00:00:00+00:00",
+                "m1_cursor": None,
+                "m2_cursor": None,
+                "monitor_lag_breach": True,
+                "pre_generation_obligations": 1,
+                "remaining_lease_seconds": 5.0,
+                "required_lease_seconds": 3.0,
+                "retention_generation": 1,
+                "unresolved_quarantine": 2,
+                "worklog_pending": 1,
+                "wrong_generation_acknowledgements": 0,
+            },
             "initial_blockers": [
-                "backscan_complete",
                 "blocked_batches",
-                "fixed_safe_cutoff",
-                "m1_cursor",
-                "m2_cursor",
                 "pre_generation_obligations",
                 "unresolved_quarantine",
                 "worklog_pending",
+                "fixed_safe_cutoff",
+                "m1_cursor",
+                "m2_cursor",
+                "backscan_complete",
             ],
             "monitor_scans": {
                 "m1_backscan_rows": 10,
@@ -350,7 +429,51 @@ def _detach_evidence() -> dict[str, object]:
                 "m2_backscan_rows": 10,
                 "m2_rows_seen": 100,
             },
-            "negative_rejection": "retention barrier blocked DETACH",
+            "negative_fence_acknowledgements": [
+                {
+                    "data_sessions_observed": 0,
+                    "fence_generation": 10,
+                    "fence_token": "00000000-0000-4000-8000-000000000010",
+                    "inflight": 0,
+                    "publisher_id": "publisher-1",
+                    "retention_generation": 1,
+                    "session_closed": True,
+                },
+                {
+                    "data_sessions_observed": 0,
+                    "fence_generation": 10,
+                    "fence_token": "00000000-0000-4000-8000-000000000010",
+                    "inflight": 0,
+                    "publisher_id": "publisher-2",
+                    "retention_generation": 1,
+                    "session_closed": True,
+                },
+            ],
+            "negative_fence_generation": 10,
+            "negative_fence_token": "00000000-0000-4000-8000-000000000010",
+            "negative_rejection": (
+                "retention barrier blocked DETACH: blocked_batches, "
+                "pre_generation_obligations, unresolved_quarantine, "
+                "worklog_pending, fixed_safe_cutoff, m1_cursor, m2_cursor, "
+                "backscan_complete"
+            ),
+            "negative_retry": {
+                "fence_generation": 10,
+                "fence_token": "00000000-0000-4000-8000-000000000010",
+                "last_resume_at": "2030-01-02T00:00:02+00:00",
+                "resolution": "POST_COMMITTED",
+                "resolved_at": "2030-01-02T00:00:01+00:00",
+                "resume_count": 2,
+                "writer_commit_target": 11,
+                "writer_commits_after": {
+                    "publisher-1": 11,
+                    "publisher-2": 11,
+                },
+                "writer_commits_before": {
+                    "publisher-1": 10,
+                    "publisher-2": 9,
+                },
+            },
             "obligation_drain": {
                 "blocked_batch_physical_table": "trades_legacy",
                 "drained_blocked_batches": 1,
@@ -358,9 +481,14 @@ def _detach_evidence() -> dict[str, object]:
                 "settled_live_obligations": 1,
             },
             "passed": True,
+            "remediation_completed_at": "2030-01-02T00:00:04+00:00",
+            "remediation_started_at": "2030-01-02T00:00:03+00:00",
         },
         "retention_epoch_after_commit": "U3",
         "retention_resumes": 2,
+        "retention_fence_generation": 12,
+        "retention_release_generation": 12,
+        "retention_release_token": "00000000-0000-4000-8000-000000000012",
         "terminal_catalog_after_drop": "PURGED",
         "staged_replay": {
             "abort_left_pending_without_row_or_worklog": True,
@@ -390,6 +518,42 @@ def _acceptance_inputs() -> rehearsal.AcceptanceInputs:
         horizon=_horizon(),
         configured_rows=10_000_000,
     )
+
+
+def _phase_acknowledgements(
+    fence_generation: int,
+    token_suffix: int | None = None,
+) -> list[dict[str, object]]:
+    """Return exact publisher acknowledgements for one fence identity."""
+    suffix = fence_generation if token_suffix is None else token_suffix
+    fence_token = f"00000000-0000-4000-8000-{suffix:012d}"
+    return [
+        {
+            "data_sessions_observed": 0,
+            "fence_generation": fence_generation,
+            "fence_token": fence_token,
+            "inflight": 0,
+            "publisher_id": "publisher-1",
+            "retention_generation": 1,
+            "session_closed": True,
+        },
+        {
+            "data_sessions_observed": 0,
+            "fence_generation": fence_generation,
+            "fence_token": fence_token,
+            "inflight": 0,
+            "publisher_id": "publisher-2",
+            "retention_generation": 1,
+            "session_closed": True,
+        },
+    ]
+
+
+def _rogue_acknowledgements(fence_generation: int) -> list[dict[str, object]]:
+    """Return a phase-correct acknowledgement set with one missing publisher."""
+    acknowledgements = _phase_acknowledgements(fence_generation)
+    acknowledgements[1]["publisher_id"] = "publisher-rogue"
+    return acknowledgements
 
 
 def _mutate_detach(path: tuple[str, ...], value: object) -> dict[str, object]:
@@ -565,28 +729,147 @@ def test_ack_barrier_rejects_terminal_and_short_lease_windows() -> None:
 def test_every_ack_barrier_receives_the_full_required_lease_window() -> None:
     """Every fence caller preserves both timeout and cleanup components.
 
-    Given: Five controller and retention flows with six bounded fence consumers,
+    Given: All six controller and retention flows that wait for publisher acknowledgements,
     When: Their call sites and the acknowledgement loop are inspected,
     Then: Each flow keeps its exact full-window count and the loop enforces the live predicate.
     """
-    expected_call_counts = {
-        rehearsal._run_normal_cutover: 1,
-        rehearsal._run_kill_scenario: 1,
-        rehearsal._ensure_post: 1,
-        rehearsal._prove_pending_reconciliation: 1,
-        rehearsal._prepare_retention_detach: 2,
-    }
-    expression = "config.transaction_timeout_seconds + config.cleanup_margin_seconds"
+    callers = (
+        rehearsal._run_normal_cutover,
+        rehearsal._run_kill_scenario,
+        rehearsal._ensure_post,
+        rehearsal._prove_pending_reconciliation,
+        rehearsal._prepare_retention_barrier,
+        rehearsal._finalize_retention_barrier,
+    )
     barrier = inspect.getsource(rehearsal._wait_fence_acks)
 
-    actual_call_counts = {
-        function.__name__: inspect.getsource(function).count(expression)
-        for function in expected_call_counts
-    }
-    assert actual_call_counts == {
-        function.__name__: count for function, count in expected_call_counts.items()
-    }
+    for caller in callers:
+        source = inspect.getsource(caller)
+        call_start = source.index("await _wait_fence_acks(")
+        call = source[call_start : call_start + 500]
+        assert "transaction_timeout_seconds" in source
+        assert "cleanup_margin_seconds" in source
+        assert (
+            "required_seconds" in call
+            or "transaction_timeout_seconds" in call
+            and "cleanup_margin_seconds" in call
+        )
     assert "_require_live_fence_window(" in barrier
+    assert "observed_publishers == expected_publishers" in barrier
+    assert "observed_fence_token == lease.token" in barrier
+
+
+def test_retention_clearance_is_between_resolved_and_final_fences() -> None:
+    """The scale scans cannot consume either live retention lease.
+
+    Given: The negative attempt, lease-free remediation, pending recovery, and final attempt,
+    When: Their source-level call order and clearance implementation are inspected,
+    Then: Resume precedes both scans and the fresh final fence follows their completion.
+    """
+    preparation = inspect.getsource(rehearsal._prepare_retention_barrier)
+    workflow = inspect.getsource(rehearsal._prepare_retention_detach)
+    finalization = inspect.getsource(rehearsal._finalize_retention_barrier)
+    clearance = inspect.getsource(rehearsal._clear_retention_barrier)
+
+    assert preparation.index("_open_fence(") < preparation.index("_wait_fence_acks(")
+    assert preparation.index("_wait_fence_acks(") < preparation.index("_reject_retention_barrier(")
+    assert preparation.index("_reject_retention_barrier(") < preparation.index(
+        "_release_rejected_retention_fence("
+    )
+    assert preparation.index("_release_rejected_retention_fence(") < preparation.index(
+        "_clear_retention_barrier("
+    )
+    assert workflow.index("_prepare_retention_barrier(") < workflow.index(
+        "_prove_pending_reconciliation("
+    )
+    assert workflow.index("_prove_pending_reconciliation(") < workflow.index(
+        "_finalize_retention_barrier("
+    )
+    assert finalization.index("_open_fence(") < finalization.index("_wait_fence_acks(")
+    assert finalization.index("_wait_fence_acks(") < finalization.index(
+        "_retention_barrier_snapshot("
+    )
+    assert finalization.index("_retention_barrier_snapshot(") < finalization.index(
+        "_require_retention_barrier("
+    )
+    assert clearance.index("active_before") < clearance.index("_drain_retention_obligations(")
+    assert clearance.index("_drain_retention_obligations(") < clearance.index(
+        "_record_retention_scans("
+    )
+    assert clearance.index("_record_retention_scans(") < clearance.index("active_after")
+    assert "_open_fence(" not in clearance
+    assert "historical_overlaps == 0" in clearance
+    assert "LEAST(" in clearance
+
+
+def test_retention_drain_uses_the_live_partial_index_predicate() -> None:
+    """Pre-generation work lookup remains bounded by the live-row partial index.
+
+    Given: Both obligation-drain existence probes over the ten-million-row legacy table,
+    When: Their SQL and parameters are inspected,
+    Then: Each includes the exact known-to predicate and supplies its infinity value.
+    """
+    source = inspect.getsource(rehearsal._drain_retention_obligations)
+
+    assert source.count("legacy.known_to = $2") == 2
+    assert source.count("_KNOWN_TO") == 2
+
+
+def test_authority_measures_database_time_only_after_generation_lock() -> None:
+    """Lease authorization cannot reuse a clock value projected before lock wait.
+
+    Given: Adoption, DETACH, and U3_PENDING authority paths sharing one generation lock,
+    When: Their locked-row and database-clock operations are ordered,
+    Then: The lock excludes clock projection and every margin read follows lock acquisition.
+    """
+    lock_source = inspect.getsource(rehearsal._lock_fence_authority)
+    clock_source = inspect.getsource(rehearsal._remaining_lease_seconds)
+
+    assert "FOR UPDATE" in lock_source
+    assert "lease_expires_at" in lock_source
+    assert "clock_timestamp()" not in lock_source
+    assert "clock_timestamp()" in clock_source
+    for function in (rehearsal._authorize_controller, rehearsal._set_u3_pending):
+        source = inspect.getsource(function)
+        assert source.index("_lock_fence_authority(") < source.index("_remaining_lease_seconds(")
+    assert "_authorize_controller(" in inspect.getsource(rehearsal._authorized_detach_attempt)
+
+
+def test_controller_fence_mutations_bind_generation_and_token() -> None:
+    """A stale controller cannot resolve or authorize another lease identity.
+
+    Given: Normal release, rejected retention release, DETACH authorization, and final release,
+    When: Their SQL and retained authority evidence are inspected,
+    Then: Every mutation binds generation plus token and both retries record that identity.
+    """
+    mutation_sources = (
+        inspect.getsource(rehearsal._controller_release),
+        inspect.getsource(rehearsal._release_rejected_retention_fence),
+        inspect.getsource(rehearsal._authorized_detach_attempt),
+        inspect.getsource(rehearsal._exercise_detach),
+    )
+    authorization = mutation_sources[2]
+
+    for source in mutation_sources:
+        assert "WHERE generation = $1" in source
+        assert "AND token =" in source
+    assert '"fence_generation": spec.generation' in authorization
+    assert '"fence_token": str(spec.token)' in authorization
+
+
+def test_publisher_reconciliation_receives_token_and_reports_task_failure() -> None:
+    """Publisher resume cannot hide a malformed reconciliation fence row.
+
+    Given: The publisher resolution query and the supervisor resume waiter,
+    When: Their source contract is inspected around reconciliation and failure polling,
+    Then: The row carries its token and task failures abort the wait immediately.
+    """
+    resolution = inspect.getsource(rehearsal._await_publisher_resolution)
+    resume_wait = inspect.getsource(rehearsal._wait_resumes)
+
+    assert resolution.index("token,") < resolution.index("_attempt_reconciliation(")
+    assert "publisher failed before resume" in resume_wait
+    assert "item.failures" in resume_wait
 
 
 @pytest.mark.asyncio
@@ -1015,24 +1298,145 @@ def test_binding_v16_retention_closures_cannot_be_omitted() -> None:
         (("failed_attempt_epoch_rolled_back",), False),
         (("concurrent_detach_sqlstate",), "00000"),
         (("retention_epoch_after_commit",), "PARTITIONED"),
+        (("retention_fence_generation",), 13),
+        (("retention_release_generation",), 13),
+        (
+            ("retention_release_token",),
+            "00000000-0000-4000-8000-000000000099",
+        ),
         (("terminal_catalog_after_drop",), "INCOHERENT"),
         (("retention_resumes",), 1),
+        (("retention_resumes",), 3),
         (("retention_acknowledgements",), []),
+        (("retention_acknowledgements",), _rogue_acknowledgements(12)),
+        (("retention_acknowledgements",), _phase_acknowledgements(10)),
+        (("retention_acknowledgements",), _phase_acknowledgements(12, 99)),
         (("pending_state_before_detach",), "POST"),
+        (("pending_reconciliation", "acknowledgements"), []),
+        (("pending_reconciliation", "acknowledgements"), _rogue_acknowledgements(11)),
+        (
+            ("pending_reconciliation", "acknowledgements"),
+            _phase_acknowledgements(12),
+        ),
+        (
+            ("pending_reconciliation", "acknowledgements"),
+            _phase_acknowledgements(11, 99),
+        ),
+        (("pending_reconciliation", "fence_generation"), 10),
+        (
+            ("pending_reconciliation", "fence_token"),
+            "00000000-0000-4000-8000-000000000010",
+        ),
+        (
+            ("pending_reconciliation", "observed_fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
+        (("pending_reconciliation", "resume_count"), 3),
+        (
+            ("pending_reconciliation", "opened_at"),
+            "2030-01-02T00:00:03.500000+00:00",
+        ),
+        (
+            ("pending_reconciliation", "resolved_at"),
+            "2030-01-02T00:00:07.500000+00:00",
+        ),
+        (
+            ("pending_reconciliation", "writer_commits_after", "publisher-2"),
+            20,
+        ),
         (("pending_reconciliation", "winner_count"), 0),
         (("pending_reconciliation", "terminal_catalog"), "PENDING"),
         (("pending_reconciliation", "stale_pending_setter_denied"), False),
         (("retention_authorization", "remaining_lease_seconds"), 2.5),
         (("retention_authorization", "initial_timezone"), "UTC"),
+        (("retention_authorization", "fence_generation"), 11),
+        (
+            ("retention_authorization", "fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
         (("retention_first_authorization", "remaining_lease_seconds"), 2.5),
+        (("retention_first_authorization", "fence_generation"), 11),
+        (
+            ("retention_first_authorization", "fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
         (("retention_barrier", "passed"), False),
+        (("retention_barrier", "active_fences_before_clearance"), 1),
+        (("retention_barrier", "active_fences_after_clearance"), 1),
+        (("retention_barrier", "historical_fence_overlaps"), 1),
+        (("retention_barrier", "cleared_retention_generation"), 2),
         (("retention_barrier", "dispositioned_quarantine_rows"), 0),
         (("retention_barrier", "final_blockers"), ["quarantine"]),
+        (("retention_barrier", "final_fence_generation"), 11),
+        (
+            ("retention_barrier", "final_fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
+        (
+            ("retention_barrier", "final_lease_opened_at"),
+            "2030-01-02T00:00:03.500000+00:00",
+        ),
         (("retention_barrier", "negative_rejection"), ""),
+        (("retention_barrier", "negative_rejection"), "different nonempty failure"),
+        (("retention_barrier", "negative_fence_acknowledgements"), []),
+        (
+            ("retention_barrier", "negative_fence_acknowledgements"),
+            _rogue_acknowledgements(10),
+        ),
+        (
+            ("retention_barrier", "negative_fence_acknowledgements"),
+            _phase_acknowledgements(11),
+        ),
+        (
+            ("retention_barrier", "negative_fence_acknowledgements"),
+            _phase_acknowledgements(10, 99),
+        ),
+        (("retention_barrier", "negative_fence_generation"), 12),
+        (
+            ("retention_barrier", "negative_fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
+        (("retention_barrier", "negative_retry", "fence_generation"), 9),
+        (
+            ("retention_barrier", "negative_retry", "fence_token"),
+            "00000000-0000-4000-8000-000000000099",
+        ),
+        (("retention_barrier", "negative_retry", "resolution"), "PRE_ABORTED"),
+        (("retention_barrier", "negative_retry", "resume_count"), 1),
+        (("retention_barrier", "negative_retry", "writer_commit_target"), 12),
+        (
+            (
+                "retention_barrier",
+                "negative_retry",
+                "writer_commits_after",
+                "publisher-2",
+            ),
+            10,
+        ),
+        (
+            ("retention_barrier", "negative_retry", "last_resume_at"),
+            "2030-01-02T00:00:00+00:00",
+        ),
+        (
+            ("retention_barrier", "remediation_started_at"),
+            "2030-01-02T00:00:01.500000+00:00",
+        ),
         (("retention_barrier", "obligation_drain", "drained_blocked_batches"), 0),
         (("retention_barrier", "monitor_scans", "m1_backscan_rows"), 0),
+        (("retention_barrier", "initial_blockers"), []),
+        (("retention_barrier", "initial_snapshot", "blocked_batches"), 0),
+        (("retention_barrier", "initial_snapshot", "fence_resolution"), "POST_COMMITTED"),
+        (("retention_barrier", "initial_snapshot", "fence_generation"), 11),
+        (("retention_barrier", "initial_snapshot", "fence_token"), ""),
+        (("retention_barrier", "initial_snapshot", "remaining_lease_seconds"), 3.0),
+        (("retention_barrier", "initial_snapshot", "required_lease_seconds"), 2.0),
         (("retention_barrier", "final_snapshot", "unresolved_quarantine"), 1),
         (("retention_barrier", "final_snapshot", "monitor_lag_breach"), False),
+        (("retention_barrier", "final_snapshot", "fence_resolution"), "POST_COMMITTED"),
+        (("retention_barrier", "final_snapshot", "fence_generation"), 11),
+        (("retention_barrier", "final_snapshot", "fence_token"), ""),
+        (("retention_barrier", "final_snapshot", "remaining_lease_seconds"), 3.0),
+        (("retention_barrier", "final_snapshot", "required_lease_seconds"), 2.0),
         (
             ("retention_barrier", "final_snapshot", "wrong_generation_acknowledgements"),
             1,
@@ -1291,6 +1695,22 @@ def test_repository_verification_manifest_is_exact_and_warning_clean() -> None:
         "coverage exclusions",
         "main guard",
         "init files",
+    )
+
+
+def test_repository_verification_cannot_inherit_a_postgresql_url() -> None:
+    """Targeted checks are isolated from every ambient PostgreSQL coordinate.
+
+    Given: A parent shell that could carry the application's production database variable,
+    When: The harness constructs the environment for its eleven repository checks,
+    Then: It removes DATABASE_URL and pins DB_URL to the local SQLite test database.
+    """
+    source = inspect.getsource(rehearsal._run_repository_verification)
+
+    assert 'environment.pop("DATABASE_URL", None)' in source
+    assert 'environment["DB_URL"] = "sqlite+aiosqlite:///./data/dev.db"' in source
+    assert source.index('environment.pop("DATABASE_URL", None)') < source.index(
+        'environment["DB_URL"]'
     )
 
 

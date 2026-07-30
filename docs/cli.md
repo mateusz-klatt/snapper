@@ -1061,9 +1061,11 @@ snapper archive --table instruments --day 2024-03-15
 
 ### `restore`
 
-Restore archived CSV data back into the database.  Reads CSV files
-exported by ``snapper archive`` and inserts rows, deduplicating against
-existing data by ``(public_id, timestamp, known_to)``.
+Restore plain or zstd-compressed CSV data back into the database.
+The restorer streams ``.csv`` and ``.csv.zst`` files in bounded batches,
+validates each complete header against the table's positional archive
+contract, and deduplicates by the exact typed
+``(public_id, timestamp, known_to)`` identity.
 
 ```bash
 snapper restore [OPTIONS]
@@ -1075,13 +1077,15 @@ snapper restore [OPTIONS]
 | --- | --- | --- | --- |
 | `--table` | TEXT | (required) | Table name to restore into |
 | `--file` | str | None | Single CSV file to restore |
-| `--dir` | str | None | Directory to scan recursively for CSV files |
+| `--dir` | str | None | Directory to scan recursively for `.csv` and `.csv.zst` files |
 | `--source` | TEXT | `audit` | Restore mode (`audit` for full history) |
+| `--batch-size` | INTEGER | `10000` | Maximum rows parsed and inserted per batch |
 
 **Examples:**
 
 ```bash
 snapper restore --table ticks --file data/archive/ticks/polygon/BTC-USD/2024/2024-01-01.csv
+snapper restore --table trades --file /mnt/archive/trades-2024-01-01.csv.zst
 snapper restore --table settings --dir data/archive/settings/
 snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
 ```
@@ -1089,6 +1093,11 @@ snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
 **Notes:**
 
 - At least one of `--file` or `--dir` is required.
+- Directory scans include both ``.csv`` and ``.csv.zst`` files.
+- Headerless files, transposed columns, and other header mismatches are refused
+  before any database access.
+- The default 10,000-row batch size can be lowered to reduce peak memory or
+  raised to favor throughput.
 - Rows already present in DB (matching `public_id + timestamp + known_to`) are skipped.
 - Audit restore inserts all temporal columns exactly as exported.
 - **Execution exception (restore refused):** `snapper restore --table

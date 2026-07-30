@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -501,6 +502,18 @@ class RetentionPreparation:
     default_rows: int
     concurrent_sqlstate: str
     concurrent_message: str
+
+
+@dataclass(frozen=True)
+class RetentionBarrierContext:
+    """Shared state for preparation and final barrier attempts."""
+
+    instance: InstanceRef
+    config: RunConfig
+    connection: Connection
+    retention_generation: int
+    horizon: datetime
+    stats: Sequence[WriterStats]
 
 
 @dataclass(frozen=True)
@@ -3042,6 +3055,7 @@ async def _latest_fence(connection: Connection) -> Record | None:
     return await connection.fetchrow("""
         SELECT
             generation,
+            token,
             lease_expires_at,
             resolution,
             resolver,
@@ -3422,6 +3436,7 @@ async def _attempt_reconciliation(
         Resolution and fingerprint once terminal, or None while still fenced.
     """
     generation = cast(int, fence["generation"])
+    token = cast(UUID, fence["token"])
     try:
         async with connection.transaction():
             await connection.execute("SET LOCAL lock_timeout = '100ms'")
@@ -3437,9 +3452,11 @@ async def _attempt_reconciliation(
                     clock_timestamp() AS database_now
                 FROM rehearsal.fence_generations
                 WHERE generation = $1
+                  AND token = $2
                 FOR UPDATE
                 """,
                 generation,
+                token,
             )
             _assert(locked is not None, "fence generation disappeared")
             if locked["resolution"] is not None:
@@ -3496,6 +3513,7 @@ async def _attempt_reconciliation(
                     resolved_fingerprint = $4,
                     resolved_at = clock_timestamp()
                 WHERE generation = $1
+                  AND token = $5
                   AND resolution IS NULL
                 RETURNING generation
                 """,
@@ -3503,6 +3521,7 @@ async def _attempt_reconciliation(
                 resolution,
                 context.publisher_id,
                 fingerprint,
+                token,
             )
             if updated is not None:
                 await connection.execute(
@@ -3546,6 +3565,7 @@ async def _await_publisher_resolution(
             """
             SELECT
                 generation,
+                token,
                 lease_expires_at,
                 resolution,
                 resolver,
@@ -3811,10 +3831,12 @@ async def _wait_fence_acks(
     connection = await _connect(instance, f"ack-observer-g{lease.generation}")
     try:
         deadline = time.monotonic() + 30.0
+        expected_publishers = {f"publisher-{number}" for number in range(1, writer_count + 1)}
         while time.monotonic() < deadline:
             fence = await connection.fetchrow(
                 """
                 SELECT
+                    token,
                     resolution,
                     EXTRACT(
                         EPOCH FROM (lease_expires_at - clock_timestamp())
@@ -3825,6 +3847,11 @@ async def _wait_fence_acks(
                 lease.generation,
             )
             _assert(fence is not None, "publisher acknowledgement generation disappeared")
+            observed_fence_token = cast(UUID, fence["token"])
+            _assert(
+                observed_fence_token == lease.token,
+                "publisher acknowledgement fence token changed",
+            )
             _require_live_fence_window(
                 cast(str | None, fence["resolution"]),
                 cast(float, fence["remaining_seconds"]),
@@ -3844,7 +3871,12 @@ async def _wait_fence_acks(
                 """,
                 lease.generation,
             )
-            if len(rows) == writer_count:
+            if len(rows) >= writer_count:
+                observed_publishers = {cast(str, row["publisher_id"]) for row in rows}
+                _assert(
+                    observed_publishers == expected_publishers,
+                    "publisher acknowledgement identities do not match the configured set",
+                )
                 evidence: list[dict[str, object]] = []
                 for row in rows:
                     publisher_id = cast(str, row["publisher_id"])
@@ -3879,6 +3911,8 @@ async def _wait_fence_acks(
                         {
                             "acknowledged_at": cast(datetime, row["acknowledged_at"]).isoformat(),
                             "data_sessions_observed": data_sessions,
+                            "fence_generation": lease.generation,
+                            "fence_token": str(observed_fence_token),
                             "inflight": cast(int, row["inflight"]),
                             "publisher_id": publisher_id,
                             "retention_generation": acknowledged_generation,
@@ -5016,6 +5050,64 @@ async def _run_validate_kill(
         await _close_connection_bounded(monitor)
 
 
+async def _lock_fence_authority(
+    connection: Connection,
+    generation: int,
+) -> Record:
+    """Lock one generation before any database-clock authority measurement.
+
+    Args:
+        connection: Connection already inside the authority transaction.
+        generation: Exact durable fence generation to serialize.
+
+    Returns:
+        Locked fence row containing its absolute expiry.
+    """
+    row = await connection.fetchrow(
+        """
+        SELECT
+            generation,
+            token,
+            lease_expires_at,
+            transaction_timeout_ms,
+            cleanup_margin_ms,
+            resolution
+        FROM rehearsal.fence_generations
+        WHERE generation = $1
+        FOR UPDATE
+        """,
+        generation,
+    )
+    _assert(row is not None, "fence generation disappeared while acquiring authority")
+    return row
+
+
+async def _remaining_lease_seconds(
+    connection: Connection,
+    lease_expires_at: datetime,
+) -> float:
+    """Measure one locked lease against a fresh database clock read.
+
+    Args:
+        connection: Authority transaction already holding the generation row lock.
+        lease_expires_at: Absolute expiry fetched from that locked generation.
+
+    Returns:
+        Database-clock seconds remaining at this post-lock statement.
+    """
+    return cast(
+        float,
+        await connection.fetchval(
+            """
+            SELECT EXTRACT(
+                EPOCH FROM ($1::timestamptz - clock_timestamp())
+            )::double precision
+            """,
+            lease_expires_at,
+        ),
+    )
+
+
 async def _authorize_controller(
     connection: Connection,
     spec: ControllerSpec,
@@ -5041,23 +5133,7 @@ async def _authorize_controller(
     await connection.execute("SET LOCAL lock_timeout = '0'")
     await connection.execute("SET LOCAL statement_timeout = '0'")
     await connection.execute("SET LOCAL idle_in_transaction_session_timeout = '0'")
-    row = await connection.fetchrow(
-        """
-        SELECT
-            generation,
-            token,
-            EXTRACT(EPOCH FROM (lease_expires_at - clock_timestamp()))::double precision
-                AS remaining_seconds,
-            transaction_timeout_ms,
-            cleanup_margin_ms,
-            resolution
-        FROM rehearsal.fence_generations
-        WHERE generation = $1
-        FOR UPDATE
-        """,
-        spec.generation,
-    )
-    _assert(row is not None, "controller fence generation missing")
+    row = await _lock_fence_authority(connection, spec.generation)
     _assert(cast(UUID, row["token"]) == spec.token, "controller fence token mismatch")
     _assert(row["resolution"] is None, "controller generation is already terminal")
     ack_count = cast(
@@ -5074,7 +5150,10 @@ async def _authorize_controller(
         ),
     )
     _assert(ack_count == spec.writers, "controller entered DDL without every publisher ack")
-    remaining = cast(float, row["remaining_seconds"])
+    remaining = await _remaining_lease_seconds(
+        connection,
+        cast(datetime, row["lease_expires_at"]),
+    )
     timeout_ms = cast(int, row["transaction_timeout_ms"])
     cleanup_ms = cast(int, row["cleanup_margin_ms"])
     _assert(
@@ -5149,11 +5228,13 @@ async def _controller_release(
                 resolved_fingerprint = $2,
                 resolved_at = clock_timestamp()
             WHERE generation = $1
+              AND token = $3
               AND resolution IS NULL
             RETURNING generation
             """,
             spec.generation,
             state.fingerprint(),
+            spec.token,
         )
         _assert(updated is not None, "normal controller could not release publisher fence")
     finally:
@@ -5599,6 +5680,7 @@ async def _wait_resumes(
     connection: Connection,
     generation: int,
     writers: int,
+    stats: Sequence[WriterStats],
     timeout: float = 30.0,
 ) -> list[Record]:
     """Wait for every configured publisher-local resume event.
@@ -5607,6 +5689,7 @@ async def _wait_resumes(
         connection: Autocommit monitoring connection.
         generation: Fence generation.
         writers: Exact configured publisher count.
+        stats: Publisher failure evidence checked while waiting.
         timeout: Maximum wait.
 
     Returns:
@@ -5615,6 +5698,9 @@ async def _wait_resumes(
     deadline = time.monotonic() + timeout
     expected_publishers = {f"publisher-{number}" for number in range(1, writers + 1)}
     while time.monotonic() < deadline:
+        failures = [failure for item in stats for failure in item.failures]
+        if failures:
+            raise RehearsalError("publisher failed before resume: " + "; ".join(failures))
         rows = await connection.fetch(
             """
             SELECT publisher_id, event, mode, fingerprint, occurred_at
@@ -5881,7 +5967,7 @@ async def _run_normal_cutover(
         attach = await _normal_attach_evidence(instance, process, spec, before_oids)
         resolution = await _wait_resolution(monitor, lease.generation)
         _assert(resolution["resolver"] == "controller", "normal fence was not controller-released")
-        await _wait_resumes(monitor, lease.generation, config.writers)
+        await _wait_resumes(monitor, lease.generation, config.writers, stats)
         target = max(item.committed for item in stats) + 1
         await _wait_writer_commits(stats, target)
         await _stop_publishers(tasks, stop_event)
@@ -6048,7 +6134,7 @@ async def _verify_watchdog_recovery(
     lease: FenceLease,
     spec: ControllerSpec,
     config: RunConfig,
-    horizon: datetime,
+    stats: Sequence[WriterStats],
 ) -> RecoveryResult:
     """Verify terminal catalog, one CAS winner, resumes, and stability.
 
@@ -6057,14 +6143,14 @@ async def _verify_watchdog_recovery(
         lease: Expired controller authority generation.
         spec: Exact controller authority that must now be rejected.
         config: Publisher count and stability guard.
-        horizon: Expected legacy partition bound.
+        stats: Publisher failure evidence checked while waiting.
 
     Returns:
         Complete watchdog reconciliation evidence.
     """
     resolution_row = await _wait_resolution(connection, lease.generation)
-    resumes = tuple(await _wait_resumes(connection, lease.generation, config.writers))
-    terminal = await _catalog_state(connection, horizon)
+    resumes = tuple(await _wait_resumes(connection, lease.generation, config.writers, stats))
+    terminal = await _catalog_state(connection, spec.horizon)
     _assert(terminal.mode in {"PRE", "POST"}, "kill recovery produced incoherent catalog")
     expected_resolution = "PRE_ABORTED" if terminal.mode == "PRE" else "POST_COMMITTED"
     resolution = cast(str, resolution_row["resolution"])
@@ -6099,7 +6185,12 @@ async def _verify_watchdog_recovery(
         ),
     )
     _assert(winner_count == 1, "competing watchdogs did not produce exactly one CAS winner")
-    stable = await _wait_catalog_stable(connection, horizon, terminal, config.guard_seconds)
+    stable = await _wait_catalog_stable(
+        connection,
+        spec.horizon,
+        terminal,
+        config.guard_seconds,
+    )
     _assert(stable, "catalog changed after publisher resume")
     stale_authority = await _deny_stale_authority(connection, spec)
     stale_denied = cast(bool, stale_authority["denied"])
@@ -6292,7 +6383,7 @@ async def _run_kill_scenario(
             lease,
             spec,
             config,
-            horizon,
+            stats,
         )
         resolution = cast(str, recovery.resolution_row["resolution"])
         target = max(item.committed for item in stats) + 1
@@ -6479,9 +6570,11 @@ async def _run_writer_drop_kill(
                 SELECT resolution, clock_timestamp() AS database_now, lease_expires_at
                 FROM rehearsal.fence_generations
                 WHERE generation = $1
+                  AND token = $2
                 FOR UPDATE
                 """,
                 lease.generation,
+                lease.token,
             )
             _assert(fence is not None, "writer-drop recovery fence disappeared")
             _assert(fence["resolution"] is None, "writer-drop fence resolved before detection")
@@ -6517,9 +6610,12 @@ async def _run_writer_drop_kill(
                     resolved_fingerprint = $2,
                     resolved_at = clock_timestamp()
                 WHERE generation = $1
+                  AND token = $3
+                  AND resolution IS NULL
                 """,
                 lease.generation,
                 state.fingerprint(),
+                lease.token,
             )
         page = await monitor.fetchrow(
             """
@@ -7210,23 +7306,13 @@ async def _set_u3_pending(
     """
     async with connection.transaction():
         await connection.execute("SET LOCAL transaction_timeout = '1s'")
-        fence = await connection.fetchrow(
-            """
-            SELECT
-                token,
-                resolution,
-                EXTRACT(EPOCH FROM (lease_expires_at - clock_timestamp()))::double precision
-                    AS remaining_seconds
-            FROM rehearsal.fence_generations
-            WHERE generation = $1
-            FOR UPDATE
-            """,
-            lease.generation,
-        )
-        _assert(fence is not None, "U3_PENDING fence generation disappeared")
+        fence = await _lock_fence_authority(connection, lease.generation)
         _assert(cast(UUID, fence["token"]) == lease.token, "U3_PENDING fence token mismatch")
         _assert(fence["resolution"] is None, "U3_PENDING fence is already terminal")
-        remaining = cast(float, fence["remaining_seconds"])
+        remaining = await _remaining_lease_seconds(
+            connection,
+            cast(datetime, fence["lease_expires_at"]),
+        )
         _assert(
             remaining > minimum_remaining_seconds,
             "U3_PENDING fence lacks the required database-clock lifetime",
@@ -7247,8 +7333,8 @@ async def _set_u3_pending(
 async def _retention_barrier_snapshot(
     connection: Connection,
     retention_generation: int,
-    fence_generation: int,
-    writer_count: int,
+    lease: FenceLease,
+    config: RunConfig,
     horizon: datetime,
 ) -> dict[str, object]:
     """Read every day-30 precondition from one machine-queryable snapshot.
@@ -7256,8 +7342,8 @@ async def _retention_barrier_snapshot(
     Args:
         connection: Control connection while publishers are fenced.
         retention_generation: Closed-set generation selected by the latch.
-        fence_generation: Active publisher fence generation.
-        writer_count: Exact configured publisher population.
+        lease: Exact active publisher fence.
+        config: Publisher population, transaction timeout, and cleanup margin.
         horizon: Fixed safe cutoff required from both monitor cursors.
 
     Returns:
@@ -7349,19 +7435,34 @@ async def _retention_barrier_snapshot(
                 )::double precision
                 FROM rehearsal.fence_generations
                 WHERE generation = $2
-            ) AS remaining_lease_seconds
+            ) AS remaining_lease_seconds,
+            (
+                SELECT resolution
+                FROM rehearsal.fence_generations
+                WHERE generation = $2
+            ) AS fence_resolution,
+            (
+                SELECT token::text
+                FROM rehearsal.fence_generations
+                WHERE generation = $2
+            ) AS fence_token
         """,
         retention_generation,
-        fence_generation,
+        lease.generation,
         horizon,
     )
     _assert(row is not None, "retention barrier state disappeared")
+    _assert(cast(str, row["fence_token"]) == str(lease.token), "barrier fence token changed")
+    minimum_remaining_seconds = config.transaction_timeout_seconds + config.cleanup_margin_seconds
     return {
         "actual_pre_generation_pending": cast(int, row["actual_pre_generation_pending"]),
         "backscan_complete": cast(bool, row["backscan_complete"]),
         "blocked_batches": cast(int, row["blocked_batches"]),
-        "expected_fence_acknowledgements": writer_count,
+        "expected_fence_acknowledgements": config.writers,
         "fence_acknowledgements": cast(int, row["fence_acknowledgements"]),
+        "fence_generation": lease.generation,
+        "fence_resolution": cast(str | None, row["fence_resolution"]),
+        "fence_token": cast(str, row["fence_token"]),
         "fixed_safe_cutoff": (
             cast(datetime, row["fixed_safe_cutoff"]).isoformat()
             if row["fixed_safe_cutoff"] is not None
@@ -7376,6 +7477,7 @@ async def _retention_barrier_snapshot(
         ),
         "monitor_lag_breach": cast(bool, row["monitor_lag_breach"]),
         "pre_generation_obligations": cast(int, row["pre_generation_obligations"]),
+        "required_lease_seconds": minimum_remaining_seconds,
         "remaining_lease_seconds": cast(float, row["remaining_lease_seconds"]),
         "retention_generation": retention_generation,
         "unresolved_quarantine": cast(int, row["unresolved_quarantine"]),
@@ -7410,6 +7512,12 @@ def _retention_barrier_blockers(snapshot: dict[str, object]) -> list[str]:
             blockers.append(field_name)
     if snapshot["fence_acknowledgements"] != snapshot["expected_fence_acknowledgements"]:
         blockers.append("fence_acknowledgements")
+    if snapshot["fence_resolution"] is not None:
+        blockers.append("fence_resolution")
+    if float(cast(float | int, snapshot["remaining_lease_seconds"])) <= float(
+        cast(float | int, snapshot["required_lease_seconds"])
+    ):
+        blockers.append("lease_window")
     horizon = snapshot["horizon"]
     if snapshot["fixed_safe_cutoff"] != horizon:
         blockers.append("fixed_safe_cutoff")
@@ -7459,7 +7567,7 @@ async def _drain_retention_obligations(
     """Drain real pre-generation batch and worklog records under one transaction.
 
     Args:
-        connection: Control connection while every publisher is fenced.
+        connection: Control connection after the closed generation is latched.
         retention_generation: Closed-set generation selected by the latch.
 
     Returns:
@@ -7546,9 +7654,11 @@ async def _drain_retention_obligations(
                       SELECT 1
                       FROM trades_legacy legacy
                       WHERE legacy.public_id = work.public_id
+                        AND legacy.known_to = $2
                   )
                 """,
                 retention_generation,
+                _KNOWN_TO,
             )
         )
         drained_worklog = _command_row_count(
@@ -7562,9 +7672,11 @@ async def _drain_retention_obligations(
                       SELECT 1
                       FROM trades_legacy legacy
                       WHERE legacy.public_id = work.public_id
+                        AND legacy.known_to = $2
                   )
                 """,
                 retention_generation,
+                _KNOWN_TO,
             )
         )
     _assert(
@@ -7658,31 +7770,25 @@ async def _record_retention_scans(
     return results
 
 
-async def _exercise_retention_barrier(
-    connection: Connection,
-    retention_generation: int,
+async def _reject_retention_barrier(
+    context: RetentionBarrierContext,
     lease: FenceLease,
-    writer_count: int,
-    horizon: datetime,
 ) -> dict[str, object]:
-    """Require a real rejection, disposition every blocker, then pass the gate.
+    """Require one fenced day-30 attempt to reject durable blockers.
 
     Args:
-        connection: Control connection while every publisher is fenced.
-        retention_generation: Closed-set generation selected by the latch.
-        lease: Active publisher fence.
-        writer_count: Exact configured publisher population.
-        horizon: Fixed M1/M2 safe cutoff.
+        context: Instance, config, connection, generation, and horizon.
+        lease: Active negative-attempt publisher fence.
 
     Returns:
-        Initial blockers, rejection text, disposition count, and passing snapshot.
+        Initial blocker snapshot and exact rejecting error.
     """
     initial = await _retention_barrier_snapshot(
-        connection,
-        retention_generation,
-        lease.generation,
-        writer_count,
-        horizon,
+        context.connection,
+        context.retention_generation,
+        lease,
+        context.config,
+        context.horizon,
     )
     initial_blockers = _retention_barrier_blockers(initial)
     _assert(bool(initial_blockers), "negative retention barrier fixture had no reason to fail")
@@ -7699,6 +7805,110 @@ async def _exercise_retention_barrier(
     except RehearsalError as exc:
         rejection = str(exc)
     _assert(bool(rejection), "retention barrier negative control did not reject DETACH")
+    return {
+        "initial_blockers": initial_blockers,
+        "initial_snapshot": initial,
+        "negative_rejection": rejection,
+    }
+
+
+async def _release_rejected_retention_fence(
+    connection: Connection,
+    lease: FenceLease,
+    writer_count: int,
+    horizon: datetime,
+    stats: Sequence[WriterStats],
+) -> dict[str, object]:
+    """Release a rejected attempt and prove ingestion resumes before cleanup.
+
+    Args:
+        connection: Autocommit retention control connection.
+        lease: Rejected active publisher fence.
+        writer_count: Exact configured publisher population.
+        horizon: Expected unchanged POST catalog boundary.
+        stats: Live publisher counters used for the resume proof.
+
+    Returns:
+        Controller resolution, catalog fingerprint, and resume evidence.
+    """
+    state = await _catalog_state(connection, horizon)
+    _assert(state.mode == "POST", "rejected retention barrier changed the POST catalog")
+    released = await connection.fetchrow(
+        """
+        UPDATE rehearsal.fence_generations
+        SET
+            resolution = 'POST_COMMITTED',
+            resolver = 'controller',
+            resolved_fingerprint = $2,
+            resolved_at = clock_timestamp()
+        WHERE generation = $1
+          AND token = $3
+          AND resolution IS NULL
+        RETURNING generation, token, resolved_at
+        """,
+        lease.generation,
+        state.fingerprint(),
+        lease.token,
+    )
+    _assert(released is not None, "rejected retention fence could not be released")
+    released_row = cast(Record, released)
+    resumes = await _wait_resumes(connection, lease.generation, writer_count, stats)
+    _assert(
+        all(cast(str, resume["event"]) == "RESUMED_CONTROLLER" for resume in resumes),
+        "rejected retention fence did not resume through controller release",
+    )
+    commits_before = {
+        f"publisher-{number}": item.committed for number, item in enumerate(stats, start=1)
+    }
+    target = max(commits_before.values()) + 1
+    await _wait_writer_commits(stats, target)
+    commits_after = {
+        f"publisher-{number}": item.committed for number, item in enumerate(stats, start=1)
+    }
+    last_resume_at = max(cast(datetime, resume["occurred_at"]) for resume in resumes)
+    return {
+        "catalog_fingerprint": state.fingerprint(),
+        "fence_generation": lease.generation,
+        "fence_token": str(cast(UUID, released_row["token"])),
+        "last_resume_at": last_resume_at.isoformat(),
+        "resolution": "POST_COMMITTED",
+        "resolved_at": cast(datetime, released_row["resolved_at"]).isoformat(),
+        "resume_count": len(resumes),
+        "writer_commit_target": target,
+        "writer_commits_after": commits_after,
+        "writer_commits_before": commits_before,
+    }
+
+
+async def _clear_retention_barrier(
+    connection: Connection,
+    retention_generation: int,
+    horizon: datetime,
+) -> dict[str, object]:
+    """Clear the latched finite set between bounded fence attempts.
+
+    Args:
+        connection: Control connection while publishers use the new generation.
+        retention_generation: Closed pre-generation set being drained.
+        horizon: Fixed cutoff for both real monitor scans.
+
+    Returns:
+        Disposition, obligation drain, and M1/M2 scan evidence.
+    """
+    remediation_started_at = cast(
+        datetime,
+        await connection.fetchval("SELECT clock_timestamp()"),
+    )
+    active_before = cast(
+        int,
+        await connection.fetchval("""
+            SELECT count(*)::integer
+            FROM rehearsal.fence_generations
+            WHERE resolution IS NULL
+              AND clock_timestamp() < lease_expires_at
+            """),
+    )
+    _assert(active_before == 0, "barrier clearance began under an active publisher fence")
     disposition_count = _command_row_count(await connection.execute("""
             UPDATE rehearsal.conflict_quarantine
             SET resolved_at = clock_timestamp()
@@ -7709,26 +7919,151 @@ async def _exercise_retention_barrier(
         retention_generation,
     )
     monitor_scans = await _record_retention_scans(connection, horizon)
-    final = await _retention_barrier_snapshot(
-        connection,
-        retention_generation,
-        lease.generation,
-        writer_count,
-        horizon,
+    active_after = cast(
+        int,
+        await connection.fetchval("""
+            SELECT count(*)::integer
+            FROM rehearsal.fence_generations
+            WHERE resolution IS NULL
+              AND clock_timestamp() < lease_expires_at
+            """),
     )
-    _require_retention_barrier(final)
+    _assert(active_after == 0, "publisher fence became active during barrier clearance")
+    remediation_completed_at = cast(
+        datetime,
+        await connection.fetchval("SELECT clock_timestamp()"),
+    )
+    historical_overlaps = cast(
+        int,
+        await connection.fetchval(
+            """
+            SELECT count(*)::integer
+            FROM rehearsal.fence_generations
+            WHERE opened_at < $2
+              AND LEAST(
+                    lease_expires_at,
+                    COALESCE(resolved_at, lease_expires_at)
+                  ) > $1
+            """,
+            remediation_started_at,
+            remediation_completed_at,
+        ),
+    )
+    _assert(
+        historical_overlaps == 0,
+        "publisher fence interval overlapped barrier clearance",
+    )
     _assert(disposition_count > 0, "barrier did not disposition a real quarantine row")
     return {
+        "active_fences_after_clearance": active_after,
+        "active_fences_before_clearance": active_before,
+        "cleared_retention_generation": retention_generation,
         "dispositioned_quarantine_rows": disposition_count,
-        "final_blockers": _retention_barrier_blockers(final),
-        "final_snapshot": final,
-        "initial_blockers": initial_blockers,
-        "initial_snapshot": initial,
+        "historical_fence_overlaps": historical_overlaps,
         "monitor_scans": monitor_scans,
-        "negative_rejection": rejection,
         "obligation_drain": obligation_drain,
-        "passed": True,
+        "remediation_completed_at": remediation_completed_at.isoformat(),
+        "remediation_started_at": remediation_started_at.isoformat(),
     }
+
+
+async def _prepare_retention_barrier(
+    context: RetentionBarrierContext,
+) -> dict[str, object]:
+    """Reject one bounded attempt and clear its closed generation after resume.
+
+    Args:
+        context: Instance, config, controller, generation, H, and publishers.
+
+    Returns:
+        Negative-attempt, controller-resume, and durable clearance evidence.
+    """
+    required_seconds = (
+        context.config.transaction_timeout_seconds + context.config.cleanup_margin_seconds
+    )
+    negative_lease = await _open_fence(
+        context.instance,
+        context.config,
+        "retention-barrier-negative",
+    )
+    negative_acknowledgements = await _wait_fence_acks(
+        context.instance,
+        negative_lease,
+        context.config.writers,
+        required_seconds,
+        context.retention_generation,
+    )
+    rejection = await _reject_retention_barrier(
+        context,
+        negative_lease,
+    )
+    retry = await _release_rejected_retention_fence(
+        context.connection,
+        negative_lease,
+        context.config.writers,
+        context.horizon,
+        context.stats,
+    )
+    clearance = await _clear_retention_barrier(
+        context.connection,
+        context.retention_generation,
+        context.horizon,
+    )
+    return {
+        **clearance,
+        **rejection,
+        "negative_fence_acknowledgements": negative_acknowledgements,
+        "negative_fence_generation": negative_lease.generation,
+        "negative_fence_token": str(negative_lease.token),
+        "negative_retry": retry,
+    }
+
+
+async def _finalize_retention_barrier(
+    context: RetentionBarrierContext,
+    preparation: dict[str, object],
+) -> tuple[FenceLease, list[dict[str, object]], dict[str, object]]:
+    """Acquire a fresh final fence and rerun every persisted barrier predicate.
+
+    Args:
+        context: Instance, config, controller, generation, H, and publishers.
+        preparation: Negative-attempt and scale-scan evidence.
+
+    Returns:
+        Fresh final lease, exact acknowledgements, and merged passing evidence.
+    """
+    required_seconds = (
+        context.config.transaction_timeout_seconds + context.config.cleanup_margin_seconds
+    )
+    final_lease = await _open_fence(context.instance, context.config, "retention")
+    final_acknowledgements = await _wait_fence_acks(
+        context.instance,
+        final_lease,
+        context.config.writers,
+        required_seconds,
+        context.retention_generation,
+    )
+    final = await _retention_barrier_snapshot(
+        context.connection,
+        context.retention_generation,
+        final_lease,
+        context.config,
+        context.horizon,
+    )
+    _require_retention_barrier(final)
+    return (
+        final_lease,
+        final_acknowledgements,
+        {
+            **preparation,
+            "final_blockers": _retention_barrier_blockers(final),
+            "final_fence_generation": final_lease.generation,
+            "final_lease_opened_at": final_lease.opened_at.isoformat(),
+            "final_fence_token": str(final_lease.token),
+            "final_snapshot": final,
+            "passed": True,
+        },
+    )
 
 
 async def _prove_pending_reconciliation(
@@ -7765,9 +8100,20 @@ async def _prove_pending_reconciliation(
         retention_generation,
     )
     pending_state = await _set_u3_pending(connection, horizon, lease, 0.5)
-    resumes = await _wait_resumes(connection, lease.generation, config.writers)
-    target = max(item.committed for item in stats) + 1
+    resumes = await _wait_resumes(
+        connection,
+        lease.generation,
+        config.writers,
+        stats,
+    )
+    commits_before = {
+        f"publisher-{number}": item.committed for number, item in enumerate(stats, start=1)
+    }
+    target = max(commits_before.values()) + 1
     await _wait_writer_commits(stats, target)
+    commits_after = {
+        f"publisher-{number}": item.committed for number, item in enumerate(stats, start=1)
+    }
     terminal = await _catalog_state(connection, horizon)
     _assert(terminal.mode == "POST", "expired U3_PENDING fence did not restore POST")
     winner_rows = await connection.fetch(
@@ -7781,7 +8127,7 @@ async def _prove_pending_reconciliation(
     _assert(len(winner_rows) == 1, "U3_PENDING generation did not have exactly one CAS winner")
     fence = await connection.fetchrow(
         """
-        SELECT resolution, resolver
+        SELECT resolution, resolver, token, resolved_at
         FROM rehearsal.fence_generations
         WHERE generation = $1
         """,
@@ -7789,6 +8135,7 @@ async def _prove_pending_reconciliation(
     )
     _assert(fence is not None, "U3_PENDING recovery fence disappeared")
     _assert(fence["resolution"] == "POST_COMMITTED", "U3_PENDING resolved incorrectly")
+    last_resume_at = max(cast(datetime, resume["occurred_at"]) for resume in resumes)
     stale_rejection = ""
     try:
         await _set_u3_pending(connection, horizon, lease, 0.0)
@@ -7801,14 +8148,22 @@ async def _prove_pending_reconciliation(
         "acknowledgements": acknowledgements,
         "cas_winner": cast(str, winner_rows[0]["resolver"]),
         "fence_generation": lease.generation,
+        "fence_token": str(lease.token),
+        "last_resume_at": last_resume_at.isoformat(),
+        "observed_fence_token": str(cast(UUID, fence["token"])),
+        "opened_at": lease.opened_at.isoformat(),
         "pending_fingerprint": pending_state.fingerprint(),
         "resolution": cast(str, fence["resolution"]),
+        "resolved_at": cast(datetime, fence["resolved_at"]).isoformat(),
         "resolver": cast(str, fence["resolver"]),
         "resume_count": len(resumes),
         "stale_pending_rejection": stale_rejection,
         "stale_pending_setter_denied": True,
         "terminal_catalog": terminal.mode,
         "winner_count": len(winner_rows),
+        "writer_commit_target": target,
+        "writer_commits_after": commits_after,
+        "writer_commits_before": commits_before,
     }
 
 
@@ -7853,6 +8208,8 @@ async def _authorized_detach_attempt(
             {
                 "backend_pid": backend_pid,
                 "cleanup_margin_seconds": spec.cleanup_margin_seconds,
+                "fence_generation": spec.generation,
+                "fence_token": str(spec.token),
                 "initial_timezone": initial_timezone,
                 "pinned_timezone": pinned_timezone,
                 "remaining_lease_seconds": remaining,
@@ -8848,6 +9205,15 @@ async def _prepare_retention_detach(
     )
     _assert(default_rows == 0, "DEFAULT partition was not drained before retention")
     concurrent_sqlstate, concurrent_message = await _concurrent_detach_negative(connection)
+    barrier_context = RetentionBarrierContext(
+        instance=instance,
+        config=config,
+        connection=connection,
+        retention_generation=retention_generation,
+        horizon=horizon,
+        stats=stats,
+    )
+    barrier_preparation = await _prepare_retention_barrier(barrier_context)
     pending_reconciliation = await _prove_pending_reconciliation(
         instance,
         config,
@@ -8855,20 +9221,9 @@ async def _prepare_retention_detach(
         horizon,
         stats,
     )
-    lease = await _open_fence(instance, config, "retention")
-    acknowledgements = await _wait_fence_acks(
-        instance,
-        lease,
-        config.writers,
-        config.transaction_timeout_seconds + config.cleanup_margin_seconds,
-        retention_generation,
-    )
-    barrier = await _exercise_retention_barrier(
-        connection,
-        retention_generation,
-        lease,
-        config.writers,
-        horizon,
+    lease, acknowledgements, barrier = await _finalize_retention_barrier(
+        barrier_context,
+        barrier_preparation,
     )
     pending_state = await _set_u3_pending(
         connection,
@@ -9004,7 +9359,7 @@ async def _exercise_detach(
             retained_state.mode == "RETAINED",
             f"DETACH+epoch did not commit one coherent RETAINED state: {retained_state}",
         )
-        released = await connection.fetchval(
+        released = await connection.fetchrow(
             """
             UPDATE rehearsal.fence_generations
             SET
@@ -9013,14 +9368,22 @@ async def _exercise_detach(
                 resolved_fingerprint = $2,
                 resolved_at = clock_timestamp()
             WHERE generation = $1
+              AND token = $3
               AND resolution IS NULL
-            RETURNING generation
+            RETURNING generation, token
             """,
             preparation.lease.generation,
             retained_state.fingerprint(),
+            preparation.lease.token,
         )
         _assert(released is not None, "retention controller could not release its fence")
-        resumes = await _wait_resumes(connection, preparation.lease.generation, config.writers)
+        released_row = cast(Record, released)
+        resumes = await _wait_resumes(
+            connection,
+            preparation.lease.generation,
+            config.writers,
+            stats,
+        )
         target = max(item.committed for item in stats) + 1
         await _wait_writer_commits(stats, target)
         await _stop_publishers(tasks, stop_event)
@@ -9098,6 +9461,8 @@ async def _exercise_detach(
                 "retention_first_authorization": retry["first_authorization"],
                 "retention_epoch_after_commit": retained_state.topology_epoch,
                 "retention_fence_generation": preparation.lease.generation,
+                "retention_release_generation": cast(int, released_row["generation"]),
+                "retention_release_token": str(cast(UUID, released_row["token"])),
                 "retention_resumes": len(resumes),
                 "staged_replay": staged_replay,
                 "terminal_catalog_after_drop": purged_state.mode,
@@ -9273,11 +9638,17 @@ def _duration_text(seconds: float) -> str:
     return f"{hours}h {minutes}m {final_seconds}s"
 
 
-def _lease_authorization_passed(evidence: dict[str, object]) -> bool:
+def _lease_authorization_passed(
+    evidence: dict[str, object],
+    expected_generation: int,
+    expected_token: object,
+) -> bool:
     """Validate one in-transaction database-clock DDL authorization.
 
     Args:
         evidence: Facts captured after locking the exact fence generation row.
+        expected_generation: Final retention fence generation.
+        expected_token: Final retention fence token.
 
     Returns:
         True only when timeout and cleanup fit within the remaining lease.
@@ -9287,11 +9658,230 @@ def _lease_authorization_passed(evidence: dict[str, object]) -> bool:
     margin = float(cast(float | int, evidence.get("cleanup_margin_seconds", 0)))
     return (
         int(cast(int, evidence.get("backend_pid", 0))) > 1
+        and int(cast(int, evidence.get("fence_generation", 0))) == expected_generation
+        and evidence.get("fence_token") == expected_token
+        and _valid_uuid_text(expected_token)
         and cast(str, evidence.get("initial_timezone", "")) == _NON_UTC_TIMEZONE
         and cast(str, evidence.get("pinned_timezone", "")) == "UTC"
         and timeout > 0
         and margin > 0
         and remaining > timeout + margin
+    )
+
+
+def _ordered_evidence_times(values: Sequence[object]) -> bool:
+    """Require a strictly ordered series of timezone-aware evidence instants.
+
+    Args:
+        values: Serialized database-clock instants in expected event order.
+
+    Returns:
+        True only when every value parses with a timezone and increases strictly.
+    """
+    if not values or not all(isinstance(value, str) for value in values):
+        return False
+    try:
+        instants = [datetime.fromisoformat(cast(str, value)) for value in values]
+    except ValueError:
+        return False
+    return all(instant.tzinfo is not None for instant in instants) and all(
+        earlier < later for earlier, later in itertools.pairwise(instants)
+    )
+
+
+def _valid_uuid_text(value: object) -> bool:
+    """Validate one serialized UUID without accepting non-string coercions.
+
+    Args:
+        value: Candidate evidence value.
+
+    Returns:
+        True only for a canonical UUID string.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return str(parsed) == value
+
+
+def _retention_acknowledgements_passed(
+    acknowledgements: Sequence[dict[str, object]],
+    expected_publishers: int,
+    retention_generation: int,
+    fence_generation: int,
+    fence_token: object,
+) -> bool:
+    """Validate one complete generation-bound publisher acknowledgement set.
+
+    Args:
+        acknowledgements: Persisted publisher session-closure evidence.
+        expected_publishers: Exact configured publisher population.
+        retention_generation: Closed retention obligation generation.
+        fence_generation: Exact phase-specific publisher fence generation.
+        fence_token: Exact phase-specific publisher fence token.
+
+    Returns:
+        True only when every expected publisher closed cleanly on the generation.
+    """
+    expected_identities = {f"publisher-{number}" for number in range(1, expected_publishers + 1)}
+    observed_identities = {
+        cast(str, acknowledgement.get("publisher_id", "")) for acknowledgement in acknowledgements
+    }
+    return (
+        expected_publishers > 0
+        and fence_generation > 0
+        and _valid_uuid_text(fence_token)
+        and len(acknowledgements) == expected_publishers
+        and observed_identities == expected_identities
+        and all(
+            acknowledgement.get("session_closed") is True
+            and int(cast(int, acknowledgement.get("fence_generation", 0))) == fence_generation
+            and acknowledgement.get("fence_token") == fence_token
+            and int(cast(int, acknowledgement.get("inflight", -1))) == 0
+            and int(cast(int, acknowledgement.get("data_sessions_observed", -1))) == 0
+            and int(cast(int, acknowledgement.get("retention_generation", -1)))
+            == retention_generation
+            for acknowledgement in acknowledgements
+        )
+    )
+
+
+def _retention_snapshot_window_passed(
+    snapshot: dict[str, object],
+    fence_generation: int,
+    retention_generation: int,
+    required_seconds: float,
+    expected_publishers: int,
+) -> bool:
+    """Validate identity, generation, and live-window facts from one fence snapshot.
+
+    Args:
+        snapshot: Coherent database snapshot captured after publisher acknowledgements.
+        fence_generation: Exact fence generation expected in the snapshot.
+        retention_generation: Exact closed retention generation.
+        required_seconds: Transaction timeout plus cleanup margin.
+        expected_publishers: Exact configured publisher population.
+
+    Returns:
+        True only for the active exact fence with a strictly sufficient lease.
+    """
+    if not _valid_uuid_text(snapshot.get("fence_token")):
+        return False
+    remaining = float(cast(float | int, snapshot.get("remaining_lease_seconds", 0)))
+    recorded_required = float(cast(float | int, snapshot.get("required_lease_seconds", 0)))
+    return (
+        fence_generation > 0
+        and retention_generation > 0
+        and required_seconds > 0
+        and math.isclose(recorded_required, required_seconds, rel_tol=1e-9)
+        and remaining > recorded_required
+        and snapshot.get("fence_resolution", "missing") is None
+        and int(cast(int, snapshot.get("fence_generation", 0))) == fence_generation
+        and int(cast(int, snapshot.get("retention_generation", 0))) == retention_generation
+        and int(cast(int, snapshot.get("expected_fence_acknowledgements", -1)))
+        == expected_publishers
+        and int(cast(int, snapshot.get("fence_acknowledgements", -1))) == expected_publishers
+    )
+
+
+def _writer_commit_resume_passed(
+    retry: dict[str, object],
+    acknowledgements: Sequence[dict[str, object]],
+) -> bool:
+    """Validate committed ingestion progress after a rejected fence is released.
+
+    Args:
+        retry: Controller release, resume, and publisher commit evidence.
+        acknowledgements: Exact publisher set expected to make progress.
+
+    Returns:
+        True only when every resumed publisher advances beyond its baseline.
+    """
+    expected_publishers = {
+        cast(str, acknowledgement.get("publisher_id", "")) for acknowledgement in acknowledgements
+    }
+    before = cast(dict[str, int], retry.get("writer_commits_before", {}))
+    after = cast(dict[str, int], retry.get("writer_commits_after", {}))
+    if not expected_publishers or set(before) != expected_publishers:
+        return False
+    if set(after) != expected_publishers:
+        return False
+    target = int(cast(int, retry.get("writer_commit_target", 0)))
+    return target == max(before.values()) + 1 and all(
+        after[publisher_id] >= target and after[publisher_id] > before[publisher_id]
+        for publisher_id in expected_publishers
+    )
+
+
+def _retention_phase_order_passed(
+    barrier: dict[str, object],
+    pending_reconciliation: dict[str, object],
+    retention_generation: int,
+    terminal_fence_generation: int,
+) -> bool:
+    """Validate negative release, lease-free clearance, and fresh final-fence order.
+
+    Args:
+        barrier: Combined negative, remediation, and final barrier evidence.
+        pending_reconciliation: Separate expired U3_PENDING fence evidence.
+        retention_generation: Closed obligation generation cleared by remediation.
+        terminal_fence_generation: Fence authorizing the successful DETACH.
+
+    Returns:
+        True only when all three fence generations and remediation are ordered.
+    """
+    negative_generation = int(cast(int, barrier.get("negative_fence_generation", 0)))
+    pending_generation = int(cast(int, pending_reconciliation.get("fence_generation", 0)))
+    final_generation = int(cast(int, barrier.get("final_fence_generation", 0)))
+    fence_tokens = {
+        cast(str, barrier.get("negative_fence_token", "")),
+        cast(str, pending_reconciliation.get("fence_token", "")),
+        cast(str, barrier.get("final_fence_token", "")),
+    }
+    retry = cast(dict[str, object], barrier.get("negative_retry", {}))
+    negative_acknowledgements = cast(
+        list[dict[str, object]],
+        barrier.get("negative_fence_acknowledgements", []),
+    )
+    pending_acknowledgements = cast(
+        list[dict[str, object]],
+        pending_reconciliation.get("acknowledgements", []),
+    )
+    return (
+        0 < negative_generation < pending_generation < final_generation
+        and final_generation == terminal_fence_generation
+        and len(fence_tokens) == 3
+        and all(_valid_uuid_text(token) for token in fence_tokens)
+        and pending_reconciliation.get("fence_token")
+        == pending_reconciliation.get("observed_fence_token")
+        and _writer_commit_resume_passed(
+            pending_reconciliation,
+            pending_acknowledgements,
+        )
+        and int(cast(int, retry.get("fence_generation", 0))) == negative_generation
+        and retry.get("fence_token") == barrier.get("negative_fence_token")
+        and cast(str, retry.get("resolution", "")) == "POST_COMMITTED"
+        and int(cast(int, retry.get("resume_count", 0))) == len(negative_acknowledgements)
+        and _writer_commit_resume_passed(retry, negative_acknowledgements)
+        and int(cast(int, barrier.get("active_fences_before_clearance", -1))) == 0
+        and int(cast(int, barrier.get("active_fences_after_clearance", -1))) == 0
+        and int(cast(int, barrier.get("historical_fence_overlaps", -1))) == 0
+        and int(cast(int, barrier.get("cleared_retention_generation", -1))) == retention_generation
+        and _ordered_evidence_times(
+            (
+                retry.get("resolved_at"),
+                retry.get("last_resume_at"),
+                barrier.get("remediation_started_at"),
+                barrier.get("remediation_completed_at"),
+                pending_reconciliation.get("opened_at"),
+                pending_reconciliation.get("resolved_at"),
+                pending_reconciliation.get("last_resume_at"),
+                barrier.get("final_lease_opened_at"),
+            )
+        )
     )
 
 
@@ -9371,6 +9961,21 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
         dict[str, object],
         retention_barrier.get("final_snapshot", {}),
     )
+    barrier_initial = cast(
+        dict[str, object],
+        retention_barrier.get("initial_snapshot", {}),
+    )
+    computed_initial_blockers, computed_final_blockers = (
+        (_retention_barrier_blockers(barrier_initial) if barrier_initial else ["unexercised"]),
+        _retention_barrier_blockers(barrier_final) if barrier_final else ["unexercised"],
+    )
+    reported_initial_blockers, reported_final_blockers = (
+        cast(list[str], retention_barrier.get("initial_blockers", [])),
+        cast(
+            list[str],
+            retention_barrier.get("final_blockers", ["unexercised"]),
+        ),
+    )
     barrier_obligation_drain = cast(
         dict[str, object],
         retention_barrier.get("obligation_drain", {}),
@@ -9379,9 +9984,17 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
         dict[str, object],
         retention_barrier.get("monitor_scans", {}),
     )
+    barrier_negative_acks = cast(
+        list[dict[str, object]],
+        retention_barrier.get("negative_fence_acknowledgements", []),
+    )
     pending_reconciliation = cast(
         dict[str, object],
         inputs.detach.get("pending_reconciliation", {}),
+    )
+    pending_acknowledgements = cast(
+        list[dict[str, object]],
+        pending_reconciliation.get("acknowledgements", []),
     )
     retention_authorization = cast(
         dict[str, object],
@@ -9391,6 +10004,20 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
         dict[str, object],
         inputs.detach.get("retention_first_authorization", {}),
     )
+    (
+        retention_generation,
+        expected_retention_publishers,
+        terminal_retention_fence_generation,
+        terminal_retention_fence_token,
+    ) = (
+        int(cast(int, generation_serialization.get("new_generation", -1))),
+        int(cast(int, barrier_final.get("expected_fence_acknowledgements", -1))),
+        int(cast(int, inputs.detach.get("retention_fence_generation", -1))),
+        retention_barrier.get("final_fence_token"),
+    )
+    required_retention_seconds = float(
+        cast(float | int, retention_authorization.get("transaction_timeout_seconds", 0))
+    ) + float(cast(float | int, retention_authorization.get("cleanup_margin_seconds", 0)))
     attach_seconds = float(cast(float | int, inputs.attach["attach_seconds"]))
     negative_scans_observed = all(
         not cast(bool, control["debug_implication_observed"])
@@ -9596,19 +10223,58 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
                 and cast(bool, inputs.detach.get("failed_attempt_epoch_rolled_back", False))
                 and cast(str, inputs.detach.get("retention_epoch_after_commit", "")) == "U3"
                 and cast(str, inputs.detach.get("terminal_catalog_after_drop", "")) == "PURGED"
-                and int(cast(int, inputs.detach.get("retention_resumes", 0))) >= 2
-                and len(retention_acks)
-                == int(cast(int, barrier_final.get("expected_fence_acknowledgements", -1)))
-                and all(
-                    cast(bool, ack["session_closed"])
-                    and int(cast(int, ack["inflight"])) == 0
-                    and int(cast(int, ack["data_sessions_observed"])) == 0
-                    and int(cast(int, ack["retention_generation"]))
-                    == int(cast(int, generation_serialization.get("new_generation", -1)))
-                    for ack in retention_acks
+                and int(cast(int, inputs.detach.get("retention_resumes", 0)))
+                == expected_retention_publishers
+                and _retention_acknowledgements_passed(
+                    retention_acks,
+                    expected_retention_publishers,
+                    retention_generation,
+                    terminal_retention_fence_generation,
+                    terminal_retention_fence_token,
                 )
+                and _retention_acknowledgements_passed(
+                    barrier_negative_acks,
+                    expected_retention_publishers,
+                    retention_generation,
+                    int(cast(int, retention_barrier.get("negative_fence_generation", 0))),
+                    retention_barrier.get("negative_fence_token"),
+                )
+                and _retention_acknowledgements_passed(
+                    pending_acknowledgements,
+                    expected_retention_publishers,
+                    retention_generation,
+                    int(cast(int, pending_reconciliation.get("fence_generation", 0))),
+                    pending_reconciliation.get("fence_token"),
+                )
+                and _retention_snapshot_window_passed(
+                    barrier_initial,
+                    int(cast(int, retention_barrier.get("negative_fence_generation", 0))),
+                    retention_generation,
+                    required_retention_seconds,
+                    expected_retention_publishers,
+                )
+                and _retention_snapshot_window_passed(
+                    barrier_final,
+                    int(cast(int, retention_barrier.get("final_fence_generation", 0))),
+                    retention_generation,
+                    required_retention_seconds,
+                    expected_retention_publishers,
+                )
+                and barrier_initial.get("fence_token")
+                == retention_barrier.get("negative_fence_token")
+                and barrier_final.get("fence_token") == retention_barrier.get("final_fence_token")
+                and _retention_phase_order_passed(
+                    retention_barrier,
+                    pending_reconciliation,
+                    retention_generation,
+                    terminal_retention_fence_generation,
+                )
+                and int(cast(int, inputs.detach.get("retention_release_generation", -1)))
+                == terminal_retention_fence_generation
+                and inputs.detach.get("retention_release_token") == terminal_retention_fence_token
                 and cast(bool, retention_barrier.get("passed", False))
-                and set(cast(list[str], retention_barrier.get("initial_blockers", [])))
+                and reported_initial_blockers == computed_initial_blockers
+                and set(computed_initial_blockers)
                 >= {
                     "backscan_complete",
                     "blocked_batches",
@@ -9619,13 +10285,12 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
                     "unresolved_quarantine",
                     "worklog_pending",
                 }
-                and cast(list[str], retention_barrier.get("final_blockers", ["unexercised"])) == []
+                and reported_final_blockers == computed_final_blockers == []
                 and int(cast(int, barrier_final.get("actual_pre_generation_pending", -1))) == 0
                 and int(cast(int, barrier_final.get("blocked_batches", -1))) == 0
                 and int(cast(int, barrier_final.get("pre_generation_obligations", -1))) == 0
                 and int(cast(int, barrier_final.get("unresolved_quarantine", -1))) == 0
                 and int(cast(int, barrier_final.get("worklog_pending", -1))) == 0
-                and float(cast(float | int, barrier_final.get("remaining_lease_seconds", 0))) > 0
                 and int(cast(int, barrier_final.get("wrong_generation_acknowledgements", -1))) == 0
                 and barrier_final.get("fixed_safe_cutoff") == barrier_final.get("horizon")
                 and barrier_final.get("m1_cursor") == barrier_final.get("horizon")
@@ -9633,12 +10298,14 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
                 and cast(bool, barrier_final.get("monitor_lag_breach", False))
                 and cast(bool, barrier_final.get("backscan_complete", False))
                 and int(cast(int, retention_barrier.get("dispositioned_quarantine_rows", 0))) > 0
-                and bool(cast(str, retention_barrier.get("negative_rejection", "")))
+                and cast(str, retention_barrier.get("negative_rejection", ""))
+                == "retention barrier blocked DETACH: " + ", ".join(computed_initial_blockers)
                 and cast(str, inputs.detach.get("pending_state_before_detach", "")) == "PENDING"
                 and int(cast(int, pending_reconciliation.get("winner_count", 0))) == 1
                 and cast(str, pending_reconciliation.get("terminal_catalog", "")) == "POST"
                 and cast(str, pending_reconciliation.get("resolution", "")) == "POST_COMMITTED"
-                and int(cast(int, pending_reconciliation.get("resume_count", 0))) >= 2
+                and int(cast(int, pending_reconciliation.get("resume_count", 0)))
+                == expected_retention_publishers
                 and cast(
                     bool,
                     pending_reconciliation.get("stale_pending_setter_denied", False),
@@ -9666,8 +10333,16 @@ def _criteria(inputs: AcceptanceInputs) -> list[CriterionResult]:
                         "m2_rows_seen",
                     )
                 )
-                and _lease_authorization_passed(retention_first_authorization)
-                and _lease_authorization_passed(retention_authorization)
+                and _lease_authorization_passed(
+                    retention_first_authorization,
+                    terminal_retention_fence_generation,
+                    terminal_retention_fence_token,
+                )
+                and _lease_authorization_passed(
+                    retention_authorization,
+                    terminal_retention_fence_generation,
+                    terminal_retention_fence_token,
+                )
                 and cast(bool, generation_serialization.get("serialized_before_latch", False))
                 and cast(str, generation_serialization.get("old_row_physical_table", ""))
                 == "trades_legacy"
@@ -9969,6 +10644,7 @@ def _run_repository_verification(
     """
     commands = _repository_verification_commands()
     environment = dict(os.environ)
+    environment.pop("DATABASE_URL", None)
     environment["DB_URL"] = "sqlite+aiosqlite:///./data/dev.db"
     results: list[dict[str, object]] = []
     log_lines: list[str] = []
