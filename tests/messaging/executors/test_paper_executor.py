@@ -118,13 +118,15 @@ async def fake_iter_trades(
     as_of: datetime | None = None,
 ) -> AsyncIterator[dict]:
     """Stream fake trade data for testing."""
+    occurred_at = datetime.now(tz=UTC)
     for trade in [
         {
             "side": "buy",
             "size": 0.5,
             "price": 50000.0,
             "trade_id": 12345,
-            "timestamp": datetime.now(tz=UTC),
+            "timestamp": occurred_at,
+            "executed_at": occurred_at,
         }
     ]:
         yield trade
@@ -798,6 +800,7 @@ class TestPaperMarketDataMethods:
                             "price": 2.0,
                             "trade_id": 2,
                             "timestamp": base.replace(minute=2),
+                            "executed_at": base.replace(minute=2),
                         },
                         {
                             "side": "buy",
@@ -805,6 +808,7 @@ class TestPaperMarketDataMethods:
                             "price": 2.5,
                             "trade_id": 4,
                             "timestamp": base.replace(minute=4),
+                            "executed_at": base.replace(minute=4),
                         },
                     ]
                 if symbol == "ETH-USD":
@@ -815,6 +819,7 @@ class TestPaperMarketDataMethods:
                             "price": 1.0,
                             "trade_id": 1,
                             "timestamp": base.replace(minute=1),
+                            "executed_at": base.replace(minute=1),
                         },
                         {
                             "side": "sell",
@@ -822,6 +827,7 @@ class TestPaperMarketDataMethods:
                             "price": 1.5,
                             "trade_id": 3,
                             "timestamp": base.replace(minute=3),
+                            "executed_at": base.replace(minute=3),
                         },
                     ]
                 return []

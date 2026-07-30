@@ -16,6 +16,7 @@ Database:
     - ``db-init``: Initialize database schema
     - ``db-upgrade``: Run Alembic migrations
     - ``db-downgrade``: Rollback migrations
+    - ``daily-partitions``: Operate daily market-data partitions from the host
 
 User Management:
     - ``init-admin``: Create initial admin user
@@ -131,6 +132,7 @@ from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdate
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
+from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.token_preflight import token_app
@@ -2998,6 +3000,7 @@ def notify() -> None:
 app.command(name="dev-mint-pat")(dev_mint_pat)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.add_typer(annulment_app, name="annulment")
+app.add_typer(daily_partitions_app, name="daily-partitions")
 app.add_typer(token_app, name="token")
 
 

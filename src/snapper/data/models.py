@@ -815,12 +815,19 @@ class Trade(TemporalMixin, Base):
     """SQLAlchemy model for individual market trades.
 
     timestamp (from TemporalMixin) is bus-time when the trade was received.
-    executed_at is domain-time when the trade actually occurred on the exchange.
+    executed_at is required domain-time normalized by every adapter. Together
+    with instrument and venue trade ID it forms the partition-safe U3 identity.
     """
 
     __tablename__ = "trades"
     __table_args__ = (
-        UniqueConstraint("instrument_public_id", "trade_id", name="uq_trade_instrument_trade_id"),
+        Index(
+            "uq_trade_instr_tid_exec",
+            "instrument_public_id",
+            "trade_id",
+            "executed_at",
+            unique=True,
+        ),
         Index("ix_trade_instrument_ts", "instrument_public_id", "timestamp"),
         Index("ix_trades_timestamp", "timestamp"),
         Index("ix_trades_executed_at", "executed_at"),
@@ -842,7 +849,7 @@ class Trade(TemporalMixin, Base):
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
 class TradeIntegrityWorkItem(Base):

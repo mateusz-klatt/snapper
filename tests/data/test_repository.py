@@ -328,7 +328,19 @@ async def test_upsert_trades_other_dialect_skips_duplicates(
     session = _DummyAsyncSession(fail_on=2)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
-    rows = [{"trade_id": "t1"}, {"trade_id": "t2"}]
+    base_ts = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[TradeUpsertRow] = [
+        {
+            "trade_id": "t1",
+            "timestamp": base_ts,
+            "executed_at": base_ts,
+        },
+        {
+            "trade_id": "t2",
+            "timestamp": base_ts + timedelta(seconds=1),
+            "executed_at": base_ts + timedelta(seconds=1),
+        },
+    ]
     inserted = await repo.upsert_trades(rows)
     assert inserted == 1
     assert session.savepoint_rollbacks == 1
@@ -1051,7 +1063,15 @@ async def test_upsert_trades_other_dialect_preserves_existing_public_id(
     session = _DummyAsyncSession()
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
-    rows = [{"trade_id": "t1", "public_id": "my-trade-uuid"}]
+    occurred_at = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[TradeUpsertRow] = [
+        {
+            "trade_id": "t1",
+            "public_id": "my-trade-uuid",
+            "timestamp": occurred_at,
+            "executed_at": occurred_at,
+        }
+    ]
     await repo.upsert_trades(rows)
     assert rows[0]["public_id"] == "my-trade-uuid"
 
@@ -1069,7 +1089,24 @@ async def test_upsert_trades_savepoint_preserves_earlier_inserts(
     session = _DummyAsyncSession(fail_on=2)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     monkeypatch.setattr(repository, "insert", lambda table: _DummyInsert())
-    rows = [{"trade_id": "t1"}, {"trade_id": "t2"}, {"trade_id": "t3"}]
+    base_ts = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[TradeUpsertRow] = [
+        {
+            "trade_id": "t1",
+            "timestamp": base_ts,
+            "executed_at": base_ts,
+        },
+        {
+            "trade_id": "t2",
+            "timestamp": base_ts + timedelta(seconds=1),
+            "executed_at": base_ts + timedelta(seconds=1),
+        },
+        {
+            "trade_id": "t3",
+            "timestamp": base_ts + timedelta(seconds=2),
+            "executed_at": base_ts + timedelta(seconds=2),
+        },
+    ]
     inserted = await repo.upsert_trades(rows)
     assert inserted == 2
     assert session.savepoint_rollbacks == 1
@@ -1455,6 +1492,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         {
             "instrument_public_id": instrument_public_id,
             "timestamp": base_ts,
+            "executed_at": base_ts,
             "price": 10.5,
             "size": 0.25,
             "side": "buy",
@@ -1465,6 +1503,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         {
             "instrument_public_id": instrument_public_id,
             "timestamp": base_ts + timedelta(minutes=1),
+            "executed_at": base_ts + timedelta(minutes=1),
             "price": 11.5,
             "size": 0.5,
             "side": "sell",
@@ -2590,10 +2629,11 @@ class TestSQLAlchemyRepositoryDialects:
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
-            rows: list[dict[str, Any]] = [
+            rows: list[TradeUpsertRow] = [
                 {
                     "trade_id": "trade_1",
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "side": "buy",
                     "size": 100.0,
                     "price": 100.5,
@@ -2617,10 +2657,11 @@ class TestSQLAlchemyRepositoryDialects:
         with patch.object(mock_other_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
-            rows: list[dict[str, Any]] = [
+            rows: list[TradeUpsertRow] = [
                 {
                     "trade_id": "trade_1",
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "side": "buy",
                     "size": 100.0,
                     "price": 100.5,
@@ -5147,7 +5188,7 @@ async def test_iter_exchange_trades_streams_single_instrument() -> None:
             SimpleNamespace(
                 instrument_public_id="inst-btc",
                 timestamp=base + timedelta(seconds=5),
-                executed_at=None,
+                executed_at=base + timedelta(seconds=5),
                 price=100.0,
                 size=1.5,
                 side="buy",
@@ -5168,7 +5209,7 @@ async def test_iter_exchange_trades_streams_single_instrument() -> None:
             "inst-btc",
             {
                 "timestamp": base + timedelta(seconds=5),
-                "executed_at": None,
+                "executed_at": base + timedelta(seconds=5),
                 "price": 100.0,
                 "size": 1.5,
                 "side": "buy",
@@ -5207,7 +5248,7 @@ async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instrument
             SimpleNamespace(
                 instrument_public_id="inst-eth",
                 timestamp=base + timedelta(seconds=1),
-                executed_at=None,
+                executed_at=base + timedelta(seconds=1),
                 price=201.0,
                 size=1.0,
                 side="sell",
@@ -5229,10 +5270,8 @@ async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instrument
         "inst-btc",
         "inst-eth",
     ]
-    assert (
-        "ORDER BY trades.instrument_public_id ASC, "
-        "coalesce(trades.executed_at, trades.timestamp) ASC, trades.id ASC"
-    ) in sql
+    assert "ORDER BY trades.instrument_public_id ASC, trades.executed_at ASC, trades.id ASC" in sql
+    assert "coalesce" not in sql.lower()
 
 
 @pytest.mark.asyncio

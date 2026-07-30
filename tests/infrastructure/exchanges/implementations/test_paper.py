@@ -1100,6 +1100,7 @@ class _ReplayRepo:
                 "size": 1.0,
                 "price": 100.0,
                 "timestamp": now,
+                "executed_at": now,
                 "trade_id": "42",
             }
         ]
@@ -1678,12 +1679,14 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
     class _EmptyTradesRepo(_ReplayRepo):
         async def _trades_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
             if symbol == "BTC/USD":
+                occurred_at = datetime.fromtimestamp(0, tz=UTC)
                 return [
                     {
                         "side": "buy",
                         "size": 1.0,
                         "price": 50000.0,
-                        "timestamp": datetime.fromtimestamp(0, tz=UTC),
+                        "timestamp": occurred_at,
+                        "executed_at": occurred_at,
                         "trade_id": 1,
                     }
                 ]

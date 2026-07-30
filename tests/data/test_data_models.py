@@ -159,9 +159,11 @@ class TestTradeModel:
         When: Trade is created,
         Then: All fields match provided values.
         """
+        occurred_at = datetime.now(UTC)
         trade = Trade(
             instrument_public_id="test-instrument-uuid",
-            timestamp=datetime.now(UTC),
+            timestamp=occurred_at,
+            executed_at=occurred_at,
             price=50000.0,
             size=1.5,
             side="buy",
@@ -175,6 +177,7 @@ class TestTradeModel:
         assert trade.side == "buy"
         assert trade.trade_id == "trade-123"
         assert isinstance(trade.timestamp, datetime)
+        assert trade.executed_at == occurred_at
 
     def test_trade_value_calculation(self) -> None:
         """Test Trade value is size times price.
@@ -183,9 +186,11 @@ class TestTradeModel:
         When: Calculating trade value,
         Then: Value equals size * price.
         """
+        occurred_at = datetime.now(UTC)
         trade = Trade(
             instrument_public_id="test-instrument-uuid",
-            timestamp=datetime.now(UTC),
+            timestamp=occurred_at,
+            executed_at=occurred_at,
             price=45000.0,
             size=2.0,
             side="buy",
@@ -203,9 +208,11 @@ class TestTradeModel:
         When: Checking side values,
         Then: Both buy and sell are supported.
         """
+        occurred_at = datetime.now(UTC)
         buy_trade = Trade(
             instrument_public_id="test-instrument-uuid",
-            timestamp=datetime.now(UTC),
+            timestamp=occurred_at,
+            executed_at=occurred_at,
             price=50000.0,
             size=1.0,
             side="buy",
@@ -215,7 +222,8 @@ class TestTradeModel:
         )
         sell_trade = Trade(
             instrument_public_id="test-instrument-uuid",
-            timestamp=datetime.now(UTC),
+            timestamp=occurred_at,
+            executed_at=occurred_at,
             price=50000.0,
             size=1.0,
             side="sell",

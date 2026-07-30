@@ -187,7 +187,7 @@ def _trade(
         price: Trade price.
         size: Trade size.
         side: Trade side.
-        executed_at: Optional exchange execution timestamp.
+        executed_at: Exchange execution timestamp, defaulting to persisted bus time.
         trade_id: Optional exchange trade id.
 
     Returns:
@@ -195,7 +195,7 @@ def _trade(
     """
     return {
         "timestamp": event_time,
-        "executed_at": executed_at,
+        "executed_at": event_time if executed_at is None else executed_at,
         "price": price,
         "size": size,
         "side": side,
@@ -320,7 +320,7 @@ async def test_single_instrument_multiple_minutes_skips_trailing_partial() -> No
         ["BTC-USD"],
         {"BTC-USD": "inst-btc"},
         [
-            ("inst-btc", _trade(_dt(0, 1), 100.0, executed_at=_dt(0, 5), trade_id="t1")),
+            ("inst-btc", _trade(_dt(0, 5), 100.0, executed_at=_dt(0, 1), trade_id="t1")),
             ("inst-btc", _trade(_dt(0, 30), 110.0, size=2.0, side="sell", trade_id="t2")),
             ("inst-btc", _trade(_dt(1, 5), 120.0, trade_id="t3")),
             ("inst-btc", _trade(_dt(2, 10), 90.0, trade_id="t4")),

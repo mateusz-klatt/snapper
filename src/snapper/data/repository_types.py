@@ -231,7 +231,7 @@ class TradeRow(TypedDict):
     """Row dict yielded by iter_trades."""
 
     timestamp: datetime
-    executed_at: datetime | None
+    executed_at: datetime
     price: float
     size: float
     side: str

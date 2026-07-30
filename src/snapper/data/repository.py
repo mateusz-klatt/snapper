@@ -10391,14 +10391,14 @@ class SQLAlchemyRepository(Repository):
             return await self._upsert_batch(
                 Trade,
                 rows,
-                ["instrument_public_id", "trade_id"],
+                ["instrument_public_id", "trade_id", "executed_at"],
                 session=session,
             )
         if session is not None:
             inserted = await self._upsert_batch(
                 Trade,
                 rows,
-                ["instrument_public_id", "trade_id"],
+                ["instrument_public_id", "trade_id", "executed_at"],
                 session=session,
             )
             await self._enqueue_trade_integrity_work(session, rows)
@@ -10407,7 +10407,7 @@ class SQLAlchemyRepository(Repository):
             inserted = await self._upsert_batch(
                 Trade,
                 rows,
-                ["instrument_public_id", "trade_id"],
+                ["instrument_public_id", "trade_id", "executed_at"],
                 session=owned_session,
             )
             await self._enqueue_trade_integrity_work(owned_session, rows)
@@ -11161,20 +11161,18 @@ class SQLAlchemyRepository(Repository):
         """Stream trades for instrument in time range without materialising the full result.
 
         Companion to :meth:`iter_ticks` for the equally-high-cardinality
-        Trade table. Yields rows in event-time ASC order using
-        coalesce(executed_at, timestamp) as the event time, falling back
-        to bus-time for rows without executed_at. The primary-key ``id`` is
-        a secondary sort key so trades sharing an event time always stream
-        in a stable order; without it, ties reorder across queries and the
-        order-dependent float accumulation of trade-built candle vwap/volume
-        drifts by a ULP, making the candle backfill non-idempotent (a fresh
-        SCD2 version on every re-run).
+        Trade table. Yields rows in ``executed_at`` order so PostgreSQL
+        can prune daily partitions. The primary-key ``id`` is a secondary
+        sort key so trades sharing an event time always stream in a stable
+        order; without it, ties reorder across queries and the order-dependent
+        float accumulation of trade-built candle vwap/volume drifts by a ULP,
+        making the candle backfill non-idempotent.
         """
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
             if inst is None:
                 return
-            event_time = func.coalesce(Trade.executed_at, Trade.timestamp)
+            event_time = Trade.executed_at
             stmt = (
                 select(
                     Trade.timestamp,
@@ -11225,7 +11223,7 @@ class SQLAlchemyRepository(Repository):
         if instrument_public_ids is not None and not instrument_public_ids:
             return
         async with self.session() as s:
-            event_time = func.coalesce(Trade.executed_at, Trade.timestamp)
+            event_time = Trade.executed_at
             stmt = select(
                 Trade.instrument_public_id,
                 Trade.timestamp,
