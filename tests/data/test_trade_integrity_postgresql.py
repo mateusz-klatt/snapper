@@ -206,6 +206,40 @@ async def test_postgresql_dispatch_uses_monitor_specific_probe(
 
 
 @pytest.mark.asyncio
+async def test_m2_dispatch_short_circuits_without_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip every M2 database probe when the pass has no candidate identity.
+
+    Given: An M2 pass with no sweep rows or pending worklog obligations,
+    When: Violation discovery assembles its public-ID candidates,
+    Then: It returns no finding without invoking either dialect probe.
+    """
+    postgresql_probe = AsyncMock()
+    sqlite_probe = AsyncMock()
+    monkeypatch.setattr(integrity_module, "_find_m2_postgresql", postgresql_probe)
+    monkeypatch.setattr(integrity_module, "_find_m2_sqlite", sqlite_probe)
+    request = TradeIntegrityPassRequest(
+        monitor="m2",
+        now=_NOW,
+        sweep_limit=1,
+        worklog_limit=1,
+    )
+
+    findings = await _find_violations(
+        MagicMock(),
+        "postgresql",
+        request,
+        [],
+        [],
+    )
+
+    assert findings == ()
+    postgresql_probe.assert_not_awaited()
+    sqlite_probe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_monitor_rejects_unsupported_dialect() -> None:
     """Reject a monitor pass for a database without a supported probe.
 

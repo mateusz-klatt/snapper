@@ -35,6 +35,7 @@ from snapper.data.archiver import _parse_int_csv
 from snapper.data.archiver import _parse_json_csv
 from snapper.data.archiver import _parse_str_csv
 from snapper.data.archiver import _parser_for_column
+from snapper.data.archiver import _restore_headers_for_table
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -183,6 +184,37 @@ def test_parse_datetime_csv() -> None:
     assert _parse_datetime_csv("") is None
 
 
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("2024-01-01T14:30:00", "CSV datetime must include a UTC offset"),
+        ("99999-12-31 00:59:59+01:00", "Invalid CSV datetime"),
+        ("10000-01-01broken", "Invalid CSV datetime"),
+        ("10000-01-01 00:59:58+01:00", "Unsupported overflow CSV datetime"),
+        ("10000-01-01 00:59:59", "Unsupported overflow CSV datetime"),
+    ],
+    ids=[
+        "naive",
+        "non-sentinel-overflow-prefix",
+        "malformed-sentinel-rendering",
+        "wrong-sentinel-instant",
+        "naive-sentinel-rendering",
+    ],
+)
+def test_parse_datetime_csv_refuses_ambiguous_or_invalid_values(
+    value: str,
+    message: str,
+) -> None:
+    """Datetime parsing fails closed outside the exact offset-aware contract.
+
+    Given: A naive, malformed, or non-sentinel overflow datetime,
+    When: The archive datetime parser reads the value,
+    Then: It raises the specific validation error instead of returning an instant.
+    """
+    with pytest.raises(ValueError, match=message):
+        _parse_datetime_csv(value)
+
+
 def test_parse_float_csv() -> None:
     """Parse float CSV value."""
     assert _parse_float_csv("1.5") == 1.5
@@ -310,6 +342,32 @@ def test_restore_unknown_table() -> None:
         restorer.restore(table="bogus", paths=[])
 
 
+def test_restore_header_lookup_refuses_unregistered_table() -> None:
+    """Header lookup has no permissive fallback for an unregistered table.
+
+    Given: A table name absent from every archive table registry,
+    When: The restore header contract is resolved directly,
+    Then: It raises instead of inferring or returning a partial header.
+    """
+    with pytest.raises(ValueError, match="No archive header is defined"):
+        _restore_headers_for_table("bogus")
+
+
+def test_restore_rejects_zero_batch_size() -> None:
+    """Restore batching rejects the zero boundary at construction time.
+
+    Given: A repository and a requested batch size of zero,
+    When: The archive restorer is constructed,
+    Then: It raises before any file or database work can begin.
+    """
+    repository = MagicMock(spec=DatabaseRepository)
+
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        ArchiveRestorer(repository, batch_size=0)
+
+    repository.get_session.assert_not_called()
+
+
 def test_restore_unsupported_source() -> None:
     """Restore raises ValueError for unsupported source.
 
@@ -378,6 +436,110 @@ def test_restore_refuses_transposed_trade_header(tmp_path: Path) -> None:
 
     repository.get_existing_archive_keys.assert_not_called()
     repository.bulk_insert_from_archive.assert_not_called()
+
+
+def test_restore_refuses_unsupported_archive_extension(tmp_path: Path) -> None:
+    """Restore accepts only the two explicitly supported archive extensions.
+
+    Given: A readable archive-shaped file whose suffix is neither CSV nor CSV.zst,
+    When: Audit restore attempts to open it,
+    Then: It raises an extension error before querying or inserting database rows.
+    """
+    archive_path = tmp_path / "ticks.csv.gz"
+    archive_path.write_text(",".join(EVENT_TABLES["ticks"].columns), encoding="utf-8")
+    repository = MagicMock(spec=DatabaseRepository)
+
+    with pytest.raises(ValueError, match="Unsupported archive extension"):
+        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+
+    repository.get_existing_archive_keys.assert_not_called()
+    repository.bulk_insert_from_archive.assert_not_called()
+
+
+def test_restore_refuses_row_with_wrong_field_count(tmp_path: Path) -> None:
+    """Every data row must have exactly the validated header width.
+
+    Given: A tick archive with a complete header and a three-field data row,
+    When: Audit restore streams the first batch,
+    Then: It identifies line two and refuses the row before database access.
+    """
+    archive_path = tmp_path / "short-row.csv"
+    header = EVENT_TABLES["ticks"].columns
+    with archive_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerow(
+            (
+                "tick-1",
+                "2026-07-29T10:00:00+00:00",
+                "9999-12-31T23:59:59+00:00",
+            )
+        )
+    repository = MagicMock(spec=DatabaseRepository)
+    expected_message = f"CSV row 2 has 3 fields; expected {len(header)}"
+
+    with pytest.raises(ValueError, match=expected_message):
+        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+
+    repository.get_existing_archive_keys.assert_not_called()
+    repository.bulk_insert_from_archive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "empty_index",
+    [0, 1, 2],
+    ids=["public-id", "timestamp", "known-to"],
+)
+def test_restore_refuses_empty_temporal_identity(
+    tmp_path: Path,
+    empty_index: int,
+) -> None:
+    """Each field of the positional temporal identity is mandatory.
+
+    Given: A complete tick row with one empty temporal identity field,
+    When: Audit restore canonicalizes its deduplication key,
+    Then: It raises the identity error before consulting the repository.
+    """
+    archive_path = tmp_path / f"empty-identity-{empty_index}.csv"
+    row = [
+        "tick-1",
+        "2026-07-29T10:00:00+00:00",
+        "9999-12-31T23:59:59+00:00",
+        "session-1",
+        "1",
+        "instrument-1",
+        "100.0",
+        "101.0",
+        "100.5",
+        "1.0",
+    ]
+    row[empty_index] = ""
+    with archive_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(EVENT_TABLES["ticks"].columns)
+        writer.writerow(row)
+    repository = MagicMock(spec=DatabaseRepository)
+
+    with pytest.raises(ValueError, match="CSV temporal identity fields must be non-empty"):
+        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+
+    repository.get_existing_archive_keys.assert_not_called()
+    repository.bulk_insert_from_archive.assert_not_called()
+
+
+def test_existing_archive_key_lookup_short_circuits_empty_candidates() -> None:
+    """An empty restore batch never issues an unconstrained database query.
+
+    Given: No candidate temporal identities,
+    When: The repository checks for existing archive keys,
+    Then: It returns an empty set without opening a database session.
+    """
+    repository = MagicMock(spec=DatabaseRepository)
+
+    result = DatabaseRepository.get_existing_archive_keys(repository, Tick, [])
+
+    assert result == set()
+    repository.get_session.assert_not_called()
 
 
 def test_restore_compressed_trade_archive(tmp_path: Path) -> None:

@@ -259,7 +259,8 @@ class TestZMQBrokerAdditionalCoverage:
         Then: Broker continues running.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7822", xpub_endpoint="tcp://127.0.0.1:7823"
+            xsub_endpoint="tcp://127.0.0.1:0",
+            xpub_endpoint="tcp://127.0.0.1:0",
         )
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
