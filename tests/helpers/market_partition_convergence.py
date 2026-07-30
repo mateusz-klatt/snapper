@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 from argparse import Namespace
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -59,6 +60,7 @@ type SequenceRow = tuple[
     str | None,
     str | None,
     str | None,
+    str | None,
 ]
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +70,8 @@ _PG_ROLE = "snapper_partition_test"
 _PG_PORT = 65439
 _HOST_CORES = 4
 _MAX_LOAD_PER_CORE = 1.5
+_LOAD_WAIT_SECONDS = 45.0
+_LOAD_POLL_SECONDS = 1.0
 _ANCHOR_TEXT = "2026-07-30T00:00:00+00:00"
 _ANCHOR = datetime(2026, 7, 30, tzinfo=UTC)
 _ROOT_TABLES: Final[tuple[str, ...]] = ("ticks", "candles", "trades")
@@ -259,6 +263,7 @@ SELECT
     sequence_catalog.seqincrement,
     sequence_catalog.seqcycle,
     sequence_catalog.seqcache,
+    owned_namespace.nspname AS owned_schema,
     owned_table.relname AS owned_table,
     owned_column.attname AS owned_column,
     ownership.deptype::text AS dependency_type
@@ -273,13 +278,19 @@ LEFT JOIN pg_depend AS ownership
    AND ownership.refobjsubid > 0
    AND ownership.deptype IN ('a', 'i')
 LEFT JOIN pg_class AS owned_table ON owned_table.oid = ownership.refobjid
+LEFT JOIN pg_namespace AS owned_namespace
+    ON owned_namespace.oid = owned_table.relnamespace
 LEFT JOIN pg_attribute AS owned_column
     ON owned_column.attrelid = ownership.refobjid
    AND owned_column.attnum = ownership.refobjsubid
 WHERE namespace.nspname = 'public'
   AND sequence_relation.relname IN ('ticks_id_seq', 'candles_id_seq', 'trades_id_seq')
   AND sequence_relation.relkind = 'S'
-ORDER BY sequence_relation.relname, owned_table.relname, owned_column.attname
+ORDER BY
+    sequence_relation.relname,
+    owned_namespace.nspname,
+    owned_table.relname,
+    owned_column.attname
 """
 
 
@@ -324,9 +335,18 @@ class RefusalEvidence:
     populated_revision: str
     populated_root_kinds: tuple[tuple[str, str, bool], ...]
     populated_legacy_relations: tuple[str, ...]
+    runtime_constraint_error: str
+    runtime_constraint_name: str
+    runtime_constraint_restored: bool
+    runtime_sequence_error: str
+    runtime_sequence_cache: int
+    runtime_sequence_restored: bool
+    runtime_leaf_error: str
+    runtime_leaf_index_name: str
+    runtime_leaf_restored: bool
     unexpected_partition_revision: str
     unexpected_partition_error: str
-    unexpected_partition: tuple[str, str, bool, str, str]
+    unexpected_partition: tuple[str, str, str, bool, str, str, str]
     unexpected_partition_removed: bool
     storage_drift_revision: str
     storage_drift_error: str
@@ -531,6 +551,7 @@ def _sequences(connection: Connection) -> tuple[SequenceRow, ...]:
             _integer(row["seqincrement"]),
             _boolean(row["seqcycle"]),
             _integer(row["seqcache"]),
+            _optional_text(row["owned_schema"]),
             _optional_text(row["owned_table"]),
             _optional_text(row["owned_column"]),
             _optional_text(row["dependency_type"]),
@@ -645,6 +666,45 @@ def _require_safe_load(operation: str) -> None:
             f"refusing {operation}: one-minute load {load:.2f} exceeds "
             f"{_MAX_LOAD_PER_CORE:.1f} per CPU on {_HOST_CORES} cores"
         )
+
+
+def _await_safe_load(
+    operation: str,
+    *,
+    load_reader: Callable[[], float] = _load_average,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+    wait_seconds: float = _LOAD_WAIT_SECONDS,
+) -> None:
+    """Wait idly and boundedly for one already-admitted heavy phase.
+
+    Args:
+        operation: Human-readable phase about to begin.
+        load_reader: One-minute host load provider.
+        clock: Monotonic deadline clock.
+        sleeper: Idle wait function.
+        wait_seconds: Maximum total idle wait.
+
+    Raises:
+        UnsafeHostLoadError: If load remains unsafe through the deadline.
+        ValueError: If the wait bound is not positive.
+    """
+    if wait_seconds <= 0.0:
+        raise ValueError("load wait duration must be positive")
+    limit = _HOST_CORES * _MAX_LOAD_PER_CORE
+    load = load_reader()
+    if load <= limit:
+        return
+    deadline = clock() + wait_seconds
+    while load > limit:
+        remaining = deadline - clock()
+        if remaining <= 0.0:
+            raise UnsafeHostLoadError(
+                f"refusing {operation}: one-minute load {load:.2f} exceeds "
+                f"{_MAX_LOAD_PER_CORE:.1f} per CPU on {_HOST_CORES} cores"
+            )
+        sleeper(min(_LOAD_POLL_SECONDS, remaining, 1.0))
+        load = load_reader()
 
 
 def _postgres_tools() -> _PostgresTools:
@@ -819,7 +879,7 @@ def _upgrade(database: str, socket_directory: Path, revision: str) -> None:
         socket_directory: Private server socket directory.
         revision: Alembic target revision.
     """
-    _require_safe_load(f"Alembic upgrade of {database} to {revision}")
+    _await_safe_load(f"Alembic upgrade of {database} to {revision}")
     command.upgrade(_alembic_config(database, socket_directory), revision)
 
 
@@ -980,6 +1040,216 @@ def _prove_populated_refusal(
     return revision, root_kinds, legacy_relations
 
 
+def _expect_runtime_adoption_refusal(
+    engine: Engine,
+    table: str,
+    expected_text: str,
+) -> str:
+    """Require the public manual path to reject one ordinary catalog drift.
+
+    Args:
+        engine: Scratch manual-branch engine.
+        table: Allowlisted ordinary table under test.
+        expected_text: Required refusal diagnostic fragment.
+
+    Returns:
+        Exact runtime refusal message.
+
+    Raises:
+        AssertionError: If adoption succeeds or refuses for another reason.
+    """
+    with engine.connect() as connection:
+        try:
+            adopt(connection, table, _ANCHOR, dry_run=False)
+        except DailyPartitionError as exc:
+            refusal = str(exc)
+            if expected_text not in refusal:
+                raise AssertionError(
+                    f"runtime adoption refused {table} for the wrong reason: {exc}"
+                ) from exc
+            return refusal
+    raise AssertionError(f"runtime adoption unexpectedly accepted drifted {table}")
+
+
+def _not_null_constraint_name(
+    connection: Connection,
+    table: str,
+    column: str,
+) -> str:
+    """Return one PostgreSQL 18 NOT NULL constraint name.
+
+    Args:
+        connection: Scratch catalog connection.
+        table: Public table relation name.
+        column: Required column name.
+
+    Returns:
+        Exact catalog constraint name.
+    """
+    value = connection.execute(
+        sa.text("""
+            SELECT constraint_row.conname
+            FROM pg_constraint AS constraint_row
+            JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
+            JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_attribute AS attribute
+              ON attribute.attrelid = relation.oid
+             AND attribute.attnum = constraint_row.conkey[1]
+            WHERE namespace.nspname = 'public'
+              AND relation.relname = :table
+              AND attribute.attname = :column
+              AND constraint_row.contype = 'n'
+            """),
+        {"table": table, "column": column},
+    ).scalar_one()
+    return _required_text(value)
+
+
+def _sequence_cache(connection: Connection, sequence: str) -> int:
+    """Return one sequence cache parameter from the scratch catalog.
+
+    Args:
+        connection: Scratch catalog connection.
+        sequence: Public sequence relation name.
+
+    Returns:
+        Exact positive cache value.
+
+    Raises:
+        TypeError: If the driver returns a noninteger catalog value.
+    """
+    value = connection.execute(
+        sa.text("""
+            SELECT sequence_parameters.seqcache
+            FROM pg_sequence AS sequence_parameters
+            JOIN pg_class AS relation
+              ON relation.oid = sequence_parameters.seqrelid
+            JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND relation.relname = :sequence
+            """),
+        {"sequence": sequence},
+    ).scalar_one()
+    if not isinstance(value, int):
+        raise TypeError(f"expected integer sequence cache, observed {value!r}")
+    return value
+
+
+def _prove_runtime_constraint_refusal(
+    engine: Engine,
+) -> tuple[str, str, bool]:
+    """Prove adoption rejects and preserves a renamed NOT NULL constraint.
+
+    Args:
+        engine: Scratch manual-branch engine at revision 0042.
+
+    Returns:
+        Refusal text, preserved drift name, and restoration result.
+    """
+    table = "ticks"
+    original = "ticks_timestamp_not_null"
+    drifted = "ticks_timestamp_not_null_drifted"
+    with engine.connect() as connection:
+        baseline = catalog_fingerprint(connection)
+        if _not_null_constraint_name(connection, table, "timestamp") != original:
+            raise AssertionError(f"{original} is absent before the refusal probe")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"ALTER TABLE public.{table} RENAME CONSTRAINT {original} TO {drifted}"
+        )
+    error = _expect_runtime_adoption_refusal(
+        engine,
+        table,
+        "ticks relation constraint manifest drifted",
+    )
+    with engine.connect() as connection:
+        observed = _not_null_constraint_name(connection, table, "timestamp")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"ALTER TABLE public.{table} RENAME CONSTRAINT {drifted} TO {original}"
+        )
+    with engine.connect() as connection:
+        restored_name = _not_null_constraint_name(connection, table, "timestamp")
+        restored = catalog_fingerprint(connection)
+    assert_catalogs_identical(baseline, restored)
+    return error, observed, restored_name == original
+
+
+def _prove_runtime_sequence_refusal(
+    engine: Engine,
+) -> tuple[str, int, bool]:
+    """Prove adoption rejects and preserves sequence-parameter drift.
+
+    Args:
+        engine: Scratch manual-branch engine at revision 0042.
+
+    Returns:
+        Refusal text, preserved cache value, and restoration result.
+    """
+    sequence = "ticks_id_seq"
+    with engine.connect() as connection:
+        baseline = catalog_fingerprint(connection)
+        if _sequence_cache(connection, sequence) != 1:
+            raise AssertionError(f"{sequence} has a nondefault cache before the refusal probe")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER SEQUENCE public.{sequence} CACHE 100")
+    error = _expect_runtime_adoption_refusal(
+        engine,
+        "ticks",
+        "ticks_id_seq parameters or ownership are not exact",
+    )
+    with engine.connect() as connection:
+        observed = _sequence_cache(connection, sequence)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER SEQUENCE public.{sequence} CACHE 1")
+    with engine.connect() as connection:
+        restored_cache = _sequence_cache(connection, sequence)
+        restored = catalog_fingerprint(connection)
+    assert_catalogs_identical(baseline, restored)
+    return error, observed, restored_cache == 1
+
+
+def _prove_runtime_leaf_index_refusal(
+    engine: Engine,
+) -> tuple[str, str, bool]:
+    """Prove adopted no-op rejects and preserves one renamed leaf index.
+
+    Args:
+        engine: Scratch manual-branch engine after public adoption.
+
+    Returns:
+        Refusal text, preserved drift name, and restoration result.
+    """
+    original = "ticks_d20260730_instrument_public_id_timestamp_idx"
+    drifted = "ticks_d20260730_instrument_public_id_timestamp_drifted"
+    with engine.connect() as connection:
+        baseline = catalog_fingerprint(connection)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER INDEX public.{original} RENAME TO {drifted}")
+    error = _expect_runtime_adoption_refusal(
+        engine,
+        "ticks",
+        "ticks_d20260730 index manifest",
+    )
+    with engine.connect() as connection:
+        observed = _required_text(
+            connection.exec_driver_sql(
+                f"SELECT relname FROM pg_class WHERE oid = 'public.{drifted}'::regclass"
+            ).scalar_one()
+        )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER INDEX public.{drifted} RENAME TO {original}")
+    with engine.connect() as connection:
+        restored_name = _required_text(
+            connection.exec_driver_sql(
+                f"SELECT relname FROM pg_class WHERE oid = 'public.{original}'::regclass"
+            ).scalar_one()
+        )
+        restored = catalog_fingerprint(connection)
+    assert_catalogs_identical(baseline, restored)
+    return error, observed, restored_name == original
+
+
 def _ordinary_index_evidence(
     connection: Connection,
     table: str,
@@ -1017,7 +1287,7 @@ def _ordinary_index_evidence(
 def _manual_adoption(engine: Engine) -> None:
     """Invoke the public runtime adoption path independently for all roots."""
     for table in _ROOT_TABLES:
-        _require_safe_load(f"runtime adoption of {table}")
+        _await_safe_load(f"runtime adoption of {table}")
         with engine.connect() as connection:
             try:
                 adopt(connection, table, _ANCHOR, dry_run=False)
@@ -1030,16 +1300,18 @@ def _manual_adoption(engine: Engine) -> None:
 
 def _unexpected_partition_evidence(
     connection: Connection,
-) -> tuple[str, str, bool, str, str]:
+) -> tuple[str, str, str, bool, str, str, str]:
     """Read the exact nested direct-child state used by the refusal probe."""
     connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
     row = connection.exec_driver_sql("""
         SELECT
+            child_namespace.nspname,
             child.relname,
             child.relkind::text,
             child.relispartition,
             parent.relname,
-            pg_get_expr(child.relpartbound, child.oid, true)
+            pg_get_expr(child.relpartbound, child.oid, true),
+            pg_get_partkeydef(child.oid)
         FROM pg_inherits AS inheritance
         JOIN pg_class AS parent ON parent.oid = inheritance.inhparent
         JOIN pg_namespace AS parent_namespace
@@ -1049,28 +1321,31 @@ def _unexpected_partition_evidence(
           ON child_namespace.oid = child.relnamespace
         WHERE parent_namespace.nspname = 'public'
           AND parent.relname = 'trades'
-          AND child_namespace.nspname = 'public'
+          AND child_namespace.nspname = 'partition_probe'
           AND child.relname = 'trades_unexpected_partitioned'
         """).one()
     return (
         _required_text(row[0]),
         _required_text(row[1]),
-        _boolean(row[2]),
-        _required_text(row[3]),
+        _required_text(row[2]),
+        _boolean(row[3]),
         _required_text(row[4]),
+        _required_text(row[5]),
+        _required_text(row[6]),
     )
 
 
 def _prove_unexpected_partitioned_child_refusal(
     engine: Engine,
     socket_directory: Path,
-) -> tuple[str, str, tuple[str, str, bool, str, str], bool]:
-    """Prove 0043 rejects and preserves one unexpected nested direct child."""
+) -> tuple[str, str, tuple[str, str, str, bool, str, str, str], bool]:
+    """Prove 0043 rejects and preserves a foreign-schema partitioned child."""
     with engine.connect() as connection:
         baseline = catalog_fingerprint(connection)
     with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE SCHEMA partition_probe")
         connection.exec_driver_sql("""
-            CREATE TABLE public.trades_unexpected_partitioned
+            CREATE TABLE partition_probe.trades_unexpected_partitioned
             PARTITION OF public.trades
             FOR VALUES FROM (TIMESTAMPTZ '2026-09-01 00:00:00+00')
             TO (TIMESTAMPTZ '2026-09-02 00:00:00+00')
@@ -1093,11 +1368,12 @@ def _prove_unexpected_partitioned_child_refusal(
             f"before={observed!r}, after={preserved!r}"
         )
     with engine.begin() as connection:
-        connection.exec_driver_sql("DROP TABLE public.trades_unexpected_partitioned")
+        connection.exec_driver_sql("DROP TABLE partition_probe.trades_unexpected_partitioned")
+        connection.exec_driver_sql("DROP SCHEMA partition_probe")
     with engine.connect() as connection:
         removed = _boolean(
             connection.exec_driver_sql(
-                "SELECT to_regclass('public.trades_unexpected_partitioned') IS NULL"
+                "SELECT to_regclass('partition_probe.trades_unexpected_partitioned') IS NULL"
             ).scalar_one()
         )
         restored = catalog_fingerprint(connection)
@@ -1194,7 +1470,22 @@ def _build_manual_branch(engine: Engine, socket_directory: Path) -> RefusalEvide
         engine,
         socket_directory,
     )
+    (
+        runtime_constraint_error,
+        runtime_constraint_name,
+        runtime_constraint_restored,
+    ) = _prove_runtime_constraint_refusal(engine)
+    (
+        runtime_sequence_error,
+        runtime_sequence_cache,
+        runtime_sequence_restored,
+    ) = _prove_runtime_sequence_refusal(engine)
     _manual_adoption(engine)
+    (
+        runtime_leaf_error,
+        runtime_leaf_index_name,
+        runtime_leaf_restored,
+    ) = _prove_runtime_leaf_index_refusal(engine)
     (
         unexpected_partition_revision,
         unexpected_partition_error,
@@ -1221,6 +1512,15 @@ def _build_manual_branch(engine: Engine, socket_directory: Path) -> RefusalEvide
         populated_revision=populated_revision,
         populated_root_kinds=root_kinds,
         populated_legacy_relations=legacy_relations,
+        runtime_constraint_error=runtime_constraint_error,
+        runtime_constraint_name=runtime_constraint_name,
+        runtime_constraint_restored=runtime_constraint_restored,
+        runtime_sequence_error=runtime_sequence_error,
+        runtime_sequence_cache=runtime_sequence_cache,
+        runtime_sequence_restored=runtime_sequence_restored,
+        runtime_leaf_error=runtime_leaf_error,
+        runtime_leaf_index_name=runtime_leaf_index_name,
+        runtime_leaf_restored=runtime_leaf_restored,
         unexpected_partition_revision=unexpected_partition_revision,
         unexpected_partition_error=unexpected_partition_error,
         unexpected_partition=unexpected_partition,
@@ -1254,7 +1554,7 @@ def _create_database(
         database: Database to create.
         environment: Sanitized process environment.
     """
-    _require_safe_load(f"creation of {database}")
+    _await_safe_load(f"creation of {database}")
     _run_process(
         [
             str(tools.createdb),
@@ -1296,7 +1596,7 @@ def _start_cluster(
     environment: dict[str, str],
 ) -> subprocess.Popen[bytes]:
     """Initialize and start a parent-bound private PostgreSQL postmaster."""
-    _require_safe_load("PostgreSQL 18.4 initdb")
+    _await_safe_load("PostgreSQL 18.4 initdb")
     _run_process(
         [
             str(tools.initdb),
@@ -1312,7 +1612,7 @@ def _start_cluster(
     )
     socket_directory.mkdir(mode=0o700)
     _append_server_configuration(data_directory, socket_directory)
-    _require_safe_load("PostgreSQL 18.4 server startup")
+    _await_safe_load("PostgreSQL 18.4 server startup")
     with log_path.open("ab") as log_stream:
         postmaster = subprocess.Popen(
             [
@@ -1527,8 +1827,8 @@ def _mutate_trade_u3(connection: Connection) -> None:
     """Reorder the parent U3 key inside the throwaway system catalog."""
     result = connection.exec_driver_sql("""
         UPDATE pg_index
-        SET indkey = format(
-            '%s %s %s',
+        SET indkey = concat_ws(
+            ' ',
             (string_to_array(indkey::text, ' '))[1],
             (string_to_array(indkey::text, ' '))[3],
             (string_to_array(indkey::text, ' '))[2]

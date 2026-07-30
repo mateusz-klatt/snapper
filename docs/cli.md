@@ -350,6 +350,29 @@ snapper db-downgrade
 snapper db-downgrade --revision base
 ```
 
+### `daily-partitions`
+
+Inspects and operates PostgreSQL daily partitions for the static `ticks`,
+`candles`, and `trades` allowlist. Mutating subcommands are dry-run by
+default and require `--apply`. This lifecycle is separate from
+`RETENTION_POLICIES`; it never materializes rows for deletion.
+
+```bash
+snapper daily-partitions inspect trades
+snapper daily-partitions adopt trades --anchor 2026-07-30T00:00:00+00:00
+snapper daily-partitions ensure trades
+snapper daily-partitions detach trades --day 2026-06-01
+```
+
+`adopt` is the explicit manual path for populated tables. It requires a
+UTC-midnight anchor and refuses an unsupported or drifted catalog,
+target-name collisions, or a host load above 1.5 per CPU. Add `--apply` only
+after reviewing its printed DDL plan. `ensure` maintains fourteen future
+leaves and refuses while the retained DEFAULT anomaly partition contains
+rows. `detach` enforces the seven-day ticks or thirty-day candles/trades
+horizon, uses plain bounded-lock `DETACH`, and leaves the detached table
+intact; dropping or archiving it is a separate operator action.
+
 ### `db-seed`
 
 Seeds the database with environment-specific data from TOML profiles.

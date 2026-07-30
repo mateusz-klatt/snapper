@@ -183,6 +183,28 @@ def test_public_operations_refuse_a_nonpublic_current_schema() -> None:
         lifecycle.inspect(connection, "ticks", _ANCHOR)
 
 
+def test_inspect_classifies_a_nested_root_as_unsupported() -> None:
+    """A same-named relation cannot masquerade as an independent root.
+
+    Given: PostgreSQL reports the allowlisted root as a partition of another
+        relation even though its relkind is partitioned-table.
+    When: Read-only lifecycle inspection classifies that root.
+    Then: It returns the closed OTHER state so adoption refuses before any
+        preparation or DDL can begin.
+    """
+    connection = _connection_double()
+    timezone_result = MagicMock()
+    relation_result = MagicMock()
+    relation_result.one_or_none.return_value = ("p", True)
+    connection.execute.side_effect = (timezone_result, relation_result)
+
+    report = lifecycle.inspect(connection, "trades", _ANCHOR)
+
+    assert report.state is lifecycle.RelationState.OTHER
+    assert report.partitions == ()
+    assert connection.execute.call_count == 2
+
+
 @pytest.mark.parametrize("table", ["ticks", "candles", "trades"])
 def test_manual_cutover_plan_preserves_legacy_and_builds_fourteen_days(
     table: lifecycle.MarketDataTable,
@@ -259,6 +281,125 @@ def test_parent_unique_indexes_are_standalone_and_keep_the_exact_keys() -> None:
     )
     assert "ADD CONSTRAINT" not in candle_sql
     assert "ADD CONSTRAINT" not in trade_sql
+
+
+def test_relation_constraint_manifest_tracks_postgresql_18_not_null_names() -> None:
+    """Constraint roles must distinguish ordinary, prepared, and leaf shapes.
+
+    Given: Trades has a nullable 0042 partition key that preparation hardens.
+    When: Runtime builds exact non-CHECK manifests for each relation role.
+    Then: Prepared and leaf manifests add canonical NOT NULL names, while a
+        daily leaf has its own PK name and never inherits legacy U2.
+    """
+    spec = lifecycle._spec("trades")
+
+    ordinary = lifecycle._expected_noncheck_constraints(
+        spec,
+        "trades",
+        lifecycle.ConstraintRole.ORDINARY,
+    )
+    prepared = lifecycle._expected_noncheck_constraints(
+        spec,
+        "trades",
+        lifecycle.ConstraintRole.PREPARED,
+    )
+    leaf = lifecycle._expected_noncheck_constraints(
+        spec,
+        "trades_d20260801",
+        lifecycle.ConstraintRole.LEAF,
+    )
+    ordinary_names = {item[0] for item in ordinary}
+    prepared_names = {item[0] for item in prepared}
+    leaf_names = {item[0] for item in leaf}
+
+    assert "trades_executed_at_not_null" not in ordinary_names
+    assert "trades_executed_at_not_null" in prepared_names
+    assert "trades_executed_at_not_null" in leaf_names
+    assert "trades_d20260801_pkey" in leaf_names
+    assert "uq_trade_instrument_trade_id" not in leaf_names
+
+
+def test_sequence_preflight_refuses_parameter_drift() -> None:
+    """Sequence ownership alone cannot hide nondefault sequence parameters.
+
+    Given: The exact sequence catalog query reports a mismatch.
+    When: Runtime verifies the ordinary ticks id sequence before adoption.
+    Then: It refuses with the parameter-or-ownership contract instead of
+        accepting a name-only ownership match.
+    """
+    connection = _connection_double()
+    connection.scalar.return_value = False
+
+    with pytest.raises(
+        lifecycle.DailyPartitionError,
+        match="ticks_id_seq parameters or ownership are not exact",
+    ):
+        lifecycle._verify_sequence_owner(connection, lifecycle._spec("ticks"))
+
+    statement = str(connection.scalar.call_args.args[0])
+    assert "sequence_parameters.seqcache = 1" in statement
+    assert "dependency.deptype = 'a'" in statement
+
+
+def test_adoption_refuses_target_name_collisions_before_preparation() -> None:
+    """Cutover names must be free before a populated-index build can start.
+
+    Given: A public relation already occupies the planned ticks legacy name.
+    When: Runtime evaluates adoption target names at the ordinary preflight.
+    Then: It refuses immediately and reports the exact colliding relation.
+    """
+    connection = _connection_double()
+    connection.execute.return_value.scalars.return_value = iter(("ticks_legacy",))
+
+    with pytest.raises(
+        lifecycle.DailyPartitionError,
+        match="target partition relation names already exist.*ticks_legacy",
+    ):
+        lifecycle._verify_adoption_names_available(
+            connection,
+            lifecycle._spec("ticks"),
+            _ANCHOR,
+        )
+
+    parameters = connection.execute.call_args.args[1]
+    assert "ticks_legacy" in parameters["names"]
+    assert "ticks_d20260801" in parameters["names"]
+    assert "ticks_d20260814_instrument_public_id_timestamp_idx" in parameters["names"]
+
+
+def test_generated_leaf_does_not_hide_a_reserved_legacy_range_check() -> None:
+    """The legacy range name is special only on source and legacy relations.
+
+    Given: A generated ticks leaf carries an extra validated CHECK using the
+        reserved legacy-range constraint name.
+    When: CHECK collection runs for source mode and exact leaf mode.
+    Then: Source mode suppresses the preparation artifact, while leaf mode
+        returns it so the exact manifest verifier refuses the extra CHECK.
+    """
+    connection = _connection_double()
+    definition = (
+        "CHECK (timestamp IS NOT NULL AND "
+        "timestamp < '2026-08-01 00:00:00+00'::timestamp with time zone)"
+    )
+    connection.execute.return_value = [
+        ("ck_ticks_legacy_range", definition, True),
+    ]
+    spec = lifecycle._spec("ticks")
+
+    source_checks = lifecycle._ordinary_check_constraints(
+        connection,
+        spec,
+        "ticks",
+    )
+    leaf_checks = lifecycle._ordinary_check_constraints(
+        connection,
+        spec,
+        "ticks_d20260801",
+        exclude_legacy_range=False,
+    )
+
+    assert source_checks == ()
+    assert leaf_checks == (("ck_ticks_legacy_range", definition),)
 
 
 def test_trade_u3_preflight_refuses_an_index_that_is_not_ready() -> None:
@@ -447,6 +588,30 @@ def test_partitioned_noop_refuses_a_malformed_legacy_primary_key() -> None:
             lifecycle._spec("ticks"),
             "ticks_legacy",
         )
+
+
+def test_partitioned_noop_refuses_a_nested_or_foreign_direct_child() -> None:
+    """Every direct child must remain a public ordinary partition leaf.
+
+    Given: An otherwise partitioned ticks report containing a foreign-schema
+        child that is itself partitioned.
+    When: Runtime validates direct-child relation shapes.
+    Then: It refuses before names and bounds can disguise the nested topology.
+    """
+    nested = lifecycle.PartitionRef(
+        name="ticks_d20260801",
+        bound="FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-08-02 00:00:00+00')",
+        schema="partition_probe",
+        relation_kind="p",
+        has_partition_key=True,
+    )
+    report = _partitioned_report("ticks", (nested,))
+
+    with pytest.raises(
+        lifecycle.DailyPartitionError,
+        match="unexpected relation shape",
+    ):
+        lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
 
 
 def test_partitioned_noop_refuses_a_malformed_legacy_active_partial() -> None:
@@ -712,20 +877,54 @@ def test_detach_retries_a_psycopg2_pgcode_lock_timeout() -> None:
         original,
         False,
     )
-    statement = "ALTER TABLE trades DETACH PARTITION trades_d20260601"
+    lower = datetime(2026, 6, 1, tzinfo=UTC)
+    spec = lifecycle._spec("trades")
+    leaf = "trades_d20260601"
 
     with (
         patch.object(
             lifecycle,
-            "_execute_transaction",
+            "_execute_detach_attempt",
             side_effect=(failure, None),
         ) as execute,
         patch.object(lifecycle.time, "sleep") as sleep,
     ):
-        lifecycle._detach_with_retries(connection, statement)
+        lifecycle._detach_with_retries(connection, spec, leaf, lower)
 
     assert execute.call_count == 2
+    execute.assert_called_with(connection, spec, leaf, lower)
     sleep.assert_called_once_with(0.25)
+
+
+def test_detach_revalidates_the_exact_bound_under_the_parent_lock() -> None:
+    """A replaced leaf name cannot redirect a previously approved DETACH.
+
+    Given: The parent lock reveals the selected daily name now carries another
+        range after the public preflight completed.
+    When: One bounded DETACH attempt rechecks its target under that lock.
+    Then: It refuses before emitting DETACH against the replacement relation.
+    """
+    connection = _connection_double()
+    spec = lifecycle._spec("trades")
+    leaf = "trades_d20260601"
+    lower = datetime(2026, 6, 1, tzinfo=UTC)
+    replacement = lifecycle.PartitionRef(
+        name=leaf,
+        bound="FOR VALUES FROM ('2026-05-31 00:00:00+00') TO ('2026-06-01 00:00:00+00')",
+    )
+
+    with (
+        patch.object(lifecycle, "_direct_partitions", return_value=(replacement,)),
+        pytest.raises(
+            lifecycle.DailyPartitionError,
+            match="no longer has its exact daily bound",
+        ),
+    ):
+        lifecycle._execute_detach_attempt(connection, spec, leaf, lower)
+
+    executed = [str(call.args[0]) for call in connection.execute.call_args_list]
+    assert "LOCK TABLE trades IN ACCESS EXCLUSIVE MODE" in executed
+    assert f"ALTER TABLE trades DETACH PARTITION {leaf}" not in executed
 
 
 def test_detach_refuses_when_the_settled_default_partition_is_missing() -> None:

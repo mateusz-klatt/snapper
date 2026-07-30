@@ -1177,25 +1177,45 @@ def _verify_partition_tree(
             f"TO ('{upper.strftime('%Y-%m-%d %H:%M:%S+00')}')"
         )
     expected_rows = ", ".join(
-        "('" + child + "', '" + expected_bounds[child].replace("'", "''") + "')"
+        "('"
+        + _SCHEMA
+        + "', '"
+        + child
+        + "', '"
+        + expected_bounds[child].replace("'", "''")
+        + "', 'r', true, false, 1)"
         for child in children
     )
     statement = sa.text(f"""
-        WITH expected(child_name, bound) AS (
+        WITH expected(
+            child_schema,
+            child_name,
+            bound,
+            relation_kind,
+            is_partition,
+            has_partition_key,
+            inheritance_sequence
+        ) AS (
             VALUES {expected_rows}
         ),
         actual AS (
             SELECT
+                cn.nspname::text,
                 child.relname::text,
-                pg_get_expr(child.relpartbound, child.oid, true)
+                pg_get_expr(child.relpartbound, child.oid, true),
+                child.relkind::text,
+                child.relispartition,
+                child_partitioning.partrelid IS NOT NULL,
+                inh.inhseqno::integer
             FROM pg_inherits AS inh
             JOIN pg_class AS parent ON parent.oid = inh.inhparent
             JOIN pg_namespace AS pn ON pn.oid = parent.relnamespace
             JOIN pg_class AS child ON child.oid = inh.inhrelid
             JOIN pg_namespace AS cn ON cn.oid = child.relnamespace
+            LEFT JOIN pg_partitioned_table AS child_partitioning
+              ON child_partitioning.partrelid = child.oid
             WHERE pn.nspname = :schema
               AND parent.relname = :parent
-              AND cn.nspname = :schema
         )
         SELECT NOT EXISTS (
             (SELECT * FROM actual EXCEPT SELECT * FROM expected)
@@ -1473,7 +1493,7 @@ def _create_parent_indexes(spec: TableSpec) -> None:
         predicate = f" WHERE {_ACTIVE_PREDICATE}" if index.partial else ""
         columns = ", ".join(_identifier(column) for column in index.columns)
         op.execute(
-            f"CREATE {unique}INDEX {_qualified(index.parent_name)} "
+            f"CREATE {unique}INDEX {_identifier(index.parent_name)} "
             f"ON {_qualified(spec.name)} ({columns}){predicate}"
         )
 
@@ -1486,7 +1506,7 @@ def _create_local_leaf_objects(spec: TableSpec, relation: str) -> None:
     )
     if spec.active_public_id:
         op.execute(
-            f"CREATE UNIQUE INDEX {_qualified(f'{relation}_public_id')} "
+            f"CREATE UNIQUE INDEX {_identifier(f'{relation}_public_id')} "
             f"ON {_qualified(relation)} (public_id) WHERE {_ACTIVE_PREDICATE}"
         )
 
@@ -1516,7 +1536,7 @@ def _prepare_legacy(spec: TableSpec, anchor: datetime) -> None:
         op.execute(f"ALTER TABLE {_qualified(spec.name)} ALTER COLUMN {key} SET NOT NULL")
         if _relation_kind(op.get_bind(), "uq_trade_instr_tid_exec") is None:
             op.execute(
-                "CREATE UNIQUE INDEX public.uq_trade_instr_tid_exec "
+                "CREATE UNIQUE INDEX uq_trade_instr_tid_exec "
                 "ON public.trades "
                 "(instrument_public_id, trade_id, executed_at)"
             )

@@ -30,7 +30,12 @@ from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 
 
 def test_trade_upsert_row_requires_non_nullable_executed_at() -> None:
-    """Declare executed_at as a required, non-nullable trade upsert field."""
+    """Require event time at every typed trade-upsert boundary.
+
+    Given: The repository's typed trade row contract.
+    When: Its required keys and resolved annotations are inspected.
+    Then: ``executed_at`` is mandatory and resolves to nonoptional datetime.
+    """
     assert TradeUpsertRow.__required_keys__ == frozenset({"executed_at"})
     assert get_type_hints(TradeUpsertRow)["executed_at"] is datetime
 

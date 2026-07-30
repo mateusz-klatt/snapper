@@ -31,6 +31,7 @@ from tests.helpers.market_partition_convergence import CatalogMutation
 from tests.helpers.market_partition_convergence import PostgresBranches
 from tests.helpers.market_partition_convergence import ScratchClusterUnavailableError
 from tests.helpers.market_partition_convergence import UnsafeHostLoadError
+from tests.helpers.market_partition_convergence import _await_safe_load
 from tests.helpers.market_partition_convergence import alembic_revision
 from tests.helpers.market_partition_convergence import apply_catalog_mutation
 from tests.helpers.market_partition_convergence import assert_catalogs_identical
@@ -120,6 +121,7 @@ _REFERENCE = CatalogFingerprint(
             1,
             False,
             1,
+            "public",
             "trades",
             "id",
             "a",
@@ -225,9 +227,9 @@ _SYNTHETIC_MUTATIONS: Final[tuple[tuple[CatalogFingerprint, str, str], ...]] = (
             _REFERENCE,
             sequences=(
                 (
-                    *_REFERENCE.sequences[0][0:8],
+                    *_REFERENCE.sequences[0][0:9],
                     "trades_legacy",
-                    *_REFERENCE.sequences[0][9:],
+                    *_REFERENCE.sequences[0][10:],
                 ),
             ),
         ),
@@ -255,7 +257,8 @@ _PARENT_INDEXES: Final[set[str]] = {
     "trades_p_ix_ts",
     "trades_p_ix_exec",
 }
-_ACTIVE_PREDICATE = "(known_to = '9999-12-31 23:59:59+00'::timestamp with time zone)"
+_ACTIVE_PREDICATE = "known_to = '9999-12-31 23:59:59+00'::timestamp with time zone"
+_INDEX_ACTIVE_PREDICATE = f"({_ACTIVE_PREDICATE})"
 _UNEXPECTED_PARTITION_BOUND = (
     "FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-09-02 00:00:00+00')"
 )
@@ -277,7 +280,7 @@ _TRADES_U3_DEFINITION = (
 _CANDLE_UNIQUE_DEFINITION = (
     "CREATE UNIQUE INDEX candles_p_uq_itf_open ON ONLY public.candles "
     "USING btree (instrument_public_id, timeframe, open_at) "
-    f"WHERE {_ACTIVE_PREDICATE}"
+    f"WHERE {_INDEX_ACTIVE_PREDICATE}"
 )
 _EXPECTED_PARENT_INDEX_ROWS: Final[
     dict[tuple[str, str], tuple[str, bool, bool, bool, str | None]]
@@ -434,6 +437,113 @@ def test_catalog_sql_walks_complete_table_and_index_inheritance_components() -> 
     assert "_RELATIONS_SQL = _INDEX_GRAPH_CTE" in source
     assert "_INDEXES_SQL = _INDEX_GRAPH_CTE" in source
     assert "_INDEX_INHERITANCE_SQL = _INDEX_GRAPH_CTE" in source
+
+
+def test_migration_create_index_names_remain_unqualified() -> None:
+    """Pin PostgreSQL's CREATE INDEX naming grammar on the fresh branch.
+
+    Given: The independent migration SQL renderers for parent, local partial,
+        and introduced legacy indexes.
+    When: Their source is checked before a scratch cluster is needed.
+    Then: No CREATE INDEX name is schema-qualified, while each target table
+        continues to use the explicit public schema.
+    """
+    source = _MIGRATION_PATH.read_text(encoding="utf-8")
+
+    assert "INDEX {_qualified(" not in source
+    assert source.count("ON {_qualified(") >= 2
+    assert '"ON public.trades "' in source
+
+
+def test_migration_partition_tree_compares_schema_and_relation_kind() -> None:
+    """Pin the exact direct-child catalog fields in migration verification.
+
+    Given: The independent migration verifier for an already partitioned root.
+    When: Its direct-child query and expected manifest are inspected.
+    Then: Child schema, relation kind, partition status, and absence of a nested
+        partition key participate in comparison without a child-schema filter.
+    """
+    source = _MIGRATION_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_verify_partition_tree"
+    )
+    assert function.end_lineno is not None
+    function_source = "\n".join(source.splitlines()[function.lineno - 1 : function.end_lineno])
+
+    assert "cn.nspname::text" in function_source
+    assert "child.relkind::text" in function_source
+    assert "child.relispartition" in function_source
+    assert "child_partitioning.partrelid IS NOT NULL" in function_source
+    assert "inh.inhseqno::integer" in function_source
+    assert "AND cn.nspname = :schema" not in function_source
+
+
+def test_bounded_load_cooldown_waits_idly_until_a_safe_poll() -> None:
+    """Admit a subsequent heavy phase only after an idle safe-load poll.
+
+    Given: Two unsafe load samples followed by one sample at the safe ceiling.
+    When: The bounded post-admission cooldown evaluates the phase.
+    Then: It performs only one-second idle polls and returns after the first
+        safe sample without exhausting the deadline.
+    """
+    loads = iter((6.25, 6.10, 6.00))
+    sleeps: list[float] = []
+
+    def load_reader() -> float:
+        return next(loads)
+
+    def clock() -> float:
+        return 10.0
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    _await_safe_load(
+        "test phase",
+        load_reader=load_reader,
+        clock=clock,
+        sleeper=sleeper,
+    )
+
+    assert sleeps == [1.0, 1.0]
+
+
+def test_bounded_load_cooldown_refuses_after_its_exact_deadline() -> None:
+    """Retain the fail-closed error after a bounded idle cooldown expires.
+
+    Given: A load that remains unsafe and a deterministic two-second deadline.
+    When: The post-admission cooldown reaches that deadline.
+    Then: No sleep exceeds one second and the original exact threshold refusal
+        is raised rather than proceeding with heavy work.
+    """
+    times = iter((10.0, 10.0, 11.0, 12.0))
+    sleeps: list[float] = []
+
+    def load_reader() -> float:
+        return 6.25
+
+    def clock() -> float:
+        return next(times)
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    with pytest.raises(
+        UnsafeHostLoadError,
+        match="refusing test phase: one-minute load 6.25 exceeds 1.5 per CPU on 4 cores",
+    ):
+        _await_safe_load(
+            "test phase",
+            load_reader=load_reader,
+            clock=clock,
+            sleeper=sleeper,
+            wait_seconds=2.0,
+        )
+
+    assert sleeps == [1.0, 1.0]
 
 
 @pytest.mark.parametrize(
@@ -594,7 +704,7 @@ def _assert_leaf_local_contract(fingerprint: CatalogFingerprint) -> None:
             partial = indexes[(child, partial_name)]
             partial_definition = (
                 f"CREATE UNIQUE INDEX {partial_name} ON public.{child} USING btree "
-                f"(public_id) WHERE {_ACTIVE_PREDICATE}"
+                f"(public_id) WHERE {_INDEX_ACTIVE_PREDICATE}"
             )
             assert partial == (
                 partial_definition,
@@ -637,6 +747,7 @@ def _assert_expected_topology(fingerprint: CatalogFingerprint) -> None:
             1,
             False,
             1,
+            "public",
             table,
             "id",
             "a",
@@ -650,18 +761,18 @@ def _assert_expected_topology(fingerprint: CatalogFingerprint) -> None:
 def test_0043_refuses_populated_and_malformed_manual_states(
     converged_postgresql_branches: PostgresBranches,
 ) -> None:
-    """Prove four fail-closed paths leave revision 0042 and preserve topology.
+    """Prove four migration fail-closed paths preserve revision and topology.
 
     Args:
         converged_postgresql_branches: Independent scratch branch fixture.
 
     Given: The manual database first has a populated ordinary ``ticks`` table,
-        then an adopted topology with an unexpected nested direct child, and
-        finally adopted topologies with legacy-index storage drift and one
+        then an adopted topology with a foreign-schema nested direct child,
+        and finally adopted topologies with legacy-index storage drift and one
         required parent index renamed.
     When: Migration 0043 is attempted against each invalid state.
     Then: All four attempts refuse at revision 0042; ordinary roots remain
-        untouched, the nested child is preserved through refusal and removed
+        untouched, the foreign child is preserved through refusal and removed
         explicitly, and both index drifts remain until explicitly restored.
     """
     evidence = converged_postgresql_branches.refusals
@@ -675,11 +786,13 @@ def test_0043_refuses_populated_and_malformed_manual_states(
     assert evidence.unexpected_partition_revision == "0042"
     assert evidence.unexpected_partition_error == "trades partition bounds or table edges differ"
     assert evidence.unexpected_partition == (
+        "partition_probe",
         "trades_unexpected_partitioned",
         "p",
         True,
         "trades",
         _UNEXPECTED_PARTITION_BOUND,
+        "RANGE (executed_at)",
     )
     assert evidence.unexpected_partition_removed
     assert evidence.storage_drift_revision == "0042"
@@ -688,6 +801,39 @@ def test_0043_refuses_populated_and_malformed_manual_states(
     assert evidence.storage_drift_restored
     assert evidence.malformed_revision == "0042"
     assert evidence.malformed_index_name == "trades_p_ix_ts_malformed"
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(300)
+def test_manual_adoption_refuses_constraint_sequence_and_leaf_drift(
+    converged_postgresql_branches: PostgresBranches,
+) -> None:
+    """Prove runtime preflight rejects catalog drift migration would reject.
+
+    Args:
+        converged_postgresql_branches: Independent scratch branch fixture.
+
+    Given: An ordinary 0042 ticks table with, in turn, one renamed PostgreSQL
+        18 NOT NULL constraint and a nondefault sequence cache, followed by an
+        adopted ticks topology with one inherited leaf index renamed.
+    When: Public manual adoption or its partitioned no-op path is invoked
+        before each drift is explicitly restored.
+    Then: All attempts refuse without changing the drift, and explicit repair
+        restores each exact baseline.
+    """
+    evidence = converged_postgresql_branches.refusals
+
+    assert "ticks relation constraint manifest drifted" in evidence.runtime_constraint_error
+    assert evidence.runtime_constraint_name == "ticks_timestamp_not_null_drifted"
+    assert evidence.runtime_constraint_restored
+    assert "ticks_id_seq parameters or ownership are not exact" in evidence.runtime_sequence_error
+    assert evidence.runtime_sequence_cache == 100
+    assert evidence.runtime_sequence_restored
+    assert "ticks_d20260730 index manifest" in evidence.runtime_leaf_error
+    assert (
+        evidence.runtime_leaf_index_name == "ticks_d20260730_instrument_public_id_timestamp_drifted"
+    )
+    assert evidence.runtime_leaf_restored
 
 
 @pytest.mark.integration

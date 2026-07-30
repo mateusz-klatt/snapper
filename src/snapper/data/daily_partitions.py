@@ -23,6 +23,7 @@ from typing import Final
 from typing import Literal
 from typing import cast
 
+from sqlalchemy import bindparam
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
@@ -62,6 +63,16 @@ class LifecycleAction(StrEnum):
     ENSURED = "ensured"
     DETACHED = "detached"
     NOOP = "noop"
+
+
+class ConstraintRole(StrEnum):
+    """Catalog role controlling one relation's exact non-CHECK manifest."""
+
+    ORDINARY = "ordinary"
+    PREPARED = "prepared"
+    PARENT = "parent"
+    LEGACY = "legacy"
+    LEAF = "leaf"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +118,20 @@ class PartitionRef:
     Attributes:
         name: Child relation name.
         bound: Canonical ``pg_get_expr`` partition-bound rendering.
+        schema: Child namespace.
+        relation_kind: PostgreSQL relation kind.
+        is_partition: Whether the child has partition identity.
+        has_partition_key: Whether the expected leaf is itself partitioned.
+        inheritance_sequence: Direct ``pg_inherits`` edge position.
     """
 
     name: str
     bound: str
+    schema: str = "public"
+    relation_kind: str = "r"
+    is_partition: bool = True
+    has_partition_key: bool = False
+    inheritance_sequence: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,20 +416,20 @@ def inspect(
     spec = _spec(table)
     effective_anchor = current_utc_anchor() if anchor is None else _validate_anchor(anchor)
     connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
-    relation_kind = cast(
-        str | None,
-        connection.scalar(
-            text("""
-                SELECT c.relkind::text
-                FROM pg_class AS c
-                JOIN pg_namespace AS n ON n.oid = c.relnamespace
-                WHERE n.nspname = current_schema()
-                  AND c.relname = :table
-                """),
-            {"table": spec.table},
-        ),
-    )
-    state = _relation_state(relation_kind)
+    relation_row = connection.execute(
+        text("""
+            SELECT c.relkind::text,
+                   c.relispartition
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND c.relname = :table
+            """),
+        {"table": spec.table},
+    ).one_or_none()
+    relation_kind = cast(str | None, relation_row[0] if relation_row is not None else None)
+    is_partition = cast(bool, relation_row[1]) if relation_row is not None else False
+    state = RelationState.OTHER if is_partition else _relation_state(relation_kind)
     if state is not RelationState.PARTITIONED:
         return PartitionInspection(
             table=spec.table,
@@ -680,7 +701,7 @@ def detach(
             future_leaf_count=topology.future_leaf_count,
             future_leaf_alarm=topology.future_leaf_alarm,
         )
-    _detach_with_retries(connection, statement)
+    _detach_with_retries(connection, spec, leaf, lower)
     return LifecycleResult(
         table=spec.table,
         action=LifecycleAction.DETACHED,
@@ -806,20 +827,39 @@ def _direct_partitions(
     """
     rows = connection.execute(
         text("""
-            SELECT child.relname::text,
-                   pg_get_expr(child.relpartbound, child.oid)
+            SELECT child_namespace.nspname::text,
+                   child.relname::text,
+                   pg_get_expr(child.relpartbound, child.oid),
+                   child.relkind::text,
+                   child.relispartition,
+                   child_partitioning.partrelid IS NOT NULL,
+                   inheritance.inhseqno::integer
             FROM pg_inherits AS inheritance
             JOIN pg_class AS parent ON parent.oid = inheritance.inhparent
             JOIN pg_namespace AS parent_ns ON parent_ns.oid = parent.relnamespace
             JOIN pg_class AS child ON child.oid = inheritance.inhrelid
+            JOIN pg_namespace AS child_namespace
+              ON child_namespace.oid = child.relnamespace
+            LEFT JOIN pg_partitioned_table AS child_partitioning
+              ON child_partitioning.partrelid = child.oid
             WHERE parent_ns.nspname = current_schema()
               AND parent.relname = :table
-              AND child.relkind = 'r'
-            ORDER BY child.relname
+            ORDER BY child_namespace.nspname, child.relname
             """),
         {"table": spec.table},
     )
-    return tuple(PartitionRef(name=cast(str, row[0]), bound=cast(str, row[1])) for row in rows)
+    return tuple(
+        PartitionRef(
+            schema=cast(str, row[0]),
+            name=cast(str, row[1]),
+            bound=cast(str, row[2]),
+            relation_kind=cast(str, row[3]),
+            is_partition=cast(bool, row[4]),
+            has_partition_key=cast(bool, row[5]),
+            inheritance_sequence=cast(int, row[6]),
+        )
+        for row in rows
+    )
 
 
 def _relation_has_rows(connection: Connection, relation: str) -> bool:
@@ -894,6 +934,8 @@ def _verify_ordinary_schema(
     connection: Connection,
     spec: TableSpec,
     anchor: datetime,
+    *,
+    prepared: bool = False,
 ) -> None:
     """Fail closed unless the ordinary 0042 schema is exactly recognizable.
 
@@ -901,14 +943,22 @@ def _verify_ordinary_schema(
         connection: PostgreSQL catalog connection.
         spec: Expected ordinary table contract.
         anchor: Expected bound for an optional resumed legacy CHECK.
+        prepared: Whether the partition key has already been hardened.
 
     Raises:
         DailyPartitionError: If columns, CHECKs, or indexes drift from 0042.
     """
-    _verify_ordinary_columns(connection, spec)
+    _verify_adoption_names_available(connection, spec, anchor)
+    _verify_relation_columns(
+        connection,
+        spec,
+        spec.table,
+        partition_key_not_null=prepared,
+    )
     _verify_ordinary_checks(connection, spec)
     _verify_ordinary_indexes(connection, spec)
-    _verify_noncheck_constraints(connection, spec, spec.table, local=True)
+    role = ConstraintRole.PREPARED if prepared else ConstraintRole.ORDINARY
+    _verify_noncheck_constraints(connection, spec, spec.table, role)
     range_info = _constraint_info(
         connection,
         spec.table,
@@ -921,6 +971,55 @@ def _verify_ordinary_schema(
     ):
         raise DailyPartitionError(
             f"refused: {_range_constraint_name(spec)} has an unexpected definition"
+        )
+
+
+def _verify_adoption_names_available(
+    connection: Connection,
+    spec: TableSpec,
+    anchor: datetime,
+) -> None:
+    """Refuse every target relation-name collision before heavy preparation.
+
+    Args:
+        connection: PostgreSQL catalog connection.
+        spec: Expected ordinary table contract.
+        anchor: Exact first daily partition boundary.
+
+    Raises:
+        DailyPartitionError: If any cutover-created relation name already exists.
+    """
+    leaves = tuple(
+        _daily_name(spec, anchor + timedelta(days=offset)) for offset in range(FUTURE_LEAF_TARGET)
+    ) + (f"{spec.table}_default",)
+    names = {
+        f"{spec.table}_legacy",
+        *(index.name for index in spec.parent_indexes),
+        *leaves,
+    }
+    for leaf in leaves:
+        names.add(f"{leaf}_pkey")
+        names.update(f"{leaf}_{'_'.join(index.columns)}_idx" for index in spec.parent_indexes)
+        if spec.local_public_id:
+            names.add(f"{leaf}_public_id")
+    statement = text("""
+        SELECT relation.relname::text
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = current_schema()
+          AND relation.relname IN :names
+        ORDER BY relation.relname
+        """).bindparams(bindparam("names", expanding=True))
+    collisions = tuple(
+        cast(str, name)
+        for name in connection.execute(
+            statement,
+            {"names": tuple(sorted(names))},
+        ).scalars()
+    )
+    if collisions:
+        raise DailyPartitionError(
+            f"refused: target partition relation names already exist: {collisions!r}"
         )
 
 
@@ -944,13 +1043,7 @@ def _verify_prepared_ordinary_schema(
         raise DailyPartitionError(
             f"refused: locked {spec.table} is not the expected ordinary table"
         )
-    _verify_ordinary_schema(connection, spec, anchor)
-    _verify_relation_columns(
-        connection,
-        spec,
-        spec.table,
-        partition_key_not_null=True,
-    )
+    _verify_ordinary_schema(connection, spec, anchor, prepared=True)
     range_info = _constraint_info(
         connection,
         spec.table,
@@ -971,24 +1064,6 @@ def _verify_prepared_ordinary_schema(
                 "refused: prepared trades U3 is absent or has an unexpected shape"
             )
     _verify_sequence_owner(connection, spec)
-
-
-def _verify_ordinary_columns(connection: Connection, spec: TableSpec) -> None:
-    """Compare every ordinary column in ordinal order to its exact contract.
-
-    Args:
-        connection: PostgreSQL catalog connection.
-        spec: Expected ordinary table contract.
-
-    Raises:
-        DailyPartitionError: If a column name, type, nullability, or default drifts.
-    """
-    _verify_relation_columns(
-        connection,
-        spec,
-        spec.table,
-        partition_key_not_null=False,
-    )
 
 
 def _verify_relation_columns(
@@ -1165,6 +1240,8 @@ def _verify_ordinary_checks(
     connection: Connection,
     spec: TableSpec,
     relation: str | None = None,
+    *,
+    exclude_legacy_range: bool = True,
 ) -> None:
     """Require the exact validated ordinary CHECK manifest.
 
@@ -1172,12 +1249,18 @@ def _verify_ordinary_checks(
         connection: PostgreSQL catalog connection.
         spec: Expected ordinary table contract.
         relation: Known relation name, defaulting to the ordinary table.
+        exclude_legacy_range: Whether the prepared legacy bound is allowed.
 
     Raises:
         DailyPartitionError: If a CHECK is missing, extra, invalid, or malformed.
     """
     target = relation or spec.table
-    checks = _ordinary_check_constraints(connection, spec, target)
+    checks = _ordinary_check_constraints(
+        connection,
+        spec,
+        target,
+        exclude_legacy_range=exclude_legacy_range,
+    )
     expected_names = (
         ("ck_candle_source", "ck_candles_sequence_id")
         if spec.table == "candles"
@@ -1421,7 +1504,7 @@ def _ordinary_index_contract(
 
 
 def _verify_sequence_owner(connection: Connection, spec: TableSpec) -> None:
-    """Require the ordinary table's conventional owned id sequence.
+    """Require the exact bigint id sequence parameters and ownership edge.
 
     Args:
         connection: PostgreSQL catalog connection.
@@ -1430,17 +1513,52 @@ def _verify_sequence_owner(connection: Connection, spec: TableSpec) -> None:
     Raises:
         DailyPartitionError: If sequence ownership cannot be transferred exactly.
     """
-    owned = cast(
-        str | None,
+    exact = cast(
+        bool,
         connection.scalar(
-            text("SELECT pg_get_serial_sequence(:table, 'id')"),
-            {"table": spec.table},
+            text("""
+                SELECT count(*) = 1
+                FROM pg_class AS sequence_relation
+                JOIN pg_namespace AS sequence_namespace
+                  ON sequence_namespace.oid = sequence_relation.relnamespace
+                JOIN pg_sequence AS sequence_parameters
+                  ON sequence_parameters.seqrelid = sequence_relation.oid
+                JOIN pg_depend AS dependency
+                  ON dependency.classid = 'pg_class'::regclass
+                 AND dependency.objid = sequence_relation.oid
+                 AND dependency.objsubid = 0
+                 AND dependency.refclassid = 'pg_class'::regclass
+                 AND dependency.deptype = 'a'
+                JOIN pg_class AS owner_relation
+                  ON owner_relation.oid = dependency.refobjid
+                JOIN pg_namespace AS owner_namespace
+                  ON owner_namespace.oid = owner_relation.relnamespace
+                JOIN pg_attribute AS owner_attribute
+                  ON owner_attribute.attrelid = owner_relation.oid
+                 AND owner_attribute.attnum = dependency.refobjsubid
+                WHERE sequence_namespace.nspname = current_schema()
+                  AND sequence_relation.relname = :sequence
+                  AND sequence_relation.relkind = 'S'
+                  AND owner_namespace.nspname = current_schema()
+                  AND owner_relation.relname = :owner
+                  AND owner_attribute.attname = 'id'
+                  AND sequence_parameters.seqtypid = 'bigint'::regtype
+                  AND sequence_parameters.seqstart = 1
+                  AND sequence_parameters.seqincrement = 1
+                  AND sequence_parameters.seqmax = 9223372036854775807
+                  AND sequence_parameters.seqmin = 1
+                  AND sequence_parameters.seqcache = 1
+                  AND NOT sequence_parameters.seqcycle
+                """),
+            {
+                "sequence": f"{spec.table}_id_seq",
+                "owner": spec.table,
+            },
         ),
     )
-    expected = f"{spec.table}_id_seq"
-    if owned is None or owned.rsplit(".", maxsplit=1)[-1] != expected:
+    if not exact:
         raise DailyPartitionError(
-            f"refused: {spec.table}.id is not owned by expected sequence {expected}"
+            f"refused: {spec.table}_id_seq parameters or ownership are not exact"
         )
 
 
@@ -1448,6 +1566,8 @@ def _ordinary_check_constraints(
     connection: Connection,
     spec: TableSpec,
     relation: str | None = None,
+    *,
+    exclude_legacy_range: bool = True,
 ) -> tuple[tuple[str, str], ...]:
     """Capture validated ordinary CHECKs for independent parent construction.
 
@@ -1455,6 +1575,7 @@ def _ordinary_check_constraints(
         connection: PostgreSQL catalog connection.
         spec: Ordinary table contract.
         relation: Known relation name, defaulting to the ordinary table.
+        exclude_legacy_range: Whether to suppress the prepared legacy bound.
 
     Returns:
         Constraint names and canonical definitions, excluding the legacy bound.
@@ -1482,7 +1603,7 @@ def _ordinary_check_constraints(
     checks: list[tuple[str, str]] = []
     for row in rows:
         name = cast(str, row[0])
-        if name == range_name:
+        if exclude_legacy_range and name == range_name:
             continue
         if not cast(bool, row[2]):
             raise DailyPartitionError(
@@ -1496,24 +1617,23 @@ def _verify_noncheck_constraints(
     connection: Connection,
     spec: TableSpec,
     relation: str,
-    *,
-    local: bool,
+    role: ConstraintRole,
 ) -> None:
-    """Require the exact local primary and legacy U2 constraint manifest.
+    """Require exact NOT NULL, primary, and legacy U2 constraints.
 
     Args:
         connection: PostgreSQL catalog connection.
         spec: Expected market-data table contract.
-        relation: Parent, ordinary, or attached legacy relation name.
-        local: Whether ordinary leaf-local constraints must be present.
+        relation: Parent, ordinary, legacy, or daily relation name.
+        role: Role selecting required local constraints and key nullability.
 
     Raises:
         DailyPartitionError: If a constraint is missing, extra, or malformed.
     """
     observed = _noncheck_constraints(connection, relation)
-    expected = _expected_noncheck_constraints(spec) if local else ()
+    expected = _expected_noncheck_constraints(spec, relation, role)
     if tuple(shape.name for shape in observed) != tuple(item[0] for item in expected):
-        raise DailyPartitionError(f"refused: {relation} non-CHECK constraint manifest drifted")
+        raise DailyPartitionError(f"refused: {relation} relation constraint manifest drifted")
     for shape, contract in zip(observed, expected, strict=True):
         name, kind, definition, index_name = contract
         if (
@@ -1534,7 +1654,7 @@ def _noncheck_constraints(
     connection: Connection,
     relation: str,
 ) -> tuple[ConstraintShape, ...]:
-    """Read exact non-CHECK, non-NOT-NULL constraints on one known relation.
+    """Read every exact non-CHECK constraint on one known relation.
 
     Args:
         connection: PostgreSQL catalog connection.
@@ -1561,7 +1681,7 @@ def _noncheck_constraints(
               ON index_relation.oid = constraint_row.conindid
             WHERE namespace.nspname = current_schema()
               AND relation.relname = :table
-              AND constraint_row.contype NOT IN ('c', 'n')
+              AND constraint_row.contype <> 'c'
             ORDER BY constraint_row.conname
             """),
         {"table": relation},
@@ -1582,30 +1702,53 @@ def _noncheck_constraints(
 
 def _expected_noncheck_constraints(
     spec: TableSpec,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Return exact ordinary constraints ordered by stable relation name.
+    relation: str,
+    role: ConstraintRole,
+) -> tuple[tuple[str, str, str, str | None], ...]:
+    """Return exact relation constraints ordered by stable constraint name.
 
     Args:
         spec: Expected market-data table contract.
+        relation: Relation whose generated constraint names are expected.
+        role: Role controlling partition-key nullability and local arbiters.
 
     Returns:
         Name, kind, compact definition, and backing index tuples.
     """
+    local_prefix = relation if role is ConstraintRole.LEAF else spec.table
+    expected: list[tuple[str, str, str, str | None]] = []
+    for column in _ordinary_column_contract(spec):
+        required = column.nullable is False
+        if column.name == spec.partition_key and role is not ConstraintRole.ORDINARY:
+            required = True
+        if required:
+            expected.append(
+                (
+                    f"{spec.table}_{column.name}_not_null",
+                    "n",
+                    f"notnull{column.name}",
+                    None,
+                )
+            )
+    if role is ConstraintRole.PARENT:
+        return tuple(sorted(expected))
     primary = (
-        f"{spec.table}_pkey",
+        f"{local_prefix}_pkey",
         "p",
         "primarykeyid",
-        f"{spec.table}_pkey",
+        f"{local_prefix}_pkey",
     )
-    if spec.table != "trades":
-        return (primary,)
-    unique = (
-        "uq_trade_instrument_trade_id",
-        "u",
-        "uniqueinstrument_public_id,trade_id",
-        "uq_trade_instrument_trade_id",
-    )
-    return tuple(sorted((primary, unique)))
+    expected.append(primary)
+    if spec.table == "trades" and role is not ConstraintRole.LEAF:
+        expected.append(
+            (
+                "uq_trade_instrument_trade_id",
+                "u",
+                "uniqueinstrument_public_id,trade_id",
+                "uq_trade_instrument_trade_id",
+            )
+        )
+    return tuple(sorted(expected))
 
 
 def _compact_key_constraint(definition: str) -> str:
@@ -2305,7 +2448,15 @@ def _execute_ensure(
             ),
             None,
         )
-        if default_ref is None or default_ref.bound.strip().upper() != "DEFAULT":
+        if (
+            default_ref is None
+            or default_ref.schema != "public"
+            or default_ref.relation_kind != "r"
+            or not default_ref.is_partition
+            or default_ref.has_partition_key
+            or default_ref.inheritance_sequence != 1
+            or default_ref.bound.strip().upper() != "DEFAULT"
+        ):
             raise DailyPartitionError(f"refused: {default_name} is no longer attached as DEFAULT")
         if _relation_has_rows(connection, default_name):
             raise DailyPartitionError(
@@ -2315,19 +2466,75 @@ def _execute_ensure(
             connection.execute(text(statement))
 
 
-def _detach_with_retries(connection: Connection, statement: str) -> None:
+def _execute_detach_attempt(
+    connection: Connection,
+    spec: TableSpec,
+    leaf: str,
+    lower: datetime,
+) -> None:
+    """Lock and revalidate one exact daily child before plain DETACH.
+
+    Args:
+        connection: Clean PostgreSQL connection.
+        spec: Partitioned parent contract.
+        leaf: Expected generated daily relation name.
+        lower: Exact inclusive UTC day boundary.
+
+    Raises:
+        DailyPartitionError: If the locked attachment or bound has changed.
+    """
+    with connection.begin():
+        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+        connection.execute(text(f"SET LOCAL statement_timeout = '{CUTOVER_STATEMENT_TIMEOUT}'"))
+        connection.execute(text(f"LOCK TABLE {spec.table} IN ACCESS EXCLUSIVE MODE"))
+        observed = next(
+            (
+                partition
+                for partition in _direct_partitions(connection, spec)
+                if partition.name == leaf
+            ),
+            None,
+        )
+        if (
+            observed is None
+            or observed.schema != "public"
+            or observed.relation_kind != "r"
+            or not observed.is_partition
+            or observed.has_partition_key
+            or observed.inheritance_sequence != 1
+            or not _range_bound_matches(
+                observed.bound,
+                lower,
+                lower + timedelta(days=1),
+            )
+        ):
+            raise DailyPartitionError(
+                f"refused: locked attachment for {leaf} no longer has its exact daily bound"
+            )
+        connection.execute(text(f"ALTER TABLE {spec.table} DETACH PARTITION {leaf}"))
+
+
+def _detach_with_retries(
+    connection: Connection,
+    spec: TableSpec,
+    leaf: str,
+    lower: datetime,
+) -> None:
     """Run plain DETACH under a fixed lock timeout and bounded retries.
 
     Args:
         connection: Clean PostgreSQL connection.
-        statement: Exact non-concurrent DETACH DDL.
+        spec: Partitioned parent contract.
+        leaf: Expected generated daily relation name.
+        lower: Exact inclusive UTC day boundary.
 
     Raises:
         DailyPartitionError: If a non-lock error occurs or retries are exhausted.
     """
     for attempt in range(DETACH_RETRIES):
         try:
-            _execute_transaction(connection, (statement,))
+            _execute_detach_attempt(connection, spec, leaf, lower)
             return
         except DBAPIError as error:
             if _sqlstate(error) != "55P03" or attempt == DETACH_RETRIES - 1:
@@ -2378,7 +2585,35 @@ def _require_partitioned_topology(
         raise DailyPartitionError(
             f"refused: {spec.table} partition key is {topology.partition_key!r}"
         )
+    _verify_direct_partition_shapes(spec, topology)
     _verify_parent_indexes(connection, spec)
+
+
+def _verify_direct_partition_shapes(
+    spec: TableSpec,
+    topology: PartitionInspection,
+) -> None:
+    """Reject foreign, non-leaf, or nonpartition direct children.
+
+    Args:
+        spec: Expected parent contract.
+        topology: Direct-child catalog inspection.
+
+    Raises:
+        DailyPartitionError: If any child is outside the exact leaf shape.
+    """
+    for partition in topology.partitions:
+        if (
+            partition.schema != "public"
+            or partition.relation_kind != "r"
+            or not partition.is_partition
+            or partition.has_partition_key
+            or partition.inheritance_sequence != 1
+        ):
+            raise DailyPartitionError(
+                f"refused: {spec.table} direct child "
+                f"{partition.schema}.{partition.name} has an unexpected relation shape"
+            )
 
 
 def _verify_partitioned(
@@ -2401,6 +2636,19 @@ def _verify_partitioned(
     """
     _require_partitioned_topology(connection, spec, anchor)
     topology = inspect(connection, spec.table, anchor)
+    expected_names = {
+        f"{spec.table}_legacy",
+        f"{spec.table}_default",
+        *(
+            _daily_name(spec, anchor + timedelta(days=offset))
+            for offset in range(FUTURE_LEAF_TARGET)
+        ),
+    }
+    observed_names = tuple(partition.name for partition in topology.partitions)
+    if set(observed_names) != expected_names or len(observed_names) != len(expected_names):
+        raise DailyPartitionError(
+            f"refused: {spec.table} direct partition manifest is {observed_names!r}"
+        )
     by_name = {item.name: item for item in topology.partitions}
     legacy = f"{spec.table}_legacy"
     legacy_ref = by_name.get(legacy)
@@ -2502,8 +2750,8 @@ def _verify_partitioned_relation_shapes(
         or not _range_constraint_matches(legacy_range.definition, spec, anchor)
     ):
         raise DailyPartitionError(f"refused: {legacy} lacks the exact validated legacy range CHECK")
-    _verify_noncheck_constraints(connection, spec, spec.table, local=False)
-    _verify_noncheck_constraints(connection, spec, legacy, local=True)
+    _verify_noncheck_constraints(connection, spec, spec.table, ConstraintRole.PARENT)
+    _verify_noncheck_constraints(connection, spec, legacy, ConstraintRole.LEGACY)
     _verify_legacy_index_manifest(connection, spec, legacy)
     _verify_legacy_local_objects(connection, spec, legacy)
 
@@ -2642,12 +2890,17 @@ def _verify_parent_indexes(connection: Connection, spec: TableSpec) -> None:
             )
 
 
-def _index_matches(shape: IndexShape, expected: IndexSpec) -> bool:
+def _index_matches(
+    shape: IndexShape,
+    expected: IndexSpec,
+    parent_indexes: tuple[str, ...] = (),
+) -> bool:
     """Compare one structural catalog index to its static contract.
 
     Args:
         shape: Observed catalog shape.
         expected: Static parent index definition.
+        parent_indexes: Exact direct index parents required for this relation.
 
     Returns:
         Whether uniqueness, validity, keys, predicate, and ownership all match.
@@ -2656,7 +2909,7 @@ def _index_matches(shape: IndexShape, expected: IndexSpec) -> bool:
         shape.unique != expected.unique
         or shape.columns != expected.columns
         or shape.constraint_backed
-        or not _index_storage_matches(shape, ())
+        or not _index_storage_matches(shape, parent_indexes)
     ):
         return False
     if expected.predicate is None:
@@ -2703,6 +2956,20 @@ def _verify_leaf_local_objects(
     Raises:
         DailyPartitionError: If a local object is absent or malformed.
     """
+    _verify_relation_columns(
+        connection,
+        spec,
+        leaf,
+        partition_key_not_null=True,
+    )
+    _verify_ordinary_checks(
+        connection,
+        spec,
+        leaf,
+        exclude_legacy_range=False,
+    )
+    _verify_noncheck_constraints(connection, spec, leaf, ConstraintRole.LEAF)
+    _verify_leaf_index_manifest(connection, spec, leaf)
     primary = _index_shape(connection, leaf, f"{leaf}_pkey")
     if (
         primary is None
@@ -2725,6 +2992,37 @@ def _verify_leaf_local_objects(
         or not _index_storage_matches(public_id, ())
     ):
         raise DailyPartitionError(f"refused: {leaf} active-public-id partial is malformed")
+
+
+def _verify_leaf_index_manifest(
+    connection: Connection,
+    spec: TableSpec,
+    leaf: str,
+) -> None:
+    """Require every local and inherited leaf index, with exact parentage.
+
+    Args:
+        connection: PostgreSQL catalog connection.
+        spec: Expected parent contract.
+        leaf: Expected daily or DEFAULT child name.
+
+    Raises:
+        DailyPartitionError: If names, definitions, or parent edges drift.
+    """
+    inherited = {f"{leaf}_{'_'.join(index.columns)}_idx": index for index in spec.parent_indexes}
+    expected_names = set(inherited)
+    expected_names.add(f"{leaf}_pkey")
+    if spec.local_public_id:
+        expected_names.add(f"{leaf}_public_id")
+    names = _relation_index_names(connection, leaf)
+    if set(names) != expected_names or len(names) != len(expected_names):
+        raise DailyPartitionError(f"refused: {leaf} index manifest is {names!r}")
+    for child_name, parent in inherited.items():
+        shape = _index_shape(connection, leaf, child_name)
+        if shape is None or not _index_matches(shape, parent, (parent.name,)):
+            raise DailyPartitionError(
+                f"refused: {child_name} is not the exact child of {parent.name}"
+            )
 
 
 def _range_bound_matches(
