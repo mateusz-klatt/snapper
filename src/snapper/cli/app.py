@@ -2438,17 +2438,26 @@ def restore_data(
     file: str | None = typer.Option(None, help="Single CSV file to restore."),
     directory: str | None = typer.Option(None, "--dir", help="Directory of CSV files to restore."),
     source: str = typer.Option("audit", help="Restore source (audit)."),
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            min=1,
+            help="Maximum archive rows parsed and inserted per batch.",
+        ),
+    ] = 10_000,
 ) -> None:
-    """Restore archived CSV data back into the database.
+    """Restore plain or zstd-compressed CSV data into the database.
 
-    Reads CSV files exported by ``snapper archive`` and inserts rows
-    back into the database, deduplicating against existing data.
+    Streams CSV files into bounded batches and deduplicates against
+    exact temporal identities already present in the database.
 
     Args:
         table: Table name.
         file: Single CSV file path.
-        directory: Directory to scan recursively for CSV files.
+        directory: Directory to scan recursively for CSV archive files.
         source: Restore mode (audit for full history).
+        batch_size: Maximum rows retained and inserted per batch.
     """
     if file is None and directory is None:
         typer.echo("Error: provide --file or --dir")
@@ -2467,6 +2476,7 @@ def restore_data(
             typer.echo(f"Error: directory not found: {directory}")
             raise typer.Exit(code=1)
         paths.extend(sorted(d.rglob("*.csv")))
+        paths.extend(sorted(d.rglob("*.csv.zst")))
 
     if not paths:
         typer.echo("No CSV files found")
@@ -2474,7 +2484,7 @@ def restore_data(
 
     bootstrap = BootstrapSettingsLoader()
     repo = DatabaseRepository(bootstrap.db_url)
-    restorer = ArchiveRestorer(repo)
+    restorer = ArchiveRestorer(repo, batch_size=batch_size)
     typer.echo(f"Restoring {table} from {len(paths)} file(s) (source={source})...")
     result = restorer.restore(table=table, paths=paths, source=source)
     typer.echo(

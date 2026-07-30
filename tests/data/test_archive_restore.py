@@ -1,15 +1,21 @@
 """Tests for archive restore (audit mode) and purge/reload round-trip."""
 
+import csv
+import shutil
+import tracemalloc
+from compression import zstd
 from datetime import UTC
 from datetime import date
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import JSON
 from sqlalchemy import DateTime
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
@@ -36,9 +42,132 @@ from snapper.data.models import Instrument
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.models import Tick
+from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
 from snapper.data.repository import DatabaseRepository
+
+_TRADE_ARCHIVE_HEADER = (
+    "public_id",
+    "timestamp",
+    "known_to",
+    "session_id",
+    "sequence_id",
+    "instrument_public_id",
+    "trade_id",
+    "executed_at",
+    "price",
+    "size",
+    "side",
+    "id",
+)
+_TRADE_ARCHIVE_ROW = (
+    "019ea68f-d48f-7148-8cf5-418963401eb5",
+    "2026-06-08 11:28:24.463041+02",
+    "10000-01-01 00:59:59+01",
+    "019ea3af-eaca-75f6-a7ed-38e8495c07df",
+    "7",
+    "019e874d-81ac-70ed-a02c-e057914554b0",
+    "7636064946467373056",
+    "2026-05-04 17:51:56.48+02",
+    "4.988",
+    "1",
+    "buy",
+    "30051988",
+)
+_LARGE_ARCHIVE_ROWS = 100_000
+_MAX_RESTORE_PEAK_BYTES = 48 * 1024 * 1024
+
+
+class _DiscardingArchiveRepository:
+    """Measure restore batching without retaining inserted row dictionaries."""
+
+    def __init__(self) -> None:
+        """Initialize observed batch sizes and total inserted rows."""
+        self.batch_sizes: list[int] = []
+        self.rows_inserted = 0
+
+    def get_existing_archive_keys(
+        self,
+        _model: type[Base],
+        _keys_or_day_start: object,
+        _day_end: date | None = None,
+    ) -> set[tuple[str, datetime, datetime]]:
+        """Return no existing keys for either legacy or exact-key lookup shapes."""
+        return set()
+
+    def bulk_insert_from_archive(
+        self,
+        _model: type[Base],
+        rows: list[dict[str, object]],
+    ) -> int:
+        """Count one batch without retaining its allocations."""
+        batch_size = len(rows)
+        self.batch_sizes.append(batch_size)
+        self.rows_inserted += batch_size
+        return batch_size
+
+
+def _write_trade_zstd_archive(path: Path) -> None:
+    """Write one compressed row in the immutable production trade format."""
+    with zstd.open(path, mode="wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(_TRADE_ARCHIVE_HEADER)
+        writer.writerow(_TRADE_ARCHIVE_ROW)
+
+
+def _write_trade_csv_archive(path: Path) -> None:
+    """Write one plain row with offset timestamps in the production format."""
+    row = list(_TRADE_ARCHIVE_ROW)
+    row[2] = "9999-12-31T23:59:59+00:00"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(_TRADE_ARCHIVE_HEADER)
+        writer.writerow(row)
+
+
+def _make_trade_restore_fixture(tmp_path: Path) -> tuple[DatabaseRepository, Path]:
+    """Create an empty database and one production-shaped compressed archive."""
+    repository = DatabaseRepository(f"sqlite:///{tmp_path / 'trade-restore.db'}")
+    Base.metadata.create_all(repository.engine)
+    archive_path = tmp_path / "trades-2026-05-04.csv.zst"
+    _write_trade_zstd_archive(archive_path)
+    return repository, archive_path
+
+
+def _write_large_tick_archive(path: Path) -> int:
+    """Write enough valid plain CSV rows to discriminate bounded batching."""
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(EVENT_TABLES["ticks"].columns)
+        for index in range(_LARGE_ARCHIVE_ROWS):
+            writer.writerow(
+                (
+                    f"tick-{index}",
+                    "2026-07-29T10:00:00+00:00",
+                    "9999-12-31T23:59:59+00:00",
+                    "session-1",
+                    str(index),
+                    "instrument-1",
+                    "100.0",
+                    "101.0",
+                    "100.5",
+                    "1.0",
+                )
+            )
+    return path.stat().st_size
+
+
+def _write_large_tick_zstd_archive(path: Path) -> tuple[int, int]:
+    """Compress the large tick fixture without retaining its logical contents."""
+    plain_path = path.with_suffix("")
+    logical_size = _write_large_tick_archive(plain_path)
+    with (
+        plain_path.open("rb") as source,
+        zstd.open(path, mode="wb") as destination,
+    ):
+        shutil.copyfileobj(source, destination, length=1024 * 1024)
+    return path.stat().st_size, logical_size
 
 
 def test_parse_str_csv() -> None:
@@ -220,6 +349,167 @@ def test_restore_executions_is_refused_loudly() -> None:
     repo.get_existing_archive_keys.assert_not_called()
 
 
+def test_restore_refuses_transposed_trade_header(tmp_path: Path) -> None:
+    """A plausible field transposition is refused before database access.
+
+    Given: A production-shaped trade archive whose float-compatible price
+        and size columns are transposed,
+    When: The audit restorer validates the positional archive contract,
+    Then: It raises a header mismatch instead of silently swapping values.
+    """
+    csv_path = tmp_path / "transposed.csv"
+    header = list(_TRADE_ARCHIVE_HEADER)
+    price_index = header.index("price")
+    size_index = header.index("size")
+    header[price_index], header[size_index] = header[size_index], header[price_index]
+    row = list(_TRADE_ARCHIVE_ROW)
+    row[2] = "9999-12-31T23:59:59+00:00"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerow(row)
+
+    repository = MagicMock(spec=DatabaseRepository)
+    repository.get_existing_archive_keys.return_value = set()
+    repository.bulk_insert_from_archive.return_value = 1
+
+    with pytest.raises(ValueError, match="CSV header mismatch"):
+        ArchiveRestorer(repository).restore(table="trades", paths=[csv_path])
+
+    repository.get_existing_archive_keys.assert_not_called()
+    repository.bulk_insert_from_archive.assert_not_called()
+
+
+def test_restore_compressed_trade_archive(tmp_path: Path) -> None:
+    """A real-format zstd trade archive streams into typed database columns.
+
+    Given: A compressed CSV using the immutable production header and
+        PostgreSQL's offset rendering of the open-ended known-to sentinel,
+    When: The trade archive is restored and then restored again,
+    Then: One exact row is inserted and the rerun reports it already present.
+    """
+    repository, archive_path = _make_trade_restore_fixture(tmp_path)
+
+    restorer = ArchiveRestorer(repository)
+    result = restorer.restore(table="trades", paths=[archive_path])
+    rerun = restorer.restore(table="trades", paths=[archive_path])
+
+    assert result.rows_inserted == 1
+    assert result.rows_skipped == 0
+    assert rerun.rows_inserted == 0
+    assert rerun.rows_skipped == 1
+    with repository.get_session() as session:
+        restored = session.execute(select(Trade)).scalar_one()
+    assert restored.id == 30051988
+    assert restored.public_id == _TRADE_ARCHIVE_ROW[0]
+    assert restored.timestamp == datetime(2026, 6, 8, 9, 28, 24, 463041, tzinfo=UTC)
+    assert restored.known_to == KNOWN_TO_MAX
+    assert restored.executed_at == datetime(2026, 5, 4, 15, 51, 56, 480000, tzinfo=UTC)
+    assert restored.price == 4.988
+    assert restored.size == 1.0
+    repository.dispose()
+
+
+def test_restore_trade_archive_is_idempotent(tmp_path: Path) -> None:
+    """A second offset-timestamp restore reports every archived row as present.
+
+    Given: A production-shaped trade archive whose timestamp uses a non-UTC offset,
+    When: The same archive is restored again after the first batch commits,
+    Then: The rerun inserts zero rows and reports the entire file as skipped.
+    """
+    repository = DatabaseRepository(f"sqlite:///{tmp_path / 'idempotent-restore.db'}")
+    Base.metadata.create_all(repository.engine)
+    archive_path = tmp_path / "trades-2026-05-04.csv"
+    _write_trade_csv_archive(archive_path)
+    restorer = ArchiveRestorer(repository)
+
+    first = restorer.restore(table="trades", paths=[archive_path])
+    second = restorer.restore(table="trades", paths=[archive_path])
+
+    assert first.rows_inserted == 1
+    assert first.rows_skipped == 0
+    assert second.rows_inserted == 0
+    assert second.rows_skipped == 1
+    with repository.get_session() as session:
+        assert len(session.execute(select(Trade)).scalars().all()) == 1
+    repository.dispose()
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "zstd"])
+def test_restore_peak_allocation_is_bounded(
+    tmp_path: Path,
+    compressed: bool,
+) -> None:
+    """Large plain and compressed archives avoid file-sized live allocations.
+
+    Given: A valid 100,000-row plain or zstd archive and a discarding repository,
+    When: Restore allocation is measured independently of fixture generation,
+    Then: Every row is processed while peak traced memory remains below 48 MiB.
+    """
+    if compressed:
+        csv_path = tmp_path / "large-ticks.csv.zst"
+        fixture_size, logical_size = _write_large_tick_zstd_archive(csv_path)
+    else:
+        csv_path = tmp_path / "large-ticks.csv"
+        fixture_size = _write_large_tick_archive(csv_path)
+        logical_size = fixture_size
+    repository = _DiscardingArchiveRepository()
+    restorer = ArchiveRestorer(cast(DatabaseRepository, repository))
+
+    tracemalloc.stop()
+    tracemalloc.start()
+    try:
+        result = restorer.restore(table="ticks", paths=[csv_path])
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert fixture_size > 0
+    assert logical_size > 10 * 1024 * 1024
+    assert result.rows_inserted == _LARGE_ARCHIVE_ROWS
+    assert result.rows_skipped == 0
+    assert repository.rows_inserted == _LARGE_ARCHIVE_ROWS
+    assert peak_bytes < _MAX_RESTORE_PEAK_BYTES
+    assert repository.batch_sizes == [10_000] * 10
+
+
+def test_restore_uses_configured_batch_size(tmp_path: Path) -> None:
+    """A caller-selected batch size bounds each repository insertion.
+
+    Given: A five-row archive and a requested batch size of two,
+    When: The archive is restored,
+    Then: The repository receives two full batches and one final partial batch.
+    """
+    csv_path = tmp_path / "configured-batches.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(EVENT_TABLES["ticks"].columns)
+        for index in range(5):
+            writer.writerow(
+                (
+                    f"tick-{index}",
+                    "2026-07-29T10:00:00+00:00",
+                    "9999-12-31T23:59:59+00:00",
+                    "session-1",
+                    str(index),
+                    "instrument-1",
+                    "100.0",
+                    "101.0",
+                    "100.5",
+                    "1.0",
+                )
+            )
+    repository = _DiscardingArchiveRepository()
+
+    result = ArchiveRestorer(
+        cast(DatabaseRepository, repository),
+        batch_size=2,
+    ).restore(table="ticks", paths=[csv_path])
+
+    assert result.rows_inserted == 5
+    assert repository.batch_sizes == [2, 2, 1]
+
+
 def _make_db_with_tick(tmp_path: Path) -> tuple[DatabaseRepository, Path]:
     """Create DB with Symbol + Instrument + Tick, export to CSV, return (repo, csv_dir).
 
@@ -342,7 +632,10 @@ def test_restore_audit_empty_file(tmp_path: Path) -> None:
     Then: Returns zero counts.
     """
     csv_path = tmp_path / "empty.csv"
-    csv_path.write_text("public_id,timestamp,known_to\n", encoding="utf-8")
+    csv_path.write_text(
+        f"{','.join(EVENT_TABLES['ticks'].columns)}\n",
+        encoding="utf-8",
+    )
     repo = MagicMock()
     restorer = ArchiveRestorer(repo)
     result = restorer.restore(table="ticks", paths=[csv_path])
@@ -350,20 +643,21 @@ def test_restore_audit_empty_file(tmp_path: Path) -> None:
     assert result.files_processed == 1
 
 
-def test_restore_audit_no_header(tmp_path: Path) -> None:
-    """Restore handles completely empty CSV file.
+def test_restore_refuses_missing_header(tmp_path: Path) -> None:
+    """Restore refuses a headerless file before database access.
 
-    Given: Empty file with no content,
-    When: restore is called,
-    Then: Returns zero counts.
+    Given: A truncated archive with no CSV header,
+    When: Restore validates the table's exact positional contract,
+    Then: It raises a missing-header error without querying or inserting rows.
     """
     csv_path = tmp_path / "empty.csv"
     csv_path.write_text("", encoding="utf-8")
     repo = MagicMock()
     restorer = ArchiveRestorer(repo)
-    result = restorer.restore(table="ticks", paths=[csv_path])
-    assert result.rows_inserted == 0
-    assert result.files_processed == 1
+    with pytest.raises(ValueError, match="missing CSV header"):
+        restorer.restore(table="ticks", paths=[csv_path])
+    repo.get_existing_archive_keys.assert_not_called()
+    repo.bulk_insert_from_archive.assert_not_called()
 
 
 def _make_db_with_setting(tmp_path: Path) -> tuple[DatabaseRepository, Path]:
@@ -489,7 +783,7 @@ def test_round_trip_purge_restore_state(tmp_path: Path) -> None:
 
     Given: DB with closed + active setting versions,
     When: export all -> purge closed -> restore from CSV,
-    Then: All rows present again.
+    Then: Every temporal and domain field is restored unchanged.
     """
     repo, csv_dir = _make_db_with_setting(tmp_path)
     columns = _get_model_archive_columns(Setting)
@@ -530,6 +824,7 @@ def test_round_trip_purge_restore_state(tmp_path: Path) -> None:
         date(2024, 1, 1),
     )
     assert len(rows_after_restore) == 2
+    assert [row[1:] for row in rows_after_restore] == [row[1:] for row in rows_before]
     repo.dispose()
 
 
@@ -538,7 +833,7 @@ def test_round_trip_purge_restore_events(tmp_path: Path) -> None:
 
     Given: DB with ticks,
     When: export -> purge -> restore,
-    Then: Same data present.
+    Then: Every temporal and domain field is restored unchanged.
     """
     repo, csv_dir = _make_db_with_tick(tmp_path)
     spec = EVENT_TABLES["ticks"]
@@ -578,7 +873,7 @@ def test_round_trip_purge_restore_events(tmp_path: Path) -> None:
         date(2024, 1, 1),
     )
     assert len(rows_restored) == 1
-    assert rows_restored[0][1] == rows_before[0][1]
+    assert [row[1:] for row in rows_restored] == [row[1:] for row in rows_before]
     repo.dispose()
 
 
@@ -724,9 +1019,9 @@ def test_cli_restore_dir_no_csv(tmp_path: Path) -> None:
 
 
 def test_cli_restore_dir(tmp_path: Path) -> None:
-    """CLI restore finds CSV files recursively from --dir.
+    """CLI restore finds plain and compressed CSV files recursively.
 
-    Given: Directory with CSV files,
+    Given: Directory with plain and zstd CSV files,
     When: CLI invoked with --dir,
     Then: All CSV files passed to restorer.
     """
@@ -734,6 +1029,7 @@ def test_cli_restore_dir(tmp_path: Path) -> None:
     sub.mkdir(parents=True)
     (sub / "2024-01-01.csv").write_text("public_id,timestamp,known_to\n")
     (sub / "2024-01-02.csv").write_text("public_id,timestamp,known_to\n")
+    (sub / "2024-01-03.csv.zst").write_bytes(b"fixture")
     runner = CliRunner()
     mock_restorer = MagicMock()
     mock_restorer.restore.return_value = RestoreResult(
@@ -754,4 +1050,4 @@ def test_cli_restore_dir(tmp_path: Path) -> None:
         )
     assert result.exit_code == 0
     call_kwargs = mock_restorer.restore.call_args[1]
-    assert len(call_kwargs["paths"]) == 2
+    assert len(call_kwargs["paths"]) == 3

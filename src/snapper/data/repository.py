@@ -482,6 +482,7 @@ _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE: Final[str] = " \t\n\r\f\v"
 type _PnlTimelineFillIdentity = tuple[str, str, str, str]
 type _PnlTimelineFillScopeKey = tuple[str, str, str, str]
 type _PnlTimelineFillNativeScopeKey = tuple[str, str, str, str, str]
+type _ArchiveRestoreKey = tuple[str, datetime, datetime]
 type _PortfolioReconciliationIdentity = tuple[str, str, str]
 type _FuturesPositionResultRow = tuple[Position, str | None, str | None, str | None]
 type _PortfolioReconciliationReadResultRow = tuple[
@@ -34941,32 +34942,44 @@ class DatabaseRepository:
     def get_existing_archive_keys(
         self,
         model: type[Any],
-        day_start: date,
-        day_end: date,
-    ) -> set[tuple[str, str, str]]:
-        """Get existing (public_id, timestamp_iso, known_to_iso) for dedup.
+        candidates: Sequence[_ArchiveRestoreKey],
+    ) -> set[_ArchiveRestoreKey]:
+        """Get the exact existing temporal keys from one bounded restore batch.
 
-        Returns a set of string triples for comparison against CSV row
-        values, avoiding datetime precision mismatches.
+        The query is constrained to caller-supplied identities rather than
+        a date range so a rerun cannot materialize every database key from
+        a high-volume day.
 
         Args:
             model: SQLAlchemy model class.
-            day_start: First day (inclusive) of ``timestamp`` range.
-            day_end: Last day (inclusive) of ``timestamp`` range.
+            candidates: At most one restore batch of typed temporal identities.
 
         Returns:
-            Set of ``(public_id, timestamp_iso, known_to_iso)`` tuples.
+            Existing ``(public_id, timestamp, known_to)`` tuples in UTC.
         """
-        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
-        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        if not candidates:
+            return set()
+        unique_candidates = list(dict.fromkeys(candidates))
         with self.get_session() as session:
             rows = session.execute(
-                select(model.public_id, model.timestamp, model.known_to).where(
-                    model.timestamp >= from_dt,
-                    model.timestamp < to_dt,
+                select(model.public_id, model.timestamp, model.known_to)
+                .distinct()
+                .where(
+                    tuple_(
+                        model.public_id,
+                        model.timestamp,
+                        model.known_to,
+                    ).in_(unique_candidates)
                 )
             ).all()
-        return {(r[0], r[1].isoformat(), r[2].isoformat()) for r in rows}
+        return {
+            (
+                str(row[0]),
+                row[1].astimezone(UTC),
+                row[2].astimezone(UTC),
+            )
+            for row in rows
+        }
 
     def bulk_insert_from_archive(
         self,

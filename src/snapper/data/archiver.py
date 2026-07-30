@@ -19,13 +19,18 @@ import csv
 import json
 from collections import defaultdict
 from collections.abc import Callable
+from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Sequence
+from compression import zstd
 from dataclasses import dataclass
+from datetime import UTC
 from datetime import date
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from typing import TextIO
 
 from sqlalchemy import JSON
 from sqlalchemy import Boolean
@@ -34,6 +39,8 @@ from sqlalchemy import Float
 from sqlalchemy import Integer
 from sqlalchemy.types import TypeDecorator
 
+from snapper.core.json_types import JsonValue
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import ContinuousContractConfig
 from snapper.data.models import Control
@@ -1472,8 +1479,28 @@ _ALL_TABLE_SPECS: dict[str, type[Any]] = {
     "candles": Candle,
 }
 
+_TRADE_PRODUCTION_ARCHIVE_COLUMNS = (
+    "public_id",
+    "timestamp",
+    "known_to",
+    "session_id",
+    "sequence_id",
+    "instrument_public_id",
+    "trade_id",
+    "executed_at",
+    "price",
+    "size",
+    "side",
+    "id",
+)
+_DEFAULT_RESTORE_BATCH_SIZE = 10_000
 
-def _parser_for_column(col_type: Any) -> Callable[[str], Any]:
+type _ArchiveKey = tuple[str, datetime, datetime]
+type _ArchiveValue = JsonValue | datetime
+type _ArchiveParser = Callable[[str], _ArchiveValue]
+
+
+def _parser_for_column(col_type: Any) -> _ArchiveParser:
     """Return a CSV string parser for a SQLAlchemy column type.
 
     Handles TypeDecorator wrapping (TZDateTime, UUIDColumn) and
@@ -1508,7 +1535,59 @@ def _parse_str_csv(s: str) -> str | None:
 
 
 def _parse_datetime_csv(s: str) -> datetime | None:
-    return datetime.fromisoformat(s) if s else None
+    """Parse one timezone-aware CSV datetime, including PostgreSQL's max sentinel.
+
+    PostgreSQL renders ``9999-12-31 23:59:59+00`` as
+    ``10000-01-01 00:59:59+01`` in a Europe/Warsaw session. Python cannot
+    construct year 10000, so only an overflow value that resolves exactly
+    to the known open-ended sentinel is accepted.
+
+    Args:
+        s: CSV datetime text, or an empty string for NULL.
+
+    Returns:
+        A timezone-aware datetime, the canonical open-ended sentinel, or None.
+
+    Raises:
+        ValueError: If the value is naive, malformed, or an unsupported
+            out-of-range datetime.
+    """
+    if not s:
+        return None
+    try:
+        parsed = datetime.fromisoformat(s)
+    except ValueError as exc:
+        return _parse_overflow_datetime_csv(s, exc)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"CSV datetime must include a UTC offset: {s!r}")
+    return parsed
+
+
+def _parse_overflow_datetime_csv(s: str, cause: ValueError) -> datetime:
+    """Recognize only the timezone-rendered form of the maximum known-to instant.
+
+    Args:
+        s: CSV datetime text rejected by ``datetime.fromisoformat``.
+        cause: Original parser failure retained as exception context.
+
+    Returns:
+        ``KNOWN_TO_MAX`` when the overflow text denotes that exact instant.
+
+    Raises:
+        ValueError: If the text denotes any other invalid or overflow instant.
+    """
+    overflow_prefix = "10000-01-01"
+    if not s.startswith(overflow_prefix):
+        raise ValueError(f"Invalid CSV datetime: {s!r}") from cause
+    synthetic = f"2000-01-01{s[len(overflow_prefix):]}"
+    try:
+        comparable = datetime.fromisoformat(synthetic)
+    except ValueError:
+        raise ValueError(f"Invalid CSV datetime: {s!r}") from cause
+    sentinel = datetime(1999, 12, 31, 23, 59, 59, tzinfo=UTC)
+    if comparable.tzinfo is None or comparable.astimezone(UTC) != sentinel:
+        raise ValueError(f"Unsupported overflow CSV datetime: {s!r}") from cause
+    return KNOWN_TO_MAX
 
 
 def _parse_float_csv(s: str) -> float | None:
@@ -1525,14 +1604,14 @@ def _parse_bool_csv(s: str) -> bool | None:
     return s in ("True", "1", "true")
 
 
-def _parse_json_csv(s: str) -> dict[str, Any] | list[Any] | None:
+def _parse_json_csv(s: str) -> JsonValue:
     return json.loads(s) if s else None
 
 
 def _build_column_parsers(
     model: type[Any],
     header: list[str],
-) -> list[Callable[[str], Any]]:
+) -> list[_ArchiveParser]:
     """Build a list of CSV value parsers matching the CSV header order.
 
     Args:
@@ -1549,6 +1628,105 @@ def _build_column_parsers(
             f"CSV header contains unknown columns for {model.__tablename__}: {unknown}"
         )
     return [_parser_for_column(table_cols[name].type) for name in header]
+
+
+def _restore_headers_for_table(table: str) -> tuple[tuple[str, ...], ...]:
+    """Return every explicitly supported complete header for one table.
+
+    The production trade exporter has a versioned full-row header that
+    includes ``id``. The legacy in-application event exporter remains an
+    accepted plain-CSV format. No other permutations are inferred.
+
+    Args:
+        table: Valid archive restore table name.
+
+    Returns:
+        One or more exact complete headers accepted for the table.
+
+    Raises:
+        ValueError: If no restore header is defined for the table.
+    """
+    if table == "trades":
+        return (_TRADE_PRODUCTION_ARCHIVE_COLUMNS, EVENT_TABLES[table].columns)
+    event_spec = EVENT_TABLES.get(table)
+    if event_spec is not None:
+        return (event_spec.columns,)
+    if table == "candles":
+        return (_CANDLE_AUDIT_COLUMNS,)
+    state_spec = STATE_TABLES.get(table)
+    if state_spec is not None:
+        return (_get_model_archive_columns(state_spec.model),)
+    raise ValueError(f"No archive header is defined for restore table: {table}")
+
+
+def _open_archive_text(path: Path) -> TextIO:
+    """Open one supported archive as a streaming UTF-8 text reader.
+
+    Args:
+        path: Plain ``.csv`` or zstd-compressed ``.csv.zst`` path.
+
+    Returns:
+        A text stream suitable for ``csv.reader``.
+
+    Raises:
+        ValueError: If the archive extension is unsupported.
+    """
+    if path.name.endswith(".csv.zst"):
+        return zstd.open(path, mode="rt", encoding="utf-8", newline="")
+    if path.suffix == ".csv":
+        return path.open(encoding="utf-8", newline="")
+    raise ValueError(f"Unsupported archive extension for {path}; expected .csv or .csv.zst")
+
+
+def _iter_archive_batches(
+    rows: Iterable[list[str]],
+    *,
+    width: int,
+    batch_size: int,
+) -> Iterator[list[tuple[str, ...]]]:
+    """Yield validated CSV rows in bounded batches.
+
+    Args:
+        rows: Streaming CSV data rows after the header.
+        width: Exact field count required by the validated header.
+        batch_size: Maximum rows retained in one batch.
+
+    Yields:
+        Lists containing at most ``batch_size`` immutable raw rows.
+
+    Raises:
+        ValueError: If any row has a different field count from the header.
+    """
+    batch: list[tuple[str, ...]] = []
+    for line_number, row in enumerate(rows, start=2):
+        if len(row) != width:
+            raise ValueError(f"CSV row {line_number} has {len(row)} fields; expected {width}")
+        batch.append(tuple(row))
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _archive_key(raw: tuple[str, ...]) -> _ArchiveKey:
+    """Parse and canonicalize one positional archive identity.
+
+    Args:
+        raw: Validated raw CSV row with the temporal identity first.
+
+    Returns:
+        ``(public_id, timestamp, known_to)`` with both instants in UTC.
+
+    Raises:
+        ValueError: If any temporal identity field is empty or invalid.
+    """
+    public_id = raw[0]
+    timestamp = _parse_datetime_csv(raw[1])
+    known_to = _parse_datetime_csv(raw[2])
+    if not public_id or timestamp is None or known_to is None:
+        raise ValueError("CSV temporal identity fields must be non-empty")
+    return (public_id, timestamp.astimezone(UTC), known_to.astimezone(UTC))
 
 
 class ExecutionRestoreUnsupportedError(RuntimeError):
@@ -1595,15 +1773,28 @@ class ArchiveRestorer:
 
     Attributes:
         _repo: Sync database repository.
+        _batch_size: Maximum CSV rows retained and inserted per batch.
     """
 
-    def __init__(self, repo: DatabaseRepository) -> None:
+    def __init__(
+        self,
+        repo: DatabaseRepository,
+        *,
+        batch_size: int = _DEFAULT_RESTORE_BATCH_SIZE,
+    ) -> None:
         """Initialize the archive restorer.
 
         Args:
             repo: Sync database repository.
+            batch_size: Maximum rows parsed and inserted per batch.
+
+        Raises:
+            ValueError: If ``batch_size`` is not positive.
         """
+        if batch_size <= 0:
+            raise ValueError("Archive restore batch_size must be positive")
         self._repo = repo
+        self._batch_size = batch_size
 
     def restore(
         self,
@@ -1612,11 +1803,11 @@ class ArchiveRestorer:
         paths: list[Path],
         source: str = "audit",
     ) -> RestoreResult:
-        """Restore archived rows from CSV files.
+        """Restore archived rows from plain or zstd-compressed CSV files.
 
         Args:
             table: Table name (must be a known event, state, or candle table).
-            paths: List of CSV file paths to restore.
+            paths: List of ``.csv`` or ``.csv.zst`` paths to restore.
             source: Restore mode — ``audit`` for full history.
 
         Returns:
@@ -1643,12 +1834,17 @@ class ArchiveRestorer:
         if source != "audit":
             raise ValueError(f"Restore source '{source}' not yet supported (use 'audit')")
 
+        expected_headers = _restore_headers_for_table(table)
         total_inserted = 0
         total_skipped = 0
         files_processed = 0
 
         for path in paths:
-            inserted, skipped = self._restore_file(model, path)
+            inserted, skipped = self._restore_file(
+                model,
+                path,
+                expected_headers,
+            )
             total_inserted += inserted
             total_skipped += skipped
             files_processed += 1
@@ -1663,57 +1859,81 @@ class ArchiveRestorer:
         self,
         model: type[Any],
         path: Path,
+        expected_headers: tuple[tuple[str, ...], ...],
     ) -> tuple[int, int]:
-        """Restore a single CSV file into the database.
+        """Stream one validated archive file into bounded database batches.
 
         Args:
             model: SQLAlchemy model class.
-            path: CSV file path.
+            path: Plain or zstd-compressed CSV file path.
+            expected_headers: Exact complete layouts accepted for the table.
+
+        Returns:
+            Tuple of (rows_inserted, rows_skipped).
+
+        Raises:
+            ValueError: If the header or a row width violates the archive format.
+        """
+        with _open_archive_text(path) as handle:
+            reader = csv.reader(handle, strict=True)
+            header = next(reader, None)
+            if header is None:
+                raise ValueError(f"Archive {path} is missing CSV header for {model.__tablename__}")
+            if tuple(header) not in expected_headers:
+                raise ValueError(
+                    f"CSV header mismatch for {model.__tablename__}: "
+                    f"expected {expected_headers!r}, got {tuple(header)!r}"
+                )
+            parsers = _build_column_parsers(model, header)
+            inserted = 0
+            skipped = 0
+            for raw_rows in _iter_archive_batches(
+                reader,
+                width=len(header),
+                batch_size=self._batch_size,
+            ):
+                batch_inserted, batch_skipped = self._restore_batch(
+                    model,
+                    header,
+                    parsers,
+                    raw_rows,
+                )
+                inserted += batch_inserted
+                skipped += batch_skipped
+        return inserted, skipped
+
+    def _restore_batch(
+        self,
+        model: type[Any],
+        header: list[str],
+        parsers: list[_ArchiveParser],
+        raw_rows: list[tuple[str, ...]],
+    ) -> tuple[int, int]:
+        """Deduplicate, parse, and insert one bounded archive batch.
+
+        Args:
+            model: SQLAlchemy model class.
+            header: Previously validated exact column names.
+            parsers: Typed CSV parsers aligned with ``header``.
+            raw_rows: At most the configured number of validated raw rows.
 
         Returns:
             Tuple of (rows_inserted, rows_skipped).
         """
-        with path.open(encoding="utf-8", newline="") as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            if header is None:
-                return 0, 0
-            raw_rows = [tuple(row) for row in reader]
-
-        if not raw_rows:
-            return 0, 0
-
-        parsers = _build_column_parsers(model, header)
-        existing_keys = self._get_existing_keys(model, raw_rows)
-
-        new_rows: list[dict[str, Any]] = []
+        candidate_keys = [_archive_key(raw) for raw in raw_rows]
+        existing_keys = self._repo.get_existing_archive_keys(model, candidate_keys)
+        seen_keys = set(existing_keys)
+        new_rows: list[dict[str, _ArchiveValue]] = []
         skipped = 0
-        for raw in raw_rows:
-            key = (raw[0], raw[1], raw[2])
-            if key in existing_keys:
+        for raw, key in zip(raw_rows, candidate_keys, strict=True):
+            if key in seen_keys:
                 skipped += 1
                 continue
-            row_dict = {header[i]: parsers[i](raw[i]) for i in range(len(header))}
-            new_rows.append(row_dict)
-
+            row = {
+                name: parser(value)
+                for name, parser, value in zip(header, parsers, raw, strict=True)
+            }
+            new_rows.append(row)
+            seen_keys.add(key)
         inserted = self._repo.bulk_insert_from_archive(model, new_rows)
         return inserted, skipped
-
-    def _get_existing_keys(
-        self,
-        model: type[Any],
-        raw_rows: list[tuple[str, ...]],
-    ) -> set[tuple[str, str, str]]:
-        """Extract date range from CSV rows and query existing dedup keys.
-
-        Args:
-            model: SQLAlchemy model class.
-            raw_rows: Raw CSV string rows (timestamp at index 1).
-
-        Returns:
-            Set of (public_id, timestamp_iso, known_to_iso) tuples.
-        """
-        timestamps = [r[1] for r in raw_rows]
-        min_date = datetime.fromisoformat(min(timestamps)).date()
-        max_date = datetime.fromisoformat(max(timestamps)).date()
-        return self._repo.get_existing_archive_keys(model, min_date, max_date)
