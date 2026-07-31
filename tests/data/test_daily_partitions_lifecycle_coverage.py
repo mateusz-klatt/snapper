@@ -600,6 +600,31 @@ def test_partition_topology_requirement_accepts_quoted_spacing_and_checks_indexe
         ),
         (
             (
+                replace(
+                    _legacy_ref(),
+                    bound="FOR VALUES FROM (MINVALUE) TO ('2026-08-02 00:00:00+00')",
+                ),
+                _default_ref(),
+                _daily_ref(),
+            ),
+            "refused: trades_legacy is missing or has an unexpected bound",
+        ),
+        (
+            (
+                _legacy_ref(),
+                replace(
+                    _default_ref(),
+                    bound=(
+                        "FOR VALUES FROM ('2026-08-01 00:00:00+00') "
+                        "TO ('2026-08-02 00:00:00+00')"
+                    ),
+                ),
+                _daily_ref(),
+            ),
+            "refused: trades_default is missing or is not DEFAULT",
+        ),
+        (
+            (
                 _legacy_ref(),
                 _default_ref(),
                 replace(

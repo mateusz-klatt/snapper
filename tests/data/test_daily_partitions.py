@@ -351,20 +351,60 @@ def test_adoption_refuses_target_name_collisions_before_preparation() -> None:
     connection = _connection_double()
     connection.execute.return_value.scalars.return_value = iter(("ticks_legacy",))
 
-    with pytest.raises(
-        lifecycle.DailyPartitionError,
-        match="target partition relation names already exist.*ticks_legacy",
-    ):
+    with pytest.raises(lifecycle.DailyPartitionError) as error:
         lifecycle._verify_adoption_names_available(
             connection,
             lifecycle._spec("ticks"),
             _ANCHOR,
         )
 
+    assert str(error.value) == (
+        "refused: target partition relation names already exist: ('ticks_legacy',)"
+    )
     parameters = connection.execute.call_args.args[1]
     assert "ticks_legacy" in parameters["names"]
     assert "ticks_d20260801" in parameters["names"]
     assert "ticks_d20260814_instrument_public_id_timestamp_idx" in parameters["names"]
+    assert not any(name.endswith("_public_id") for name in parameters["names"])
+
+
+@pytest.mark.parametrize(
+    ("table", "local_public_id"),
+    [
+        ("ticks", False),
+        ("candles", True),
+        ("trades", True),
+    ],
+)
+def test_adoption_accepts_available_names_for_each_public_id_contract(
+    table: lifecycle.MarketDataTable,
+    local_public_id: bool,
+) -> None:
+    """Free cutover names must allow adoption preparation to continue.
+
+    Given: No public relation occupies any planned cutover name for one table.
+    When: Runtime checks names for a table with or without leaf-local indexes.
+    Then: It returns normally after querying the exact local public-id names.
+    """
+    connection = _connection_double()
+    connection.execute.return_value.scalars.return_value = iter(())
+
+    result = lifecycle._verify_adoption_names_available(
+        connection,
+        lifecycle._spec(table),
+        _ANCHOR,
+    )
+
+    names = cast(tuple[str, ...], connection.execute.call_args.args[1]["names"])
+    actual_local_indexes = {name for name in names if name.endswith("_public_id")}
+    expected_local_indexes = {
+        f"{table}_d{(_ANCHOR + timedelta(days=offset)):%Y%m%d}_public_id"
+        for offset in range(lifecycle.FUTURE_LEAF_TARGET)
+    }
+    expected_local_indexes.add(f"{table}_default_public_id")
+    assert result is None
+    assert actual_local_indexes == (expected_local_indexes if local_public_id else set())
+    connection.execute.return_value.scalars.assert_called_once_with()
 
 
 def test_generated_leaf_does_not_hide_a_reserved_legacy_range_check() -> None:
@@ -593,11 +633,14 @@ def test_partitioned_noop_refuses_a_malformed_legacy_primary_key() -> None:
 def test_partitioned_noop_refuses_a_nested_or_foreign_direct_child() -> None:
     """Every direct child must remain a public ordinary partition leaf.
 
-    Given: An otherwise partitioned ticks report containing a foreign-schema
-        child that is itself partitioned.
+    Given: A valid public ticks leaf precedes a foreign child that is partitioned.
     When: Runtime validates direct-child relation shapes.
-    Then: It refuses before names and bounds can disguise the nested topology.
+    Then: It continues past the valid leaf and refuses the malformed second one.
     """
+    valid = lifecycle.PartitionRef(
+        name="ticks_legacy",
+        bound="FOR VALUES FROM (MINVALUE) TO ('2026-08-01 00:00:00+00')",
+    )
     nested = lifecycle.PartitionRef(
         name="ticks_d20260801",
         bound="FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-08-02 00:00:00+00')",
@@ -605,13 +648,47 @@ def test_partitioned_noop_refuses_a_nested_or_foreign_direct_child() -> None:
         relation_kind="p",
         has_partition_key=True,
     )
-    report = _partitioned_report("ticks", (nested,))
+    report = _partitioned_report("ticks", (valid, nested))
 
-    with pytest.raises(
-        lifecycle.DailyPartitionError,
-        match="unexpected relation shape",
-    ):
+    with pytest.raises(lifecycle.DailyPartitionError) as error:
         lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
+
+    assert str(error.value) == (
+        "refused: ticks direct child partition_probe.ticks_d20260801 "
+        "has an unexpected relation shape"
+    )
+
+
+def test_partitioned_shape_verifier_accepts_multiple_exact_leaf_shapes() -> None:
+    """Every valid direct child must pass the complete leaf-shape contract.
+
+    Given: Two public ordinary partitions satisfying all five shape conditions.
+    When: Runtime validates every direct-child relation shape.
+    Then: It continues after the first child and accepts the complete topology.
+    """
+    legacy = lifecycle.PartitionRef(
+        name="ticks_legacy",
+        bound="FOR VALUES FROM (MINVALUE) TO ('2026-08-01 00:00:00+00')",
+        schema="public",
+        relation_kind="r",
+        is_partition=True,
+        has_partition_key=False,
+        inheritance_sequence=1,
+    )
+    default = lifecycle.PartitionRef(
+        name="ticks_default",
+        bound="DEFAULT",
+        schema="public",
+        relation_kind="r",
+        is_partition=True,
+        has_partition_key=False,
+        inheritance_sequence=1,
+    )
+    report = _partitioned_report("ticks", (legacy, default))
+
+    result = lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
+
+    assert result is None
 
 
 def test_partitioned_noop_refuses_a_malformed_legacy_active_partial() -> None:
