@@ -1,5 +1,6 @@
 """Mutation-sensitive unit coverage for partition lifecycle execution and verification."""
 
+import re
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -446,15 +447,16 @@ def test_detach_rejects_a_non_lock_database_failure_without_retry() -> None:
     """Only PostgreSQL lock-not-available is retryable."""
     connection = _connection_double()
     failure = _dbapi_error(_PersistentError("serialization"))
+    spec = lifecycle._spec("trades")
 
     with (
-        patch.object(lifecycle, "_execute_transaction", side_effect=failure) as execute,
+        patch.object(lifecycle, "_execute_detach_attempt", side_effect=failure) as execute,
         patch.object(lifecycle.time, "sleep") as sleep,
         pytest.raises(lifecycle.DailyPartitionError, match="after 1 attempt"),
     ):
-        lifecycle._detach_with_retries(connection, "ALTER TABLE trades DETACH PARTITION leaf")
+        lifecycle._detach_with_retries(connection, spec, "trades_d20260801", _ANCHOR)
 
-    execute.assert_called_once()
+    execute.assert_called_once_with(connection, spec, "trades_d20260801", _ANCHOR)
     sleep.assert_not_called()
 
 
@@ -462,27 +464,58 @@ def test_detach_exhausts_exactly_three_lock_attempts_and_two_backoffs() -> None:
     """Bounded DETACH must surface the third lock timeout rather than spin."""
     connection = _connection_double()
     failure = _dbapi_error(_LockError("lock timeout"))
+    spec = lifecycle._spec("trades")
 
     with (
-        patch.object(lifecycle, "_execute_transaction", side_effect=failure) as execute,
+        patch.object(lifecycle, "_execute_detach_attempt", side_effect=failure) as execute,
         patch.object(lifecycle.time, "sleep") as sleep,
         pytest.raises(lifecycle.DailyPartitionError, match="after 3 attempt"),
     ):
-        lifecycle._detach_with_retries(connection, "ALTER TABLE trades DETACH PARTITION leaf")
+        lifecycle._detach_with_retries(connection, spec, "trades_d20260801", _ANCHOR)
 
     assert execute.call_count == lifecycle.DETACH_RETRIES
+    execute.assert_called_with(connection, spec, "trades_d20260801", _ANCHOR)
     assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
 
 
 def test_detach_zero_retry_guard_still_fails_closed() -> None:
     """A corrupted retry budget cannot make DETACH report success."""
     connection = _connection_double()
+    spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "DETACH_RETRIES", 0),
         pytest.raises(lifecycle.DailyPartitionError, match="exhausted its bounded retry loop"),
     ):
-        lifecycle._detach_with_retries(connection, "ALTER TABLE trades DETACH PARTITION leaf")
+        lifecycle._detach_with_retries(connection, spec, "trades_d20260801", _ANCHOR)
+
+
+def test_detach_attempt_executes_plain_detach_after_locked_exact_bound() -> None:
+    """An unchanged daily attachment must permit plain DETACH under its parent lock.
+
+    Given: The locked catalog still exposes the selected leaf with its exact UTC day bound.
+    When: One bounded DETACH attempt revalidates that attachment.
+    Then: It executes plain DETACH only after the bounded settings and parent lock.
+    """
+    connection = _connection_double()
+    spec = lifecycle._spec("trades")
+
+    with patch.object(lifecycle, "_direct_partitions", return_value=(_daily_ref(),)):
+        lifecycle._execute_detach_attempt(
+            connection,
+            spec,
+            "trades_d20260801",
+            _ANCHOR,
+        )
+
+    executed = [str(item.args[0]) for item in connection.execute.call_args_list]
+    assert executed == [
+        "SET LOCAL TIME ZONE 'UTC'",
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '30s'",
+        "LOCK TABLE trades IN ACCESS EXCLUSIVE MODE",
+        "ALTER TABLE trades DETACH PARTITION trades_d20260801",
+    ]
 
 
 def test_sqlstate_rejects_malformed_driver_attributes() -> None:
@@ -547,9 +580,24 @@ def test_partition_topology_requirement_accepts_quoted_spacing_and_checks_indexe
 @pytest.mark.parametrize(
     ("partitions", "message"),
     [
-        ((_default_ref(), _daily_ref()), "trades_legacy"),
-        ((_legacy_ref(), _daily_ref()), "trades_default"),
-        ((_legacy_ref(), _default_ref()), "trades_d20260801"),
+        (
+            (_default_ref(), _daily_ref()),
+            (
+                "refused: trades direct partition manifest is "
+                "('trades_default', 'trades_d20260801')"
+            ),
+        ),
+        (
+            (_legacy_ref(), _daily_ref()),
+            (
+                "refused: trades direct partition manifest is "
+                "('trades_legacy', 'trades_d20260801')"
+            ),
+        ),
+        (
+            (_legacy_ref(), _default_ref()),
+            "refused: trades direct partition manifest is ('trades_legacy', 'trades_default')",
+        ),
         (
             (
                 _legacy_ref(),
@@ -561,7 +609,7 @@ def test_partition_topology_requirement_accepts_quoted_spacing_and_checks_indexe
                     ),
                 ),
             ),
-            "trades_d20260801",
+            "refused: trades_d20260801 is missing or has an unexpected bound",
         ),
     ],
 )
@@ -576,7 +624,10 @@ def test_partitioned_verification_refuses_each_required_child_gap(
         patch.object(lifecycle, "FUTURE_LEAF_TARGET", 1),
         patch.object(lifecycle, "_require_partitioned_topology"),
         patch.object(lifecycle, "inspect", return_value=_partitioned(partitions)),
-        pytest.raises(lifecycle.DailyPartitionError, match=message),
+        pytest.raises(
+            lifecycle.DailyPartitionError,
+            match=rf"^{re.escape(message)}$",
+        ),
     ):
         lifecycle._verify_partitioned(
             connection,
@@ -783,8 +834,8 @@ def test_partitioned_relation_shapes_runs_all_local_and_manifest_checks() -> Non
         call(connection, "trades_legacy", constraint_name),
     ]
     assert constraints.call_args_list == [
-        call(connection, spec, "trades", local=False),
-        call(connection, spec, "trades_legacy", local=True),
+        call(connection, spec, "trades", lifecycle.ConstraintRole.PARENT),
+        call(connection, spec, "trades_legacy", lifecycle.ConstraintRole.LEGACY),
     ]
     manifest.assert_called_once_with(connection, spec, "trades_legacy")
     local.assert_called_once_with(connection, spec, "trades_legacy")
@@ -1032,6 +1083,102 @@ def test_active_predicate_matcher_accepts_only_the_infinity_equality(
     assert lifecycle._active_predicate_matches(predicate) is expected
 
 
+def test_leaf_index_manifest_accepts_exact_local_names_and_parent_edges() -> None:
+    """The leaf manifest must bind every inherited index to its exact parent.
+
+    Given: A candles leaf with both local names and exact inherited index shapes.
+    When: The leaf index manifest is verified.
+    Then: Every inherited index is accepted only through its named parent edge.
+    """
+    connection = _connection_double()
+    spec = lifecycle._spec("candles")
+    leaf = "candles_d20260801"
+    inherited_names = tuple(
+        f"{leaf}_{'_'.join(index.columns)}_idx" for index in spec.parent_indexes
+    )
+    shapes = tuple(
+        _shape(
+            index.columns,
+            unique=index.unique,
+            constraint_backed=False,
+            predicate=_ACTIVE_PREDICATE if index.predicate is not None else None,
+            parent_indexes=(index.name,),
+        )
+        for index in spec.parent_indexes
+    )
+    names = (*inherited_names, f"{leaf}_pkey", f"{leaf}_public_id")
+
+    with (
+        patch.object(lifecycle, "_relation_index_names", return_value=names),
+        patch.object(lifecycle, "_index_shape", side_effect=shapes) as index_shape,
+    ):
+        lifecycle._verify_leaf_index_manifest(connection, spec, leaf)
+
+    assert index_shape.call_args_list == [
+        call(connection, leaf, child_name) for child_name in inherited_names
+    ]
+
+
+def test_leaf_index_manifest_refuses_exact_names_with_the_wrong_parent_edge() -> None:
+    """The inherited child name cannot disguise a wrong index-parent edge.
+
+    Given: An exact ticks leaf name manifest whose inherited index names the wrong parent.
+    When: The leaf index manifest verifies the inherited index shape.
+    Then: It emits the exact refusal naming both the child and required parent.
+    """
+    connection = _connection_double()
+    spec = lifecycle._spec("ticks")
+    leaf = "ticks_d20260801"
+    parent = spec.parent_indexes[0]
+    child_name = f"{leaf}_{'_'.join(parent.columns)}_idx"
+    names = (child_name, f"{leaf}_pkey")
+    shape = _shape(
+        parent.columns,
+        unique=parent.unique,
+        constraint_backed=False,
+        parent_indexes=("wrong_parent",),
+    )
+    message = f"refused: {child_name} is not the exact child of {parent.name}"
+
+    with (
+        patch.object(lifecycle, "_relation_index_names", return_value=names),
+        patch.object(lifecycle, "_index_shape", return_value=shape),
+        pytest.raises(
+            lifecycle.DailyPartitionError,
+            match=rf"^{re.escape(message)}$",
+        ),
+    ):
+        lifecycle._verify_leaf_index_manifest(connection, spec, leaf)
+
+
+def test_leaf_index_manifest_refuses_an_extra_relation_name_exactly() -> None:
+    """The complete name manifest must reject even one extra leaf index.
+
+    Given: A ticks leaf index catalog containing its required names and one extra name.
+    When: The leaf index manifest is verified.
+    Then: It emits the exact refusal with the observed ordered name tuple.
+    """
+    connection = _connection_double()
+    spec = lifecycle._spec("ticks")
+    leaf = "ticks_d20260801"
+    parent = spec.parent_indexes[0]
+    names = (
+        f"{leaf}_{'_'.join(parent.columns)}_idx",
+        f"{leaf}_pkey",
+        "unexpected_index",
+    )
+    message = f"refused: {leaf} index manifest is {names!r}"
+
+    with (
+        patch.object(lifecycle, "_relation_index_names", return_value=names),
+        pytest.raises(
+            lifecycle.DailyPartitionError,
+            match=rf"^{re.escape(message)}$",
+        ),
+    ):
+        lifecycle._verify_leaf_index_manifest(connection, spec, leaf)
+
+
 @pytest.mark.parametrize(
     "primary",
     [
@@ -1052,6 +1199,10 @@ def test_leaf_verifier_rejects_every_malformed_primary_shape(
     connection = _connection_double()
 
     with (
+        patch.object(lifecycle, "_verify_relation_columns"),
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
+        patch.object(lifecycle, "_verify_leaf_index_manifest"),
         patch.object(lifecycle, "_index_shape", return_value=primary),
         pytest.raises(lifecycle.DailyPartitionError, match="local primary key"),
     ):
@@ -1067,7 +1218,13 @@ def test_leaf_verifier_returns_after_the_ticks_primary_key() -> None:
     connection = _connection_double()
     primary = _shape(("id",), unique=True, constraint_backed=True)
 
-    with patch.object(lifecycle, "_index_shape", return_value=primary) as index_shape:
+    with (
+        patch.object(lifecycle, "_verify_relation_columns"),
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
+        patch.object(lifecycle, "_verify_leaf_index_manifest"),
+        patch.object(lifecycle, "_index_shape", return_value=primary) as index_shape,
+    ):
         lifecycle._verify_leaf_local_objects(
             connection,
             lifecycle._spec("ticks"),
@@ -1125,6 +1282,10 @@ def test_leaf_verifier_rejects_every_malformed_active_public_id_shape(
     primary = _shape(("id",), unique=True, constraint_backed=True)
 
     with (
+        patch.object(lifecycle, "_verify_relation_columns"),
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
+        patch.object(lifecycle, "_verify_leaf_index_manifest"),
         patch.object(lifecycle, "_index_shape", side_effect=(primary, public_id)),
         pytest.raises(lifecycle.DailyPartitionError, match="active-public-id partial"),
     ):
@@ -1146,7 +1307,13 @@ def test_leaf_verifier_accepts_both_exact_local_objects() -> None:
         predicate=_ACTIVE_PREDICATE,
     )
 
-    with patch.object(lifecycle, "_index_shape", side_effect=(primary, public_id)):
+    with (
+        patch.object(lifecycle, "_verify_relation_columns"),
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
+        patch.object(lifecycle, "_verify_leaf_index_manifest"),
+        patch.object(lifecycle, "_index_shape", side_effect=(primary, public_id)),
+    ):
         lifecycle._verify_leaf_local_objects(
             connection,
             lifecycle._spec("candles"),

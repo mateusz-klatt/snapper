@@ -17,6 +17,12 @@ import snapper.data.daily_partitions as lifecycle
 
 _ANCHOR = datetime(2026, 8, 1, tzinfo=UTC)
 
+_PARTITION_KEYS: dict[lifecycle.MarketDataTable, str] = {
+    "ticks": "timestamp",
+    "candles": "open_at",
+    "trades": "executed_at",
+}
+
 _COLUMN_MANIFESTS: dict[
     lifecycle.MarketDataTable,
     tuple[tuple[str, str, bool, str | None, str, str], ...],
@@ -118,6 +124,40 @@ _NONCHECK_CONSTRAINT_MANIFESTS: dict[
         ),
     ),
 }
+
+
+def _literal_noncheck_manifest(
+    table: lifecycle.MarketDataTable,
+    role: lifecycle.ConstraintRole,
+) -> tuple[lifecycle.ConstraintShape, ...]:
+    """Build the independently pinned ordinary or parent constraint manifest.
+
+    Args:
+        table: Table whose literal non-CHECK constraints are required.
+        role: Ordinary or parent role selecting local key constraints.
+
+    Returns:
+        Exact sorted structural constraint shapes for the requested role.
+    """
+    shapes = [
+        lifecycle.ConstraintShape(
+            name=f"{table}_{name}_not_null",
+            kind="n",
+            definition=f"NOT NULL {name}",
+            validated=True,
+            deferrable=False,
+            initially_deferred=False,
+            index_name=None,
+        )
+        for name, _data_type, nullable, _default, _identity, _generated in (
+            _COLUMN_MANIFESTS[table]
+        )
+        if not nullable
+        or (name == _PARTITION_KEYS[table] and role is not lifecycle.ConstraintRole.ORDINARY)
+    ]
+    if role is not lifecycle.ConstraintRole.PARENT:
+        shapes.extend(_NONCHECK_CONSTRAINT_MANIFESTS[table])
+    return tuple(sorted(shapes, key=lambda shape: shape.name))
 
 
 def _connection_double(
@@ -426,7 +466,9 @@ def test_relation_state_maps_the_closed_catalog_vocabulary(
 def test_inspect_returns_a_closed_nonpartitioned_report(kind: str | None) -> None:
     """Inspection must stop before child queries for every nonparent state."""
     connection = _connection_double()
-    connection.scalar.side_effect = ("public", kind)
+    relation = MagicMock()
+    relation.one_or_none.return_value = None if kind is None else (kind, False)
+    connection.execute.side_effect = ((), relation)
 
     report = lifecycle.inspect(connection, "ticks", _ANCHOR)
 
@@ -435,13 +477,17 @@ def test_inspect_returns_a_closed_nonpartitioned_report(kind: str | None) -> Non
     assert report.partitions == ()
     assert report.future_leaf_count == 0
     assert report.future_leaf_alarm is True
-    assert connection.scalar.call_count == 2
+    assert connection.scalar.call_count == 1
+    assert connection.execute.call_count == 2
 
 
 def test_inspect_reports_partition_key_default_rows_and_future_alarm() -> None:
     """Partition inspection must derive all topology fields from catalog facts."""
     connection = _connection_double()
-    connection.scalar.side_effect = ("public", "p", "RANGE (executed_at)")
+    relation = MagicMock()
+    relation.one_or_none.return_value = ("p", False)
+    connection.execute.side_effect = ((), relation)
+    connection.scalar.side_effect = ("public", "RANGE (executed_at)")
     partitions = (
         lifecycle.PartitionRef(
             "trades_d20260801",
@@ -468,7 +514,10 @@ def test_inspect_reports_partition_key_default_rows_and_future_alarm() -> None:
 def test_inspect_skips_the_row_probe_without_an_attached_default() -> None:
     """A missing DEFAULT edge must not trigger SQL against an unrelated name."""
     connection = _connection_double()
-    connection.scalar.side_effect = ("public", "p", "RANGE (timestamp)")
+    relation = MagicMock()
+    relation.one_or_none.return_value = ("p", False)
+    connection.execute.side_effect = ((), relation)
+    connection.scalar.side_effect = ("public", "RANGE (timestamp)")
 
     with (
         patch.object(lifecycle, "_direct_partitions", return_value=()),
@@ -714,7 +763,13 @@ def test_live_detach_uses_the_bounded_retry_executor() -> None:
 
     statement = "ALTER TABLE trades DETACH PARTITION trades_d20260601"
     assert result.action is lifecycle.LifecycleAction.DETACHED
-    execute.assert_called_once_with(connection, statement)
+    assert result.statements == (statement,)
+    execute.assert_called_once_with(
+        connection,
+        lifecycle._spec("trades"),
+        "trades_d20260601",
+        datetime(2026, 6, 1, tzinfo=UTC),
+    )
 
 
 def test_private_spec_rejects_a_runtime_allowlist_escape() -> None:
@@ -761,8 +816,16 @@ def test_mutation_entry_points_reject_an_active_transaction() -> None:
 def test_direct_partition_reader_preserves_name_bound_and_order() -> None:
     """Direct partition rows must become immutable typed references unchanged."""
     rows = (
-        ("ticks_d20260801", "FOR VALUES FROM ('a') TO ('b')"),
-        ("ticks_default", "DEFAULT"),
+        (
+            "public",
+            "ticks_d20260801",
+            "FOR VALUES FROM ('a') TO ('b')",
+            "r",
+            True,
+            False,
+            1,
+        ),
+        ("public", "ticks_default", "DEFAULT", "r", True, False, 1),
     )
     connection = _connection_double(rows)
 
@@ -819,7 +882,8 @@ def test_ordinary_schema_verifier_runs_every_independent_catalog_check() -> None
     spec = lifecycle._spec("ticks")
 
     with (
-        patch.object(lifecycle, "_verify_ordinary_columns") as columns,
+        patch.object(lifecycle, "_verify_adoption_names_available") as names,
+        patch.object(lifecycle, "_verify_relation_columns") as columns,
         patch.object(lifecycle, "_verify_ordinary_checks") as checks,
         patch.object(lifecycle, "_verify_ordinary_indexes") as indexes,
         patch.object(lifecycle, "_verify_noncheck_constraints") as constraints,
@@ -827,10 +891,21 @@ def test_ordinary_schema_verifier_runs_every_independent_catalog_check() -> None
     ):
         lifecycle._verify_ordinary_schema(connection, spec, _ANCHOR)
 
-    columns.assert_called_once_with(connection, spec)
+    names.assert_called_once_with(connection, spec, _ANCHOR)
+    columns.assert_called_once_with(
+        connection,
+        spec,
+        "ticks",
+        partition_key_not_null=False,
+    )
     checks.assert_called_once_with(connection, spec)
     indexes.assert_called_once_with(connection, spec)
-    constraints.assert_called_once_with(connection, spec, "ticks", local=True)
+    constraints.assert_called_once_with(
+        connection,
+        spec,
+        "ticks",
+        lifecycle.ConstraintRole.ORDINARY,
+    )
 
 
 def test_ordinary_schema_verifier_rejects_a_resumed_wrong_range() -> None:
@@ -839,7 +914,8 @@ def test_ordinary_schema_verifier_rejects_a_resumed_wrong_range() -> None:
     info = lifecycle.ConstraintInfo("CHECK (timestamp < 'wrong')", True)
 
     with (
-        patch.object(lifecycle, "_verify_ordinary_columns"),
+        patch.object(lifecycle, "_verify_adoption_names_available"),
+        patch.object(lifecycle, "_verify_relation_columns"),
         patch.object(lifecycle, "_verify_ordinary_checks"),
         patch.object(lifecycle, "_verify_ordinary_indexes"),
         patch.object(lifecycle, "_verify_noncheck_constraints"),
@@ -918,8 +994,11 @@ def test_prepared_ticks_schema_verifies_columns_range_and_sequence() -> None:
 
     with (
         patch.object(lifecycle, "inspect", return_value=_ordinary_report("ticks")),
-        patch.object(lifecycle, "_verify_ordinary_schema"),
+        patch.object(lifecycle, "_verify_adoption_names_available"),
         patch.object(lifecycle, "_verify_relation_columns") as columns,
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_ordinary_indexes"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
         patch.object(lifecycle, "_constraint_info", return_value=info),
         patch.object(lifecycle, "_range_constraint_matches", return_value=True),
         patch.object(lifecycle, "_verify_sequence_owner") as sequence,
@@ -985,13 +1064,20 @@ def test_prepared_trades_schema_accepts_an_exact_u3() -> None:
     sequence.assert_called_once()
 
 
-def test_ordinary_column_verifier_delegates_with_preparation_tolerance() -> None:
+def test_ordinary_schema_delegates_with_preparation_tolerance() -> None:
     """Ordinary columns must leave only the trade key nullability preparable."""
     connection = _connection_double()
     spec = lifecycle._spec("trades")
 
-    with patch.object(lifecycle, "_verify_relation_columns") as verify:
-        lifecycle._verify_ordinary_columns(connection, spec)
+    with (
+        patch.object(lifecycle, "_verify_adoption_names_available"),
+        patch.object(lifecycle, "_verify_relation_columns") as verify,
+        patch.object(lifecycle, "_verify_ordinary_checks"),
+        patch.object(lifecycle, "_verify_ordinary_indexes"),
+        patch.object(lifecycle, "_verify_noncheck_constraints"),
+        patch.object(lifecycle, "_constraint_info", return_value=None),
+    ):
+        lifecycle._verify_ordinary_schema(connection, spec, _ANCHOR)
 
     verify.assert_called_once_with(
         connection,
@@ -1278,29 +1364,38 @@ def test_ordinary_index_verifier_rejects_manifest_and_shape_drift() -> None:
 
 
 @pytest.mark.parametrize(
-    "owned",
-    [None, "public.wrong_id_seq"],
+    "exact",
+    [None, False],
 )
 def test_sequence_owner_verifier_rejects_missing_or_wrong_ownership(
-    owned: str | None,
+    exact: bool | None,
 ) -> None:
     """The source id sequence must have the exact transferable owner."""
     connection = _connection_double()
-    connection.scalar.return_value = owned
+    connection.scalar.return_value = exact
 
-    with pytest.raises(lifecycle.DailyPartitionError, match="expected sequence"):
+    with pytest.raises(
+        lifecycle.DailyPartitionError,
+        match="ticks_id_seq parameters or ownership are not exact",
+    ):
         lifecycle._verify_sequence_owner(connection, lifecycle._spec("ticks"))
 
 
-@pytest.mark.parametrize("owned", ["ticks_id_seq", "public.ticks_id_seq"])
-def test_sequence_owner_verifier_accepts_qualified_and_plain_names(
-    owned: str,
+@pytest.mark.parametrize("table", ["ticks", "candles", "trades"])
+def test_sequence_owner_verifier_accepts_an_exact_catalog_proof(
+    table: lifecycle.MarketDataTable,
 ) -> None:
-    """PostgreSQL may render the exact owned sequence with or without schema."""
+    """Each exact sequence parameter and ownership proof must be accepted."""
     connection = _connection_double()
-    connection.scalar.return_value = owned
+    connection.scalar.return_value = True
 
-    lifecycle._verify_sequence_owner(connection, lifecycle._spec("ticks"))
+    lifecycle._verify_sequence_owner(connection, lifecycle._spec(table))
+
+    parameters = connection.scalar.call_args.args[1]
+    assert parameters == {
+        "sequence": f"{table}_id_seq",
+        "owner": table,
+    }
 
 
 def test_noncheck_constraint_reader_preserves_every_structural_flag() -> None:
@@ -1342,38 +1437,57 @@ def test_noncheck_constraint_verifier_accepts_exact_local_manifests(
     with patch.object(
         lifecycle,
         "_noncheck_constraints",
-        return_value=_NONCHECK_CONSTRAINT_MANIFESTS[table],
+        return_value=_literal_noncheck_manifest(
+            table,
+            lifecycle.ConstraintRole.ORDINARY,
+        ),
     ):
         lifecycle._verify_noncheck_constraints(
             _connection_double(),
             spec,
             table,
-            local=True,
+            lifecycle.ConstraintRole.ORDINARY,
         )
 
 
-def test_parent_noncheck_constraint_verifier_accepts_an_empty_manifest() -> None:
-    """A minimal partitioned parent must not inherit leaf-local constraints."""
-    with patch.object(lifecycle, "_noncheck_constraints", return_value=()):
+def test_parent_noncheck_constraint_verifier_accepts_only_not_null_constraints() -> None:
+    """A partitioned parent must omit leaf-local keys from its exact manifest."""
+    manifest = _literal_noncheck_manifest(
+        "trades",
+        lifecycle.ConstraintRole.PARENT,
+    )
+
+    with patch.object(lifecycle, "_noncheck_constraints", return_value=manifest):
         lifecycle._verify_noncheck_constraints(
             _connection_double(),
             lifecycle._spec("trades"),
             "trades",
-            local=False,
+            lifecycle.ConstraintRole.PARENT,
         )
+
+    assert all(shape.kind == "n" for shape in manifest)
 
 
 def test_noncheck_constraint_verifier_rejects_manifest_drift() -> None:
     """A missing local primary key must fail before shape comparison."""
+    manifest = tuple(
+        shape
+        for shape in _literal_noncheck_manifest(
+            "ticks",
+            lifecycle.ConstraintRole.ORDINARY,
+        )
+        if shape.name != "ticks_pkey"
+    )
+
     with (
-        patch.object(lifecycle, "_noncheck_constraints", return_value=()),
+        patch.object(lifecycle, "_noncheck_constraints", return_value=manifest),
         pytest.raises(lifecycle.DailyPartitionError, match="manifest drifted"),
     ):
         lifecycle._verify_noncheck_constraints(
             _connection_double(),
             lifecycle._spec("ticks"),
             "ticks",
-            local=True,
+            lifecycle.ConstraintRole.ORDINARY,
         )
 
 
@@ -1395,46 +1509,55 @@ def test_noncheck_constraint_verifier_rejects_each_shape_drift(
     message: str,
 ) -> None:
     """Each primary-key catalog flag must independently remain fail closed."""
-    shape = lifecycle.ConstraintShape(
-        name="ticks_pkey",
-        kind="p",
-        definition="PRIMARY KEY (id)",
-        validated=True,
-        deferrable=False,
-        initially_deferred=False,
-        index_name="ticks_pkey",
+    manifest = list(
+        _literal_noncheck_manifest(
+            "ticks",
+            lifecycle.ConstraintRole.ORDINARY,
+        )
     )
+    primary_index = next(
+        index for index, shape in enumerate(manifest) if shape.name == "ticks_pkey"
+    )
+    shape = manifest[primary_index]
     malformed = replace(shape, **{field: value})
+    manifest[primary_index] = malformed
 
     with (
-        patch.object(lifecycle, "_noncheck_constraints", return_value=(malformed,)),
+        patch.object(lifecycle, "_noncheck_constraints", return_value=tuple(manifest)),
         pytest.raises(lifecycle.DailyPartitionError, match=message),
     ):
         lifecycle._verify_noncheck_constraints(
             _connection_double(),
             lifecycle._spec("ticks"),
             "ticks",
-            local=True,
+            lifecycle.ConstraintRole.ORDINARY,
         )
 
 
 def test_expected_noncheck_constraints_match_the_literal_manifests() -> None:
     """Every ordinary table must retain its exact PK and trades U2 contract."""
-    assert lifecycle._expected_noncheck_constraints(lifecycle._spec("ticks")) == (
-        ("ticks_pkey", "p", "primarykeyid", "ticks_pkey"),
-    )
-    assert lifecycle._expected_noncheck_constraints(lifecycle._spec("candles")) == (
-        ("candles_pkey", "p", "primarykeyid", "candles_pkey"),
-    )
-    assert lifecycle._expected_noncheck_constraints(lifecycle._spec("trades")) == (
-        ("trades_pkey", "p", "primarykeyid", "trades_pkey"),
-        (
-            "uq_trade_instrument_trade_id",
-            "u",
-            "uniqueinstrument_public_id,trade_id",
-            "uq_trade_instrument_trade_id",
-        ),
-    )
+    for table in ("ticks", "candles", "trades"):
+        manifest = _literal_noncheck_manifest(
+            table,
+            lifecycle.ConstraintRole.ORDINARY,
+        )
+        expected = tuple(
+            (
+                shape.name,
+                shape.kind,
+                lifecycle._compact_key_constraint(shape.definition),
+                shape.index_name,
+            )
+            for shape in manifest
+        )
+        assert (
+            lifecycle._expected_noncheck_constraints(
+                lifecycle._spec(table),
+                table,
+                lifecycle.ConstraintRole.ORDINARY,
+            )
+            == expected
+        )
     assert lifecycle._compact_key_constraint('UNIQUE ("a", "b")') == "uniquea,b"
 
 
