@@ -6,6 +6,7 @@ bounds and names, safe dry-run default, DEFAULT refusal, retention guard, and
 plain bounded-lock DETACH shape without starting a database cluster.
 """
 
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC
 from datetime import date
@@ -29,6 +30,20 @@ class _Psycopg2LockError(RuntimeError):
     """Represent psycopg2's legacy ``pgcode`` exception surface."""
 
     pgcode: str = "55P03"
+
+
+class _ObservedPartitions(tuple[lifecycle.PartitionRef, ...]):
+    """Record direct-child names as shape validation consumes them."""
+
+    def __init__(self, values: tuple[lifecycle.PartitionRef, ...]) -> None:
+        """Initialize an empty visit record for the supplied partitions."""
+        self.visited: list[str] = []
+
+    def __iter__(self) -> Iterator[lifecycle.PartitionRef]:
+        """Yield direct children while recording their traversal order."""
+        for partition in super().__iter__():
+            self.visited.append(partition.name)
+            yield partition
 
 
 def _partitioned_report(
@@ -384,26 +399,37 @@ def test_adoption_accepts_available_names_for_each_public_id_contract(
 
     Given: No public relation occupies any planned cutover name for one table.
     When: Runtime checks names for a table with or without leaf-local indexes.
-    Then: It returns normally after querying the exact local public-id names.
+    Then: It returns normally after one exact candidate-name catalog query.
     """
     connection = _connection_double()
     connection.execute.return_value.scalars.return_value = iter(())
+    spec = lifecycle._spec(table)
+    leaves = tuple(
+        f"{table}_d{(_ANCHOR + timedelta(days=offset)):%Y%m%d}"
+        for offset in range(lifecycle.FUTURE_LEAF_TARGET)
+    ) + (f"{table}_default",)
+    expected_names = {
+        f"{table}_legacy",
+        *(index.name for index in spec.parent_indexes),
+        *leaves,
+        *(f"{leaf}_pkey" for leaf in leaves),
+        *(
+            f"{leaf}_{'_'.join(index.columns)}_idx"
+            for leaf in leaves
+            for index in spec.parent_indexes
+        ),
+    }
+    if local_public_id:
+        expected_names.update(f"{leaf}_public_id" for leaf in leaves)
 
-    result = lifecycle._verify_adoption_names_available(
+    lifecycle._verify_adoption_names_available(
         connection,
-        lifecycle._spec(table),
+        spec,
         _ANCHOR,
     )
 
     names = cast(tuple[str, ...], connection.execute.call_args.args[1]["names"])
-    actual_local_indexes = {name for name in names if name.endswith("_public_id")}
-    expected_local_indexes = {
-        f"{table}_d{(_ANCHOR + timedelta(days=offset)):%Y%m%d}_public_id"
-        for offset in range(lifecycle.FUTURE_LEAF_TARGET)
-    }
-    expected_local_indexes.add(f"{table}_default_public_id")
-    assert result is None
-    assert actual_local_indexes == (expected_local_indexes if local_public_id else set())
+    assert names == tuple(sorted(expected_names))
     connection.execute.return_value.scalars.assert_called_once_with()
 
 
@@ -664,7 +690,7 @@ def test_partitioned_shape_verifier_accepts_multiple_exact_leaf_shapes() -> None
 
     Given: Two public ordinary partitions satisfying all five shape conditions.
     When: Runtime validates every direct-child relation shape.
-    Then: It continues after the first child and accepts the complete topology.
+    Then: It returns normally after visiting both children in order.
     """
     legacy = lifecycle.PartitionRef(
         name="ticks_legacy",
@@ -684,11 +710,12 @@ def test_partitioned_shape_verifier_accepts_multiple_exact_leaf_shapes() -> None
         has_partition_key=False,
         inheritance_sequence=1,
     )
-    report = _partitioned_report("ticks", (legacy, default))
+    partitions = _ObservedPartitions((legacy, default))
+    report = _partitioned_report("ticks", partitions)
 
-    result = lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
+    lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
 
-    assert result is None
+    assert partitions.visited == ["ticks_legacy", "ticks_default"]
 
 
 def test_partitioned_noop_refuses_a_malformed_legacy_active_partial() -> None:
