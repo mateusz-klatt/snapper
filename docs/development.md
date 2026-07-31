@@ -297,14 +297,6 @@ Coverage is configured under `[tool.coverage.run]` /
 threshold enforces the TDD requirement over the configured unit-testable
 scope, and a contract test pins the complete omit allowlist.
 
-`scripts/trades_partition_rehearsal.py` is the sole executable exception.
-It is a full-system PostgreSQL 18.4 proof harness that drives real process
-faults, partition DDL, archival, and destructive cleanup against a large
-throwaway dataset. Its fast contract tests remain part of `make cov`, but a
-green `make check-all` is not a rehearsal PASS and must never authorize
-production partition DDL; that operation requires the separate retained
-rehearsal report.
-
 ## Frontend
 
 ### Setup

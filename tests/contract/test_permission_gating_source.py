@@ -172,15 +172,6 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     ),
     AllowedFinding(
         FindingSignature(
-            "backend",
-            "scripts/trades_partition_rehearsal.py",
-            "role-comparison",
-            'role in {"controller", "publisher"}',
-        ),
-        "rehearsal harness child-process role, unrelated to the authentication role domain",
-    ),
-    AllowedFinding(
-        FindingSignature(
             "frontend",
             "src/components/auth/UserProfile.tsx",
             "role-switch",

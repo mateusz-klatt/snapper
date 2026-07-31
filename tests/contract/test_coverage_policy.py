@@ -11,13 +11,12 @@ def test_coverage_omit_allowlist_is_exact() -> None:
 
     Given: The repository's authoritative coverage configuration,
     When: Its complete omit list is inspected,
-    Then: Only empty package files, migrations, and the full-system PostgreSQL
-        rehearsal supervisor are outside the unit-testable scope.
+    Then: Only empty package files and migrations are outside the
+        unit-testable scope.
     """
     configuration = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert configuration["tool"]["coverage"]["run"]["omit"] == [
         "*/__init__.py",
         "src/snapper/data/migrations/*",
-        "scripts/trades_partition_rehearsal.py",
     ]
