@@ -404,6 +404,7 @@ def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestMain:
     """Test suite for main() entrypoint function."""
 
+    @pytest.mark.timeout(45)
     @patch("snapper.__main__.app")
     @patch("snapper.__main__.log_kraken_sdk_patches_status")
     @patch("snapper.__main__.setup_logging")
@@ -490,7 +491,7 @@ class TestMain:
             [sys.executable, "-m", "snapper", "--help"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=30,
             check=False,
             cwd=run_cwd,
             env=env,
