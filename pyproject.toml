@@ -419,7 +419,7 @@ max-statements = 50
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["snapper", "snapper_delegate"]
+known-first-party = ["proprietary", "snapper", "snapper_delegate"]
 known-third-party = ["alembic", "sqlalchemy"]
 force-single-line = true
 
@@ -446,7 +446,7 @@ extend-exclude = '''
 [tool.isort]
 profile = "black"
 line_length = 100
-known_first_party = ["snapper", "snapper_delegate"]
+known_first_party = ["proprietary", "snapper", "snapper_delegate"]
 known_third_party = ["alembic", "sqlalchemy"]
 force_single_line = true
 skip = [".venv", "build", "dist", "data/polygon", "frontend", "ios", "notebooks"]
