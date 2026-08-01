@@ -125,6 +125,7 @@ async def get_current_user(
         role=token_data.role,
         user_public_id=token_data.user_public_id,
         operator_public_ids=token_data.operator_public_ids,
+        operator_membership_public_ids=token_data.operator_membership_public_ids,
         primary_operator_public_id=token_data.primary_operator_public_id,
         active_wallet_public_id=token_data.active_wallet_public_id,
         permissions=token_data.permissions,

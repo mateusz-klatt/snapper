@@ -836,7 +836,7 @@ class TestDispatchFlow:
 
 
 class TestScopeRevalidationDispatch:
-    """Scope revalidation: admin.scope_revoked + admin.user_deactivated routing."""
+    """Administrative revocation events route to the scope revalidator."""
 
     @pytest.mark.asyncio
     async def test_scope_revoked_routed_to_revalidator(self, repo: SQLAlchemyRepository) -> None:
@@ -859,6 +859,19 @@ class TestScopeRevalidationDispatch:
         await sidecar._dispatch("admin.user_deactivated", b"{}", _ts())
 
         sidecar._scope_revalidator.handle_user_deactivated.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_membership_revoked_routed_to_revalidator(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Desk detach frames bypass alert rules and hit the membership handler."""
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_membership_revoked = AsyncMock()
+
+        await sidecar._dispatch("admin.membership_revoked", b"{}", _ts())
+
+        sidecar._scope_revalidator.handle_membership_revoked.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_scope_revoked_handler_exception_does_not_kill_loop(
@@ -892,6 +905,19 @@ class TestScopeRevalidationDispatch:
         )
 
         await sidecar._dispatch("admin.user_deactivated", b"{}", _ts())
+
+    @pytest.mark.asyncio
+    async def test_membership_revoked_handler_exception_does_not_kill_loop(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A failed desk cancellation is isolated from the receive loop."""
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_membership_revoked = AsyncMock(
+            side_effect=RuntimeError("db race boom")
+        )
+
+        await sidecar._dispatch("admin.membership_revoked", b"{}", _ts())
 
 
 class TestScopePreSendSkip:
@@ -953,6 +979,39 @@ class TestScopePreSendSkip:
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
 
+        apns.send.assert_not_awaited()
+        queued = await repo.list_queued_deliveries_all()
+        assert queued == []
+
+    @pytest.mark.asyncio
+    async def test_detach_during_attempt_reservation_blocks_apns_admission(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A detach committed during the bump prevents the APNs call from starting.
+
+        Given: The first scope check passes but the post-bump check observes a
+            revoked desk membership.
+        When: The sidecar reserves the durable attempt and reaches send admission.
+        Then: It cancels the delivery without invoking the APNs client.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=[False, True])
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+
+        assert sidecar._scope_revalidator.should_skip_send.await_count == 2
         apns.send.assert_not_awaited()
         queued = await repo.list_queued_deliveries_all()
         assert queued == []
@@ -1378,6 +1437,7 @@ class TestSidecarStart:
             "x.y.",
             "admin.scope_revoked",
             "admin.user_deactivated",
+            "admin.membership_revoked",
         }
 
     @pytest.mark.asyncio

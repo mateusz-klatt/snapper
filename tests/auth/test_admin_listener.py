@@ -23,13 +23,25 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
+from snapper.auth.websocket_auth import ConnectionState
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.data.repository import Repository
+from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
+from snapper.interface.websocket.dispatcher import _build_dispatch_table
+from snapper.interface.websocket.dispatcher import _dispatch_single_message
+from snapper.interface.websocket.schemas import WSSubscribeRequest
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 from tests.auth.deactivation_fallback_helpers import FailingInactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import FailingMembershipLookupRepo
+from tests.auth.deactivation_fallback_helpers import FailingTokenInventoryLookupRepo
 from tests.auth.deactivation_fallback_helpers import InactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import MembershipLookupRepo
+from tests.auth.deactivation_fallback_helpers import MembershipTokenLookupRepo
 from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_scan_cancelled
 from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_sleep_cancelled
 
@@ -40,13 +52,23 @@ def _make_manager() -> WebSocketAuthManager:
     return WebSocketAuthManager()
 
 
-def _make_principal(user_public_id: str, *, username: str | None = None) -> AuthPrincipal:
+def _make_principal(
+    user_public_id: str,
+    *,
+    role: UserRole = UserRole.VIEWER,
+    operator_public_ids: list[str] | None = None,
+    permissions: list[str] | None = None,
+    permission_scope_version: int | None = None,
+) -> AuthPrincipal:
     """Build an authenticated AuthPrincipal pinned to ``user_public_id``."""
     return AuthPrincipal(
-        username=username or f"user-{user_public_id}",
-        role=UserRole.VIEWER,
+        username=f"user-{user_public_id}",
+        role=role,
         is_active=True,
         user_public_id=user_public_id,
+        operator_public_ids=operator_public_ids or [],
+        permissions=permissions,
+        permission_scope_version=permission_scope_version,
     )
 
 
@@ -64,6 +86,52 @@ def _make_user_deactivated_payload(
         user_public_id=user_public_id,
         deactivated_at=now,
         reason=reason,
+    )
+
+
+def _make_membership_revoked_payload(
+    user_public_id: str,
+    reason: str | None = None,
+) -> MembershipRevokedData:
+    """Build a canonical internal membership-revocation event payload."""
+    now = datetime.now(UTC)
+    return MembershipRevokedData(
+        public_id=f"membership-event-{user_public_id}",
+        timestamp=now,
+        session_id="membership-sid",
+        sequence_id=1,
+        membership_public_id="membership-1",
+        user_public_id=user_public_id,
+        username=f"user-{user_public_id}",
+        operator_public_id="operator-detached",
+        detached_at=now,
+        revoked_by_user_public_id="admin-1",
+        promoted_operator_public_id=None,
+        reason=reason,
+    )
+
+
+def _track_membership_connection(
+    manager: WebSocketAuthManager,
+    websocket: MagicMock,
+    *,
+    access_token_jti: str | None,
+    membership_public_id: str | None,
+    operator_claimed: bool = True,
+) -> None:
+    """Track one target socket with explicit token and membership claims."""
+    membership_claims = (
+        {"operator-detached": membership_public_id} if membership_public_id is not None else {}
+    )
+    principal = _make_principal(
+        "user-detached",
+        operator_public_ids=["operator-detached"] if operator_claimed else [],
+    ).model_copy(update={"operator_membership_public_ids": membership_claims})
+    manager.authenticated_connections[websocket] = principal
+    manager._connection_states[websocket] = ConnectionState(
+        session_id=f"session-{access_token_jti}",
+        session_expires_at=datetime.now(UTC),
+        access_token_jti=access_token_jti,
     )
 
 
@@ -123,7 +191,7 @@ class TestCloseUserConnections:
         ws_b = MagicMock()
         ws_b.close = AsyncMock()
         manager.authenticated_connections[ws_a1] = _make_principal("user-a")
-        manager.authenticated_connections[ws_a2] = _make_principal("user-a", username="alt")
+        manager.authenticated_connections[ws_a2] = _make_principal("user-a")
         manager.authenticated_connections[ws_b] = _make_principal("user-b")
         closed = await manager.close_user_connections(
             user_public_id="user-a", reason="policy_violation"
@@ -258,6 +326,456 @@ class TestHandleUserDeactivated:
         ws.close.assert_awaited_once_with(code=4003, reason="account_deactivated")
 
 
+class TestHandleMembershipRevoked:
+    """Membership fanout retires authority before closing target sockets."""
+
+    @pytest.mark.asyncio
+    async def test_unrelated_user_skips_inventory_lookup_and_remains_connected(self) -> None:
+        """A membership event does not inspect or close another user's socket.
+
+        Given: One connected user unrelated to a membership-revocation event.
+        When: The manager handles the event for its actual target user.
+        Then: It neither queries token inventory nor closes the unrelated socket.
+        """
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=[])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("unrelated-user")
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        repo.list_active_user_token_jtis.assert_not_awaited()
+        ws.close.assert_not_awaited()
+        assert ws in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_retires_connection_and_bridge_before_socket_close(self) -> None:
+        """Subscription state is removed before the close frame is emitted."""
+        manager = _make_manager()
+        order: list[str] = []
+        ws = MagicMock()
+        ws.close = AsyncMock(side_effect=lambda **_kwargs: order.append("ws.close"))
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-detached",
+            operator_public_ids=["operator-detached"],
+        )
+        connection_manager = MagicMock()
+        connection_manager.retire_connection.side_effect = lambda _ws: order.append(
+            "connection.retire"
+        )
+        bridge = MagicMock()
+        retirement = object()
+
+        def _retire_client(_websocket: MagicMock) -> object:
+            order.append("bridge.retire")
+            return retirement
+
+        bridge.retire_client.side_effect = _retire_client
+        bridge.finalize_retired_client = AsyncMock(
+            side_effect=lambda _retirement: order.append("bridge.finalize")
+        )
+        manager.set_wiring(connection_manager, bridge, None)
+        original_disconnect = manager.disconnect
+
+        def _disconnect(target: MagicMock) -> None:
+            order.append("auth.disconnect")
+            original_disconnect(target)
+
+        manager.disconnect = _disconnect
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+        assert order == [
+            "auth.disconnect",
+            "connection.retire",
+            "bridge.retire",
+            "bridge.finalize",
+            "ws.close",
+        ]
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+
+    @pytest.mark.asyncio
+    async def test_reason_from_event_reaches_close_frame(self) -> None:
+        """Administrative detach reason is forwarded to the target socket."""
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-detached")
+        await manager._handle_membership_revoked(
+            _make_membership_revoked_payload("user-detached", reason="desk_closed")
+        )
+        ws.close.assert_awaited_once_with(code=4003, reason="desk_closed")
+
+    @pytest.mark.parametrize(
+        ("membership_public_id", "active_jtis"),
+        [("membership-1", ["candidate-jti"]), (None, [])],
+    )
+    @pytest.mark.asyncio
+    async def test_old_or_absent_membership_claim_closes_when_stale(
+        self,
+        membership_public_id: str | None,
+        active_jtis: list[str],
+    ) -> None:
+        """The revoked generation and an inventory-stale absent claim close."""
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=active_jtis)
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            ws,
+            access_token_jti="candidate-jti",
+            membership_public_id=membership_public_id,
+        )
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        assert ws not in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_delayed_event_preserves_active_empty_membership_claim(self) -> None:
+        """A post-detach login without desk authority survives a delayed event."""
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=["new-empty-jti"])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            ws,
+            access_token_jti="new-empty-jti",
+            membership_public_id=None,
+            operator_claimed=False,
+        )
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        ws.close.assert_not_awaited()
+        assert ws in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_inactive_jti_closes_connection_from_different_generation(self) -> None:
+        """Token inventory still fences pre-attach sessions with another generation."""
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=[])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            ws,
+            access_token_jti="revoked-jti",
+            membership_public_id="membership-other",
+        )
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+
+    @pytest.mark.asyncio
+    async def test_delayed_event_preserves_new_generation_with_active_jti(self) -> None:
+        """A reattached login survives a delayed event for the prior generation."""
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=["new-jti"])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            ws,
+            access_token_jti="new-jti",
+            membership_public_id="membership-new",
+        )
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        ws.close.assert_not_awaited()
+        assert ws in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_snapshot_excludes_connection_opened_during_inventory_read(self) -> None:
+        """A connection created after the pre-await snapshot cannot be closed."""
+        manager = _make_manager()
+        lookup_started = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        async def _lookup_active_jtis(user_public_id: str) -> list[str]:
+            assert user_public_id == "user-detached"
+            lookup_started.set()
+            await release_lookup.wait()
+            return ["race-jti", "new-jti"]
+
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(side_effect=_lookup_active_jtis)
+        manager.repository_factory = lambda: cast(Repository, repo)
+        old_ws = MagicMock()
+        old_ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            old_ws,
+            access_token_jti="race-jti",
+            membership_public_id="membership-1",
+        )
+
+        handler_task = asyncio.create_task(
+            manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+        )
+        await lookup_started.wait()
+        new_ws = MagicMock()
+        new_ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            new_ws,
+            access_token_jti="new-jti",
+            membership_public_id="membership-new",
+        )
+        release_lookup.set()
+        await handler_task
+
+        old_ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        new_ws.close.assert_not_awaited()
+        assert new_ws in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_inventory_failure_uses_membership_generation_fail_safe(self) -> None:
+        """Failure closes old, absent, and state-less sockets but preserves replacement."""
+        manager = _make_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(side_effect=RuntimeError("lookup failed"))
+        manager.repository_factory = lambda: cast(Repository, repo)
+        matching_ws = MagicMock()
+        matching_ws.close = AsyncMock()
+        absent_ws = MagicMock()
+        absent_ws.close = AsyncMock()
+        missing_state_ws = MagicMock()
+        missing_state_ws.close = AsyncMock()
+        replacement_ws = MagicMock()
+        replacement_ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            matching_ws,
+            access_token_jti="matching-jti",
+            membership_public_id="membership-1",
+        )
+        _track_membership_connection(
+            manager,
+            absent_ws,
+            access_token_jti="absent-jti",
+            membership_public_id=None,
+        )
+        _track_membership_connection(
+            manager,
+            missing_state_ws,
+            access_token_jti=None,
+            membership_public_id="membership-new",
+        )
+        _track_membership_connection(
+            manager,
+            replacement_ws,
+            access_token_jti="replacement-jti",
+            membership_public_id="membership-new",
+        )
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        matching_ws.close.assert_awaited_once()
+        absent_ws.close.assert_awaited_once()
+        missing_state_ws.close.assert_awaited_once()
+        replacement_ws.close.assert_not_awaited()
+        assert replacement_ws in manager.authenticated_connections
+
+    @pytest.mark.parametrize(
+        "failure_stage",
+        ["connection", "bridge", "finalize"],
+    )
+    @pytest.mark.asyncio
+    async def test_retirement_failure_does_not_block_socket_close(
+        self,
+        failure_stage: str,
+    ) -> None:
+        """A cleanup failure remains fail-closed at the socket boundary.
+
+        Given: One retirement stage raises while a detached user's socket is live,
+        When: The membership-revocation fanout closes that user's connections,
+        Then: The socket still closes and every reachable later cleanup stage runs.
+        """
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-detached",
+            operator_public_ids=["operator-detached"],
+        )
+        connection_manager = MagicMock()
+        bridge = MagicMock()
+        retirement = object()
+        bridge.retire_client.return_value = retirement
+        bridge.finalize_retired_client = AsyncMock()
+        if failure_stage == "connection":
+            connection_manager.retire_connection.side_effect = RuntimeError("manager failure")
+        elif failure_stage == "bridge":
+            bridge.retire_client.side_effect = RuntimeError("bridge failure")
+        else:
+            bridge.finalize_retired_client.side_effect = RuntimeError("finalize failure")
+        manager.set_wiring(connection_manager, bridge, None)
+
+        await manager._handle_membership_revoked(_make_membership_revoked_payload("user-detached"))
+
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        connection_manager.retire_connection.assert_called_once_with(ws)
+        bridge.retire_client.assert_called_once_with(ws)
+        if failure_stage == "bridge":
+            bridge.finalize_retired_client.assert_not_awaited()
+        else:
+            bridge.finalize_retired_client.assert_awaited_once_with(retirement)
+
+    @pytest.mark.asyncio
+    async def test_detach_during_backpressure_retires_before_send(self) -> None:
+        """An in-flight bridge dispatch cannot send after the detach barrier."""
+        manager = _make_manager()
+        connection_manager = WebSocketConnectionManager()
+        bridge = connection_manager.zmq_bridge
+        manager.set_wiring(connection_manager, bridge, None)
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        ws.close = AsyncMock()
+        await connection_manager.connect(ws, accept=False)
+        topic = "market.kraken.BTC-USD.candles"
+        connection_manager.subscribe_client(ws, topic)
+        bridge._register_topic_subscription(ws, topic, throttle_ms=0)
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-detached",
+            operator_public_ids=["operator-detached"],
+        )
+        backpressure_entered = asyncio.Event()
+        release_backpressure = asyncio.Event()
+
+        async def _block_backpressure(
+            _subscription: object,
+            _topic: str,
+            _max_pending: int,
+            _is_trade: bool,
+        ) -> bool:
+            backpressure_entered.set()
+            await release_backpressure.wait()
+            return False
+
+        with (
+            patch.object(bridge, "_handle_backpressure", new=_block_backpressure),
+            patch.object(bridge, "_stop_zmq_subscription", new=AsyncMock()),
+        ):
+            dispatch_task = asyncio.create_task(
+                bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
+            )
+            await backpressure_entered.wait()
+            await manager._handle_membership_revoked(
+                _make_membership_revoked_payload("user-detached")
+            )
+            assert ws not in manager.authenticated_connections
+            assert connection_manager.is_connection_active(ws) is False
+            assert ws not in connection_manager.client_subscriptions
+            assert all(
+                ws not in subscribers
+                for subscribers in connection_manager.topic_subscribers.values()
+            )
+            assert ws not in bridge.client_subscriptions
+            assert all(
+                ws not in subscriptions for subscriptions in bridge.topic_subscriptions.values()
+            )
+            release_backpressure.set()
+            await dispatch_task
+        ws.send_text.assert_not_awaited()
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+
+    @pytest.mark.asyncio
+    async def test_detach_during_subscribe_authorization_cannot_resurrect_socket(self) -> None:
+        """A suspended subscribe request cannot register after its detach barrier."""
+        manager = _make_manager()
+        connection_manager = WebSocketConnectionManager()
+        bridge = connection_manager.zmq_bridge
+        manager.set_wiring(connection_manager, bridge, None)
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        ws.close = AsyncMock()
+        await connection_manager.connect(ws, accept=False)
+        principal = _make_principal(
+            "user-detached",
+            operator_public_ids=["operator-detached"],
+        )
+        manager.authenticated_connections[ws] = principal
+        topic = "market."
+        request = WSSubscribeRequest(
+            public_id="subscribe-race",
+            timestamp=datetime.now(UTC),
+            session_id="race-session",
+            sequence_id=1,
+            topics=[topic],
+        )
+        authorization_entered = asyncio.Event()
+        release_authorization = asyncio.Event()
+        repository = cast(Repository, MagicMock())
+
+        async def _pause_authorization(
+            *,
+            topics: list[str],
+            principal: AuthPrincipal,
+            repository: Repository | None,
+            as_of: datetime,
+        ) -> tuple[list[str], list[str]]:
+            assert topics == [topic]
+            assert principal is manager.authenticated_connections[ws]
+            assert repository is repository_for_dispatch
+            assert as_of.tzinfo is not None
+            authorization_entered.set()
+            await release_authorization.wait()
+            return topics, []
+
+        repository_for_dispatch = repository
+        settings = MagicMock(db_url="sqlite+aiosqlite://")
+        with (
+            patch(
+                "snapper.interface.websocket.handlers.subscribe.partition_authorized_topics",
+                new=_pause_authorization,
+            ),
+            patch(
+                "snapper.interface.websocket.dispatcher.get_settings",
+                return_value=settings,
+            ),
+            patch(
+                "snapper.interface.websocket.dispatcher.get_repository",
+                return_value=repository,
+            ),
+        ):
+            dispatch_table = _build_dispatch_table(ws, connection_manager, manager)
+            subscribe_task = asyncio.create_task(
+                _dispatch_single_message(request, principal, dispatch_table)
+            )
+            await asyncio.wait_for(authorization_entered.wait(), timeout=2.0)
+            await manager._handle_membership_revoked(
+                _make_membership_revoked_payload("user-detached")
+            )
+            release_authorization.set()
+            await subscribe_task
+
+        assert ws not in manager.authenticated_connections
+        assert connection_manager.is_connection_active(ws) is False
+        assert ws not in connection_manager.client_subscriptions
+        assert ws not in bridge.client_subscriptions
+        assert all(
+            ws not in subscribers for subscribers in connection_manager.topic_subscribers.values()
+        )
+        assert all(ws not in subscribers for subscribers in bridge.topic_subscriptions.values())
+        ws.send_text.assert_not_awaited()
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+
+
 class TestAdminDispatchFrame:
     """Per-frame dispatch must route to typed handlers and swallow errors."""
 
@@ -275,6 +793,20 @@ class TestAdminDispatchFrame:
         assert isinstance(called_arg, UserDeactivatedData)
         assert called_arg.user_public_id == "user-1"
         assert called_arg.reason == "r"
+
+    @pytest.mark.asyncio
+    async def test_membership_revoked_topic_invokes_handler(self) -> None:
+        """Internal membership payload routes to the typed async handler."""
+        manager = _make_manager()
+        payload = _make_membership_revoked_payload("user-1").to_json()
+        with patch.object(manager, "_handle_membership_revoked", new=AsyncMock()) as handler:
+            await manager._admin_dispatch_frame("admin.membership_revoked", payload)
+        handler.assert_awaited_once()
+        await_args = handler.await_args
+        assert await_args is not None
+        called_arg = await_args.args[0]
+        assert isinstance(called_arg, MembershipRevokedData)
+        assert called_arg.user_public_id == "user-1"
 
     @pytest.mark.asyncio
     async def test_unknown_topic_is_ignored(self) -> None:
@@ -316,11 +848,14 @@ class TestAdminDispatchFrame:
         """
         manager = _make_manager()
         payload = _make_user_deactivated_payload("user-x").to_json()
-        with patch.object(
-            manager,
-            "_handle_user_deactivated",
-            new=AsyncMock(side_effect=asyncio.CancelledError()),
-        ), pytest.raises(asyncio.CancelledError):
+        with (
+            patch.object(
+                manager,
+                "_handle_user_deactivated",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await manager._admin_dispatch_frame("admin.user_deactivated", payload)
 
 
@@ -596,6 +1131,258 @@ class TestDeactivationFallbackScan:
         manager.authenticated_connections[ws] = _make_principal("user-a")
         repo = FailingInactiveUserLookupRepo()
         manager.repository_factory = lambda: cast(Repository, repo)
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_closes_stale_membership_and_retires_subscriptions(self) -> None:
+        """Broker loss still closes a detached viewer after subscription cleanup."""
+        manager = _make_manager()
+        repo = MembershipLookupRepo(
+            {
+                "user-target": {"operator-still-active"},
+                "user-bystander": {"operator-bystander"},
+            }
+        )
+        connection_manager = MagicMock()
+        bridge = MagicMock()
+        retirement = object()
+        bridge.retire_client.return_value = retirement
+        bridge.finalize_retired_client = AsyncMock()
+        manager.set_wiring(
+            connection_manager,
+            bridge,
+            lambda: cast(Repository, repo),
+        )
+        ws_target = MagicMock()
+        ws_target.close = AsyncMock()
+        ws_bystander = MagicMock()
+        ws_bystander.close = AsyncMock()
+        manager.authenticated_connections[ws_target] = _make_principal(
+            "user-target",
+            operator_public_ids=["operator-still-active", "operator-detached"],
+        )
+        manager.authenticated_connections[ws_bystander] = _make_principal(
+            "user-bystander",
+            operator_public_ids=["operator-bystander"],
+        )
+        await manager._scan_deactivated_connections_once()
+        ws_target.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        ws_bystander.close.assert_not_awaited()
+        connection_manager.retire_connection.assert_called_once_with(ws_target)
+        bridge.retire_client.assert_called_once_with(ws_target)
+        bridge.finalize_retired_client.assert_awaited_once_with(retirement)
+
+    @pytest.mark.asyncio
+    async def test_scan_closes_socket_from_replaced_membership_generation(self) -> None:
+        """Broker loss still retires a socket minted before desk re-attachment."""
+        manager = _make_manager()
+        repo = MembershipLookupRepo({"user-target": {"operator-current"}})
+        connection_manager = MagicMock()
+        bridge = MagicMock()
+        retirement = object()
+        bridge.retire_client.return_value = retirement
+        bridge.finalize_retired_client = AsyncMock()
+        manager.set_wiring(
+            connection_manager,
+            bridge,
+            lambda: cast(Repository, repo),
+        )
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-target", operator_public_ids=["operator-current"]
+        ).model_copy(
+            update={
+                "operator_membership_public_ids": {"operator-current": "membership-before-detach"}
+            }
+        )
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        connection_manager.retire_connection.assert_called_once_with(ws)
+        bridge.retire_client.assert_called_once_with(ws)
+        bridge.finalize_retired_client.assert_awaited_once_with(retirement)
+
+    @pytest.mark.asyncio
+    async def test_scan_closes_partially_versioned_membership_claim(self) -> None:
+        """A mixed legacy and generation-pinned desk claim fails closed.
+
+        Given: A token claims two active desks but pins only one membership generation.
+        When: The fallback scanner reconciles it against both current memberships.
+        Then: The incomplete generation map is stale and its socket is closed.
+        """
+        manager = _make_manager()
+        repo = MembershipLookupRepo(
+            {"user-target": {"operator-current", "operator-without-generation"}}
+        )
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-target",
+            operator_public_ids=["operator-current", "operator-without-generation"],
+        ).model_copy(
+            update={
+                "operator_membership_public_ids": {
+                    "operator-current": "membership-operator-current"
+                }
+            }
+        )
+
+        await manager._scan_deactivated_connections_once()
+
+        ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        assert ws not in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_scan_fences_empty_claim_jtis_without_closing_new_login(self) -> None:
+        """Broker loss closes revoked or missing JTIs but preserves the active login."""
+        manager = _make_manager()
+        repo = MembershipTokenLookupRepo(
+            {"user-detached": set()},
+            {"user-detached": {"new-jti"}},
+        )
+        manager.repository_factory = lambda: cast(Repository, repo)
+        revoked_ws = MagicMock()
+        revoked_ws.close = AsyncMock()
+        missing_jti_ws = MagicMock()
+        missing_jti_ws.close = AsyncMock()
+        new_ws = MagicMock()
+        new_ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            revoked_ws,
+            access_token_jti="revoked-jti",
+            membership_public_id=None,
+            operator_claimed=False,
+        )
+        _track_membership_connection(
+            manager,
+            missing_jti_ws,
+            access_token_jti=None,
+            membership_public_id=None,
+            operator_claimed=False,
+        )
+        _track_membership_connection(
+            manager,
+            new_ws,
+            access_token_jti="new-jti",
+            membership_public_id=None,
+            operator_claimed=False,
+        )
+
+        await manager._scan_deactivated_connections_once()
+
+        revoked_ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        missing_jti_ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        new_ws.close.assert_not_awaited()
+        assert new_ws in manager.authenticated_connections
+        assert repo.token_queries == ["user-detached"]
+
+    @pytest.mark.asyncio
+    async def test_membership_scan_closes_only_stale_connection_generation(self) -> None:
+        """Coexisting old and current membership generations are fenced per socket."""
+        manager = _make_manager()
+        repo = MembershipTokenLookupRepo(
+            {"user-target": {"operator-current"}},
+            {"user-target": {"old-jti", "new-jti"}},
+        )
+        manager.repository_factory = lambda: cast(Repository, repo)
+        old_ws = MagicMock()
+        old_ws.close = AsyncMock()
+        new_ws = MagicMock()
+        new_ws.close = AsyncMock()
+        old_principal = _make_principal(
+            "user-target",
+            operator_public_ids=["operator-current"],
+        ).model_copy(
+            update={
+                "operator_membership_public_ids": {"operator-current": "membership-before-detach"}
+            }
+        )
+        new_principal = _make_principal(
+            "user-target",
+            operator_public_ids=["operator-current"],
+        ).model_copy(
+            update={
+                "operator_membership_public_ids": {
+                    "operator-current": "membership-operator-current"
+                }
+            }
+        )
+        manager.authenticated_connections[old_ws] = old_principal
+        manager.authenticated_connections[new_ws] = new_principal
+        manager._connection_states[old_ws] = ConnectionState(
+            session_id="old-session",
+            session_expires_at=datetime.now(UTC),
+            access_token_jti="old-jti",
+        )
+        manager._connection_states[new_ws] = ConnectionState(
+            session_id="new-session",
+            session_expires_at=datetime.now(UTC),
+            access_token_jti="new-jti",
+        )
+
+        await manager._scan_deactivated_connections_once()
+
+        old_ws.close.assert_awaited_once_with(code=4003, reason="membership_revoked")
+        new_ws.close.assert_not_awaited()
+        assert new_ws in manager.authenticated_connections
+        assert repo.token_queries == ["user-target"]
+        assert [query[0] for query in repo.membership_queries] == ["user-target"]
+
+    @pytest.mark.asyncio
+    async def test_token_inventory_scan_tolerates_lookup_error(self) -> None:
+        """A token-inventory failure leaves an empty-claim socket untouched."""
+        manager = _make_manager()
+        repo = FailingTokenInventoryLookupRepo()
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        _track_membership_connection(
+            manager,
+            ws,
+            access_token_jti="unknown-jti",
+            membership_public_id=None,
+            operator_claimed=False,
+        )
+
+        await manager._scan_deactivated_connections_once()
+
+        ws.close.assert_not_awaited()
+        assert ws in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_explicit_admin_scope_retains_structural_global_authority(self) -> None:
+        """Effective-permission policy keeps current ADMIN credentials global."""
+        manager = _make_manager()
+        repo = MembershipLookupRepo({})
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal(
+            "admin-user",
+            role=UserRole.ADMIN,
+            operator_public_ids=["global-operator"],
+            permissions=[Permission.MANAGE_DESK_MEMBERSHIPS.value],
+            permission_scope_version=PERMISSION_SCOPE_VERSION,
+        )
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_not_awaited()
+        assert repo.membership_queries == []
+
+    @pytest.mark.asyncio
+    async def test_membership_scan_tolerates_lookup_error(self) -> None:
+        """Transient membership DB failures leave active sockets untouched."""
+        manager = _make_manager()
+        repo = FailingMembershipLookupRepo()
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal(
+            "user-target",
+            operator_public_ids=["operator-detached"],
+        )
         await manager._scan_deactivated_connections_once()
         ws.close.assert_not_awaited()
 

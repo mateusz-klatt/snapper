@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 from fastapi import WebSocket
@@ -145,9 +146,101 @@ class TestConnectionManagement:
         """
         await connection_manager.disconnect(mock_websocket)
 
+    @pytest.mark.asyncio
+    async def test_stale_generation_cannot_resubscribe_after_reconnect(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+    ) -> None:
+        """A retired request lease cannot mutate a later socket generation."""
+        await connection_manager.connect(mock_websocket, accept=False)
+        stale_generation = connection_manager.get_connection_generation(mock_websocket)
+        assert stale_generation is not None
+        connection_manager.retire_connection(mock_websocket)
+        assert connection_manager.subscribe_client(mock_websocket, "stale.topic") is False
+
+        await connection_manager.connect(mock_websocket, accept=False)
+        assert (
+            await connection_manager.zmq_bridge.add_subscription(
+                mock_websocket,
+                ["stale.topic"],
+                expected_connection_generation=stale_generation,
+                authority_is_current=lambda: True,
+            )
+            is False
+        )
+        assert mock_websocket not in connection_manager.zmq_bridge.client_subscriptions
+        assert (
+            connection_manager.subscribe_client(
+                mock_websocket,
+                "stale.topic",
+                expected_generation=stale_generation,
+            )
+            is False
+        )
+        current_generation = connection_manager.get_connection_generation(mock_websocket)
+        assert current_generation is not None
+        assert current_generation != stale_generation
+        assert (
+            connection_manager.subscribe_client(
+                mock_websocket,
+                "current.topic",
+                expected_generation=current_generation,
+            )
+            is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_retire_connection_synchronously_removes_send_authority(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+        mock_websocket_2: Mock,
+    ) -> None:
+        """Retirement removes one socket while preserving other subscribers.
+
+        Given: Two active clients sharing one topic and one client owning another,
+        When: The first client is synchronously retired,
+        Then: Every send registry drops it and the other client remains active.
+        """
+        await connection_manager.connect(mock_websocket, accept=False)
+        await connection_manager.connect(mock_websocket_2, accept=False)
+        connection_manager.subscribe_client(mock_websocket, "shared.topic")
+        connection_manager.subscribe_client(mock_websocket, "solo.topic")
+        connection_manager.subscribe_client(mock_websocket_2, "shared.topic")
+
+        topics = connection_manager.retire_connection(mock_websocket)
+
+        assert topics == ("shared.topic", "solo.topic")
+        assert connection_manager.is_connection_active(mock_websocket) is False
+        assert connection_manager.is_connection_active(mock_websocket_2) is True
+        assert mock_websocket not in connection_manager.client_subscriptions
+        assert connection_manager.get_topic_subscribers("shared.topic") == {mock_websocket_2}
+        assert "solo.topic" not in connection_manager.topic_subscribers
+
+    def test_retire_connection_tolerates_orphaned_client_topic(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+    ) -> None:
+        """Retirement tolerates a client topic missing from the inverse map."""
+        connection_manager.client_subscriptions[mock_websocket] = {"orphan.topic"}
+
+        assert connection_manager.retire_connection(mock_websocket) == ("orphan.topic",)
+        assert mock_websocket not in connection_manager.client_subscriptions
+
 
 class TestSubscriptionManagement:
     """Tests for client topic subscription management."""
+
+    @pytest.fixture(autouse=True)
+    def _activate_default_websocket(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+    ) -> None:
+        """Activate the default socket used by synchronous subscription tests."""
+        connection_manager.active_connections.append(mock_websocket)
 
     def test_subscribe_client_to_topic(
         self, connection_manager: WebSocketConnectionManager, mock_websocket: Mock
@@ -190,12 +283,33 @@ class TestSubscriptionManagement:
         When: Two clients subscribe to the same topic,
         Then: Both clients appear in topic subscribers.
         """
+        connection_manager.active_connections.append(mock_websocket_2)
         connection_manager.subscribe_client(mock_websocket, "market.btc")
         connection_manager.subscribe_client(mock_websocket_2, "market.btc")
         subscribers = connection_manager.get_topic_subscribers("market.btc")
         assert mock_websocket in subscribers
         assert mock_websocket_2 in subscribers
         assert len(subscribers) == 2
+
+    def test_unsubscribe_preserves_other_topic_subscribers(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+        mock_websocket_2: Mock,
+    ) -> None:
+        """Removing one client leaves the shared topic registered.
+
+        Given: Two active WebSockets subscribed to the same topic,
+        When: One WebSocket unsubscribes from that topic,
+        Then: The inverse topic registry retains the other subscriber.
+        """
+        connection_manager.active_connections.append(mock_websocket_2)
+        connection_manager.subscribe_client(mock_websocket, "market.btc")
+        connection_manager.subscribe_client(mock_websocket_2, "market.btc")
+
+        connection_manager.unsubscribe_client(mock_websocket, "market.btc")
+
+        assert connection_manager.get_topic_subscribers("market.btc") == {mock_websocket_2}
 
     def test_unsubscribe_client_from_topic(
         self, connection_manager: WebSocketConnectionManager, mock_websocket: Mock
@@ -345,6 +459,26 @@ class TestMessaging:
         assert mock_websocket_2 in connection_manager.active_connections
 
     @pytest.mark.asyncio
+    async def test_broadcast_skips_connection_retired_during_fanout(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+        mock_websocket_2: Mock,
+    ) -> None:
+        """A snapshot member retired during an earlier send is not contacted."""
+        await connection_manager.connect(mock_websocket, accept=False)
+        await connection_manager.connect(mock_websocket_2, accept=False)
+
+        async def _retire_second(_message: str) -> None:
+            connection_manager.retire_connection(mock_websocket_2)
+
+        mock_websocket.send_text.side_effect = _retire_second
+        await connection_manager.broadcast(MockMessage(type="test"))
+
+        mock_websocket.send_text.assert_awaited_once()
+        mock_websocket_2.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_broadcast_to_topic(
         self,
         connection_manager: WebSocketConnectionManager,
@@ -377,6 +511,42 @@ class TestMessaging:
         Then: No error is raised.
         """
         await connection_manager.broadcast_to_topic("empty.topic", MockMessage(type="test"))
+
+    @pytest.mark.asyncio
+    async def test_topic_broadcast_skips_inactive_snapshot_member(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+    ) -> None:
+        """An inactive socket left in a stale topic snapshot receives nothing."""
+        connection_manager.topic_subscribers["market.btc"] = {mock_websocket}
+
+        await connection_manager.broadcast_to_topic(
+            "market.btc",
+            MockMessage(type="test"),
+        )
+
+        mock_websocket.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_topic_broadcast_rechecks_live_topic_membership(
+        self,
+        connection_manager: WebSocketConnectionManager,
+        mock_websocket: Mock,
+    ) -> None:
+        """A socket removed after the snapshot is skipped before its send."""
+        await connection_manager.connect(mock_websocket, accept=False)
+        with patch.object(
+            connection_manager,
+            "get_topic_subscribers",
+            side_effect=[{mock_websocket}, set()],
+        ):
+            await connection_manager.broadcast_to_topic(
+                "market.btc",
+                MockMessage(type="test"),
+            )
+
+        mock_websocket.send_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_broadcast_to_topic_removes_failed_connections(

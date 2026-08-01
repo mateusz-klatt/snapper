@@ -22,10 +22,15 @@ from fastapi import WebSocket
 from loguru import logger
 
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
+from snapper.auth.deactivation_fallback import OperatorMembershipClaim
+from snapper.auth.deactivation_fallback import list_active_user_token_jtis_by_user
 from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
+from snapper.auth.deactivation_fallback import list_stale_operator_membership_claims
 from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -39,6 +44,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import DelegateOfflineData
 from snapper.messaging.schemas.data import ScopeGrantedData
 from snapper.messaging.schemas.data import ScopeHandedOverData
@@ -47,7 +53,9 @@ from snapper.messaging.schemas.data import UserDeactivatedData
 
 _KILL_SWITCH_CLOSE_CODE = 4003
 _KILL_SWITCH_REASON_FALLBACK = "account_deactivated"
+_KILL_SWITCH_REASON_MEMBERSHIP_REVOKED = "membership_revoked"
 _ADMIN_USER_DEACTIVATED_TOPIC = "admin.user_deactivated"
+_ADMIN_MEMBERSHIP_REVOKED_TOPIC = "admin.membership_revoked"
 _ADMIN_SCOPE_REVOKED_TOPIC = "admin.scope_revoked"
 _ADMIN_SCOPE_GRANTED_TOPIC = "admin.scope_granted"
 _ADMIN_SCOPE_HANDED_OVER_TOPIC = "admin.scope_handed_over"
@@ -80,6 +88,8 @@ every ~7s, so bumping at most once per 5s keeps every well-behaved
 delegate live while capping the DB write rate of a misbehaving client
 that floods pings.
 """
+
+type _ConnectionClaimSnapshot = tuple[WebSocket, AuthPrincipal, str | None]
 
 
 @dataclass(slots=True)
@@ -120,6 +130,7 @@ class ConnectionState:
     Attributes:
         session_id: Session identifier.
         session_expires_at: Session expiration timestamp.
+        access_token_jti: Access-token JWT ID that authenticated the connection.
         ws_token_expiration: WebSocket token expiration.
         ws_token_jti: WebSocket token JWT ID.
         warn_task: Task for expiration warning.
@@ -128,6 +139,7 @@ class ConnectionState:
 
     session_id: str
     session_expires_at: datetime
+    access_token_jti: str | None = None
     ws_token_expiration: datetime | None = None
     ws_token_jti: str | None = None
     warn_task: asyncio.Task[None] | None = None
@@ -302,6 +314,7 @@ class WebSocketAuthManager:
             role=token_data.role,
             user_public_id=token_data.user_public_id,
             operator_public_ids=token_data.operator_public_ids,
+            operator_membership_public_ids=token_data.operator_membership_public_ids,
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
             permissions=token_data.permissions,
@@ -335,6 +348,7 @@ class WebSocketAuthManager:
         state = ConnectionState(
             session_id=token_data.sid,
             session_expires_at=session_expires_at,
+            access_token_jti=token_data.jti,
             ws_token_expiration=ws_expires_at,
             ws_token_jti=ws_payload.jti,
             warn_task=warn_task,
@@ -773,14 +787,17 @@ class WebSocketAuthManager:
             raw_sub_socket.connect(zmq_broker_xpub)
             self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
             self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
+            self._admin_subscriber.subscribe(_ADMIN_MEMBERSHIP_REVOKED_TOPIC)
             self._admin_subscriber.subscribe(_ADMIN_SCOPE_REVOKED_TOPIC)
             self._admin_subscriber.subscribe(_ADMIN_SCOPE_GRANTED_TOPIC)
             self._admin_subscriber.subscribe(_ADMIN_SCOPE_HANDED_OVER_TOPIC)
             self._admin_running = True
             self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
             logger.info(
-                "WebSocketAuthManager: admin-bus listener subscribed to {} + {} + {} + {} on {}",
+                "WebSocketAuthManager: admin-bus listener subscribed to "
+                "{} + {} + {} + {} + {} on {}",
                 _ADMIN_USER_DEACTIVATED_TOPIC,
+                _ADMIN_MEMBERSHIP_REVOKED_TOPIC,
                 _ADMIN_SCOPE_REVOKED_TOPIC,
                 _ADMIN_SCOPE_GRANTED_TOPIC,
                 _ADMIN_SCOPE_HANDED_OVER_TOPIC,
@@ -874,11 +891,12 @@ class WebSocketAuthManager:
         )
 
     async def _scan_deactivated_connections_once(self) -> None:
-        """Cross-check connected principals against the DB-backed deactivation registry."""
+        """Cross-check connected principals against active users and memberships."""
+        snapshot = self._snapshot_authenticated_connection_claims()
         user_public_ids = sorted(
             {
                 principal.user_public_id
-                for principal in self.authenticated_connections.values()
+                for _websocket, principal, _access_token_jti in snapshot
                 if principal.user_public_id
             }
         )
@@ -891,6 +909,101 @@ class WebSocketAuthManager:
             await self.close_user_connections(
                 user_public_id=user_public_id,
                 reason=_KILL_SWITCH_REASON_FALLBACK,
+            )
+        await self._retire_inventory_revoked_connections(
+            snapshot,
+            set(inactive_user_public_ids),
+        )
+        await self._retire_stale_membership_connections(snapshot)
+
+    def _snapshot_authenticated_connection_claims(
+        self,
+    ) -> tuple[_ConnectionClaimSnapshot, ...]:
+        """Snapshot sockets, principals, and access JTIs before fallback I/O."""
+        return tuple(
+            (
+                websocket,
+                principal,
+                state.access_token_jti if state is not None else None,
+            )
+            for websocket, principal in self.authenticated_connections.items()
+            for state in (self._connection_states.get(websocket),)
+        )
+
+    async def _retire_inventory_revoked_connections(
+        self,
+        snapshot: tuple[_ConnectionClaimSnapshot, ...],
+        inactive_user_public_ids: set[str],
+    ) -> None:
+        """Retire snapshot sockets whose authenticating JTI is no longer active."""
+        active_jtis_by_user = await list_active_user_token_jtis_by_user(
+            self.repository_factory,
+            [principal.user_public_id for _ws, principal, _jti in snapshot],
+            component_name="WebSocketAuthManager",
+        )
+        sockets_by_user: dict[str, list[WebSocket]] = {}
+        for websocket, principal, access_token_jti in snapshot:
+            user_public_id = principal.user_public_id
+            active_jtis = active_jtis_by_user.get(user_public_id)
+            if user_public_id in inactive_user_public_ids or active_jtis is None:
+                continue
+            if access_token_jti is None or access_token_jti not in active_jtis:
+                sockets_by_user.setdefault(user_public_id, []).append(websocket)
+        await self._retire_connection_groups(sockets_by_user)
+
+    async def _retire_stale_membership_connections(
+        self,
+        snapshot: tuple[_ConnectionClaimSnapshot, ...],
+    ) -> None:
+        """Retire only snapshot sockets whose own membership claim is stale."""
+        candidates = [
+            (websocket, self._operator_membership_claim(principal))
+            for websocket, principal, _access_token_jti in snapshot
+            if websocket in self.authenticated_connections and principal.user_public_id
+        ]
+        stale_claims = set(
+            await list_stale_operator_membership_claims(
+                self.repository_factory,
+                [claim for _websocket, claim in candidates],
+                datetime.now(UTC),
+                component_name="WebSocketAuthManager",
+            )
+        )
+        sockets_by_user: dict[str, list[WebSocket]] = {}
+        for websocket, claim in candidates:
+            if claim in stale_claims and websocket in self.authenticated_connections:
+                sockets_by_user.setdefault(claim.user_public_id, []).append(websocket)
+        await self._retire_connection_groups(sockets_by_user)
+
+    @staticmethod
+    def _operator_membership_claim(principal: AuthPrincipal) -> OperatorMembershipClaim:
+        """Project one connected principal into the shared fallback claim shape."""
+        return OperatorMembershipClaim(
+            user_public_id=principal.user_public_id,
+            role=principal.role,
+            has_global_operator_authority=has_effective_permission(
+                principal.role,
+                principal.permissions,
+                principal.permission_scope_version,
+                Permission.IMPERSONATE_OPERATOR,
+            ),
+            operator_public_ids=tuple(principal.operator_public_ids),
+            operator_membership_public_ids=tuple(
+                sorted(principal.operator_membership_public_ids.items())
+            ),
+        )
+
+    async def _retire_connection_groups(
+        self,
+        sockets_by_user: dict[str, list[WebSocket]],
+    ) -> None:
+        """Retire grouped snapshot sockets under the membership close reason."""
+        for user_public_id, sockets in sockets_by_user.items():
+            await self._close_connection_snapshot(
+                tuple(sockets),
+                user_public_id,
+                _KILL_SWITCH_REASON_MEMBERSHIP_REVOKED,
+                retire_subscriptions=True,
             )
 
     async def _admin_recv_one_frame(
@@ -928,6 +1041,8 @@ class WebSocketAuthManager:
         try:
             if topic == _ADMIN_USER_DEACTIVATED_TOPIC:
                 await self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
+            elif topic == _ADMIN_MEMBERSHIP_REVOKED_TOPIC:
+                await self._handle_membership_revoked(MembershipRevokedData.from_json(payload))
             elif topic == _ADMIN_SCOPE_REVOKED_TOPIC:
                 await self._handle_scope_revoked(ScopeRevokedData.from_json(payload))
             elif topic == _ADMIN_SCOPE_GRANTED_TOPIC:
@@ -949,6 +1064,88 @@ class WebSocketAuthManager:
             user_public_id=data.user_public_id,
             reason=data.reason or _KILL_SWITCH_REASON_FALLBACK,
         )
+
+    async def _handle_membership_revoked(self, data: MembershipRevokedData) -> None:
+        """Retire only snapshot connections whose access token is no longer active.
+
+        Args:
+            data: Typed desk-membership revocation event.
+        """
+        candidates = self._snapshot_user_connection_claims(
+            data.user_public_id,
+            data.operator_public_id,
+        )
+        if not candidates:
+            return
+        active_jtis = await self._list_active_user_token_jtis(data.user_public_id)
+        sockets = tuple(
+            websocket
+            for websocket, access_token_jti, membership_public_id in candidates
+            if self._membership_revocation_candidate_should_close(
+                access_token_jti,
+                membership_public_id,
+                data.membership_public_id,
+                active_jtis,
+            )
+        )
+        await self._close_connection_snapshot(
+            sockets,
+            user_public_id=data.user_public_id,
+            reason=data.reason or _KILL_SWITCH_REASON_MEMBERSHIP_REVOKED,
+            retire_subscriptions=True,
+        )
+
+    def _snapshot_user_connection_claims(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+    ) -> tuple[tuple[WebSocket, str | None, str | None], ...]:
+        """Snapshot target sockets with token and membership-generation claims."""
+        candidates: list[tuple[WebSocket, str | None, str | None]] = []
+        for websocket, principal in self.authenticated_connections.items():
+            if principal.user_public_id != user_public_id:
+                continue
+            state = self._connection_states.get(websocket)
+            candidates.append(
+                (
+                    websocket,
+                    state.access_token_jti if state is not None else None,
+                    principal.operator_membership_public_ids.get(operator_public_id),
+                )
+            )
+        return tuple(candidates)
+
+    @staticmethod
+    def _membership_revocation_candidate_should_close(
+        access_token_jti: str | None,
+        membership_public_id: str | None,
+        revoked_membership_public_id: str,
+        active_jtis: set[str] | None,
+    ) -> bool:
+        """Apply generation and token-inventory fences to one snapshot socket."""
+        if membership_public_id == revoked_membership_public_id:
+            return True
+        if active_jtis is not None:
+            return access_token_jti is None or access_token_jti not in active_jtis
+        return membership_public_id is None or access_token_jti is None
+
+    async def _list_active_user_token_jtis(
+        self,
+        user_public_id: str,
+    ) -> set[str] | None:
+        """Return active access JTIs, or None when fail-safe closure is required."""
+        if self.repository_factory is None:
+            return None
+        try:
+            repository = self.repository_factory()
+            return set(await repository.list_active_user_token_jtis(user_public_id))
+        except Exception as exc:
+            logger.warning(
+                "Failed to fence membership-revoked WebSockets for user {}: {}",
+                user_public_id,
+                exc,
+            )
+            return None
 
     async def _handle_scope_revoked(self, data: ScopeRevokedData) -> None:
         """Mid-session revalidation for affected AI review-principal connections.
@@ -1179,17 +1376,93 @@ class WebSocketAuthManager:
             event_identifier,
         )
 
-    async def close_user_connections(self, user_public_id: str, reason: str) -> int:
+    async def _retire_connection_subscriptions(self, websocket: WebSocket) -> None:
+        """Retire connection-manager and bridge authority before socket close.
+
+        Args:
+            websocket: Target connection whose subscriptions must be removed.
+        """
+        if self.connection_manager is not None:
+            try:
+                self.connection_manager.retire_connection(websocket)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to retire revoked-member connection registries: {}",
+                    exc,
+                )
+        if self.zmq_bridge is not None:
+            try:
+                retirement = self.zmq_bridge.retire_client(websocket)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to retire revoked-member bridge subscriptions: {}",
+                    exc,
+                )
+                return
+            try:
+                await self.zmq_bridge.finalize_retired_client(retirement)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to finalize revoked-member bridge resources: {}",
+                    exc,
+                )
+
+    async def _close_connection_snapshot(
+        self,
+        sockets: tuple[WebSocket, ...],
+        user_public_id: str,
+        reason: str,
+        *,
+        retire_subscriptions: bool,
+    ) -> int:
+        """Close an immutable socket snapshot without widening its target set."""
+        truncated_reason = reason.encode("utf-8")[:_KILL_SWITCH_REASON_MAX_BYTES].decode(
+            "utf-8", errors="ignore"
+        )
+        closed = 0
+        for websocket in sockets:
+            if retire_subscriptions:
+                self.disconnect(websocket)
+                await self._retire_connection_subscriptions(websocket)
+            else:
+                self.disconnect(websocket)
+            try:
+                await websocket.close(code=_KILL_SWITCH_CLOSE_CODE, reason=truncated_reason)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to close kill-switched WS for user {}: {}",
+                    user_public_id,
+                    exc,
+                )
+            closed += 1
+        if closed:
+            logger.info(
+                "Kill switch closed {} WebSocket(s) for user {} (reason='{}')",
+                closed,
+                user_public_id,
+                truncated_reason,
+            )
+        return closed
+
+    async def close_user_connections(
+        self,
+        user_public_id: str,
+        reason: str,
+        *,
+        retire_subscriptions: bool = False,
+    ) -> int:
         """Close every authenticated WS matching `user_public_id` (code 4003).
 
         Per-connection sequence
-        1. `self.disconnect(ws)` first — synchronously cancels the
+        1. When ``retire_subscriptions=True``, remove connection-manager
+           and bridge subscriptions before the socket can receive more data.
+        2. `self.disconnect(ws)` — synchronously cancels the
            connection's `warn_task` + `hard_task` timers so a pending
            expiration handler cannot wake during the `await
            ws.close()` yield and try to write/close the socket
            concurrently with the kill switch (the original
            close-then-disconnect order was a race).
-        2. `await ws.close(code=4003, reason=…)` — the kill-switch
+        3. `await ws.close(code=4003, reason=…)` — the kill-switch
            close itself.
         Iterates a snapshot so the `disconnect` side-effect (which
         mutates `authenticated_connections`) does not invalidate the
@@ -1210,35 +1483,23 @@ class WebSocketAuthManager:
                 ``errors="ignore"`` so a multi-byte character split
                 by truncation is dropped rather than corrupting the
                 control frame.
+            retire_subscriptions: Whether live connection-manager and bridge
+                subscriptions must be removed before closing the socket.
 
         Returns:
             Number of connections that were closed.
         """
-        truncated_reason = reason.encode("utf-8")[:_KILL_SWITCH_REASON_MAX_BYTES].decode(
-            "utf-8", errors="ignore"
+        sockets = tuple(
+            websocket
+            for websocket, principal in self.authenticated_connections.items()
+            if principal.user_public_id == user_public_id
         )
-        closed = 0
-        for ws, principal in tuple(self.authenticated_connections.items()):
-            if principal.user_public_id != user_public_id:
-                continue
-            self.disconnect(ws)
-            try:
-                await ws.close(code=_KILL_SWITCH_CLOSE_CODE, reason=truncated_reason)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to close kill-switched WS for user {}: {}",
-                    user_public_id,
-                    exc,
-                )
-            closed += 1
-        if closed:
-            logger.info(
-                "Kill switch closed {} WebSocket(s) for user {} (reason='{}')",
-                closed,
-                user_public_id,
-                truncated_reason,
-            )
-        return closed
+        return await self._close_connection_snapshot(
+            sockets,
+            user_public_id,
+            reason,
+            retire_subscriptions=retire_subscriptions,
+        )
 
     def get_connection_stats(self) -> AuthConnectionStats:
         """Get statistics about authenticated connections.

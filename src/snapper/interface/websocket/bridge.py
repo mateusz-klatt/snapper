@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
@@ -88,6 +89,14 @@ class _DispatchFrame:
     alerts_payload: dict[str, Any] | None
     wallet_access_cache: WalletAccessCache
     wallet_scope_as_of: datetime | None
+
+
+@dataclass(frozen=True)
+class BridgeClientRetirement:
+    """Bridge resources captured by synchronous client retirement."""
+
+    topics: tuple[str, ...]
+    trailing_tasks: tuple[asyncio.Task[None], ...]
 
 
 class ZmqWebSocketBridgeService:
@@ -233,6 +242,96 @@ class ZmqWebSocketBridgeService:
         if websocket in self.client_subscriptions and not self.client_subscriptions[websocket]:
             del self.client_subscriptions[websocket]
 
+    def _registration_authority_is_current(
+        self,
+        websocket: WebSocket,
+        expected_connection_generation: int | None,
+        authority_is_current: Callable[[], bool] | None,
+    ) -> bool:
+        """Return whether a client may still mutate bridge subscriptions."""
+        if self.connection_manager is not None:
+            if expected_connection_generation is None:
+                if not self.connection_manager.is_connection_active(websocket):
+                    return False
+            elif not self.connection_manager.is_connection_current(
+                websocket,
+                expected_connection_generation,
+            ):
+                return False
+        return authority_is_current is None or authority_is_current()
+
+    def retire_client(self, websocket: WebSocket) -> BridgeClientRetirement:
+        """Synchronously remove a socket from every bridge send registry.
+
+        The returned resource bundle is finalized asynchronously after the
+        no-await barrier has made every in-flight registration check fail.
+
+        Args:
+            websocket: Client whose subscriptions are being revoked.
+
+        Returns:
+            Topics and cancelled trailing tasks requiring async cleanup.
+        """
+        topics = set(self.client_subscriptions.pop(websocket, set()))
+        topics.update(
+            topic
+            for topic, subscriptions in self.topic_subscriptions.items()
+            if websocket in subscriptions
+        )
+        for topic in topics:
+            subscriptions = self.topic_subscriptions.get(topic)
+            if subscriptions is None:
+                continue
+            subscriptions.pop(websocket, None)
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].active_subscribers = len(subscriptions)
+        trailing_tasks = self._retire_client_trailing_tasks(websocket)
+        return BridgeClientRetirement(
+            topics=tuple(sorted(topics)),
+            trailing_tasks=trailing_tasks,
+        )
+
+    def _retire_client_trailing_tasks(
+        self,
+        websocket: WebSocket,
+    ) -> tuple[asyncio.Task[None], ...]:
+        """Cancel trailing-delivery tasks for one synchronously retired client."""
+        keys = tuple(key for key in self._account_trailing_tasks if key[0] is websocket)
+        if not keys:
+            return ()
+        current_task = asyncio.current_task()
+        trailing_tasks: list[asyncio.Task[None]] = []
+        for key in keys:
+            task = self._account_trailing_tasks.pop(key)
+            self._account_trailing_frames.pop(key, None)
+            if task is current_task:
+                continue
+            task.cancel()
+            trailing_tasks.append(task)
+        return tuple(trailing_tasks)
+
+    async def finalize_retired_client(
+        self,
+        retirement: BridgeClientRetirement,
+    ) -> None:
+        """Drain retired tasks and stop topics that remain subscriber-free.
+
+        Args:
+            retirement: Resources captured by :meth:`retire_client`.
+        """
+        if retirement.trailing_tasks:
+            await asyncio.gather(*retirement.trailing_tasks, return_exceptions=True)
+        for topic in retirement.topics:
+            subscriptions = self.topic_subscriptions.get(topic)
+            if subscriptions is None or subscriptions:
+                continue
+            await self._stop_zmq_subscription(topic)
+            subscriptions = self.topic_subscriptions.get(topic)
+            if subscriptions:
+                await self.start_zmq_subscriber(topic)
+            elif subscriptions is not None:
+                del self.topic_subscriptions[topic]
+
     @staticmethod
     def _get_prefix_subscription_error(topic: str) -> str | None:
         """Return validation detail for invalid prefix subscriptions."""
@@ -279,6 +378,11 @@ class ZmqWebSocketBridgeService:
         throttle_per_topic: bool = False,
     ) -> bool:
         """Track subscription state and return whether it is the first subscriber."""
+        if (
+            self.connection_manager is not None
+            and not self.connection_manager.is_connection_active(websocket)
+        ):
+            return False
         client_topics = self._ensure_client_topics(websocket)
         client_topics.add(topic)
         subscriptions = self.topic_subscriptions.setdefault(topic, {})
@@ -345,17 +449,42 @@ class ZmqWebSocketBridgeService:
             return True
         return await self._reject_unknown_websocket_topic(websocket, topic)
 
-    async def subscribe_client(self, websocket: WebSocket, topics: list[str]) -> None:
+    async def subscribe_client(
+        self,
+        websocket: WebSocket,
+        topics: list[str],
+        expected_connection_generation: int | None = None,
+        authority_is_current: Callable[[], bool] | None = None,
+    ) -> bool:
         """Subscribe a WebSocket client to multiple topics.
 
         Args:
             websocket: The WebSocket connection.
             topics: List of topic names to subscribe to.
+            expected_connection_generation: Connection lease captured before
+                asynchronous authorization.
+            authority_is_current: Optional identity guard for the authenticated
+                principal that initiated the subscription.
+
+        Returns:
+            Whether the captured connection authority remained current.
         """
+        if not self._registration_authority_is_current(
+            websocket,
+            expected_connection_generation,
+            authority_is_current,
+        ):
+            return False
         client_id = f"{id(websocket)}"
         logger.info(f"Client {client_id} subscribing to topics: {topics}")
         self._ensure_client_topics(websocket)
         for topic in topics:
+            if not self._registration_authority_is_current(
+                websocket,
+                expected_connection_generation,
+                authority_is_current,
+            ):
+                return False
             if not self._is_client_subscription_topic_valid(topic):
                 continue
             should_start = self._register_topic_subscription(
@@ -367,11 +496,20 @@ class ZmqWebSocketBridgeService:
             )
             if should_start:
                 await self._start_zmq_subscription(topic)
+                if not self._registration_authority_is_current(
+                    websocket,
+                    expected_connection_generation,
+                    authority_is_current,
+                ):
+                    retirement = self.retire_client(websocket)
+                    await self.finalize_retired_client(retirement)
+                    return False
         self._remove_client_if_empty(websocket)
         logger.info(
             f"Client {client_id} subscribed. Active subscriptions: "
             f"{len(self.client_subscriptions.get(websocket, set()))}"
         )
+        return True
 
     async def unsubscribe_client(self, websocket: WebSocket, topics: list[str]) -> None:
         """Unsubscribe a WebSocket client from multiple topics.
@@ -1179,6 +1317,8 @@ class ZmqWebSocketBridgeService:
                 self._is_trade_topic(frame.topic),
             ):
                 return
+            if not self._is_registered_subscription(subscription, frame.topic):
+                return
             await self._try_send_message(
                 subscription,
                 frame.topic,
@@ -1511,7 +1651,12 @@ class ZmqWebSocketBridgeService:
             logger.exception(f"ZMQ message handler for {topic} failed: {e}")
 
     async def subscribe_websocket(
-        self, websocket: WebSocket, topic: str, throttle_ms: int | None = None
+        self,
+        websocket: WebSocket,
+        topic: str,
+        throttle_ms: int | None = None,
+        expected_connection_generation: int | None = None,
+        authority_is_current: Callable[[], bool] | None = None,
     ) -> bool:
         """Subscribe a WebSocket to a topic with optional throttle.
 
@@ -1520,11 +1665,27 @@ class ZmqWebSocketBridgeService:
             topic: The topic to subscribe to.
             throttle_ms: Optional throttle override in milliseconds. Omitted
                 values use the matching topic registry entry.
+            expected_connection_generation: Connection lease captured before
+                asynchronous authorization.
+            authority_is_current: Optional identity guard for the authenticated
+                principal that initiated the subscription.
 
         Returns:
             True if subscription successful, False otherwise.
         """
+        if not self._registration_authority_is_current(
+            websocket,
+            expected_connection_generation,
+            authority_is_current,
+        ):
+            return False
         if not await self._can_subscribe_websocket_topic(websocket, topic):
+            return False
+        if not self._registration_authority_is_current(
+            websocket,
+            expected_connection_generation,
+            authority_is_current,
+        ):
             return False
         if self._websocket_has_topic_subscription(websocket, topic):
             logger.debug(f"WebSocket already subscribed to topic: {topic}")
@@ -1539,6 +1700,14 @@ class ZmqWebSocketBridgeService:
             throttle_per_topic=self._topic_throttle_per_topic(topic),
         )
         await self.start_zmq_subscriber(topic)
+        if not self._registration_authority_is_current(
+            websocket,
+            expected_connection_generation,
+            authority_is_current,
+        ):
+            retirement = self.retire_client(websocket)
+            await self.finalize_retired_client(retirement)
+            return False
         logger.info(f"WebSocket subscribed to topic: {topic} (throttle: {effective_throttle_ms}ms)")
         return True
 
@@ -1709,15 +1878,44 @@ class ZmqWebSocketBridgeService:
         await self.cleanup()
         logger.info("ZMQ WebSocket bridge stopped")
 
-    async def add_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
+    async def add_subscription(
+        self,
+        websocket: WebSocket,
+        topics: list[str],
+        expected_connection_generation: int | None = None,
+        authority_is_current: Callable[[], bool] | None = None,
+    ) -> bool:
         """Add subscriptions for a WebSocket to multiple topics.
 
         Args:
             websocket: The WebSocket connection.
             topics: List of topics to subscribe to.
+            expected_connection_generation: Connection lease captured before
+                asynchronous authorization.
+            authority_is_current: Optional identity guard for the authenticated
+                principal that initiated the subscription.
+
+        Returns:
+            Whether the captured connection authority remained current.
         """
         for topic in topics:
-            await self.subscribe_websocket(websocket, topic)
+            if not self._registration_authority_is_current(
+                websocket,
+                expected_connection_generation,
+                authority_is_current,
+            ):
+                return False
+            await self.subscribe_websocket(
+                websocket,
+                topic,
+                expected_connection_generation=expected_connection_generation,
+                authority_is_current=authority_is_current,
+            )
+        return self._registration_authority_is_current(
+            websocket,
+            expected_connection_generation,
+            authority_is_current,
+        )
 
     async def remove_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
         """Remove subscriptions for a WebSocket from multiple topics.
@@ -1735,4 +1933,5 @@ class ZmqWebSocketBridgeService:
         Args:
             websocket: The WebSocket connection to remove.
         """
-        await self.unsubscribe_websocket_all(websocket)
+        retirement = self.retire_client(websocket)
+        await self.finalize_retired_client(retirement)

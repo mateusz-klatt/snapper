@@ -65,7 +65,9 @@ from snapper.auth.tokens import hash_token
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
+from snapper.data.models import Operator
 from snapper.data.models import User
+from snapper.data.models import UserOperatorMembership
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.mcp.server import BearerAuthMiddleware
@@ -99,7 +101,7 @@ async def repo() -> SQLAlchemyRepository:
 
 
 async def _seed_delegate(repository: SQLAlchemyRepository) -> None:
-    """Insert the SCD2-active delegate user and its ``ai_delegates`` row."""
+    """Insert the active delegate, desk, and explicit desk membership."""
     seed_time = datetime(2026, 1, 1, tzinfo=UTC)
     async with repository.session() as session:
         session.add(
@@ -125,6 +127,29 @@ async def _seed_delegate(repository: SQLAlchemyRepository) -> None:
                 active_reviews_count=0,
                 created_at=seed_time,
                 updated_at=seed_time,
+            )
+        )
+        session.add(
+            Operator(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=seed_time,
+                known_to=KNOWN_TO_MAX,
+                public_id="op-live",
+                label="live-delegate-desk",
+                description=None,
+            )
+        )
+        session.add(
+            UserOperatorMembership(
+                session_id="seed",
+                sequence_id=3,
+                timestamp=seed_time,
+                known_to=KNOWN_TO_MAX,
+                public_id="membership-live-delegate",
+                user_public_id=_DELEGATE_USER_ID,
+                operator_public_id="op-live",
+                is_primary=True,
             )
         )
         await session.commit()

@@ -4,6 +4,7 @@ This module handles topic subscription and unsubscription requests
 with permission-based access control and ZMQ bridge integration.
 """
 
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from uuid import uuid7
@@ -12,9 +13,11 @@ from fastapi import WebSocket
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.core.types import SubscriptionActionEnum
 from snapper.core.types import SubscriptionStatusEnum
 from snapper.data.repository import Repository
+from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
@@ -29,10 +32,90 @@ from snapper.messaging.topics.schemas import REGISTRY_ROOTS
 from snapper.messaging.topics.validation import validate_subscription_pattern
 
 __all__ = [
+    "SubscribeAuthorizationContext",
     "handle_subscribe",
     "handle_unsubscribe",
     "handle_get_subscriptions",
 ]
+
+
+@dataclass(frozen=True)
+class SubscribeAuthorizationContext:
+    """Dependencies that keep asynchronous subscription authority current."""
+
+    repository: Repository | None
+    auth_manager: WebSocketAuthManager | None
+
+
+@dataclass(frozen=True)
+class _SubscriptionAuthorityLease:
+    """Principal identity and connection generation captured for one request."""
+
+    websocket: WebSocket
+    manager: WebSocketConnectionManager
+    principal: AuthPrincipal
+    auth_manager: WebSocketAuthManager | None
+    connection_generation: int | None
+
+    def is_current(self) -> bool:
+        """Return whether the exact initiating authority is still live."""
+        if self.auth_manager is None:
+            return True
+        return (
+            self.connection_generation is not None
+            and self.manager.is_connection_current(
+                self.websocket,
+                self.connection_generation,
+            )
+            and self.auth_manager.get_authenticated_user(self.websocket) is self.principal
+        )
+
+    def register_manager_topic(self, topic: str) -> bool:
+        """Register one topic only while the captured lease remains current."""
+        if not self.is_current():
+            return False
+        if self.connection_generation is None:
+            return self.manager.subscribe_client(self.websocket, topic)
+        return self.manager.subscribe_client(
+            self.websocket,
+            topic,
+            expected_generation=self.connection_generation,
+        )
+
+
+def _resolve_subscribe_context(
+    repository: Repository | SubscribeAuthorizationContext | None,
+) -> SubscribeAuthorizationContext:
+    """Normalize legacy repository-only calls into a subscription context."""
+    if isinstance(repository, SubscribeAuthorizationContext):
+        return repository
+    return SubscribeAuthorizationContext(repository=repository, auth_manager=None)
+
+
+async def _register_live_subscriptions(
+    lease: _SubscriptionAuthorityLease,
+    topics: list[str],
+    bridge: ZmqWebSocketBridgeService,
+) -> bool:
+    """Register manager and bridge topics while enforcing the captured lease."""
+    for topic in topics:
+        if not lease.register_manager_topic(topic):
+            return False
+    if lease.auth_manager is None:
+        bridge_current = await bridge.add_subscription(lease.websocket, topics)
+    else:
+        bridge_current = await bridge.add_subscription(
+            lease.websocket,
+            topics,
+            expected_connection_generation=lease.connection_generation,
+            authority_is_current=lease.is_current,
+        )
+    if bridge_current and lease.is_current():
+        return True
+    lease.manager.retire_connection(lease.websocket)
+    retirement = bridge.retire_client(lease.websocket)
+    await bridge.finalize_retired_client(retirement)
+    return False
 
 
 def _invalid_registry_root_error(topic: str) -> str | None:
@@ -93,7 +176,7 @@ async def handle_subscribe(
     message: WSSubscribeRequest,
     manager: WebSocketConnectionManager,
     principal: AuthPrincipal,
-    repository: Repository | None = None,
+    repository: Repository | SubscribeAuthorizationContext | None = None,
 ) -> None:
     """Handle topic subscription request.
 
@@ -114,9 +197,23 @@ async def handle_subscribe(
         manager: WebSocket connection manager.
         principal: Authenticated caller — permissions + wallet scope.
         repository: Repository for the AI review-principal wallet-scope
-            filter. Required when ``delegate_public_id`` is populated;
-            optional otherwise because the filter fast-paths it.
+            filter, or a context additionally carrying the authoritative
+            WebSocket auth manager. Repository-only calls remain supported
+            for direct handler tests.
     """
+    context = _resolve_subscribe_context(repository)
+    connection_generation = (
+        manager.get_connection_generation(websocket) if context.auth_manager is not None else None
+    )
+    lease = _SubscriptionAuthorityLease(
+        websocket=websocket,
+        manager=manager,
+        principal=principal,
+        auth_manager=context.auth_manager,
+        connection_generation=connection_generation,
+    )
+    if not lease.is_current():
+        return
     topics, invalid_topics = _validate_ws_topics(message.topics)
     if invalid_topics:
         error_details = [f"{topic}: {error}" for topic, error in invalid_topics]
@@ -132,9 +229,11 @@ async def handle_subscribe(
     allowed, denied = await partition_authorized_topics(
         topics=topics,
         principal=principal,
-        repository=repository,
+        repository=context.repository,
         as_of=datetime.now(UTC),
     )
+    if not lease.is_current():
+        return
     if not allowed and denied:
         response = WSSubscriptionSuccessResponse(
             action=SubscriptionActionEnum.SUBSCRIBE,
@@ -163,8 +262,6 @@ async def handle_subscribe(
         )
         await websocket.send_text(response.model_dump_json())
         return
-    for topic in allowed:
-        manager.subscribe_client(websocket, topic)
     bridge = manager.zmq_bridge
     if bridge is None:
         error_msg = WSErrorResponse(
@@ -176,7 +273,8 @@ async def handle_subscribe(
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
-    await bridge.add_subscription(websocket, allowed)
+    if not await _register_live_subscriptions(lease, allowed, bridge):
+        return
     response = WSSubscriptionSuccessResponse(
         action=SubscriptionActionEnum.SUBSCRIBE,
         status=SubscriptionStatusEnum.PARTIAL if denied else SubscriptionStatusEnum.SUBSCRIBED,

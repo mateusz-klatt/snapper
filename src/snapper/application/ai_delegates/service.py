@@ -306,6 +306,7 @@ class DelegateService:
                 sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
             )
             session.add(membership_row)
+            await session.flush()
             session.add(
                 AiDelegate(
                     public_id=str(uuid.uuid7()),
@@ -322,6 +323,7 @@ class DelegateService:
                 is_active=True,
                 user_public_id=delegate_user.public_id,
                 operator_public_ids=[bound_operator_public_id],
+                operator_membership_public_ids={bound_operator_public_id: membership_row.public_id},
                 primary_operator_public_id=bound_operator_public_id,
             )
             pat = self.token_manager.create_delegate_access_token(

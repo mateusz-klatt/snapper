@@ -26,13 +26,17 @@ from loguru import logger
 from pydantic import ValidationError
 
 from snapper.application.services.settings import SettingsService
+from snapper.auth.deactivation_fallback import OperatorMembershipClaim
+from snapper.auth.deactivation_fallback import list_active_user_token_jtis_by_user
 from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
+from snapper.auth.deactivation_fallback import list_users_with_stale_operator_memberships
 from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -46,6 +50,7 @@ from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
 BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
@@ -103,6 +108,9 @@ bound memory growth.
 
 _ADMIN_USER_DEACTIVATED_TOPIC: Final[str] = "admin.user_deactivated"
 """Bus topic that ``UserService.deactivate_user`` publishes under."""
+
+_ADMIN_MEMBERSHIP_REVOKED_TOPIC: Final[str] = "admin.membership_revoked"
+"""Bus topic that desk detach publishes after closing a membership."""
 
 _ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
 """Backoff after a non-cancellation recv error so the loop cannot tight-spin."""
@@ -187,11 +195,33 @@ class _VerifyCacheEntry:
     The entry stores :class:`_InventoryFacts` rather than a boolean
     verdict precisely so a hit cannot answer a question the miss was
     never asked. See that class for why.
+
+    ``role``, ``operator_public_ids`` and ``operator_membership_public_ids``
+    preserve the signed authority claim for broker-independent fallback
+    reconciliation. Membership public IDs are the generation fence that
+    distinguishes a continuous grant from detach followed by re-attachment.
+    ``membership_claim_is_current`` is the live DB verdict computed on
+    cache fill and re-applied on every hit. Its default is deliberately
+    fail-closed so a future constructor cannot accidentally bypass the
+    membership gate.
     """
 
     facts: _InventoryFacts
     expires_at_ts: float
     cached_at_ts: float
+    role: UserRole = UserRole.VIEWER
+    operator_public_ids: tuple[str, ...] = ()
+    operator_membership_public_ids: tuple[tuple[str, str], ...] = ()
+    has_global_operator_authority: bool = False
+    membership_claim_is_current: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class _VerifyCacheGuard:
+    """Race and authority verdict sampled before one cache write."""
+
+    generation_before: int
+    membership_claim_is_current: bool = False
 
 
 REJECTION_REASON_USER_DEACTIVATED: Final[str] = "user_deactivated"
@@ -350,6 +380,7 @@ def _outcome_for(
     token_data: TokenClaims,
     expected_token_type: str,
     now_ts: float,
+    membership_claim_is_current: bool = True,
 ) -> VerifyOutcome:
     """Apply the full acceptance predicate to one set of inventory facts.
 
@@ -362,6 +393,8 @@ def _outcome_for(
         token_data: Verified claims of the presented JWT.
         expected_token_type: Purpose the call site demands.
         now_ts: The caller's single clock sample.
+        membership_claim_is_current: Whether every non-admin operator claim
+            remains backed by an active DB membership.
 
     Returns:
         Claims on acceptance, otherwise ``claims=None`` with
@@ -379,9 +412,93 @@ def _outcome_for(
             else REJECTION_REASON_INVALID
         )
         return VerifyOutcome(claims=None, rejection_reason=reason)
+    if not membership_claim_is_current:
+        return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
     if not _purpose_accepted(facts, token_data, expected_token_type):
         return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
     return VerifyOutcome(claims=token_data, rejection_reason=None)
+
+
+async def _operator_membership_claim_is_current(
+    repository: Repository,
+    facts: _InventoryFacts,
+    token_data: TokenClaims,
+    as_of: datetime,
+) -> bool:
+    """Validate non-global operator claims against current membership versions.
+
+    Empty claims are valid and credentials with effective global impersonation
+    authority bypass explicit membership checks. A non-empty claim fails closed
+    when the inventory row has no user identity, the membership lookup fails,
+    or any claimed operator is absent. New credentials additionally bind each
+    operator to the active membership row's ``public_id`` so a detach followed
+    by re-attachment cannot resurrect an older token. A completely empty
+    version mapping remains the deliberate compatibility path for legacy JWTs;
+    a partial mapping fails closed.
+
+    Args:
+        repository: Repository used by the DB-backed token verification path.
+        facts: Inventory facts naming the authoritative token owner.
+        token_data: Signed role and operator claims.
+        as_of: UTC temporal boundary for active membership reads.
+
+    Returns:
+        Whether the credential's operator claim remains fully authorized.
+    """
+    claimed_operator_public_ids = set(token_data.operator_public_ids)
+    claimed_membership_public_ids = token_data.operator_membership_public_ids
+    has_global_operator_authority = has_effective_permission(
+        token_data.role,
+        token_data.permissions,
+        token_data.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    )
+    if has_global_operator_authority:
+        return True
+    if not claimed_operator_public_ids:
+        return not claimed_membership_public_ids
+    if not facts.user_public_id:
+        logger.warning(
+            "verify_token_with_db: non-empty operator claim has no inventory user — jti={}",
+            token_data.jti,
+        )
+        return False
+    try:
+        memberships = await repository.get_user_operator_memberships(
+            facts.user_public_id,
+            as_of,
+        )
+    except Exception as exc:
+        logger.warning(
+            "verify_token_with_db: membership lookup failed closed — user={} err={}",
+            facts.user_public_id,
+            exc,
+        )
+        return False
+    active_operator_public_ids = {membership["operator_public_id"] for membership in memberships}
+    operators_are_current = claimed_operator_public_ids.issubset(active_operator_public_ids)
+    versions_are_current = True
+    if claimed_membership_public_ids:
+        active_membership_public_ids = {
+            membership["operator_public_id"]: membership["public_id"] for membership in memberships
+        }
+        versions_are_current = set(
+            claimed_membership_public_ids
+        ) == claimed_operator_public_ids and all(
+            active_membership_public_ids.get(operator_public_id) == membership_public_id
+            for operator_public_id, membership_public_id in claimed_membership_public_ids.items()
+        )
+    is_current = operators_are_current and versions_are_current
+    if not is_current:
+        logger.warning(
+            "verify_token_with_db: stale operator claim rejected — user={} "
+            "claimed={} active={} versioned={}",
+            facts.user_public_id,
+            sorted(claimed_operator_public_ids),
+            sorted(active_operator_public_ids),
+            bool(claimed_membership_public_ids),
+        )
+    return is_current
 
 
 def _log_inventory_rejection(
@@ -660,6 +777,7 @@ class TokenManager:
             sid=session_identifier,
             user_public_id=user.user_public_id,
             operator_public_ids=user.operator_public_ids,
+            operator_membership_public_ids=user.operator_membership_public_ids,
             primary_operator_public_id=user.primary_operator_public_id,
             active_wallet_public_id=user.active_wallet_public_id,
         )
@@ -681,6 +799,7 @@ class TokenManager:
             sid=session_identifier,
             user_public_id=user.user_public_id,
             operator_public_ids=user.operator_public_ids,
+            operator_membership_public_ids=user.operator_membership_public_ids,
             primary_operator_public_id=user.primary_operator_public_id,
             active_wallet_public_id=user.active_wallet_public_id,
         )
@@ -761,6 +880,7 @@ class TokenManager:
             sid=session_identifier,
             user_public_id=user.user_public_id,
             operator_public_ids=user.operator_public_ids,
+            operator_membership_public_ids=user.operator_membership_public_ids,
             primary_operator_public_id=user.primary_operator_public_id,
             active_wallet_public_id=user.active_wallet_public_id,
         )
@@ -1246,21 +1366,42 @@ class TokenManager:
         now_ts = datetime.now(UTC).timestamp()
         cached = self._verify_cache.get(th)
         if cached is not None and cached.cached_at_ts + VERIFY_CACHE_TTL_SECONDS > now_ts:
-            return _outcome_for(cached.facts, token_data, expected_token_type, now_ts)
+            return _outcome_for(
+                cached.facts,
+                token_data,
+                expected_token_type,
+                now_ts,
+                cached.membership_claim_is_current,
+            )
         claim_sample_key = token_data.user_public_id
         gen_before = (
             self._user_cache_generations.get(claim_sample_key, 0) if claim_sample_key else 0
         )
         facts = _inventory_facts(await repository.get_active_token_by_hash(th))
+        membership_claim_is_current = await _operator_membership_claim_is_current(
+            repository,
+            facts,
+            token_data,
+            datetime.fromtimestamp(now_ts, UTC),
+        )
         self._cache_inventory_facts(
             th,
             facts=facts,
             token_data=token_data,
             now_ts=now_ts,
-            gen_before=gen_before,
+            guard=_VerifyCacheGuard(
+                generation_before=gen_before,
+                membership_claim_is_current=membership_claim_is_current,
+            ),
         )
         _log_inventory_rejection(facts, token_data, now_ts)
-        return _outcome_for(facts, token_data, expected_token_type, now_ts)
+        return _outcome_for(
+            facts,
+            token_data,
+            expected_token_type,
+            now_ts,
+            membership_claim_is_current,
+        )
 
     def _cache_inventory_facts(
         self,
@@ -1269,7 +1410,7 @@ class TokenManager:
         facts: _InventoryFacts,
         token_data: TokenClaims,
         now_ts: float,
-        gen_before: int,
+        guard: _VerifyCacheGuard,
     ) -> None:
         """Memoise one read's inventory facts, prune on overflow, skip on stale generation.
 
@@ -1314,10 +1455,8 @@ class TokenManager:
             now_ts: Monotonic-ish "now" the caller also used to read
                 the cache — keeps the TTL anchored to one clock
                 sample per request.
-            gen_before: Generation counter value sampled BEFORE the
-                DB read using the same effective user id this
-                method samples now. If the stored value differs
-                now, the write is skipped.
+            guard: Generation sampled before DB reads plus the live membership
+                verdict. A generation mismatch skips the write.
         """
         if not token_data.user_public_id:
             logger.debug(
@@ -1327,7 +1466,7 @@ class TokenManager:
             return
         sample_key = token_data.user_public_id
         gen_now = self._user_cache_generations.get(sample_key, 0)
-        if gen_now != gen_before:
+        if gen_now != guard.generation_before:
             logger.debug(
                 "verify_cache skip: generation advanced during DB read — user={}",
                 sample_key,
@@ -1337,6 +1476,18 @@ class TokenManager:
             facts=facts,
             expires_at_ts=float(token_data.exp),
             cached_at_ts=now_ts,
+            role=token_data.role,
+            operator_public_ids=tuple(token_data.operator_public_ids),
+            operator_membership_public_ids=tuple(
+                sorted(token_data.operator_membership_public_ids.items())
+            ),
+            has_global_operator_authority=has_effective_permission(
+                token_data.role,
+                token_data.permissions,
+                token_data.permission_scope_version,
+                Permission.IMPERSONATE_OPERATOR,
+            ),
+            membership_claim_is_current=guard.membership_claim_is_current,
         )
         if len(self._verify_cache) > VERIFY_CACHE_MAX_ENTRIES:
             self._prune_verify_cache(now_ts)
@@ -1452,6 +1603,7 @@ class TokenManager:
             role=token_data.role,
             user_public_id=token_data.user_public_id,
             operator_public_ids=token_data.operator_public_ids,
+            operator_membership_public_ids=token_data.operator_membership_public_ids,
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
             permissions=token_data.permissions,
@@ -1533,7 +1685,13 @@ class TokenManager:
             len(self._blacklisted_tokens),
         )
 
-    async def revoke_user_sessions(self, user_public_id: str, repository: Repository) -> int:
+    async def revoke_user_sessions(
+        self,
+        user_public_id: str,
+        repository: Repository,
+        *,
+        immediate: bool = False,
+    ) -> int:
         """Revoke every active session for a user.
 
         Two-step revocation pushes state into BOTH the DB inventory
@@ -1546,9 +1704,8 @@ class TokenManager:
                meth:`Repository.revoke_user_active_tokens` — atomic
                per SQLAlchemy UPDATE.
             3. For every JTI loaded in step 1, add it to
-               attr:`_blacklisted_tokens` with grace period so
-               concurrent in-flight requests still complete but new
-               verifications fail.
+               attr:`_blacklisted_tokens`, using the normal grace period
+               unless ``immediate=True`` requests a hard authority barrier.
         Caller (``UserService.deactivate_user``) publishes the
         ``admin.user_deactivated`` bus event AFTER commit — this
         method deliberately does NOT publish the event itself so
@@ -1565,6 +1722,9 @@ class TokenManager:
                 the caller's transactional scope is respected — for
                 example the kill-switch can be driven from a
                 migration script that attaches its own session.
+            immediate: Whether blacklist entries reject without the normal
+                concurrent-request grace period. Defaults to ``False`` to
+                preserve user-deactivation and logout semantics.
 
         Returns:
             Count of rows revoked (0 if user had no active
@@ -1574,12 +1734,16 @@ class TokenManager:
         revoked_at = datetime.now(UTC)
         count = await repository.revoke_user_active_tokens(user_public_id, revoked_at)
         for jti in jtis:
-            self.blacklist_token(jti)
+            if immediate:
+                self.blacklist_token_immediately(jti)
+            else:
+                self.blacklist_token(jti)
         logger.info(
-            "revoke_user_sessions: user={} revoked_rows={} blacklisted_jtis={}",
+            "revoke_user_sessions: user={} revoked_rows={} blacklisted_jtis={} immediate={}",
             user_public_id,
             count,
             len(jtis),
+            immediate,
         )
         return count
 
@@ -1664,11 +1828,13 @@ class TokenManager:
             raw_sub_socket.connect(zmq_broker_xpub)
             self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
             self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
+            self._admin_subscriber.subscribe(_ADMIN_MEMBERSHIP_REVOKED_TOPIC)
             self._admin_running = True
             self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
             logger.info(
-                "TokenManager: admin-bus listener subscribed to {} on {}",
+                "TokenManager: admin-bus listener subscribed to {} + {} on {}",
                 _ADMIN_USER_DEACTIVATED_TOPIC,
+                _ADMIN_MEMBERSHIP_REVOKED_TOPIC,
                 zmq_broker_xpub,
             )
 
@@ -1752,20 +1918,47 @@ class TokenManager:
         )
 
     async def _scan_deactivated_cached_users_once(self) -> None:
-        """Cross-check cached user ids against the DB-backed deactivation registry."""
+        """Cross-check cached users against user, token, and membership state."""
+        cache_snapshot = tuple(self._verify_cache.values())
         user_public_ids = sorted(
-            {
-                entry.facts.user_public_id
-                for entry in self._verify_cache.values()
-                if entry.facts.user_public_id
-            }
+            {entry.facts.user_public_id for entry in cache_snapshot if entry.facts.user_public_id}
         )
         inactive_user_public_ids = await list_inactive_user_public_ids(
             self._deactivation_repository_factory,
             user_public_ids,
             component_name="TokenManager",
         )
-        for user_public_id in inactive_user_public_ids:
+        active_jtis_by_user = await list_active_user_token_jtis_by_user(
+            self._deactivation_repository_factory,
+            user_public_ids,
+            component_name="TokenManager",
+        )
+        stale_token_user_public_ids = {
+            entry.facts.user_public_id
+            for entry in cache_snapshot
+            if entry.facts.user_public_id in active_jtis_by_user
+            and entry.facts.jti not in active_jtis_by_user[entry.facts.user_public_id]
+        }
+        for user_public_id in set(inactive_user_public_ids) | stale_token_user_public_ids:
+            self.invalidate_user_cache(user_public_id)
+        membership_claims = [
+            OperatorMembershipClaim(
+                user_public_id=entry.facts.user_public_id,
+                role=entry.role,
+                has_global_operator_authority=entry.has_global_operator_authority,
+                operator_public_ids=entry.operator_public_ids,
+                operator_membership_public_ids=entry.operator_membership_public_ids,
+            )
+            for entry in cache_snapshot
+            if entry.facts.user_public_id
+        ]
+        stale_membership_user_public_ids = await list_users_with_stale_operator_memberships(
+            self._deactivation_repository_factory,
+            membership_claims,
+            datetime.now(UTC),
+            component_name="TokenManager",
+        )
+        for user_public_id in stale_membership_user_public_ids:
             self.invalidate_user_cache(user_public_id)
 
     async def _admin_recv_one_frame(
@@ -1808,6 +2001,8 @@ class TokenManager:
         try:
             if topic == _ADMIN_USER_DEACTIVATED_TOPIC:
                 self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
+            elif topic == _ADMIN_MEMBERSHIP_REVOKED_TOPIC:
+                self._handle_membership_revoked(MembershipRevokedData.from_json(payload))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1825,6 +2020,14 @@ class TokenManager:
         Synchronous because :meth:`invalidate_user_cache` does no
         I/O — walking the dict + deleting matching entries is
         pure in-process work.
+        """
+        self.invalidate_user_cache(data.user_public_id)
+
+    def _handle_membership_revoked(self, data: MembershipRevokedData) -> None:
+        """Evict every cached credential for the detached desk member.
+
+        Args:
+            data: Typed membership-revocation event naming the affected user.
         """
         self.invalidate_user_cache(data.user_public_id)
 

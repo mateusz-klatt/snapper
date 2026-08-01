@@ -1,15 +1,19 @@
-"""Scope revocation + user-deactivation handlers for the notify sidecar.
+"""Authority-reduction handlers and send-time checks for the notify sidecar.
 
-The sidecar subscribes to ``admin.scope_revoked`` + ``admin.user_deactivated``
-on startup. When either fires, ``ScopeRevalidator`` cancels the pending
-deliveries that would have shipped out under the revoked scope, and
-primes its in-memory "stale scope" cache so the next per-delivery
-send-time check can fast-path the DB lookup for non-safety-critical
+The sidecar subscribes to ``admin.scope_revoked``, ``admin.user_deactivated``,
+and ``admin.membership_revoked`` on startup. ``ScopeRevalidator`` cancels the
+pending deliveries affected by each reduction. Scope events also prime an
+in-memory cache that wakes the wallet-grant check for non-safety-critical
 alerts.
 
 Send-time revalidation (``should_skip_send``) runs *before* the APNs
 call in the sidecar's ``_attempt_once``. Policy:
 
+- **Every operator-scoped alert**: re-run the user-to-operator membership
+  check. This database fallback prevents a lost membership event from
+  delivering an alert under detached desk authority. When that literal
+  membership or a wallet grant is absent, preserve the principal-wide global
+  authority of an active role that grants ``IMPERSONATE_OPERATOR``.
 - **Safety-critical alerts**: always re-run ``is_scope_grant_active``
   — no cache shortcut. The round-trip is cheap and the alerting cost
   of paging someone whose scope was just revoked is worse than a
@@ -21,19 +25,22 @@ call in the sidecar's ``_attempt_once``. Policy:
   off is bounded staleness (at most one sidecar tick of delay after a
   scope_revoked event for non-critical alerts).
 
-The cache is an in-memory dict on the revalidator instance; it does
-NOT persist across sidecar restart. A fresh process loads the current
-DB state on its first send attempt per scope, which is correct.
+The wallet-grant wake-up cache is an in-memory dict on the revalidator
+instance and does not persist across sidecar restart. Desk membership is
+always read from the database and does not rely on that cache.
 """
 
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 
 from loguru import logger
 
+from snapper.auth.domain.permissions import Permission
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
@@ -41,8 +48,24 @@ _STALE_SCOPE_TTL = timedelta(seconds=60)
 _ZMQ_STREAM = "sidecar.scope_revalidation"
 
 
+def _authority_now() -> datetime:
+    """Return a fresh temporal boundary for the final pre-send authority read."""
+    return datetime.now(UTC)
+
+
+async def _has_global_operator_authority(
+    repo: Repository,
+    user_public_id: str,
+) -> bool:
+    """Return whether the active user's role grants global operator authority."""
+    globally_authorized_users = await repo.list_users_with_permission(
+        Permission.IMPERSONATE_OPERATOR.value
+    )
+    return user_public_id in globally_authorized_users
+
+
 class ScopeRevalidator:
-    """Handles ``admin.scope_revoked`` / ``admin.user_deactivated`` + send-time checks."""
+    """Handle administrative authority reductions and APNs send-time checks."""
 
     def __init__(self, tracker: SequenceTracker) -> None:
         """Start with an empty stale-scope cache."""
@@ -141,6 +164,45 @@ class ScopeRevalidator:
                 user=data.user_public_id,
             )
 
+    async def handle_membership_revoked(
+        self,
+        payload: bytes,
+        repo: Repository,
+        now: datetime,
+    ) -> None:
+        """Cancel queued deliveries belonging to one detached desk member.
+
+        Args:
+            payload: Raw JSON bytes of the membership-revocation event.
+            repo: Repository handle used to cancel matching deliveries.
+            now: Entry-boundary timestamp for the cancellation transition.
+        """
+        try:
+            data = MembershipRevokedData.model_validate_json(payload)
+        except Exception as exc:
+            logger.warning(
+                "scope_revalidation: drop malformed admin.membership_revoked payload: {err}",
+                err=exc,
+            )
+            return
+        sid = self._tracker.session_id
+        seq = self._tracker.next_sequence(_ZMQ_STREAM)
+        cancelled = await repo.cancel_pending_deliveries_for_membership(
+            membership=(data.user_public_id, data.operator_public_id),
+            detached_at=data.detached_at,
+            transition_at=now,
+            session_id=sid,
+            sequence_id=seq,
+        )
+        if cancelled:
+            logger.info(
+                "scope_revalidation: cancelled {n} pending deliveries for "
+                "detached user={user} operator={op}",
+                n=cancelled,
+                user=data.user_public_id,
+                op=data.operator_public_id,
+            )
+
     async def should_skip_send(
         self,
         alert: AlertEventRow,
@@ -149,15 +211,18 @@ class ScopeRevalidator:
     ) -> bool:
         """Return True when the delivery should be cancelled before the APNs call.
 
-        Safety-critical alerts always re-check the grant. Non-critical
-        alerts consult the stale-scope cache first — only paying the
-        DB round-trip when the cache signals a recent revoke for the
-        alert's ``(operator, wallet)`` pair.
+        Every operator-scoped alert re-checks desk membership. A missing
+        membership or wallet grant remains authorized only when the active
+        user's role grants global ``IMPERSONATE_OPERATOR`` authority.
+        Safety-critical alerts also always re-check the wallet grant.
+        Non-critical alerts consult the stale-scope cache before paying that
+        second DB round-trip.
 
         Args:
             alert: Persisted ``AlertEventRow`` about to be sent.
             repo: Repository handle for ``is_scope_grant_active``.
-            now: Entry-boundary timestamp threaded from the sidecar.
+            now: Dispatch timestamp used only for stale-scope cache age.
+                Authority reads mint a fresh boundary immediately before send.
 
         Returns:
             True when the pending delivery should be cancelled
@@ -165,16 +230,35 @@ class ScopeRevalidator:
             proceed to the APNs send.
         """
         operator = alert.get("operator_public_id")
+        if operator is None:
+            return False
+        authority_as_of = _authority_now()
+        membership_active = await repo.is_operator_membership_active(
+            user_public_id=alert["user_public_id"],
+            operator_public_id=operator,
+            as_of=authority_as_of,
+        )
+        if not membership_active:
+            return not await _has_global_operator_authority(
+                repo,
+                alert["user_public_id"],
+            )
         wallet = alert.get("wallet_public_id")
-        if operator is None or wallet is None:
+        if wallet is None:
             return False
         scope_key = (operator, wallet)
         if alert["is_safety_critical"]:
-            return not await repo.is_scope_grant_active(
+            scope_active = await repo.is_scope_grant_active(
                 user_public_id=alert["user_public_id"],
                 operator_public_id=operator,
                 wallet_public_id=wallet,
-                as_of=now,
+                as_of=authority_as_of,
+            )
+            if scope_active:
+                return False
+            return not await _has_global_operator_authority(
+                repo,
+                alert["user_public_id"],
             )
         cached_at = self._stale_scope_cache.get(scope_key)
         if cached_at is None or now - cached_at > _STALE_SCOPE_TTL:
@@ -183,6 +267,11 @@ class ScopeRevalidator:
             user_public_id=alert["user_public_id"],
             operator_public_id=operator,
             wallet_public_id=wallet,
-            as_of=now,
+            as_of=authority_as_of,
         )
-        return not still_active
+        if still_active:
+            return False
+        return not await _has_global_operator_authority(
+            repo,
+            alert["user_public_id"],
+        )

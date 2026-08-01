@@ -468,6 +468,89 @@ List users. Requires `manage:users`.
 
 Returns `UserListResponse` with `payload` and `count`.
 
+### Desk membership management
+
+Desk membership management is available to callers with the effective
+`manage:desk_memberships` permission. A non-global caller must also have a
+target-desk claim in the authenticated token and a currently active membership
+in that desk; the live membership is re-read from the database for each
+operation. The intersection keeps the token as a ceiling, so a desk attached
+after login cannot be managed until explicit login. A caller with effective
+`impersonate:operator` in both the token and the current database role is the
+explicit global exception. The current named sets grant desk management to
+`operator` and `admin`, while `viewer` does not hold it.
+
+The first CRUD slice may attach or detach active human `viewer` users only.
+AI-delegate membership remains owned by delegate creation and deactivation,
+and human `operator` / `admin` memberships are visible in the directory but
+cannot be mutated through these endpoints.
+
+#### GET /api/auth/desks/{operator_public_id}/members
+
+List active human members of one desk. The response is a `UserListResponse`,
+ordered by username. Its `UserProfile` entries are deliberately desk-scoped:
+
+- `operator_public_ids` contains only the requested desk;
+- `primary_operator_public_id` contains that desk only when this membership is
+  the user's primary membership, otherwise it is `null`;
+- `email` is `null`, and memberships in other desks are never disclosed.
+
+The optional `as_of` query returns the membership directory at that UTC
+timestamp for time-travel audit. The caller's permission and target-desk
+membership are still revalidated against the live database state.
+
+This endpoint does not require `manage:users`. It therefore gives an operator
+the directory needed to manage its own desk without exposing the global user
+directory.
+
+#### POST /api/auth/desks/{operator_public_id}/members/{username}
+
+Attach the active human `viewer` identified by the exact username to the desk.
+The final path parameter uses the path converter, so clients must percent-encode
+the username and names containing `/` remain addressable.
+The operation is idempotent: repeating an active pair returns `200` without
+creating another membership. The first membership becomes primary; later
+memberships are non-primary. Cookie-authenticated requests require CSRF.
+
+Attachment deliberately takes effect on the target's next login. Existing
+access tokens and WebSocket principals are not widened in place, and there is
+no `admin.membership_granted` event. Established deployments must use this
+explicit endpoint and then have the target log in again; local seed or demo
+commands do not attach production users. Refresh rotation preserves this
+boundary: it intersects desk IDs and membership generations with the signed
+session, and a database role change requires explicit authentication instead
+of upgrading the existing refresh session.
+
+The response is a `MessageResponse` confirming that the user is attached.
+
+#### DELETE /api/auth/desks/{operator_public_id}/members/{username}
+
+Detach an active human `viewer` from the desk. The operation is idempotent: an
+already-absent pair still returns `200` and does not emit another revocation
+event. If the removed membership was primary, the oldest surviving membership
+by `(timestamp, public_id)` is promoted deterministically; removing the last
+membership leaves the user with no primary desk. Cookie-authenticated requests
+require CSRF.
+
+For a real detachment, every active access and refresh session belonging to the
+target is revoked immediately and positive token-verification caches are
+invalidated before the authority reduction is committed. After commit the
+service emits the backend-internal `admin.membership_revoked` event. Auth
+listeners invalidate cross-instance token caches, retire the target's active
+WebSocket subscriptions, and close all of its sockets with code `4003`.
+Database-backed membership checks provide the broker-outage fallback. The
+target must log in again to receive credentials containing only its surviving
+desk memberships.
+
+The endpoints use the following error classes:
+
+- `403` — missing `manage:desk_memberships`, or a non-global caller is not a
+  current member of the target desk;
+- `404` — the active target desk does not exist; mutations also return it when
+  the active target user does not exist;
+- `422` — an attach or detach target is not a human `viewer`, including an AI
+  delegate.
+
 ### POST /api/auth/users
 
 Create a user. Requires `manage:users` and CSRF for cookie auth. Body is
@@ -3010,7 +3093,9 @@ covered by at least one active scope grant from its operator set.
 
 List operators accessible to the current principal. Effective
 `impersonate:operator` exposes all operators; every other caller sees only
-operators in `principal.operator_public_ids`.
+operators in `principal.operator_public_ids`. Optional `as_of` resolves the
+operator catalogue at the same UTC history horizon used by the desk-membership
+directory; authorization remains bounded by the caller's current signed scope.
 
 ### GET /api/scope-grants
 

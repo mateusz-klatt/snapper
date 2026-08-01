@@ -200,6 +200,7 @@ class NotifySidecar(RegisterableProcess):
             self._subscriber.subscribe(prefix)
         self._subscriber.subscribe("admin.scope_revoked")
         self._subscriber.subscribe("admin.user_deactivated")
+        self._subscriber.subscribe("admin.membership_revoked")
         await self._drain_outbox(datetime.now(UTC))
         await self._portfolio_drift_recovery_scanner.start()
         self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
@@ -243,23 +244,7 @@ class NotifySidecar(RegisterableProcess):
                 frame, reused for every SCD2 write performed while
                 handling it).
         """
-        if topic == "admin.scope_revoked":
-            try:
-                await self._scope_revalidator.handle_scope_revoked(payload, self._repo, now)
-            except Exception as exc:
-                logger.warning(
-                    "sidecar: admin.scope_revoked handler raised: {err}",
-                    err=exc,
-                )
-            return
-        if topic == "admin.user_deactivated":
-            try:
-                await self._scope_revalidator.handle_user_deactivated(payload, self._repo, now)
-            except Exception as exc:
-                logger.warning(
-                    "sidecar: admin.user_deactivated handler raised: {err}",
-                    err=exc,
-                )
+        if await self._dispatch_admin_revocation(topic, payload, now):
             return
         matching = self._registry.get_longest_match(topic)
         if not matching:
@@ -277,6 +262,27 @@ class NotifySidecar(RegisterableProcess):
                 continue
             for alert_row in alert_rows:
                 await self._persist_and_fanout_row(alert_row, now)
+
+    async def _dispatch_admin_revocation(
+        self,
+        topic: str,
+        payload: bytes,
+        now: datetime,
+    ) -> bool:
+        """Dispatch one administrative authority-reduction event when matched."""
+        handlers = {
+            "admin.scope_revoked": self._scope_revalidator.handle_scope_revoked,
+            "admin.user_deactivated": self._scope_revalidator.handle_user_deactivated,
+            "admin.membership_revoked": self._scope_revalidator.handle_membership_revoked,
+        }
+        handler = handlers.get(topic)
+        if handler is None:
+            return False
+        try:
+            await handler(payload, self._repo, now)
+        except Exception as exc:
+            logger.warning("sidecar: {topic} handler raised: {err}", topic=topic, err=exc)
+        return True
 
     async def _persist_and_fanout_row(
         self,
@@ -441,12 +447,12 @@ class NotifySidecar(RegisterableProcess):
     ) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
-        Before the APNs call, ``ScopeRevalidator.should_skip_send``
-        decides whether the event's scope is still active (safety-
-        critical always re-checks; non-critical uses the TTL-gated
-        stale-scope cache). Scope-stale deliveries transition to
-        ``cancelled_scope`` in the outbox and this attempt ends
-        without an APNs round-trip.
+        Before reserving an attempt and again immediately before the APNs
+        call, ``ScopeRevalidator.should_skip_send`` decides whether the
+        event's scope is still active. The second check is the send-admission
+        barrier: a desk detach that commits while the durable attempt counter
+        is bumped prevents the network call from starting. Scope-stale
+        deliveries transition to ``cancelled_scope`` in the outbox.
 
         Otherwise, bumps ``attempt_count`` first (attempt-number-before-
         attempt rule), builds the APNs payload, calls through the
@@ -460,24 +466,7 @@ class NotifySidecar(RegisterableProcess):
         user's chosen language. Falls back to the EN ``event.title``/
         ``event.body`` otherwise.
         """
-        if await self._scope_revalidator.should_skip_send(event, self._repo, now):
-            sid = self._tracker.session_id
-            seq = self._tracker.next_sequence(_ZMQ_STREAM)
-            await self._repo.mark_delivery_cancelled(
-                delivery_public_id,
-                reason="scope_revoked",
-                transition_at=now,
-                session_id=sid,
-                sequence_id=seq,
-            )
-            logger.info(
-                "sidecar: scope revoked mid-send — cancelled delivery={pid}"
-                " user={user} operator={op} wallet={wal}",
-                pid=delivery_public_id,
-                user=event["user_public_id"],
-                op=event.get("operator_public_id"),
-                wal=event.get("wallet_public_id"),
-            )
+        if await self._cancel_if_scope_revoked(delivery_public_id, event, now):
             return
         current_attempt = await self._bump_attempt(delivery_public_id, now)
         if current_attempt is None:
@@ -486,6 +475,8 @@ class NotifySidecar(RegisterableProcess):
                 " concurrent cancel / terminal transition wins",
                 pid=delivery_public_id,
             )
+            return
+        if await self._cancel_if_scope_revoked(delivery_public_id, event, now):
             return
         payload = _build_apns_payload(event, user_language=user_language)
         try:
@@ -511,6 +502,43 @@ class NotifySidecar(RegisterableProcess):
             )
             return
         await self._apply_result(delivery_public_id, current_attempt, result, device, now)
+
+    async def _cancel_if_scope_revoked(
+        self,
+        delivery_public_id: str,
+        event: AlertEventRow,
+        now: datetime,
+    ) -> bool:
+        """Cancel one delivery when its authority is stale at an admission check.
+
+        Args:
+            delivery_public_id: Delivery whose APNs attempt is being admitted.
+            event: Alert event carrying the recipient and desk scope.
+            now: Dispatch timestamp used for the cancellation transition.
+
+        Returns:
+            Whether the delivery was cancelled and the caller must stop.
+        """
+        if not await self._scope_revalidator.should_skip_send(event, self._repo, now):
+            return False
+        sid = self._tracker.session_id
+        seq = self._tracker.next_sequence(_ZMQ_STREAM)
+        await self._repo.mark_delivery_cancelled(
+            delivery_public_id,
+            reason="scope_revoked",
+            transition_at=now,
+            session_id=sid,
+            sequence_id=seq,
+        )
+        logger.info(
+            "sidecar: scope revoked mid-send — cancelled delivery={pid}"
+            " user={user} operator={op} wallet={wal}",
+            pid=delivery_public_id,
+            user=event["user_public_id"],
+            op=event.get("operator_public_id"),
+            wal=event.get("wallet_public_id"),
+        )
+        return True
 
     async def _bump_attempt(self, delivery_public_id: str, now: datetime) -> int | None:
         """Increment ``attempt_count`` via SCD2 close+insert.

@@ -11,9 +11,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from snapper.application.notify.scope_revalidation import ScopeRevalidator
+from snapper.auth.domain.permissions import Permission
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.repository_types import AlertEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
@@ -55,6 +57,29 @@ def _user_deactivated_payload(user: str = "user-1") -> bytes:
         timestamp=_now(),
         user_public_id=user,
         deactivated_at=_now(),
+    )
+    return event.to_json().encode("utf-8")
+
+
+def _membership_revoked_payload(
+    *,
+    user: str = "user-1",
+    operator: str = "op-1",
+) -> bytes:
+    """Serialise a MembershipRevokedData envelope."""
+    event = MembershipRevokedData(
+        session_id="admin",
+        sequence_id=1,
+        public_id="evt-3",
+        timestamp=_now(),
+        membership_public_id="membership-1",
+        user_public_id=user,
+        username="viewer",
+        operator_public_id=operator,
+        detached_at=_now(),
+        revoked_by_user_public_id="admin-1",
+        promoted_operator_public_id=None,
+        reason="desk_membership_revoked",
     )
     return event.to_json().encode("utf-8")
 
@@ -174,7 +199,7 @@ class TestHandleUserDeactivated:
 
     @pytest.mark.asyncio
     async def test_user_without_pending_deliveries_is_quiet(self) -> None:
-        """Zero cancels → no info log noise."""
+        """Zero cancels produce no error and complete the repository call."""
         rev = ScopeRevalidator(SequenceTracker())
         repo = MagicMock()
         repo.cancel_pending_deliveries_for_user = AsyncMock(return_value=0)
@@ -182,6 +207,51 @@ class TestHandleUserDeactivated:
         await rev.handle_user_deactivated(_user_deactivated_payload(), repo, _now())
 
         repo.cancel_pending_deliveries_for_user.assert_awaited_once()
+
+
+class TestHandleMembershipRevoked:
+    """``admin.membership_revoked`` only cancels deliveries for the detached desk."""
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_dropped(self) -> None:
+        """Broken JSON never reaches the repository."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+
+        await rev.handle_membership_revoked(b"not-json", repo, _now())
+
+        repo.cancel_pending_deliveries_for_membership.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancels_only_user_and_operator_pair(self) -> None:
+        """Identity, detach boundary, and handling transition reach the repository."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.cancel_pending_deliveries_for_membership = AsyncMock(return_value=2)
+        handled_at = _now() + timedelta(minutes=5)
+
+        await rev.handle_membership_revoked(
+            _membership_revoked_payload(user="u-detached", operator="op-detached"),
+            repo,
+            handled_at,
+        )
+
+        repo.cancel_pending_deliveries_for_membership.assert_awaited_once()
+        kwargs = repo.cancel_pending_deliveries_for_membership.await_args.kwargs
+        assert kwargs["membership"] == ("u-detached", "op-detached")
+        assert kwargs["detached_at"] == _now()
+        assert kwargs["transition_at"] == handled_at
+
+    @pytest.mark.asyncio
+    async def test_absent_pending_delivery_completes_quietly(self) -> None:
+        """An already-drained desk has nothing to transition."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.cancel_pending_deliveries_for_membership = AsyncMock(return_value=0)
+
+        await rev.handle_membership_revoked(_membership_revoked_payload(), repo, _now())
+
+        repo.cancel_pending_deliveries_for_membership.assert_awaited_once()
 
 
 class TestShouldSkipSend:
@@ -202,7 +272,9 @@ class TestShouldSkipSend:
         """Safety-critical alerts skip the cache and always call is_scope_grant_active."""
         rev = ScopeRevalidator(SequenceTracker())
         repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
         repo.is_scope_grant_active = AsyncMock(return_value=False)
+        repo.list_users_with_permission = AsyncMock(return_value=[])
 
         skip = await rev.should_skip_send(_alert(safety_critical=True), repo, _now())
 
@@ -210,10 +282,25 @@ class TestShouldSkipSend:
         repo.is_scope_grant_active.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_safety_critical_active_scope_sends_without_global_lookup(self) -> None:
+        """An active membership and wallet grant need no global-authority fallback."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
+        repo.is_scope_grant_active = AsyncMock(return_value=True)
+        repo.list_users_with_permission = AsyncMock()
+
+        skip = await rev.should_skip_send(_alert(safety_critical=True), repo, _now())
+
+        assert skip is False
+        repo.list_users_with_permission.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_non_critical_cache_miss_skips_db(self) -> None:
         """Cold cache → no DB call → send proceeds (bounded staleness)."""
         rev = ScopeRevalidator(SequenceTracker())
         repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
         repo.is_scope_grant_active = AsyncMock(return_value=True)
 
         skip = await rev.should_skip_send(_alert(), repo, _now())
@@ -227,7 +314,9 @@ class TestShouldSkipSend:
         rev = ScopeRevalidator(SequenceTracker())
         rev._stale_scope_cache[("op-1", "wal-1")] = _now()
         repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
         repo.is_scope_grant_active = AsyncMock(return_value=False)
+        repo.list_users_with_permission = AsyncMock(return_value=[])
 
         skip = await rev.should_skip_send(_alert(), repo, _now())
 
@@ -240,6 +329,7 @@ class TestShouldSkipSend:
         rev = ScopeRevalidator(SequenceTracker())
         rev._stale_scope_cache[("op-1", "wal-1")] = _now() - timedelta(minutes=5)
         repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
         repo.is_scope_grant_active = AsyncMock()
 
         skip = await rev.should_skip_send(_alert(), repo, _now())
@@ -253,8 +343,101 @@ class TestShouldSkipSend:
         rev = ScopeRevalidator(SequenceTracker())
         rev._stale_scope_cache[("op-1", "wal-1")] = _now()
         repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
         repo.is_scope_grant_active = AsyncMock(return_value=True)
 
         skip = await rev.should_skip_send(_alert(), repo, _now())
 
         assert skip is False
+
+    @pytest.mark.asyncio
+    async def test_missing_membership_and_global_authority_skips(self) -> None:
+        """A user with neither desk membership nor global authority fails closed."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=False)
+        repo.is_scope_grant_active = AsyncMock()
+        repo.list_users_with_permission = AsyncMock(return_value=[])
+
+        skip = await rev.should_skip_send(_alert(), repo, _now())
+
+        assert skip is True
+        repo.is_scope_grant_active.assert_not_called()
+        repo.list_users_with_permission.assert_awaited_once_with(
+            Permission.IMPERSONATE_OPERATOR.value
+        )
+
+    @pytest.mark.asyncio
+    async def test_global_admin_without_membership_sends(self) -> None:
+        """Global operator authority preserves an ADMIN's cross-desk delivery."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=False)
+        repo.is_scope_grant_active = AsyncMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["user-1"])
+
+        skip = await rev.should_skip_send(
+            _alert(safety_critical=True),
+            repo,
+            _now(),
+        )
+
+        assert skip is False
+        repo.is_scope_grant_active.assert_not_called()
+        repo.list_users_with_permission.assert_awaited_once_with(
+            Permission.IMPERSONATE_OPERATOR.value
+        )
+
+    @pytest.mark.asyncio
+    async def test_global_admin_bypasses_missing_wallet_grant(self) -> None:
+        """Global authority also survives a membership-bound wallet-grant result."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
+        repo.is_scope_grant_active = AsyncMock(return_value=False)
+        repo.list_users_with_permission = AsyncMock(return_value=["user-1"])
+
+        skip = await rev.should_skip_send(
+            _alert(safety_critical=True),
+            repo,
+            _now(),
+        )
+
+        assert skip is False
+        repo.list_users_with_permission.assert_awaited_once_with(
+            Permission.IMPERSONATE_OPERATOR.value
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_membership_without_wallet_scope_sends(self) -> None:
+        """A desk-scoped alert without a wallet only needs the membership check."""
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=True)
+        repo.is_scope_grant_active = AsyncMock()
+
+        skip = await rev.should_skip_send(_alert(wallet=None), repo, _now())
+
+        assert skip is False
+        repo.is_scope_grant_active.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_membership_fallback_uses_fresh_pre_send_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A detach after dispatch start is visible to the final authority read."""
+        fresh_as_of = _now() + timedelta(minutes=1)
+        monkeypatch.setattr(
+            "snapper.application.notify.scope_revalidation._authority_now",
+            lambda: fresh_as_of,
+        )
+        rev = ScopeRevalidator(SequenceTracker())
+        repo = MagicMock()
+        repo.is_operator_membership_active = AsyncMock(return_value=False)
+        repo.list_users_with_permission = AsyncMock(return_value=[])
+
+        skip = await rev.should_skip_send(_alert(), repo, _now())
+
+        assert skip is True
+        assert repo.is_operator_membership_active.await_args.kwargs["as_of"] == fresh_as_of

@@ -1568,6 +1568,46 @@ class TestBulkCancelRaceSafety:
 
         assert cancelled == 0
 
+    @pytest.mark.asyncio
+    async def test_membership_cancel_does_not_count_lost_atomic_transition(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A membership cancel skips a row won by a concurrent transition.
+
+        Given: A matching queued delivery whose guarded transition reports a race loss.
+        When: Membership-scoped cancellation processes the delivery snapshot.
+        Then: It reports no cancellation and leaves the queued row available.
+        """
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-membership-race",
+                device_public_id="dev-membership-race",
+                user_public_id="user-membership-race",
+                operator_public_id="op-membership-race",
+                wallet_public_id="wallet-membership-race",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        transition = AsyncMock(return_value=False)
+        with patch.object(repo, "_atomic_transition_queued_delivery", new=transition):
+            cancelled = await repo.cancel_pending_deliveries_for_membership(
+                membership=("user-membership-race", "op-membership-race"),
+                detached_at=_ts(),
+                transition_at=_ts(1),
+                session_id="s-admin",
+                sequence_id=2,
+            )
+
+        assert cancelled == 0
+        transition.assert_awaited_once()
+        assert [row["public_id"] for row in await repo.list_queued_deliveries_all()] == [
+            delivery_pid
+        ]
+
 
 class TestCountDeliveriesByStatus:
     """Status aggregation for ``GET /api/metrics/notifications``."""
@@ -1682,6 +1722,104 @@ class TestScopeHelpers:
         assert matching_pid != untouched_pid
 
     @pytest.mark.asyncio
+    async def test_membership_cancel_honours_inclusive_detach_boundary(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Old and equal rows cancel while later and other-desk rows survive."""
+        old_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-old",
+                device_public_id="dev-1",
+                user_public_id="user-desk",
+                operator_public_id="op-detached",
+                wallet_public_id="wallet-a",
+                status="queued",
+                created_at=_ts(1),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(1),
+            )
+        )
+        equal_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-equal",
+                device_public_id="dev-1",
+                user_public_id="user-desk",
+                operator_public_id="op-detached",
+                wallet_public_id="wallet-a",
+                status="queued",
+                created_at=_ts(2),
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(2),
+            )
+        )
+        new_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-new",
+                device_public_id="dev-1",
+                user_public_id="user-desk",
+                operator_public_id="op-detached",
+                wallet_public_id="wallet-a",
+                status="queued",
+                created_at=_ts(3),
+                session_id="s1",
+                sequence_id=3,
+                timestamp=_ts(3),
+            )
+        )
+        other_desk_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-other-desk",
+                device_public_id="dev-1",
+                user_public_id="user-desk",
+                operator_public_id="op-surviving",
+                wallet_public_id="wallet-b",
+                status="queued",
+                created_at=_ts(1),
+                session_id="s1",
+                sequence_id=4,
+                timestamp=_ts(1),
+            )
+        )
+
+        cancelled = await repo.cancel_pending_deliveries_for_membership(
+            membership=("user-desk", "op-detached"),
+            detached_at=_ts(2),
+            transition_at=_ts(5),
+            session_id="s-admin",
+            sequence_id=5,
+        )
+        duplicate_cancelled = await repo.cancel_pending_deliveries_for_membership(
+            membership=("user-desk", "op-detached"),
+            detached_at=_ts(2),
+            transition_at=_ts(6),
+            session_id="s-admin",
+            sequence_id=6,
+        )
+
+        queued_after = await repo.list_queued_deliveries_all()
+        async with repo.session() as s:
+            rows = list(
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(
+                            AlertDelivery.public_id.in_([old_pid, equal_pid])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        active_cancelled = [row for row in rows if row.known_to == KNOWN_TO_MAX]
+        assert cancelled == 2
+        assert duplicate_cancelled == 0
+        assert {row["public_id"] for row in queued_after} == {new_pid, other_desk_pid}
+        assert {row.public_id for row in active_cancelled} == {old_pid, equal_pid}
+        assert {row.status for row in active_cancelled} == {"cancelled_scope"}
+        assert {row.timestamp for row in active_cancelled} == {_ts(5)}
+
+    @pytest.mark.asyncio
     async def test_is_scope_grant_active_requires_both_grant_and_membership(
         self, repo: SQLAlchemyRepository
     ) -> None:
@@ -1745,6 +1883,11 @@ class TestScopeHelpers:
             wallet_public_id=wallet_public_id,
             as_of=now,
         )
+        membership_without_row = await repo.is_operator_membership_active(
+            user_public_id="user-l",
+            operator_public_id="op-l",
+            as_of=now,
+        )
 
         async with repo.session() as s:
             s.add(
@@ -1765,9 +1908,16 @@ class TestScopeHelpers:
             wallet_public_id=wallet_public_id,
             as_of=now,
         )
+        membership_with_row = await repo.is_operator_membership_active(
+            user_public_id="user-l",
+            operator_public_id="op-l",
+            as_of=now,
+        )
 
         assert without_membership is False
         assert with_membership is True
+        assert membership_without_row is False
+        assert membership_with_row is True
 
     @pytest.mark.asyncio
     async def test_is_scope_grant_active_false_when_grant_missing(

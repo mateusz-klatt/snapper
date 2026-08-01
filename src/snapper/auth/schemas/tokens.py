@@ -22,7 +22,9 @@ class TokenClaims(StrictBody):
     trading-context selection without re-querying the DB. Optional
     defaults keep older tokens decodable: a stale token simply has
     empty multi-tenant fields and the next token issuance refreshes
-    them from the DB.
+    them empty until an explicit login. Refresh rotation intersects carried
+    memberships with current database state, so it may shrink a session after
+    authority loss but never widen one after a new desk attachment.
 
     Attributes:
         sub: Subject (user ID).
@@ -39,6 +41,9 @@ class TokenClaims(StrictBody):
         sid: Session ID for token rotation tracking.
         user_public_id: Stable UUID7 of the user row.
         operator_public_ids: Operators this user may act AS.
+        operator_membership_public_ids: Membership-version public ID by
+            explicitly granted operator. Empty on legacy and globally scoped
+            credentials.
         primary_operator_public_id: Default operator at login.
         active_wallet_public_id: Last-selected wallet UI state.
     """
@@ -54,6 +59,7 @@ class TokenClaims(StrictBody):
     sid: str
     user_public_id: str = ""
     operator_public_ids: list[str] = Field(default=[])
+    operator_membership_public_ids: dict[str, str] = Field(default={})
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
 

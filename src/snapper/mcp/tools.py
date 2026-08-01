@@ -1110,6 +1110,7 @@ def _build_cancel_principal(claims: TokenClaims) -> AuthPrincipal:
         role=claims.role,
         user_public_id=claims.user_public_id or claims.username,
         operator_public_ids=list(claims.operator_public_ids),
+        operator_membership_public_ids=dict(claims.operator_membership_public_ids),
         primary_operator_public_id=claims.primary_operator_public_id or "",
         permissions=claims.permissions,
     )

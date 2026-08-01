@@ -303,7 +303,7 @@ models read-only principals: a user whose role permissions include
 
 ```toml
 [profile]
-name = "prod"
+name = "dev"
 format_version = 2
 tier = 1
 
@@ -319,6 +319,15 @@ username = "admin"
 email = "admin@snapper.local"
 password = "change-me-after-first-login"
 role = "admin"
+operators = ["default"]
+primary_operator = "default"
+readable_wallets = []
+
+[[users]]
+username = "operator"
+email = "operator@snapper.local"
+password = "change-me-after-first-login"
+role = "operator"
 operators = ["default"]
 primary_operator = "default"
 readable_wallets = []
@@ -357,7 +366,11 @@ wallet credentials. On a fresh database, `db-seed` creates every declared
 live reconciliation-method config, and exactly the user/operator
 memberships declared by each user's `operators` and `primary_operator`
 fields. A role does not imply a membership: a viewer with `operators = []`
-receives no desk membership.
+receives no desk membership. The shipped `dev` profiles declare the `admin`,
+`operator`, and `viewer` bootstrap users as members of the `default` desk;
+this applies only when the tenant graph is wholly fresh. Production profiles
+must not bootstrap extra active human accounts with shared default passwords:
+attach an existing production viewer through the desk membership API instead.
 
 `readable_wallets` and `[[scope_grants]]` are currently parse-and-validation
 only; `db-seed` writes neither `wallet_user_read_grants` nor operator scope

@@ -22,6 +22,7 @@ from uuid import uuid7
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
 from fastapi import status
 
@@ -52,6 +53,10 @@ async def list_operators(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[
+        datetime | None,
+        Query(description="Point-in-time operator catalogue query (UTC)"),
+    ] = None,
 ) -> OperatorListResponse:
     """List operators accessible to the current principal.
 
@@ -64,13 +69,14 @@ async def list_operators(
         request: FastAPI request (provides REST tracker for provenance).
         principal: Authenticated caller.
         repo: Repository dependency.
+        as_of: Optional point-in-time catalogue horizon.
 
     Returns:
         ``OperatorListResponse`` ordered by ``label`` ascending.
         Empty payload when the principal has no operator memberships.
     """
-    now = datetime.now(UTC)
-    all_active = await repo.list_active_operators(now)
+    effective_as_of = as_of or datetime.now(UTC)
+    all_active = await repo.list_active_operators(effective_as_of)
     if has_effective_permission(
         principal.role,
         principal.permissions,

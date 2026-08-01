@@ -71,6 +71,8 @@ import weakref
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
@@ -169,7 +171,6 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
@@ -292,7 +293,10 @@ from snapper.data.repository_types import DerivedProjectionRetirementRequest
 from snapper.data.repository_types import DerivedProjectionRetirementResult
 from snapper.data.repository_types import DerivedProjectionScopeRow
 from snapper.data.repository_types import DerivedProjectionVersionRow
+from snapper.data.repository_types import DeskMemberRow
 from snapper.data.repository_types import DeskMembershipAttach
+from snapper.data.repository_types import DeskMembershipDetach
+from snapper.data.repository_types import DeskMembershipDetachResult
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionAnnulmentReason
@@ -462,6 +466,29 @@ _AI_REVIEW_DECISION_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
         if Permission.SUBMIT_AI_REVIEW_DECISION in permissions
     )
 )
+_HUMAN_DESK_MEMBER_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
+    sorted(
+        {
+            UserRole.ADMIN.value,
+            UserRole.OPERATOR.value,
+            UserRole.VIEWER.value,
+        }
+    )
+)
+
+
+def _is_human_viewer_role(role: str) -> bool:
+    """Return whether a persisted role is the mutable human desk-member class.
+
+    Args:
+        role: Persisted authentication role value.
+
+    Returns:
+        ``True`` only for the human VIEWER domain classification.
+    """
+    return UserRole(role) is UserRole.VIEWER
+
+
 """Per-process SQLAlchemy engine pool-clamp keys (PostgreSQL only).
 
 Read directly via ``os.getenv`` in :meth:`SQLAlchemyRepository.__init__`
@@ -1156,6 +1183,16 @@ class DeskMembershipNotFoundError(Exception):
 
 class DeskMembershipTargetError(Exception):
     """Raised when the target is not a human VIEWER user."""
+
+
+@dataclass(frozen=True, slots=True)
+class _DeskDetachDecision:
+    """Locked current-state inputs for one desk detachment commit."""
+
+    user: User
+    memberships: list[UserOperatorMembership]
+    target: UserOperatorMembership
+    decision_at: datetime
 
 
 class CredentialConflictError(Exception):
@@ -7289,6 +7326,56 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_human_desk_members(
+        self,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> list[DeskMemberRow]:
+        """Return active human members of an active desk.
+
+        Args:
+            operator_public_id: Desk whose membership directory is requested.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Human ADMIN, OPERATOR, and VIEWER rows ordered by username.
+
+        Raises:
+            DeskMembershipNotFoundError: The target desk is not active.
+        """
+        ...
+
+    @abstractmethod
+    async def detach_viewer_from_desk(
+        self,
+        request: DeskMembershipDetach,
+        revoke_authority: Callable[[str], Awaitable[None]],
+    ) -> DeskMembershipDetachResult | None:
+        """Detach an active human VIEWER and promote a primary atomically.
+
+        The target user is locked for the complete decision. When the pair
+        exists, ``revoke_authority`` runs before any membership write is
+        committed. A missing pair is an idempotent ``None`` result.
+        SQLite runs revocation between a closed preflight and its serialized
+        write transaction, so two concurrent detaches may both invoke the
+        callback before one wins the membership close. The callback must be
+        idempotent; active-token revocation satisfies that contract.
+
+        Args:
+            request: Target identities and SCD2 provenance.
+            revoke_authority: Callback that revokes every active credential
+                for the target user before the authority reduction commits.
+
+        Returns:
+            Detachment facts, or ``None`` when the pair was already absent.
+
+        Raises:
+            DeskMembershipNotFoundError: User or desk is not active.
+            DeskMembershipTargetError: User is not a human VIEWER.
+        """
+        ...
+
+    @abstractmethod
     async def get_active_credential(
         self,
         exchange: str,
@@ -7875,6 +7962,16 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def is_operator_membership_active(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether one user-to-desk membership is active at ``as_of``."""
+        ...
+
+    @abstractmethod
     async def has_grant_for_delegate(
         self,
         *,
@@ -7961,6 +8058,19 @@ class Repository(ABC):
         Returns:
             Count of rows transitioned to ``cancelled_scope``.
         """
+        ...
+
+    @abstractmethod
+    async def cancel_pending_deliveries_for_membership(
+        self,
+        membership: tuple[str, str],
+        *,
+        detached_at: datetime,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int:
+        """Cancel queued membership deliveries created no later than detachment."""
         ...
 
     @abstractmethod
@@ -30288,67 +30398,15 @@ class SQLAlchemyRepository(Repository):
     ) -> UserOperatorMembershipRow:
         """Attach an active human VIEWER to an active desk atomically."""
         async with self.session() as s:
-            user = (
-                (
-                    await s.execute(
-                        select(User)
-                        .where(
-                            User.username == request.username,
-                            User.is_active.is_(True),
-                            *where_active(User, request.timestamp),
-                        )
-                        .with_for_update()
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if user is None:
-                raise DeskMembershipNotFoundError("Active target user not found")
-            target_role = UserRole(user.role)
-            is_human_viewer = has_effective_permission(
-                target_role,
-                None,
-                None,
-                Permission.MANAGE_NOTIFICATION_DEVICES,
-            ) and not has_effective_permission(
-                target_role,
-                None,
-                None,
-                Permission.CREATE_ORDERS,
-            )
-            if not is_human_viewer:
-                raise DeskMembershipTargetError(
-                    "Desk attachment supports human VIEWER users only; "
-                    "AI delegate membership is managed by delegate lifecycle"
-                )
-            desk = (
-                (
-                    await s.execute(
-                        select(Operator).where(
-                            Operator.public_id == request.operator_public_id,
-                            *where_active(Operator, request.timestamp),
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if desk is None:
-                raise DeskMembershipNotFoundError("Active target desk not found")
-            memberships = (
-                (
-                    await s.execute(
-                        select(UserOperatorMembership)
-                        .where(
-                            UserOperatorMembership.user_public_id == user.public_id,
-                            *where_active(UserOperatorMembership, request.timestamp),
-                        )
-                        .order_by(UserOperatorMembership.timestamp.asc())
-                    )
-                )
-                .scalars()
-                .all()
+            await self._begin_desk_membership_write(s)
+            user = await self._load_desk_target_user(s, request, lock=True)
+            decision_at = max(request.timestamp, datetime.now(UTC))
+            await self._require_active_desk(s, request.operator_public_id, decision_at)
+            memberships = await self._load_desk_memberships(
+                s,
+                user.public_id,
+                decision_at,
+                lock=True,
             )
             existing = next(
                 (
@@ -30364,7 +30422,7 @@ class SQLAlchemyRepository(Repository):
                 user_public_id=user.public_id,
                 operator_public_id=request.operator_public_id,
                 is_primary=not memberships,
-                timestamp=request.timestamp,
+                timestamp=decision_at,
                 session_id=request.session_id,
                 sequence_id=request.sequence_id,
             )
@@ -30372,6 +30430,279 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(membership)
             return self._user_operator_membership_row(membership)
+
+    async def list_human_desk_members(
+        self,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> list[DeskMemberRow]:
+        """Return active human members of one active desk."""
+        async with self.session() as s:
+            desk_exists = (
+                await s.execute(
+                    select(Operator.id)
+                    .where(
+                        Operator.public_id == operator_public_id,
+                        *where_active(Operator, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if desk_exists is None:
+                raise DeskMembershipNotFoundError("Active target desk not found")
+            rows = (
+                await s.execute(
+                    select(User, UserOperatorMembership)
+                    .join(
+                        UserOperatorMembership,
+                        UserOperatorMembership.user_public_id == User.public_id,
+                    )
+                    .where(
+                        UserOperatorMembership.operator_public_id == operator_public_id,
+                        User.role.in_(_HUMAN_DESK_MEMBER_ROLE_VALUES),
+                        User.is_active.is_(True),
+                        *where_active(User, as_of),
+                        *where_active(UserOperatorMembership, as_of),
+                    )
+                    .order_by(User.username.asc(), User.public_id.asc())
+                )
+            ).all()
+            return [self._desk_member_row(user, membership) for user, membership in rows]
+
+    async def detach_viewer_from_desk(
+        self,
+        request: DeskMembershipDetach,
+        revoke_authority: Callable[[str], Awaitable[None]],
+    ) -> DeskMembershipDetachResult | None:
+        """Detach a VIEWER without deadlocking SQLite credential revocation.
+
+        PostgreSQL keeps its user and membership row locks while the external
+        credential barrier runs. SQLite cannot do that because the callback
+        writes through separate sessions: retaining either a read transaction
+        or ``BEGIN IMMEDIATE`` across the callback would create a lock-upgrade
+        failure or a writer deadlock. SQLite therefore validates first, closes
+        that read transaction, runs the barrier, and then performs the complete
+        membership decision under a fresh ``BEGIN IMMEDIATE`` transaction.
+
+        Credential revocation is intentionally one-way. If the membership
+        commit fails, SQLAlchemy rolls back every membership write while the
+        already-revoked credentials stay revoked; the user can authenticate
+        again and the caller can safely retry the idempotent detachment.
+        """
+        if self.dialect_name == "sqlite":
+            return await self._detach_viewer_from_desk_sqlite(request, revoke_authority)
+        async with self.session() as s:
+            user = await self._load_desk_target_user(s, request, lock=True)
+            decision_at = max(request.timestamp, datetime.now(UTC))
+            await self._require_active_desk(s, request.operator_public_id, decision_at)
+            memberships = await self._load_desk_memberships(
+                s,
+                user.public_id,
+                decision_at,
+                lock=True,
+            )
+            target = self._find_desk_membership(memberships, request.operator_public_id)
+            if target is None:
+                return None
+            await revoke_authority(user.public_id)
+            return await self._commit_desk_detach(
+                s,
+                request,
+                _DeskDetachDecision(user, memberships, target, decision_at),
+            )
+
+    async def _detach_viewer_from_desk_sqlite(
+        self,
+        request: DeskMembershipDetach,
+        revoke_authority: Callable[[str], Awaitable[None]],
+    ) -> DeskMembershipDetachResult | None:
+        """Run SQLite revocation between a closed preflight and serialized write."""
+        async with self.session() as preflight_session:
+            user = await self._load_desk_target_user(
+                preflight_session,
+                request,
+                lock=False,
+            )
+            preflight_at = max(request.timestamp, datetime.now(UTC))
+            await self._require_active_desk(
+                preflight_session,
+                request.operator_public_id,
+                preflight_at,
+            )
+            memberships = await self._load_desk_memberships(
+                preflight_session,
+                user.public_id,
+                preflight_at,
+                lock=False,
+            )
+            target = self._find_desk_membership(
+                memberships,
+                request.operator_public_id,
+            )
+            if target is None:
+                return None
+            user_public_id = user.public_id
+        await revoke_authority(user_public_id)
+        async with self.session() as s:
+            await self._begin_desk_membership_write(s)
+            user = await self._load_desk_target_user(s, request, lock=True)
+            decision_at = max(request.timestamp, datetime.now(UTC))
+            await self._require_active_desk(s, request.operator_public_id, decision_at)
+            memberships = await self._load_desk_memberships(
+                s,
+                user.public_id,
+                decision_at,
+                lock=True,
+            )
+            target = self._find_desk_membership(memberships, request.operator_public_id)
+            if target is None:
+                return None
+            return await self._commit_desk_detach(
+                s,
+                request,
+                _DeskDetachDecision(user, memberships, target, decision_at),
+            )
+
+    async def _commit_desk_detach(
+        self,
+        s: AsyncSession,
+        request: DeskMembershipDetach,
+        decision: _DeskDetachDecision,
+    ) -> DeskMembershipDetachResult | None:
+        """Close one locked membership, promote deterministically, and commit."""
+        await s.execute(
+            update(UserOperatorMembership)
+            .where(
+                UserOperatorMembership.id == decision.target.id,
+                *where_active(UserOperatorMembership, decision.decision_at),
+            )
+            .values(known_to=decision.decision_at)
+            .execution_options(synchronize_session=False)
+        )
+        promoted_operator_public_id: str | None = None
+        if decision.target.is_primary:
+            promotion = next(
+                (
+                    membership
+                    for membership in decision.memberships
+                    if membership.id != decision.target.id
+                ),
+                None,
+            )
+            if promotion is not None:
+                await close_and_insert(
+                    session=s,
+                    model=UserOperatorMembership,
+                    match_filters=[UserOperatorMembership.id == promotion.id],
+                    new_values={
+                        "user_public_id": promotion.user_public_id,
+                        "operator_public_id": promotion.operator_public_id,
+                        "is_primary": True,
+                        "session_id": request.session_id,
+                        "sequence_id": request.sequence_id,
+                    },
+                    bus_time=decision.decision_at,
+                )
+                promoted_operator_public_id = promotion.operator_public_id
+        await s.commit()
+        return DeskMembershipDetachResult(
+            membership_public_id=decision.target.public_id,
+            user_public_id=decision.user.public_id,
+            username=decision.user.username,
+            operator_public_id=request.operator_public_id,
+            detached_at=decision.decision_at,
+            promoted_operator_public_id=promoted_operator_public_id,
+        )
+
+    async def _begin_desk_membership_write(self, s: AsyncSession) -> None:
+        """Reserve SQLite's writer slot before any membership decision read."""
+        if self.dialect_name == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+
+    async def _load_desk_target_user(
+        self,
+        s: AsyncSession,
+        request: DeskMembershipAttach | DeskMembershipDetach,
+        *,
+        lock: bool,
+    ) -> User:
+        """Load and validate the live human VIEWER targeted by one mutation."""
+        as_of = max(request.timestamp, datetime.now(UTC))
+        statement = select(User).where(
+            User.username == request.username,
+            User.is_active.is_(True),
+            *where_active(User, as_of),
+        )
+        if lock:
+            statement = statement.with_for_update()
+        user = (await s.execute(statement)).scalars().first()
+        if user is None:
+            raise DeskMembershipNotFoundError("Active target user not found")
+        if not _is_human_viewer_role(user.role):
+            raise DeskMembershipTargetError(
+                "Desk membership supports human VIEWER users only; "
+                "AI delegate membership is managed by delegate lifecycle"
+            )
+        return user
+
+    @staticmethod
+    async def _require_active_desk(
+        s: AsyncSession,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> None:
+        """Reject a mutation whose target desk is not active."""
+        desk_exists = (
+            await s.execute(
+                select(Operator.id)
+                .where(
+                    Operator.public_id == operator_public_id,
+                    *where_active(Operator, as_of),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if desk_exists is None:
+            raise DeskMembershipNotFoundError("Active target desk not found")
+
+    @staticmethod
+    async def _load_desk_memberships(
+        s: AsyncSession,
+        user_public_id: str,
+        as_of: datetime,
+        *,
+        lock: bool,
+    ) -> list[UserOperatorMembership]:
+        """Load one user's active memberships in deterministic promotion order."""
+        statement = (
+            select(UserOperatorMembership)
+            .where(
+                UserOperatorMembership.user_public_id == user_public_id,
+                *where_active(UserOperatorMembership, as_of),
+            )
+            .order_by(
+                UserOperatorMembership.timestamp.asc(),
+                UserOperatorMembership.public_id.asc(),
+            )
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return list((await s.execute(statement)).scalars().all())
+
+    @staticmethod
+    def _find_desk_membership(
+        memberships: Sequence[UserOperatorMembership],
+        operator_public_id: str,
+    ) -> UserOperatorMembership | None:
+        """Return one active membership for a desk, if present."""
+        return next(
+            (
+                membership
+                for membership in memberships
+                if membership.operator_public_id == operator_public_id
+            ),
+            None,
+        )
 
     @staticmethod
     def _user_operator_membership_row(
@@ -30386,6 +30717,29 @@ class SQLAlchemyRepository(Repository):
             timestamp=membership.timestamp,
             session_id=membership.session_id,
             sequence_id=membership.sequence_id,
+        )
+
+    @staticmethod
+    def _desk_member_row(
+        user: User,
+        membership: UserOperatorMembership,
+    ) -> DeskMemberRow:
+        """Project one active human membership into the directory contract."""
+        return DeskMemberRow(
+            membership_public_id=membership.public_id,
+            user_public_id=user.public_id,
+            operator_public_id=membership.operator_public_id,
+            username=user.username,
+            email=user.email,
+            role=user.role,
+            is_active=bool(user.is_active),
+            created_at=user.created_at,
+            default_language=user.default_language,
+            user_timestamp=user.timestamp,
+            user_session_id=user.session_id,
+            user_sequence_id=user.sequence_id,
+            is_primary=bool(membership.is_primary),
+            attached_at=membership.timestamp,
         )
 
     async def get_active_credential(
@@ -31935,6 +32289,27 @@ class SQLAlchemyRepository(Repository):
             ).scalar_one_or_none()
             return membership_exists is not None
 
+    async def is_operator_membership_active(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether one user-to-desk membership is active at ``as_of``."""
+        async with self.session() as s:
+            membership_id = (
+                await s.execute(
+                    select(UserOperatorMembership.id)
+                    .where(
+                        UserOperatorMembership.user_public_id == user_public_id,
+                        UserOperatorMembership.operator_public_id == operator_public_id,
+                        *where_active(UserOperatorMembership, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return membership_id is not None
+
     async def has_grant_for_delegate(
         self,
         *,
@@ -32096,6 +32471,39 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return transitioned
 
+    async def cancel_pending_deliveries_for_membership(
+        self,
+        membership: tuple[str, str],
+        *,
+        detached_at: datetime,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int:
+        """Cancel queued membership deliveries created no later than detachment."""
+        user_public_id, operator_public_id = membership
+        async with self.session() as s:
+            rows = await self._select_queued_deliveries_by_membership(
+                s,
+                user_public_id=user_public_id,
+                operator_public_id=operator_public_id,
+                detached_at=detached_at,
+            )
+            transitioned = 0
+            for existing in rows:
+                if await self._atomic_transition_queued_delivery(
+                    s,
+                    existing=existing,
+                    new_status="cancelled_scope",
+                    error_reason="desk_membership_revoked",
+                    transition_at=transition_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                ):
+                    transitioned += 1
+            await s.commit()
+            return transitioned
+
     @staticmethod
     async def _select_queued_deliveries_by_scope(
         s: AsyncSession,
@@ -32126,6 +32534,26 @@ class SQLAlchemyRepository(Repository):
                 AlertDelivery.status == "queued",
                 AlertDelivery.known_to == KNOWN_TO_MAX,
                 AlertDelivery.user_public_id == user_public_id,
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def _select_queued_deliveries_by_membership(
+        s: AsyncSession,
+        *,
+        user_public_id: str,
+        operator_public_id: str,
+        detached_at: datetime,
+    ) -> list[AlertDelivery]:
+        """Snapshot membership deliveries queued through the detach boundary."""
+        result = await s.execute(
+            select(AlertDelivery).where(
+                AlertDelivery.status == "queued",
+                AlertDelivery.known_to == KNOWN_TO_MAX,
+                AlertDelivery.user_public_id == user_public_id,
+                AlertDelivery.operator_public_id == operator_public_id,
+                AlertDelivery.created_at <= detached_at,
             )
         )
         return list(result.scalars().all())

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -132,12 +133,23 @@ class _TestZmqBridge:
             "orders.events.": object(),
         }
 
-    async def add_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
-        """Record subscriptions without starting ZMQ sockets."""
+    async def add_subscription(
+        self,
+        websocket: WebSocket,
+        topics: list[str],
+        expected_connection_generation: int | None = None,
+        authority_is_current: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Record subscriptions while honoring the production authority guard."""
+        if expected_connection_generation is not None and expected_connection_generation < 1:
+            return False
+        if authority_is_current is not None and not authority_is_current():
+            return False
         client_topics = self.client_subscriptions.setdefault(websocket, set())
         for topic in topics:
             client_topics.add(topic)
             self.topic_subscriptions.setdefault(topic, set()).add(websocket)
+        return authority_is_current is None or authority_is_current()
 
     async def remove_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
         """Remove subscriptions from in-memory state."""
@@ -2266,9 +2278,10 @@ class BridgeStub:
         self.added: list[tuple[Any, list[str]]] = []
         self.removed: list[tuple[Any, list[str]]] = []
 
-    async def add_subscription(self, websocket: Any, topics: list[str]) -> None:
+    async def add_subscription(self, websocket: Any, topics: list[str]) -> bool:
         """Record subscription addition."""
         self.added.append((websocket, topics))
+        return True
 
     async def remove_subscription(self, websocket: Any, topics: list[str]) -> None:
         """Record subscription removal."""
@@ -2298,9 +2311,10 @@ class ManagerStub:
         """Get subscriptions for a WebSocket."""
         return self._subscriptions.get(websocket, set())
 
-    def subscribe_client(self, websocket: Any, topic: str) -> None:
+    def subscribe_client(self, websocket: Any, topic: str) -> bool:
         """Subscribe client to a topic."""
         self._subscriptions.setdefault(websocket, set()).add(topic)
+        return True
 
     def unsubscribe_client(self, websocket: Any, topic: str) -> None:
         """Unsubscribe client from a topic."""

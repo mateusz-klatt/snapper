@@ -1105,6 +1105,7 @@ class TestBuildAuthPrincipal:
         assert principal.role == UserRole.ADMIN
         assert principal.user_public_id == "user-public-id-1"
         assert principal.operator_public_ids == ["op-1", "op-2", "op-3"]
+        assert principal.operator_membership_public_ids == {}
         assert principal.primary_operator_public_id == "op-2"
 
     @pytest.mark.asyncio
@@ -1148,6 +1149,10 @@ class TestBuildAuthPrincipal:
         repo.list_active_operators.assert_not_awaited()
         assert principal.role == UserRole.OPERATOR
         assert principal.operator_public_ids == ["op-77", "op-99"]
+        assert principal.operator_membership_public_ids == {
+            "op-77": "m-1",
+            "op-99": "m-2",
+        }
         assert principal.primary_operator_public_id == "op-99"
 
     @pytest.mark.asyncio
@@ -1169,6 +1174,7 @@ class TestBuildAuthPrincipal:
         )
 
         assert principal.operator_public_ids == []
+        assert principal.operator_membership_public_ids == {}
         assert principal.primary_operator_public_id == ""
         assert principal.user_public_id == "user-public-id-1"
 

@@ -2622,6 +2622,25 @@ class UserOperatorMembershipRow(TypedDict):
     sequence_id: int
 
 
+class DeskMemberRow(TypedDict):
+    """Human user joined to one active desk membership."""
+
+    membership_public_id: str
+    user_public_id: str
+    operator_public_id: str
+    username: str
+    email: str | None
+    role: str
+    is_active: bool
+    created_at: datetime
+    default_language: str | None
+    user_timestamp: datetime
+    user_session_id: str
+    user_sequence_id: int
+    is_primary: bool
+    attached_at: datetime
+
+
 @dataclass(frozen=True)
 class DeskMembershipAttach:
     """Parameters for one serialized human-viewer desk attachment."""
@@ -2631,6 +2650,29 @@ class DeskMembershipAttach:
     timestamp: datetime
     session_id: str
     sequence_id: int
+
+
+@dataclass(frozen=True)
+class DeskMembershipDetach:
+    """Parameters for one serialized human-viewer desk detachment."""
+
+    username: str
+    operator_public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(frozen=True)
+class DeskMembershipDetachResult:
+    """Committed authority reduction returned by the repository."""
+
+    membership_public_id: str
+    user_public_id: str
+    username: str
+    operator_public_id: str
+    detached_at: datetime
+    promoted_operator_public_id: str | None
 
 
 class InstrumentOrderCapabilityRow(TypedDict):

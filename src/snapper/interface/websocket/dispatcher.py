@@ -36,6 +36,7 @@ from snapper.interface.websocket.connection_manager import WebSocketConnectionMa
 from snapper.interface.websocket.gap_detection import WsClientGapDetector
 from snapper.interface.websocket.handlers.auth import handle_reauth
 from snapper.interface.websocket.handlers.ping import handle_ping
+from snapper.interface.websocket.handlers.subscribe import SubscribeAuthorizationContext
 from snapper.interface.websocket.handlers.subscribe import handle_get_subscriptions
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
@@ -440,7 +441,14 @@ def _build_dispatch_table(
     repository = get_repository(settings.db_url)
     return {
         WSSubscribeRequest: lambda msg, principal: handle_subscribe(
-            websocket, msg, manager, principal, repository
+            websocket,
+            msg,
+            manager,
+            principal,
+            SubscribeAuthorizationContext(
+                repository=repository,
+                auth_manager=ws_auth_manager,
+            ),
         ),
         WSUnsubscribeRequest: lambda msg, principal: handle_unsubscribe(websocket, msg, manager),
         WSGetSubscriptionsRequest: lambda msg, principal: handle_get_subscriptions(

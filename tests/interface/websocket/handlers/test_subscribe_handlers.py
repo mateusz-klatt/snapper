@@ -14,6 +14,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionStatusEnum
+from snapper.interface.websocket.handlers.subscribe import SubscribeAuthorizationContext
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.schemas import WSSubscribeRequest
@@ -296,6 +297,127 @@ class TestHandleSubscribeEdgeCases:
                 found_error = True
                 break
         assert found_error, "Expected ZMQ bridge error message"
+
+
+class TestSubscriptionAuthorityRetirement:
+    """Tests for authority changes during asynchronous subscription setup."""
+
+    @staticmethod
+    def _message() -> WSSubscribeRequest:
+        """Build one valid market-root subscription request."""
+        return WSSubscribeRequest(
+            public_id="authority-test",
+            timestamp=datetime(2026, 8, 1, tzinfo=UTC),
+            session_id="authority-session",
+            sequence_id=1,
+            topics=["market."],
+        )
+
+    @staticmethod
+    def _manager() -> MagicMock:
+        """Build a manager double with an available bridge and tracker."""
+        manager = MagicMock()
+        manager.get_client_subscriptions.return_value = set()
+        manager.subscribe_client.return_value = True
+        manager.zmq_bridge = MagicMock()
+        manager.zmq_bridge.add_subscription = AsyncMock(return_value=True)
+        manager.zmq_bridge.finalize_retired_client = AsyncMock()
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_stale_lease_at_entry_stops_before_authorization(self) -> None:
+        """A request without a current connection generation ends immediately.
+
+        Given: An authoritative auth manager but no active generation for the socket,
+        When: The subscribe handler captures its request lease,
+        Then: It returns before topic authorization or any outbound response.
+        """
+        websocket = AsyncMock()
+        websocket.send_text = AsyncMock()
+        manager = self._manager()
+        manager.get_connection_generation.return_value = None
+        auth_manager = MagicMock()
+        context = SubscribeAuthorizationContext(repository=None, auth_manager=auth_manager)
+
+        with patch(
+            "snapper.interface.websocket.handlers.subscribe.partition_authorized_topics",
+            new=AsyncMock(),
+        ) as authorize:
+            await handle_subscribe(
+                websocket,
+                self._message(),
+                manager,
+                _principal(UserRole.ADMIN),
+                context,
+            )
+
+        authorize.assert_not_awaited()
+        manager.subscribe_client.assert_not_called()
+        manager.zmq_bridge.add_subscription.assert_not_awaited()
+        websocket.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_identity_change_before_manager_registration_stops_request(self) -> None:
+        """A changed principal cannot register after authorization completes.
+
+        Given: The principal is current through authorization but replaced before mutation,
+        When: The per-topic manager registration rechecks the exact principal identity,
+        Then: Neither manager nor bridge state is created and no response is sent.
+        """
+        websocket = AsyncMock()
+        websocket.send_text = AsyncMock()
+        manager = self._manager()
+        manager.get_connection_generation.return_value = 7
+        manager.is_connection_current.return_value = True
+        principal = _principal(UserRole.ADMIN)
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.side_effect = [principal, principal, None]
+        context = SubscribeAuthorizationContext(repository=None, auth_manager=auth_manager)
+
+        with patch(
+            "snapper.interface.websocket.handlers.subscribe.partition_authorized_topics",
+            new=AsyncMock(return_value=(["market."], [])),
+        ):
+            await handle_subscribe(
+                websocket,
+                self._message(),
+                manager,
+                principal,
+                context,
+            )
+
+        manager.subscribe_client.assert_not_called()
+        manager.zmq_bridge.add_subscription.assert_not_awaited()
+        websocket.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bridge_rejection_retires_manager_and_bridge_state(self) -> None:
+        """A bridge-side authority rejection rolls back manager registration.
+
+        Given: Manager registration succeeds but the bridge reports stale authority,
+        When: The handler completes live subscription registration,
+        Then: It retires both registries, finalizes resources, and sends no success frame.
+        """
+        websocket = AsyncMock()
+        websocket.send_text = AsyncMock()
+        manager = self._manager()
+        manager.zmq_bridge.add_subscription.return_value = False
+        retirement = object()
+        manager.zmq_bridge.retire_client.return_value = retirement
+
+        await handle_subscribe(
+            websocket,
+            self._message(),
+            manager,
+            _principal(UserRole.ADMIN),
+        )
+
+        manager.subscribe_client.assert_called_once_with(websocket, "market.")
+        manager.retire_connection.assert_called_once_with(websocket)
+        manager.zmq_bridge.retire_client.assert_called_once_with(websocket)
+        manager.zmq_bridge.finalize_retired_client.assert_awaited_once_with(retirement)
+        websocket.send_text.assert_not_awaited()
 
 
 class TestAdminCategorySubscription:

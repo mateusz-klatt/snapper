@@ -32,6 +32,11 @@ class AuthPrincipal(StrictBody):
       A principal effectively granted ``IMPERSONATE_OPERATOR`` gets every
       active operator; every other permission set, including OPERATOR and
       VIEWER, gets its explicit memberships.
+    - ``operator_membership_public_ids`` maps each explicitly granted operator
+      to the public ID of the active membership version that granted it. The
+      mapping lets credentials distinguish a continuous membership from a
+      detach followed by re-attachment to the same operator. Globally scoped
+      principals intentionally keep it empty.
     - ``primary_operator_public_id`` is the membership row marked
       ``is_primary=TRUE`` and is the default scope when a user logs in.
       Empty string when the user has no primary membership yet.
@@ -58,6 +63,7 @@ class AuthPrincipal(StrictBody):
         is_active: Whether user account is active.
         user_public_id: Stable UUID7 of the user row.
         operator_public_ids: Operators this user may act AS.
+        operator_membership_public_ids: Active membership version by operator.
         primary_operator_public_id: Default operator at login.
         active_wallet_public_id: Last-selected wallet UI state.
         permissions: Permission strings granted by the presented token,
@@ -83,6 +89,7 @@ class AuthPrincipal(StrictBody):
     is_active: bool = True
     user_public_id: str = ""
     operator_public_ids: list[str] = Field(default=[])
+    operator_membership_public_ids: dict[str, str] = Field(default={})
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
     permissions: list[str] | None = None

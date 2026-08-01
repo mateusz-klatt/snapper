@@ -180,6 +180,21 @@ class TestRevokeUserSessions:
         assert manager._blacklisted_tokens == {}
 
     @pytest.mark.asyncio
+    async def test_immediate_mode_has_no_blacklist_grace(self) -> None:
+        """Desk detach can establish an immediate local authority barrier."""
+        manager = self._fresh_manager()
+        repo = MagicMock()
+        repo.list_active_user_token_jtis = AsyncMock(return_value=["desk-session-jti"])
+        repo.revoke_user_active_tokens = AsyncMock(return_value=1)
+        count = await manager.revoke_user_sessions(
+            "desk-user",
+            repo,
+            immediate=True,
+        )
+        assert count == 1
+        assert manager._is_token_blacklisted("desk-session-jti") is True
+
+    @pytest.mark.asyncio
     async def test_calls_db_revoke_before_seeding_in_memory_blacklist(self) -> None:
         """Ordering: DB flip happens before the in-memory blacklist push.
 

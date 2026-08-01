@@ -223,6 +223,7 @@ backend subscriber that cares about user/operator state changes.
 | Topic | Description |
 | ----- | ----------- |
 | `admin.user_deactivated` | A user (or AI delegate) was deactivated; immediate revocation hook for in-process token caches, WebSocket close fanout, and APNs push fan-out via the notify sidecar. Auth listeners also poll the DB-backed `users.is_active=False` registry as broker-outage fallback |
+| `admin.membership_revoked` | A human viewer was detached from a desk; post-commit wake-up for token-cache invalidation, WebSocket retirement, and queued desk-notification cancellation |
 | `admin.scope_granted` | `create_grant` published a new active scope row (instrument-exclusive grant just inserted) |
 | `admin.scope_handed_over` | `handover` finalized a scope handover (old row closed, new row open, both committed) |
 | `admin.scope_revoked` | `revoke_grant` closed an active scope row; revoke hook for any subscriber holding cached principal state |
@@ -231,6 +232,39 @@ Shape: `admin.{resource}` — exactly 2 segments. The validator only
 enforces the 2-segment shape; the `resource` token itself is not
 character-class-checked, so consumers must use the payload's
 `type` discriminator as the authoritative routing hint.
+
+`admin.membership_revoked` is a backend-internal event and is intentionally
+kept outside generated REST/WebSocket client schemas. `UserService` is its sole
+publisher and sends it only after the SCD2 membership close and any primary
+promotion have committed. Its payload identifies the closed membership,
+target user and username, removed operator, detach time, initiating user,
+optional promoted primary operator, and reason. The event is a wake-up signal;
+the committed database remains authoritative.
+
+The consumers are:
+
+- `TokenManager`, which invalidates every positive verification-cache entry
+  for the target. Request-path verification also checks non-admin operator
+  claims against current memberships, and the five-second database fallback
+  evicts users with stale cached token JTIs or membership claims if the event
+  is lost;
+- `WebSocketAuthManager`, which snapshots the target's sockets, then retires
+  and closes only connections fenced by the revoked membership generation or
+  the post-detach active-token inventory. A delayed event therefore preserves
+  a later active login. Its five-second database scan applies the same token
+  and per-connection membership reconciliation during broker outages;
+- the notify sidecar, which cancels queued deliveries for the exact
+  `(user_public_id, operator_public_id)` membership while preserving deliveries
+  for other desks. Cancellation is bounded by the event's detach time, inclusive,
+  so delayed or duplicate events cannot cancel deliveries created after a later
+  reattachment. A database membership check after the durable attempt bump and
+  immediately before APNs admission prevents a lost event from starting a new
+  send under detached authority. A network call already admitted before the
+  detach commit may still complete.
+
+Attachment intentionally has no matching `admin.membership_granted` topic:
+new membership takes effect when the target next logs in and receives a fresh
+principal.
 
 ### Accruals
 

@@ -29,16 +29,21 @@ from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import DeskMemberRow
 from snapper.data.repository_types import DeskMembershipAttach
+from snapper.data.repository_types import DeskMembershipDetach
+from snapper.data.repository_types import DeskMembershipDetachResult
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 from snapper.messaging.topics.builders import admin_topic
 
 _USERS_TOPIC = "users"
 _LOGIN_EVENTS_TOPIC = "login_events"
 _USER_DEACTIVATED_TOPIC = "user_deactivated"
+_MEMBERSHIP_REVOKED_TOPIC = "membership_revoked"
 _DESK_MEMBERSHIPS_TOPIC = "desk_memberships"
 
 
@@ -74,12 +79,13 @@ class UserService:
         self._msg_publisher: MessagePublisher | None = None
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
-        """Inject the bus publisher used for `admin.user_deactivated`.
+        """Inject the bus publisher used for administrative authority events.
 
         Called from the FastAPI lifespan once a ZMQ broker connection
         is available. Injection (rather than self-managed socket) keeps
         the singleton testable: tests substitute a stub implementing
-        `send(stream_key, data)` without binding a real ZMQ socket.
+        `send(stream_key, data)` without binding a real ZMQ socket. The same
+        publisher emits user deactivation and desk-membership revocation wake-ups.
 
         Args:
             publisher: Configured `MessagePublisher` or `None` to clear.
@@ -121,24 +127,8 @@ class UserService:
             DeskMembershipAuthorizationError: Caller lacks the capability
                 or is outside the target desk without being global ADMIN.
         """
-        if not has_effective_permission(
-            principal.role,
-            principal.permissions,
-            principal.permission_scope_version,
-            Permission.MANAGE_DESK_MEMBERSHIPS,
-        ):
-            raise DeskMembershipAuthorizationError("MANAGE_DESK_MEMBERSHIPS permission is required")
-        is_global_admin = has_effective_permission(
-            principal.role,
-            principal.permissions,
-            principal.permission_scope_version,
-            Permission.IMPERSONATE_OPERATOR,
-        )
-        if not is_global_admin and operator_public_id not in principal.operator_public_ids:
-            raise DeskMembershipAuthorizationError(
-                "Current membership in the target desk is required"
-            )
         now = datetime.now(UTC)
+        await self._authorize_desk_membership_management(principal, operator_public_id, now)
         return await self.repository.attach_viewer_to_desk(
             DeskMembershipAttach(
                 username=username,
@@ -147,6 +137,172 @@ class UserService:
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(_DESK_MEMBERSHIPS_TOPIC),
             )
+        )
+
+    async def list_desk_members(
+        self,
+        principal: AuthPrincipal,
+        operator_public_id: str,
+        as_of: datetime | None = None,
+    ) -> list[UserProfile]:
+        """List desk members at one time after checking the caller live.
+
+        Args:
+            principal: Authenticated caller requesting the directory.
+            operator_public_id: Public ID of the target desk.
+            as_of: Optional point-in-time membership horizon.
+
+        Returns:
+            Desk-scoped profiles for active human members.
+        """
+        now = datetime.now(UTC)
+        await self._authorize_desk_membership_management(principal, operator_public_id, now)
+        rows = await self.repository.list_human_desk_members(
+            operator_public_id=operator_public_id,
+            as_of=as_of or now,
+        )
+        return [self._desk_member_to_profile(row) for row in rows]
+
+    async def detach_viewer_from_desk(
+        self,
+        principal: AuthPrincipal,
+        operator_public_id: str,
+        username: str,
+    ) -> DeskMembershipDetachResult | None:
+        """Detach a human VIEWER, revoke sessions, and broadcast the reduction.
+
+        Args:
+            principal: Authenticated caller performing the detachment.
+            operator_public_id: Public ID of the target desk.
+            username: Exact username of the human VIEWER target.
+
+        Returns:
+            Committed detachment facts, or ``None`` when already detached.
+        """
+        now = datetime.now(UTC)
+        await self._authorize_desk_membership_management(principal, operator_public_id, now)
+        result = await self.repository.detach_viewer_from_desk(
+            DeskMembershipDetach(
+                username=username,
+                operator_public_id=operator_public_id,
+                timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_DESK_MEMBERSHIPS_TOPIC),
+            ),
+            self._revoke_membership_authority,
+        )
+        if result is not None:
+            get_token_manager().invalidate_user_cache(result.user_public_id)
+            await self._publish_membership_revoked(
+                result=result,
+                revoked_by_user_public_id=principal.user_public_id or None,
+            )
+        return result
+
+    async def _authorize_desk_membership_management(
+        self,
+        principal: AuthPrincipal,
+        operator_public_id: str,
+        as_of: datetime,
+    ) -> None:
+        """Require token ceiling, live canonical capability, and desk scope.
+
+        The signed token remains the maximum authority the request may use, but
+        a role change after issuance must take effect without waiting for token
+        expiry. The active SCD2 user row is therefore re-read on every desk
+        management request. Global scope is granted only when both the signed
+        permission set and the live canonical role carry operator
+        impersonation authority.
+        """
+        token_can_manage = has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.MANAGE_DESK_MEMBERSHIPS,
+        )
+        if not token_can_manage:
+            raise DeskMembershipAuthorizationError("MANAGE_DESK_MEMBERSHIPS permission is required")
+        if not principal.user_public_id:
+            raise DeskMembershipAuthorizationError("Active caller identity is required")
+        async with self.repository.session() as session:
+            live_role_value = await session.scalar(
+                select(User.role).where(
+                    User.public_id == principal.user_public_id,
+                    User.is_active.is_(True),
+                    *where_active(User, as_of),
+                )
+            )
+        if live_role_value is None:
+            raise DeskMembershipAuthorizationError("Active caller identity is required")
+        try:
+            live_role = UserRole(live_role_value)
+        except ValueError as exc:
+            raise DeskMembershipAuthorizationError(
+                "Live user role cannot manage desk memberships"
+            ) from exc
+        if not has_effective_permission(
+            live_role,
+            None,
+            None,
+            Permission.MANAGE_DESK_MEMBERSHIPS,
+        ):
+            raise DeskMembershipAuthorizationError("Live user role cannot manage desk memberships")
+        token_has_global_authority = has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.IMPERSONATE_OPERATOR,
+        )
+        live_role_has_global_authority = has_effective_permission(
+            live_role,
+            None,
+            None,
+            Permission.IMPERSONATE_OPERATOR,
+        )
+        if token_has_global_authority and live_role_has_global_authority:
+            return
+        if operator_public_id not in principal.operator_public_ids:
+            raise DeskMembershipAuthorizationError(
+                "Target desk is outside the authenticated token scope"
+            )
+        memberships = await self.repository.get_user_operator_memberships(
+            user_public_id=principal.user_public_id,
+            as_of=as_of,
+        )
+        if operator_public_id not in {
+            membership["operator_public_id"] for membership in memberships
+        }:
+            raise DeskMembershipAuthorizationError(
+                "Current membership in the target desk is required"
+            )
+
+    async def _revoke_membership_authority(self, user_public_id: str) -> None:
+        """Revoke target credentials and the local positive-verification cache."""
+        token_manager = get_token_manager()
+        await token_manager.revoke_user_sessions(
+            user_public_id,
+            self.repository,
+            immediate=True,
+        )
+        token_manager.invalidate_user_cache(user_public_id)
+
+    @staticmethod
+    def _desk_member_to_profile(row: DeskMemberRow) -> UserProfile:
+        """Project a desk-directory row through the existing user response contract."""
+        role = UserRole(row["role"])
+        return UserProfile(
+            public_id=row["user_public_id"],
+            timestamp=row["user_timestamp"],
+            session_id=row["user_session_id"],
+            sequence_id=row["user_sequence_id"],
+            username=row["username"],
+            email=None,
+            role=role,
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            operator_public_ids=[row["operator_public_id"]],
+            primary_operator_public_id=(row["operator_public_id"] if row["is_primary"] else None),
+            default_language=None,
         )
 
     def _verify_password(self, password: str, password_hash: str) -> bool:
@@ -188,8 +344,9 @@ class UserService:
         """Build a fully-populated ``AuthPrincipal`` from a ``UserProfile``.
 
         Resolves the multi-tenant fields (``user_public_id``,
-        ``operator_public_ids``, ``primary_operator_public_id``) from the
-        repository. Named permission sets carrying
+        ``operator_public_ids``, ``operator_membership_public_ids``,
+        ``primary_operator_public_id``) from the repository. Named permission
+        sets carrying
         :data:`Permission.IMPERSONATE_OPERATOR` automatically receive the
         operator set covering every active operator; other users get only
         their explicit memberships from ``user_operator_memberships``.
@@ -215,8 +372,13 @@ class UserService:
         ):
             operators = await self.repository.list_active_operators(now)
             operator_public_ids = [op["public_id"] for op in operators]
+            operator_membership_public_ids: dict[str, str] = {}
         else:
             operator_public_ids = [m["operator_public_id"] for m in memberships]
+            operator_membership_public_ids = {
+                membership["operator_public_id"]: membership["public_id"]
+                for membership in memberships
+            }
         delegate_public_id: str | None = None
         delegate_row = await self.repository.get_ai_delegate_by_user_public_id(user.public_id)
         if delegate_row is not None:
@@ -232,6 +394,7 @@ class UserService:
             is_active=user.is_active,
             user_public_id=user.public_id,
             operator_public_ids=operator_public_ids,
+            operator_membership_public_ids=operator_membership_public_ids,
             primary_operator_public_id=primary_operator_public_id,
             delegate_public_id=delegate_public_id,
         )
@@ -648,6 +811,48 @@ class UserService:
                 exc,
             )
 
+    async def _publish_membership_revoked(
+        self,
+        *,
+        result: DeskMembershipDetachResult,
+        revoked_by_user_public_id: str | None,
+    ) -> None:
+        """Emit ``admin.membership_revoked`` after the detach commit."""
+        if self._msg_publisher is None:
+            logger.warning(
+                "admin.membership_revoked NOT broadcast for user_public_id={} "
+                "operator_public_id={}: UserService publisher unavailable; "
+                "DB fallback checks will converge",
+                result.user_public_id,
+                result.operator_public_id,
+            )
+            return
+        topic = admin_topic(_MEMBERSHIP_REVOKED_TOPIC)
+        payload = MembershipRevokedData(
+            public_id=str(uuid7()),
+            timestamp=result.detached_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            membership_public_id=result.membership_public_id,
+            user_public_id=result.user_public_id,
+            username=result.username,
+            operator_public_id=result.operator_public_id,
+            detached_at=result.detached_at,
+            revoked_by_user_public_id=revoked_by_user_public_id,
+            promoted_operator_public_id=result.promoted_operator_public_id,
+            reason="desk_membership_revoked",
+        )
+        try:
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast admin.membership_revoked for user_public_id={} "
+                "operator_public_id={}; DB fallback checks will converge: {}",
+                result.user_public_id,
+                result.operator_public_id,
+                exc,
+            )
+
     async def delete_user(self, user_id: str) -> bool:
         """Soft-delete user via SCD Type 2 close+insert with inactive state.
 
@@ -854,7 +1059,6 @@ class UserService:
         """
         t = bus_time or datetime.now(UTC)
         async with self.repository.session() as session:
-
             existing = (
                 (
                     await session.execute(

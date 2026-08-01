@@ -331,6 +331,11 @@ class TestDelegateOperatorBinding:
         payload = await service.create_delegate(owner=principal, body=body)
         claims = manager.decode_fresh_token(payload.access_token)
         assert claims.operator_public_ids == ["op-primary"]
+        memberships = await repo.get_user_operator_memberships(
+            claims.user_public_id,
+            datetime.now(UTC),
+        )
+        assert claims.operator_membership_public_ids == {"op-primary": memberships[0]["public_id"]}
         assert claims.primary_operator_public_id == "op-primary"
 
     @pytest.mark.asyncio

@@ -15,6 +15,7 @@ import zmq
 import zmq.asyncio
 
 from snapper.interface.websocket.bridge import MAX_PENDING_MESSAGES_TRADE
+from snapper.interface.websocket.bridge import BridgeClientRetirement
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.models import TopicConfigurationModel
 from snapper.interface.websocket.models import TopicMetricsModel
@@ -1253,6 +1254,162 @@ class TestRemoveClient:
         await bridge.remove_client(mock_ws)
         assert len(bridge.topic_subscriptions.get(topic, [])) == 0
 
+    @pytest.mark.asyncio
+    async def test_retire_client_synchronously_removes_send_authority(self) -> None:
+        """Retirement removes one client while retaining live shared subscribers."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge._stop_zmq_subscription = AsyncMock()
+        ws: Any = DummyWebSocket()
+        other: Any = DummyWebSocket()
+        shared = TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        shared_other = TopicSubscriptionModel(websocket=other, throttle_ms=0)
+        solo = TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        bridge.topic_subscriptions["shared.topic"] = {
+            ws: shared,
+            other: shared_other,
+        }
+        bridge.topic_subscriptions["solo.topic"] = {ws: solo}
+        bridge.client_subscriptions[ws] = {"solo.topic", "shared.topic"}
+        bridge.client_subscriptions[other] = {"shared.topic"}
+        bridge.topic_metrics["shared.topic"] = TopicMetricsModel(active_subscribers=2)
+        bridge.topic_metrics["solo.topic"] = TopicMetricsModel(active_subscribers=1)
+
+        retirement = bridge.retire_client(ws)
+
+        assert retirement.topics == ("shared.topic", "solo.topic")
+        assert retirement.trailing_tasks == ()
+        assert ws not in bridge.client_subscriptions
+        assert bridge.topic_subscriptions["shared.topic"] == {other: shared_other}
+        assert bridge.topic_subscriptions["solo.topic"] == {}
+        assert bridge.topic_metrics["shared.topic"].active_subscribers == 1
+        assert bridge.topic_metrics["solo.topic"].active_subscribers == 0
+
+        await bridge.finalize_retired_client(retirement)
+
+        bridge._stop_zmq_subscription.assert_awaited_once_with("solo.topic")
+        assert "solo.topic" not in bridge.topic_subscriptions
+        assert other in bridge.topic_subscriptions["shared.topic"]
+
+    def test_retire_client_tolerates_orphaned_topic(self) -> None:
+        """Retirement is synchronous even without a running event loop."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        bridge.client_subscriptions[ws] = {"orphan.topic"}
+
+        retirement = bridge.retire_client(ws)
+
+        assert retirement == BridgeClientRetirement(
+            topics=("orphan.topic",),
+            trailing_tasks=(),
+        )
+        assert ws not in bridge.client_subscriptions
+
+    def test_retire_client_without_metrics_removes_topic_registration(self) -> None:
+        """A registry-only subscription is removed without requiring metrics."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        subscription = TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        bridge.topic_subscriptions["registry.topic"] = {ws: subscription}
+
+        retirement = bridge.retire_client(ws)
+
+        assert retirement.topics == ("registry.topic",)
+        assert bridge.topic_subscriptions["registry.topic"] == {}
+
+    @pytest.mark.asyncio
+    async def test_retire_client_cancels_and_finalizes_trailing_task(self) -> None:
+        """Retirement cancels queued account deliveries before finalization."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        blocker = asyncio.Event()
+
+        async def _wait_for_release() -> None:
+            await blocker.wait()
+
+        task = asyncio.create_task(_wait_for_release())
+        key = (ws, "portfolio.accounts.", "portfolio.accounts.wallet")
+        bridge._account_trailing_tasks[key] = task
+
+        retirement = bridge.retire_client(ws)
+
+        assert retirement.trailing_tasks == (task,)
+        assert key not in bridge._account_trailing_tasks
+        await bridge.finalize_retired_client(retirement)
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_retire_client_does_not_cancel_current_trailing_task(self) -> None:
+        """Self-retirement removes tracking without cancelling its current task."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        key = (ws, "portfolio.accounts.", "portfolio.accounts.wallet")
+        bridge._account_trailing_tasks[key] = current_task
+
+        retirement = bridge.retire_client(ws)
+
+        assert retirement.trailing_tasks == ()
+        assert key not in bridge._account_trailing_tasks
+        assert current_task.cancelled() is False
+
+    @pytest.mark.asyncio
+    async def test_finalize_retirement_tolerates_already_removed_topic(self) -> None:
+        """Finalization ignores a topic removed before asynchronous cleanup."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge._stop_zmq_subscription = AsyncMock()
+
+        await bridge.finalize_retired_client(
+            BridgeClientRetirement(topics=("missing.topic",), trailing_tasks=())
+        )
+
+        bridge._stop_zmq_subscription.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_finalize_retirement_preserves_repopulated_topic(self) -> None:
+        """A concurrent replacement subscriber survives topic finalization."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        replacement = TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        bridge.topic_subscriptions["renewed.topic"] = {}
+
+        async def _repopulate(_topic: str) -> None:
+            bridge.topic_subscriptions["renewed.topic"][ws] = replacement
+
+        bridge._stop_zmq_subscription = AsyncMock(side_effect=_repopulate)
+        bridge.start_zmq_subscriber = AsyncMock()
+
+        await bridge.finalize_retired_client(
+            BridgeClientRetirement(topics=("renewed.topic",), trailing_tasks=())
+        )
+
+        assert bridge.topic_subscriptions["renewed.topic"] == {ws: replacement}
+        bridge.start_zmq_subscriber.assert_awaited_once_with("renewed.topic")
+
+    @pytest.mark.asyncio
+    async def test_finalize_retirement_tolerates_topic_removed_during_stop(self) -> None:
+        """Finalization accepts a stop hook that removes the topic registry.
+
+        Given: An empty retired topic whose stop hook deletes its registry entry,
+        When: Bridge retirement finalization rechecks the topic after the await,
+        Then: It neither restarts nor attempts a second deletion of that topic.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.topic_subscriptions["removed.topic"] = {}
+
+        async def _remove_topic(topic: str) -> None:
+            bridge.topic_subscriptions.pop(topic)
+
+        bridge._stop_zmq_subscription = AsyncMock(side_effect=_remove_topic)
+        bridge.start_zmq_subscriber = AsyncMock()
+
+        await bridge.finalize_retired_client(
+            BridgeClientRetirement(topics=("removed.topic",), trailing_tasks=())
+        )
+
+        assert "removed.topic" not in bridge.topic_subscriptions
+        bridge.start_zmq_subscriber.assert_not_awaited()
+
 
 class TestSubscribeWebsocketBranchCoverage:
     """Tests for subscribe_client branch coverage."""
@@ -1276,6 +1433,219 @@ class TestSubscribeWebsocketBranchCoverage:
         mock_ws = MagicMock()
         await bridge.subscribe_client(mock_ws, ["market."])
         assert "market." in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_rejects_inactive_connection(self) -> None:
+        """An inactive socket cannot enter any bridge subscription registry.
+
+        Given: A bridge wired to a manager that reports the socket inactive,
+        When: The socket requests a valid topic without a captured generation,
+        Then: Subscription returns false before any registry mutation.
+        """
+        connection_manager = MagicMock()
+        connection_manager.is_connection_active.return_value = False
+        bridge = ZmqWebSocketBridgeService(connection_manager=connection_manager)
+        websocket = MagicMock()
+
+        result = await bridge.subscribe_client(websocket, ["market."])
+
+        assert result is False
+        assert websocket not in bridge.client_subscriptions
+        assert "market." not in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_accepts_current_generation(self) -> None:
+        """A current generation may complete guarded bridge registration.
+
+        Given: A manager confirms the socket still owns a captured generation,
+        When: The socket requests one valid topic under that generation,
+        Then: The bridge registers the topic and reports current authority.
+        """
+        connection_manager = MagicMock()
+        connection_manager.is_connection_current.return_value = True
+        bridge = ZmqWebSocketBridgeService(connection_manager=connection_manager)
+        bridge._start_zmq_subscription = AsyncMock()
+        websocket = MagicMock()
+
+        result = await bridge.subscribe_client(
+            websocket,
+            ["market."],
+            expected_connection_generation=7,
+        )
+
+        assert result is True
+        assert bridge.client_subscriptions[websocket] == {"market."}
+        connection_manager.is_connection_current.assert_called_with(websocket, 7)
+
+    def test_topic_registration_rejects_inactive_connection(self) -> None:
+        """The low-level bridge mutation guard rejects an inactive socket.
+
+        Given: A manager reports the socket inactive at the mutation boundary,
+        When: Topic registration is invoked directly,
+        Then: It returns false without creating client or topic state.
+        """
+        connection_manager = MagicMock()
+        connection_manager.is_connection_active.return_value = False
+        bridge = ZmqWebSocketBridgeService(connection_manager=connection_manager)
+        websocket = MagicMock()
+
+        result = bridge._register_topic_subscription(websocket, "market.", 100)
+
+        assert result is False
+        assert websocket not in bridge.client_subscriptions
+        assert "market." not in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_stops_when_authority_changes_before_topic(self) -> None:
+        """Authority loss between guards prevents the first topic mutation.
+
+        Given: The initiating authority is current only at request entry,
+        When: The per-topic guard rechecks it before registration,
+        Then: Subscription returns false and no topic state is created.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        websocket = MagicMock()
+        authority_values = iter((True, False))
+
+        def _authority_is_current() -> bool:
+            return next(authority_values)
+
+        result = await bridge.subscribe_client(
+            websocket,
+            ["market."],
+            authority_is_current=_authority_is_current,
+        )
+
+        assert result is False
+        assert "market." not in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_retires_authority_lost_during_start(self) -> None:
+        """Authority loss during subscriber startup rolls registration back.
+
+        Given: A socket passes entry and mutation guards but is revoked while startup awaits,
+        When: The bridge performs its post-start authority check,
+        Then: Every client and topic registry is retired before false is returned.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge._start_zmq_subscription = AsyncMock()
+        bridge._stop_zmq_subscription = AsyncMock()
+        websocket = MagicMock()
+        authority_values = iter((True, True, False))
+
+        def _authority_is_current() -> bool:
+            return next(authority_values)
+
+        result = await bridge.subscribe_client(
+            websocket,
+            ["market."],
+            authority_is_current=_authority_is_current,
+        )
+
+        assert result is False
+        assert websocket not in bridge.client_subscriptions
+        assert "market." not in bridge.topic_subscriptions
+        bridge._stop_zmq_subscription.assert_awaited_once_with("market.")
+
+    @pytest.mark.asyncio
+    async def test_subscribe_websocket_rejects_stale_authority_at_entry(self) -> None:
+        """Single-topic registration rejects authority already stale at entry.
+
+        Given: The captured authority callback returns false immediately,
+        When: A valid topic is passed to the single-topic bridge API,
+        Then: The call returns false without validating or registering the topic.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        websocket = MagicMock()
+
+        result = await bridge.subscribe_websocket(
+            websocket,
+            "market.",
+            authority_is_current=lambda: False,
+        )
+
+        assert result is False
+        assert "market." not in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_websocket_rejects_authority_lost_during_validation(self) -> None:
+        """Single-topic registration rechecks authority after validation.
+
+        Given: The socket is current at entry but revoked while topic validation awaits,
+        When: The bridge reaches the pre-registration authority guard,
+        Then: It returns false without creating subscription state.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        websocket = MagicMock()
+        authority_values = iter((True, False))
+
+        def _authority_is_current() -> bool:
+            return next(authority_values)
+
+        result = await bridge.subscribe_websocket(
+            websocket,
+            "market.",
+            authority_is_current=_authority_is_current,
+        )
+
+        assert result is False
+        assert "market." not in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_websocket_retires_authority_lost_during_start(self) -> None:
+        """Single-topic startup rolls back a registration revoked while awaiting.
+
+        Given: The authority survives validation and is revoked during subscriber startup,
+        When: The post-start guard observes that revocation,
+        Then: Bridge retirement removes all registration state and returns false.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.start_zmq_subscriber = AsyncMock()
+        bridge._stop_zmq_subscription = AsyncMock()
+        websocket = MagicMock()
+        authority_values = iter((True, True, False))
+
+        def _authority_is_current() -> bool:
+            return next(authority_values)
+
+        result = await bridge.subscribe_websocket(
+            websocket,
+            "market.",
+            authority_is_current=_authority_is_current,
+        )
+
+        assert result is False
+        assert websocket not in bridge.client_subscriptions
+        assert "market." not in bridge.topic_subscriptions
+        bridge._stop_zmq_subscription.assert_awaited_once_with("market.")
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_websocket_without_metrics_preserves_other_client(self) -> None:
+        """Unsubscription does not require optional topic metrics.
+
+        Given: Two clients share a topic whose metrics entry is absent,
+        When: One client unsubscribes,
+        Then: The other subscription remains and no subscriber restart occurs.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        websocket = MagicMock()
+        other_websocket = MagicMock()
+        subscription = TopicSubscriptionModel(websocket=websocket, throttle_ms=0)
+        other_subscription = TopicSubscriptionModel(websocket=other_websocket, throttle_ms=0)
+        bridge.topic_subscriptions["market."] = {
+            websocket: subscription,
+            other_websocket: other_subscription,
+        }
+        bridge.client_subscriptions[websocket] = {"market."}
+        bridge.client_subscriptions[other_websocket] = {"market."}
+        bridge.stop_zmq_subscriber = AsyncMock()
+
+        result = await bridge.unsubscribe_websocket(websocket, "market.")
+
+        assert result is True
+        assert bridge.topic_subscriptions["market."] == {other_websocket: other_subscription}
+        assert websocket not in bridge.client_subscriptions
+        bridge.stop_zmq_subscriber.assert_not_awaited()
 
 
 class TestUnsubscribeWebsocketBranchCoverage:

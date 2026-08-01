@@ -4,8 +4,9 @@ Roles are labels for named permission sets. Handwritten capability code must
 therefore consume an effective permission or a permission-based resource
 requirement, never compare a user's role, traverse a role hierarchy, or call a
 role-check helper. The narrow exceptions below cover role display, user CRUD,
-development-user lookup, process topology, and the role-to-permission mapping
-itself. Generated contracts, tests, fixtures, migrations, and the unrelated
+development-user lookup, refresh-session integrity, exact desk-member domain
+classifications, process topology, and the role-to-permission mapping itself.
+Generated contracts, tests, fixtures, migrations, and the unrelated
 ``ProcessRoleEnum`` domain are outside this source-level contract.
 """
 
@@ -71,6 +72,15 @@ class AllowedFinding:
 
 
 _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/auth/routes.py",
+            "role-comparison",
+            "principal.role is not token_data.role",
+        ),
+        "refresh-session integrity check requiring login after a role change",
+    ),
     AllowedFinding(
         FindingSignature(
             "backend",
@@ -157,6 +167,24 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
             "backend",
             "src/snapper/data/repository.py",
             "role-query-membership",
+            "User.role.in_(_HUMAN_DESK_MEMBER_ROLE_VALUES)",
+        ),
+        "exact human desk-member domain classification, not a capability grant",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/data/repository.py",
+            "role-comparison",
+            "UserRole(role) is UserRole.VIEWER",
+        ),
+        "exact mutable desk-target domain classification, not a capability grant",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/data/repository.py",
+            "role-query-membership",
             "User.role.in_(_AI_REVIEW_DECISION_ROLE_VALUES)",
         ),
         "AI delegate state lookup from a permission-derived role set",
@@ -196,6 +224,15 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
             "const rolePermissions = ROLE_PERMISSIONS[role]",
         ),
         "read-only admin role-to-permission explanation matrix",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "frontend",
+            "src/features/admin/DeskMembershipManagement/DeskMembershipManagement.tsx",
+            "role-comparison",
+            "const canDetach = member.role === 'viewer'",
+        ),
+        "exact mutable desk-target domain classification, not a capability grant",
     ),
     AllowedFinding(
         FindingSignature(
@@ -611,7 +648,8 @@ def test_capability_decisions_never_branch_on_roles() -> None:
 
     Given: Every handwritten backend, frontend, iOS, and MCP production source,
     When: Executable role decisions are compared with the reviewed exceptions,
-    Then: Only mapping, display, role CRUD, and process-topology uses remain.
+    Then: Only mapping, display, session-integrity, domain-classification,
+        role CRUD, and process-topology uses remain.
     """
     findings = [*_scan_python(), *_scan_foreign_sources()]
     observed = Counter(finding.signature for finding in findings)

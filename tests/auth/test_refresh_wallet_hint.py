@@ -1,9 +1,10 @@
-"""Tests for refresh-token wallet-hint validation.
+"""Tests for refresh-token desk-scope and wallet-hint validation.
 
 Covers ``_apply_wallet_hint`` (role-branched membership validation,
 404 on foreign wallet, model_copy projection, and re-validation of the
 claim carried across a hint-less refresh) and the
-``RefreshTokenPayload`` field/model validators.
+``RefreshTokenPayload`` field/model validators. It also proves refresh
+rotation can shrink, but never widen, the authenticated desk scope.
 """
 
 from datetime import UTC
@@ -17,8 +18,10 @@ from pydantic import ValidationError
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import _apply_wallet_hint
+from snapper.auth.routes import _constrain_refresh_memberships
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import RefreshTokenPayload
+from snapper.auth.schemas.tokens import TokenClaims
 
 _OWN_WALLET = "01948f94-0001-7a00-8000-000000000001"
 _FOREIGN_WALLET = "01948f94-0001-7a00-8000-0000000000ff"
@@ -28,6 +31,7 @@ def _principal(
     role: UserRole = UserRole.OPERATOR,
     active_wallet: str | None = None,
     operator_public_ids: list[str] | None = None,
+    operator_membership_public_ids: dict[str, str] | None = None,
 ) -> AuthPrincipal:
     """Build an AuthPrincipal fixture."""
     return AuthPrincipal(
@@ -35,6 +39,7 @@ def _principal(
         role=role,
         active_wallet_public_id=active_wallet,
         operator_public_ids=["op-1"] if operator_public_ids is None else operator_public_ids,
+        operator_membership_public_ids=operator_membership_public_ids or {},
     )
 
 
@@ -46,6 +51,119 @@ def _repo(
     repo.list_active_wallets = AsyncMock(return_value=admin_rows or [])
     repo.list_readable_wallets_for_user = AsyncMock(return_value=rows or [])
     return repo
+
+
+def _claims(
+    operator_public_ids: list[str],
+    primary_operator_public_id: str,
+    operator_membership_public_ids: dict[str, str] | None = None,
+) -> TokenClaims:
+    """Build verified refresh claims with one carried desk scope."""
+    return TokenClaims(
+        sub="user-1",
+        username="u",
+        role=UserRole.OPERATOR,
+        exp=2_000_000_000,
+        iat=1_900_000_000,
+        jti="refresh_scope-test",
+        sid="session-1",
+        user_public_id="user-1",
+        operator_public_ids=operator_public_ids,
+        operator_membership_public_ids=operator_membership_public_ids or {},
+        primary_operator_public_id=primary_operator_public_id,
+    )
+
+
+class TestConstrainRefreshMemberships:
+    """Refresh rotation preserves the existing session's desk ceiling."""
+
+    def test_live_role_promotion_requires_explicit_login(self) -> None:
+        """Refresh cannot turn an OPERATOR session into global ADMIN authority.
+
+        Given: An OPERATOR refresh token and a principal rebuilt after the
+            account was promoted to ADMIN in the database.
+        When: Refresh authority is constrained.
+        Then: Rotation fails with 401 so only explicit login can acquire the
+            new role and its structural impersonation permission.
+        """
+        principal = _principal(role=UserRole.ADMIN)
+        claims = _claims(["op-1"], "op-1")
+
+        with pytest.raises(HTTPException) as exc_info:
+            _constrain_refresh_memberships(principal, claims)
+
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "Session authority changed; sign in again"
+
+    def test_new_database_membership_does_not_widen_the_session(self) -> None:
+        """A newly attached desk remains unavailable until explicit login.
+
+        Given: A live principal rebuilt with both the old and newly attached desks,
+            while the verified refresh token carries only the old desk.
+        When: The refresh membership scope is constrained.
+        Then: Only the old desk and its primary marker survive rotation.
+        """
+        principal = _principal(
+            operator_public_ids=["desk-old", "desk-new"],
+            operator_membership_public_ids={
+                "desk-old": "membership-old-current",
+                "desk-new": "membership-new-current",
+            },
+        )
+        result = _constrain_refresh_memberships(
+            principal,
+            _claims(["desk-old"], "desk-old"),
+        )
+        assert result.operator_public_ids == ["desk-old"]
+        assert result.operator_membership_public_ids == {"desk-old": "membership-old-current"}
+        assert result.primary_operator_public_id == "desk-old"
+
+    def test_replaced_membership_generation_does_not_resurrect_the_session(self) -> None:
+        """A versioned refresh token cannot adopt a post-detach membership row.
+
+        Given: A refresh token bound to an old membership generation and a
+            live principal rebuilt after detach and re-attachment to the same desk.
+        When: Refresh authority is constrained.
+        Then: The desk, generation, and primary marker are all removed rather
+            than upgrading the existing session to the new grant.
+        """
+        principal = _principal(
+            operator_public_ids=["desk"],
+            operator_membership_public_ids={"desk": "membership-new"},
+        )
+        result = _constrain_refresh_memberships(
+            principal,
+            _claims(
+                ["desk"],
+                "desk",
+                {"desk": "membership-old"},
+            ),
+        )
+
+        assert result.operator_public_ids == []
+        assert result.operator_membership_public_ids == {}
+        assert result.primary_operator_public_id == ""
+
+    def test_removed_membership_and_primary_are_not_carried_forward(self) -> None:
+        """Refresh may narrow stale claims and clears an unauthorized primary.
+
+        Given: Claims carrying one removed primary desk and one surviving desk.
+        When: The database-backed principal contains only the survivor.
+        Then: The removed desk disappears and the stale primary becomes empty.
+        """
+        principal = _principal(
+            operator_public_ids=["desk-surviving"],
+            operator_membership_public_ids={"desk-surviving": "membership-surviving-current"},
+        )
+        result = _constrain_refresh_memberships(
+            principal,
+            _claims(["desk-removed", "desk-surviving"], "desk-removed"),
+        )
+        assert result.operator_public_ids == ["desk-surviving"]
+        assert result.operator_membership_public_ids == {
+            "desk-surviving": "membership-surviving-current"
+        }
+        assert result.primary_operator_public_id == ""
 
 
 class TestRefreshTokenPayloadValidators:

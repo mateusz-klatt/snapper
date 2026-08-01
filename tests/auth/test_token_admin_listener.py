@@ -12,6 +12,7 @@ are individually testable without a running broker.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from typing import cast
@@ -21,14 +22,20 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import _InventoryFacts
 from snapper.auth.tokens import _VerifyCacheEntry
 from snapper.data.repository import Repository
+from snapper.messaging.schemas.admin import MembershipRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 from tests.auth.deactivation_fallback_helpers import FailingInactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import FailingMembershipLookupRepo
+from tests.auth.deactivation_fallback_helpers import FailingTokenInventoryLookupRepo
 from tests.auth.deactivation_fallback_helpers import InactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import MembershipLookupRepo
+from tests.auth.deactivation_fallback_helpers import MembershipTokenLookupRepo
 from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_scan_cancelled
 from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_sleep_cancelled
 
@@ -45,7 +52,14 @@ def _fresh_manager() -> TokenManager:
     return manager
 
 
-def _seed_cache_entry(manager: TokenManager, token_hash: str, user_public_id: str) -> None:
+def _seed_cache_entry(
+    manager: TokenManager,
+    token_hash: str,
+    user_public_id: str,
+    *,
+    role: UserRole = UserRole.ADMIN,
+    operator_public_ids: tuple[str, ...] = (),
+) -> None:
     """Plant one active positive-verdict entry for ``user_public_id``."""
     now_ts = datetime.now(UTC).timestamp()
     manager._verify_cache[token_hash] = _VerifyCacheEntry(
@@ -60,6 +74,9 @@ def _seed_cache_entry(manager: TokenManager, token_hash: str, user_public_id: st
         ),
         expires_at_ts=now_ts + 900,
         cached_at_ts=now_ts,
+        role=role,
+        operator_public_ids=operator_public_ids,
+        has_global_operator_authority=role == UserRole.ADMIN,
     )
 
 
@@ -74,6 +91,25 @@ def _make_user_deactivated_payload(user_public_id: str) -> UserDeactivatedData:
         user_public_id=user_public_id,
         deactivated_at=now,
         reason=None,
+    )
+
+
+def _make_membership_revoked_payload(user_public_id: str) -> MembershipRevokedData:
+    """Build a canonical internal membership-revocation event payload."""
+    now = datetime.now(UTC)
+    return MembershipRevokedData(
+        public_id=f"membership-event-{user_public_id}",
+        timestamp=now,
+        session_id="membership-sid",
+        sequence_id=1,
+        membership_public_id="membership-1",
+        user_public_id=user_public_id,
+        username=f"user-{user_public_id}",
+        operator_public_id="operator-detached",
+        detached_at=now,
+        revoked_by_user_public_id="admin-1",
+        promoted_operator_public_id=None,
+        reason="desk_detached",
     )
 
 
@@ -99,6 +135,19 @@ class TestHandleUserDeactivated:
         assert "hash-bystander" in manager._verify_cache
 
 
+class TestHandleMembershipRevoked:
+    """Membership events invalidate every cached credential for the user."""
+
+    def test_evicts_matching_entries_only(self) -> None:
+        """Detached user's credentials drop while bystander cache stays."""
+        manager = _fresh_manager()
+        _seed_cache_entry(manager, "hash-target", "target-user")
+        _seed_cache_entry(manager, "hash-bystander", "bystander-user")
+        manager._handle_membership_revoked(_make_membership_revoked_payload("target-user"))
+        assert "hash-target" not in manager._verify_cache
+        assert "hash-bystander" in manager._verify_cache
+
+
 class TestAdminDispatchFrame:
     """Dispatch routes topics → typed handlers and swallows errors."""
 
@@ -109,6 +158,15 @@ class TestAdminDispatchFrame:
         _seed_cache_entry(manager, "hash-x", "user-x")
         payload = _make_user_deactivated_payload("user-x").to_json()
         await manager._admin_dispatch_frame("admin.user_deactivated", payload)
+        assert "hash-x" not in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_membership_revoked_topic_dispatches_to_handler(self) -> None:
+        """``admin.membership_revoked`` evicts the target user's cache."""
+        manager = _fresh_manager()
+        _seed_cache_entry(manager, "hash-x", "user-x")
+        payload = _make_membership_revoked_payload("user-x").to_json()
+        await manager._admin_dispatch_frame("admin.membership_revoked", payload)
         assert "hash-x" not in manager._verify_cache
 
     @pytest.mark.asyncio
@@ -359,7 +417,13 @@ class TestDeactivationFallbackScan:
     async def test_scan_tolerates_repo_without_lookup_method(self) -> None:
         """Older repository doubles do not break the fallback path."""
         manager = _fresh_manager()
-        _seed_cache_entry(manager, "hash-target", "target-user")
+        _seed_cache_entry(
+            manager,
+            "hash-target",
+            "target-user",
+            role=UserRole.VIEWER,
+            operator_public_ids=("operator-legacy",),
+        )
         manager.set_deactivation_repository_factory(lambda: cast(Repository, object()))
         await manager._scan_deactivated_cached_users_once()
         assert "hash-target" in manager._verify_cache
@@ -373,6 +437,153 @@ class TestDeactivationFallbackScan:
         manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
         await manager._scan_deactivated_cached_users_once()
         assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_evicts_user_when_one_cached_jti_is_revoked(self) -> None:
+        """A stale cached JTI evicts the user's whole cache, including active peers."""
+        manager = _fresh_manager()
+        repo = MembershipTokenLookupRepo(
+            {},
+            {
+                "bystander-user": {"bystander-jti"},
+                "target-user": {"new-jti"},
+            },
+        )
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(manager, "hash-old", "target-user")
+        _seed_cache_entry(manager, "hash-new", "target-user")
+        _seed_cache_entry(manager, "hash-bystander", "bystander-user")
+        old_entry = manager._verify_cache["hash-old"]
+        new_entry = manager._verify_cache["hash-new"]
+        bystander_entry = manager._verify_cache["hash-bystander"]
+        manager._verify_cache["hash-old"] = replace(
+            old_entry,
+            facts=replace(old_entry.facts, jti="old-jti"),
+        )
+        manager._verify_cache["hash-new"] = replace(
+            new_entry,
+            facts=replace(new_entry.facts, jti="new-jti"),
+        )
+        manager._verify_cache["hash-bystander"] = replace(
+            bystander_entry,
+            facts=replace(bystander_entry.facts, jti="bystander-jti"),
+        )
+
+        await manager._scan_deactivated_cached_users_once()
+
+        assert "hash-old" not in manager._verify_cache
+        assert "hash-new" not in manager._verify_cache
+        assert "hash-bystander" in manager._verify_cache
+        assert repo.token_queries == ["bystander-user", "target-user"]
+
+    @pytest.mark.asyncio
+    async def test_token_inventory_scan_tolerates_lookup_error(self) -> None:
+        """Token-inventory failures leave cached verdicts untouched."""
+        manager = _fresh_manager()
+        repo = FailingTokenInventoryLookupRepo()
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(manager, "hash-target", "target-user")
+
+        await manager._scan_deactivated_cached_users_once()
+
+        assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_evicts_stale_non_admin_membership_claims(self) -> None:
+        """A cached desk claim absent from active memberships evicts the user."""
+        manager = _fresh_manager()
+        repo = MembershipLookupRepo(
+            {
+                "target-user": {"operator-still-active"},
+                "bystander-user": {"operator-bystander"},
+            }
+        )
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(
+            manager,
+            "hash-target",
+            "target-user",
+            role=UserRole.VIEWER,
+            operator_public_ids=("operator-still-active", "operator-detached"),
+        )
+        _seed_cache_entry(
+            manager,
+            "hash-bystander",
+            "bystander-user",
+            role=UserRole.VIEWER,
+            operator_public_ids=("operator-bystander",),
+        )
+        _seed_cache_entry(
+            manager,
+            "hash-admin",
+            "admin-user",
+            role=UserRole.ADMIN,
+            operator_public_ids=("global-operator",),
+        )
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" not in manager._verify_cache
+        assert "hash-bystander" in manager._verify_cache
+        assert "hash-admin" in manager._verify_cache
+        assert [query[0] for query in repo.membership_queries] == [
+            "bystander-user",
+            "target-user",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_scan_evicts_replaced_membership_generation(self) -> None:
+        """Broker loss cannot preserve a cache entry from before re-attachment."""
+        manager = _fresh_manager()
+        repo = MembershipLookupRepo({"target-user": {"operator-current"}})
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(
+            manager,
+            "hash-target",
+            "target-user",
+            role=UserRole.VIEWER,
+            operator_public_ids=("operator-current",),
+        )
+        manager._verify_cache["hash-target"] = replace(
+            manager._verify_cache["hash-target"],
+            operator_membership_public_ids=(("operator-current", "membership-before-detach"),),
+        )
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" not in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_membership_scan_tolerates_lookup_error(self) -> None:
+        """Fallback DB failures preserve cache and leave the loop healthy."""
+        manager = _fresh_manager()
+        repo = FailingMembershipLookupRepo()
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(
+            manager,
+            "hash-target",
+            "target-user",
+            role=UserRole.VIEWER,
+            operator_public_ids=("operator-detached",),
+        )
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_admin_role_without_global_authority_is_membership_checked(self) -> None:
+        """The fallback exemption follows effective authority, not role identity."""
+        manager = _fresh_manager()
+        repo = MembershipLookupRepo({"admin-user": set()})
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(
+            manager,
+            "hash-admin",
+            "admin-user",
+            role=UserRole.ADMIN,
+            operator_public_ids=("operator-detached",),
+        )
+        manager._verify_cache["hash-admin"] = replace(
+            manager._verify_cache["hash-admin"],
+            has_global_operator_authority=False,
+        )
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-admin" not in manager._verify_cache
 
     @pytest.mark.asyncio
     async def test_scan_loop_propagates_cancelled_error(self) -> None:

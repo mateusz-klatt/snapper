@@ -40,6 +40,8 @@ class WebSocketConnectionManager:
         self.active_connections: list[WebSocket] = []
         self.client_subscriptions: dict[WebSocket, set[str]] = {}
         self.topic_subscribers: dict[str, set[WebSocket]] = {}
+        self._connection_generations: dict[WebSocket, int] = {}
+        self._next_connection_generation = 0
         self.zmq_bridge = ZmqWebSocketBridgeService(self)
         self._tracker: SequenceTracker = SequenceTracker()
 
@@ -62,6 +64,8 @@ class WebSocketConnectionManager:
         if accept:
             await websocket.accept()
         if websocket not in self.active_connections:
+            self._next_connection_generation += 1
+            self._connection_generations[websocket] = self._next_connection_generation
             self.active_connections.append(websocket)
         self.client_subscriptions[websocket] = set()
         logger.info(f"WebSocket connected: {websocket.client}")
@@ -72,24 +76,100 @@ class WebSocketConnectionManager:
         Args:
             websocket: The WebSocket connection to unregister.
         """
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        if websocket in self.client_subscriptions:
-            topics = self.client_subscriptions[websocket].copy()
-            for topic in topics:
-                self.unsubscribe_client(websocket, topic)
-            del self.client_subscriptions[websocket]
+        self.retire_connection(websocket)
         if self.zmq_bridge:
             await self.zmq_bridge.disconnect_client(websocket)
         logger.info(f"WebSocket disconnected: {websocket.client}")
 
-    def subscribe_client(self, websocket: WebSocket, topic: str) -> None:
+    def is_connection_active(self, websocket: WebSocket) -> bool:
+        """Return whether a socket remains eligible for manager sends.
+
+        Args:
+            websocket: Connection identity to check.
+
+        Returns:
+            Whether the socket is still registered as active.
+        """
+        return websocket in self.active_connections
+
+    def get_connection_generation(self, websocket: WebSocket) -> int | None:
+        """Return the current connection generation for an active socket.
+
+        Args:
+            websocket: Connection identity to inspect.
+
+        Returns:
+            Monotonic generation, or ``None`` when the socket is inactive.
+        """
+        if not self.is_connection_active(websocket):
+            return None
+        return self._connection_generations.get(websocket)
+
+    def is_connection_current(self, websocket: WebSocket, generation: int) -> bool:
+        """Return whether a socket still owns the captured live generation.
+
+        Args:
+            websocket: Connection identity to inspect.
+            generation: Generation captured before an asynchronous operation.
+
+        Returns:
+            Whether the same connection generation remains active.
+        """
+        return self.get_connection_generation(websocket) == generation
+
+    def retire_connection(self, websocket: WebSocket) -> tuple[str, ...]:
+        """Synchronously remove a socket from every manager send registry.
+
+        This is the no-await authority barrier used before desk-detach cleanup:
+        once it returns, ordinary broadcasts and topic broadcasts can no longer
+        select the socket, even while bridge resource finalization is awaiting.
+
+        Args:
+            websocket: Connection identity to retire.
+
+        Returns:
+            Sorted topics removed from the connection registry.
+        """
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        self._connection_generations.pop(websocket, None)
+        topics = tuple(sorted(self.client_subscriptions.pop(websocket, set())))
+        for topic in topics:
+            subscribers = self.topic_subscribers.get(topic)
+            if subscribers is None:
+                continue
+            subscribers.discard(websocket)
+            if not subscribers:
+                del self.topic_subscribers[topic]
+        return topics
+
+    def subscribe_client(
+        self,
+        websocket: WebSocket,
+        topic: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
         """Subscribe a client to a topic.
 
         Args:
             websocket: The WebSocket connection.
             topic: The topic to subscribe to.
+            expected_generation: Optional connection generation captured before
+                asynchronous authorization.
+
+        Returns:
+            Whether the active connection still owned the requested generation.
         """
+        if not self.is_connection_active(websocket):
+            logger.warning("Rejected subscription for inactive WebSocket: %s", topic)
+            return False
+        if expected_generation is not None and not self.is_connection_current(
+            websocket,
+            expected_generation,
+        ):
+            logger.warning("Rejected subscription for stale WebSocket generation: %s", topic)
+            return False
         if websocket not in self.client_subscriptions:
             self.client_subscriptions[websocket] = set()
         self.client_subscriptions[websocket].add(topic)
@@ -97,6 +177,7 @@ class WebSocketConnectionManager:
             self.topic_subscribers[topic] = set()
         self.topic_subscribers[topic].add(websocket)
         logger.info(f"Client {websocket.client} subscribed to topic: {topic}")
+        return True
 
     def unsubscribe_client(self, websocket: WebSocket, topic: str) -> None:
         """Unsubscribe a client from a topic.
@@ -169,7 +250,9 @@ class WebSocketConnectionManager:
             return
         message_str = message.model_dump_json()
         disconnected: list[WebSocket] = []
-        for connection in self.active_connections:
+        for connection in tuple(self.active_connections):
+            if not self.is_connection_active(connection):
+                continue
             try:
                 await connection.send_text(message_str)
             except Exception as e:
@@ -185,12 +268,16 @@ class WebSocketConnectionManager:
             topic: The topic to broadcast to.
             message: The Pydantic model to broadcast as JSON.
         """
-        subscribers = self.get_topic_subscribers(topic)
+        subscribers = tuple(self.get_topic_subscribers(topic))
         if not subscribers:
             return
         message_str = message.model_dump_json()
         disconnected: list[WebSocket] = []
         for websocket in subscribers:
+            if not self.is_connection_active(websocket):
+                continue
+            if websocket not in self.get_topic_subscribers(topic):
+                continue
             try:
                 await websocket.send_text(message_str)
             except Exception as e:
@@ -210,6 +297,7 @@ class WebSocketConnectionManager:
         self.active_connections.clear()
         self.client_subscriptions.clear()
         self.topic_subscribers.clear()
+        self._connection_generations.clear()
         if self.zmq_bridge:
             await self.zmq_bridge.cleanup()
         logger.info("Connection manager cleanup complete")

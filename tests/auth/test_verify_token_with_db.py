@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 from loguru import logger
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -39,6 +40,7 @@ from snapper.auth.tokens import VERIFY_CACHE_TTL_SECONDS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import _inventory_facts
 from snapper.auth.tokens import _VerifyCacheEntry
+from snapper.auth.tokens import _VerifyCacheGuard
 from snapper.auth.tokens import hash_token
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 
@@ -97,15 +99,24 @@ def _entry(
         facts=_inventory_facts(row),
         expires_at_ts=expires_at_ts,
         cached_at_ts=cached_at_ts,
+        membership_claim_is_current=True,
     )
 
 
-def _mint_access_token(manager: TokenManager, *, user_public_id: str = "user-verify") -> str:
+def _mint_access_token(
+    manager: TokenManager,
+    *,
+    user_public_id: str = "user-verify",
+    operator_public_ids: list[str] | None = None,
+    operator_membership_public_ids: dict[str, str] | None = None,
+) -> str:
     """Produce a fresh access JWT suitable for verify_token_with_db."""
     principal = AuthPrincipal(
         username="verify-user",
         role=UserRole.VIEWER,
         user_public_id=user_public_id,
+        operator_public_ids=operator_public_ids or [],
+        operator_membership_public_ids=operator_membership_public_ids or {},
     )
     return manager.create_tokens(principal).access_token
 
@@ -186,6 +197,198 @@ class TestVerifyTokenWithDB:
             await manager.verify_token_with_db(token, repo, expected_token_type=_ACCESS) is not None
         )
         assert repo.get_active_token_by_hash.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_token_persisted_after_detach_cannot_revive_on_reattach(self) -> None:
+        """Mint-before-detach and inventory-write-after-detach stays closed.
+
+        The inventory row is present and active, modelling a login that minted
+        from an old membership snapshot and persisted its token after the desk
+        detach committed. Re-attaching the same operator creates a different
+        membership public ID, so that otherwise-identical operator claim cannot
+        revive before JWT expiry.
+        """
+        manager = _fresh_manager()
+        operator_public_id = "detached-operator"
+        old_membership_public_id = "membership-before-detach"
+        token = _mint_access_token(
+            manager,
+            user_public_id="detached-user",
+            operator_public_ids=[operator_public_id],
+            operator_membership_public_ids={operator_public_id: old_membership_public_id},
+        )
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token),
+                user_public_id="detached-user",
+            )
+        )
+        repo.get_user_operator_memberships = AsyncMock(return_value=[])
+        assert (
+            await manager.verify_token_with_db(
+                token,
+                repo,
+                expected_token_type=_ACCESS,
+            )
+            is None
+        )
+        entry = manager._verify_cache[hash_token(token)]
+        assert entry.role == UserRole.VIEWER
+        assert entry.operator_public_ids == (operator_public_id,)
+        assert entry.operator_membership_public_ids == (
+            (operator_public_id, old_membership_public_id),
+        )
+        assert entry.membership_claim_is_current is False
+        assert (
+            await manager.verify_token_with_db(
+                token,
+                repo,
+                expected_token_type=_ACCESS,
+            )
+            is None
+        )
+        repo.get_active_token_by_hash.assert_awaited_once()
+        repo.get_user_operator_memberships.assert_awaited_once()
+
+        manager.invalidate_user_cache("detached-user")
+        repo.get_user_operator_memberships.return_value = [
+            {
+                "public_id": "membership-after-reattach",
+                "operator_public_id": operator_public_id,
+            }
+        ]
+        assert (
+            await manager.verify_token_with_db(
+                token,
+                repo,
+                expected_token_type=_ACCESS,
+            )
+            is None
+        )
+        assert repo.get_active_token_by_hash.await_count == 2
+        assert repo.get_user_operator_memberships.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_nonempty_operator_claim_rejects_membership_lookup_failure(self) -> None:
+        """A DB error cannot turn an unverified desk claim into authority."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, operator_public_ids=["operator-1"])
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        repo.get_user_operator_memberships = AsyncMock(
+            side_effect=RuntimeError("membership database unavailable")
+        )
+        assert (
+            await manager.verify_token_with_db(
+                token,
+                repo,
+                expected_token_type=_ACCESS,
+            )
+            is None
+        )
+        assert manager._verify_cache[hash_token(token)].membership_claim_is_current is False
+
+    @pytest.mark.asyncio
+    async def test_nonempty_operator_claim_without_inventory_owner_fails_closed(self) -> None:
+        """A desk claim cannot be checked when inventory has no owning user."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, operator_public_ids=["operator-1"])
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=None)
+        repo.get_user_operator_memberships = AsyncMock(return_value=[])
+        assert (
+            await manager.verify_token_with_db(
+                token,
+                repo,
+                expected_token_type=_ACCESS,
+            )
+            is None
+        )
+        repo.get_user_operator_memberships.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nonempty_operator_claim_accepts_active_membership_subset(self) -> None:
+        """A legacy version-less claim keeps operator-subset compatibility."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, operator_public_ids=["operator-1"])
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        repo.get_user_operator_memberships = AsyncMock(
+            return_value=[{"operator_public_id": "operator-1"}]
+        )
+        claims = await manager.verify_token_with_db(
+            token,
+            repo,
+            expected_token_type=_ACCESS,
+        )
+        assert claims is not None
+        assert manager._verify_cache[hash_token(token)].membership_claim_is_current is True
+
+    @pytest.mark.asyncio
+    async def test_versioned_operator_claim_accepts_exact_active_membership(self) -> None:
+        """A current membership public ID admits the newly versioned credential."""
+        manager = _fresh_manager()
+        token = _mint_access_token(
+            manager,
+            operator_public_ids=["operator-1"],
+            operator_membership_public_ids={"operator-1": "membership-current"},
+        )
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(jti=_signed_jti(manager, token))
+        )
+        repo.get_user_operator_memberships = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "membership-current",
+                    "operator_public_id": "operator-1",
+                }
+            ]
+        )
+        claims = await manager.verify_token_with_db(
+            token,
+            repo,
+            expected_token_type=_ACCESS,
+        )
+        assert claims is not None
+        assert claims.operator_membership_public_ids == {"operator-1": "membership-current"}
+
+    @pytest.mark.asyncio
+    async def test_explicit_admin_scope_uses_effective_global_authority(self) -> None:
+        """Structural impersonation authority, not ADMIN identity, drives bypass."""
+        manager = _fresh_manager()
+        principal = AuthPrincipal(
+            username="admin-user",
+            role=UserRole.ADMIN,
+            user_public_id="admin-user",
+            operator_public_ids=["global-operator"],
+        )
+        token = manager.create_tokens(
+            principal,
+            permissions=[Permission.MANAGE_DESK_MEMBERSHIPS],
+        ).access_token
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(
+                jti=_signed_jti(manager, token),
+                user_public_id="admin-user",
+            )
+        )
+        repo.get_user_operator_memberships = AsyncMock(return_value=[])
+        claims = await manager.verify_token_with_db(
+            token,
+            repo,
+            expected_token_type=_ACCESS,
+        )
+        assert claims is not None
+        entry = manager._verify_cache[hash_token(token)]
+        assert entry.has_global_operator_authority is True
+        repo.get_user_operator_memberships.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_row_returns_none_caches_negative(self) -> None:
@@ -535,7 +738,7 @@ class TestVerifyCacheGenerationRace:
             ),
             token_data=token_data,
             now_ts=datetime.now(UTC).timestamp(),
-            gen_before=gen_before,
+            guard=_VerifyCacheGuard(generation_before=gen_before),
         )
         assert th not in manager._verify_cache
 
@@ -562,7 +765,7 @@ class TestVerifyCacheGenerationRace:
             ),
             token_data=token_data,
             now_ts=datetime.now(UTC).timestamp(),
-            gen_before=gen_before,
+            guard=_VerifyCacheGuard(generation_before=gen_before),
         )
         assert th in manager._verify_cache
 
@@ -604,7 +807,7 @@ class TestVerifyCacheGenerationRace:
             ),
             token_data=legacy_claims,
             now_ts=datetime.now(UTC).timestamp(),
-            gen_before=0,
+            guard=_VerifyCacheGuard(generation_before=0),
         )
         assert "legacy-hash" not in manager._verify_cache
 
@@ -636,7 +839,7 @@ class TestVerifyCacheGenerationRace:
             facts=_inventory_facts(None),
             token_data=blank_claims,
             now_ts=datetime.now(UTC).timestamp(),
-            gen_before=0,
+            guard=_VerifyCacheGuard(generation_before=0),
         )
         assert "orphan-hash" not in manager._verify_cache
 

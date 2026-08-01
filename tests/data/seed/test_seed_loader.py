@@ -2517,6 +2517,30 @@ class TestTrackedSeedProfilesUseFormatV2:
             assert profile.name, name
             assert profile.tier in {2, 3}, name
 
+    def test_tracked_dev_profiles_seed_default_human_desk_members(self) -> None:
+        """Every tracked dev profile declares the complete default human desk graph."""
+        tracked = [
+            item
+            for item in self._tracked_profile_paths()
+            if item[0] in {"bundled dev", "proprietary dev"}
+        ]
+        assert tracked
+        expected_roles = {
+            "admin": "admin",
+            "operator": "operator",
+            "viewer": "viewer",
+        }
+        for name, path in tracked:
+            profile = _parse_seed_profile(
+                tomllib.loads(path.read_text(encoding="utf-8")), str(path)
+            )
+            users = {user.username: user for user in profile.users}
+            for username, role in expected_roles.items():
+                assert users[username].role == role, name
+                assert users[username].operators == ["default"], name
+                assert users[username].primary_operator == "default", name
+                assert users[username].readable_wallets == [], name
+
     def test_tracked_profile_settings_fit_column_widths(self) -> None:
         """Tracked profile settings fit the Setting column widths.
 

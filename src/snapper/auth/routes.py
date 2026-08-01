@@ -14,6 +14,7 @@ from uuid import uuid7
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
 from fastapi import Response
 from fastapi import status
@@ -77,6 +78,7 @@ from snapper.server.rate_limiting import register_failed_login_attempt
 _AUTH_API_PATH = "/api/auth"
 _REST_STREAM = "rest.control"
 _USER_NOT_FOUND = "User not found"
+_SESSION_AUTHORITY_CHANGED = "Session authority changed; sign in again"
 
 
 @dataclass(frozen=True)
@@ -503,10 +505,71 @@ async def _load_refresh_identity(
             detail=_USER_NOT_FOUND,
         )
     principal = await user_service.build_auth_principal(user)
+    principal = _constrain_refresh_memberships(principal, token_data)
     principal = principal.model_copy(
         update={"active_wallet_public_id": token_data.active_wallet_public_id}
     )
     return _RefreshIdentity(token_manager, token_data, user, principal)
+
+
+def _constrain_refresh_memberships(
+    principal: AuthPrincipal,
+    token_data: TokenClaims,
+) -> AuthPrincipal:
+    """Prevent refresh rotation from widening role or desk authority.
+
+    Args:
+        principal: Current database-backed account principal.
+        token_data: Verified refresh-token claims for the existing session.
+
+    Returns:
+        Principal carrying only desk memberships present in both sources,
+        with a primary desk retained only while it remains authorized.
+
+    Raises:
+        HTTPException: The live account role differs from the signed session
+            role and explicit authentication is required for the new grant.
+    """
+    if principal.role is not token_data.role:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=_SESSION_AUTHORITY_CHANGED,
+        )
+    live_operator_public_ids = set(principal.operator_public_ids)
+    token_membership_public_ids = token_data.operator_membership_public_ids
+    if token_membership_public_ids:
+        retained_operator_public_ids = [
+            operator_public_id
+            for operator_public_id in token_data.operator_public_ids
+            if operator_public_id in live_operator_public_ids
+            and token_membership_public_ids.get(operator_public_id)
+            == principal.operator_membership_public_ids.get(operator_public_id)
+        ]
+        retained_membership_public_ids = {
+            operator_public_id: token_membership_public_ids[operator_public_id]
+            for operator_public_id in retained_operator_public_ids
+        }
+    else:
+        retained_operator_public_ids = [
+            operator_public_id
+            for operator_public_id in token_data.operator_public_ids
+            if operator_public_id in live_operator_public_ids
+        ]
+        retained_membership_public_ids = {
+            operator_public_id: principal.operator_membership_public_ids[operator_public_id]
+            for operator_public_id in retained_operator_public_ids
+            if operator_public_id in principal.operator_membership_public_ids
+        }
+    primary_operator_public_id = token_data.primary_operator_public_id
+    if primary_operator_public_id not in retained_operator_public_ids:
+        primary_operator_public_id = ""
+    return principal.model_copy(
+        update={
+            "operator_public_ids": retained_operator_public_ids,
+            "operator_membership_public_ids": retained_membership_public_ids,
+            "primary_operator_public_id": primary_operator_public_id,
+        }
+    )
 
 
 def _refresh_permissions(
@@ -1032,7 +1095,53 @@ async def get_users(
     )
 
 
-@router.post("/desks/{operator_public_id}/members/{username}")
+@router.get("/desks/{operator_public_id}/members")
+async def list_desk_members(
+    request: Request,
+    operator_public_id: str,
+    current_user: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.MANAGE_DESK_MEMBERSHIPS)),
+    ],
+    as_of: Annotated[
+        datetime | None,
+        Query(description="Point-in-time desk-membership query (UTC)"),
+    ] = None,
+) -> UserListResponse:
+    """List active human members of a desk the caller may manage.
+
+    Args:
+        request: FastAPI request providing response provenance.
+        operator_public_id: Public ID of the target desk.
+        current_user: Caller holding MANAGE_DESK_MEMBERSHIPS.
+        as_of: Optional point-in-time membership horizon.
+
+    Returns:
+        Desk-scoped member profiles with their total count.
+    """
+    user_service = get_user_service()
+    try:
+        members = await user_service.list_desk_members(
+            principal=current_user,
+            operator_public_id=operator_public_id,
+            as_of=as_of,
+        )
+    except DeskMembershipAuthorizationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except DeskMembershipNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    sid, seq, pid, ts = _mint_provenance(request)
+    return UserListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=members,
+        count=len(members),
+    )
+
+
+@router.post("/desks/{operator_public_id}/members/{username:path}")
 async def attach_viewer_to_desk(
     request: Request,
     operator_public_id: str,
@@ -1079,6 +1188,47 @@ async def attach_viewer_to_desk(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     return _message_response(request, f"User '{username}' is attached to the desk")
+
+
+@router.delete("/desks/{operator_public_id}/members/{username:path}")
+async def detach_viewer_from_desk(
+    request: Request,
+    operator_public_id: str,
+    username: str,
+    current_user: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.MANAGE_DESK_MEMBERSHIPS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+) -> MessageResponse:
+    """Detach a human VIEWER and revoke all of the target's active sessions.
+
+    Args:
+        request: FastAPI request providing response provenance.
+        operator_public_id: Public ID of the target desk.
+        username: Exact username of the human VIEWER target.
+        current_user: Caller holding MANAGE_DESK_MEMBERSHIPS.
+        _csrf: CSRF token validation.
+
+    Returns:
+        Idempotent detachment confirmation.
+    """
+    user_service = get_user_service()
+    try:
+        await user_service.detach_viewer_from_desk(
+            principal=current_user,
+            operator_public_id=operator_public_id,
+            username=username,
+        )
+    except DeskMembershipAuthorizationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except DeskMembershipNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DeskMembershipTargetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return _message_response(request, f"User '{username}' is detached from the desk")
 
 
 @router.post("/users", openapi_extra=openapi_schema(CreateUserRequest))

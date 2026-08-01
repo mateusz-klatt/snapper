@@ -151,6 +151,7 @@ def test_register_connection_tracks_state() -> None:
     state = manager.get_state(cast(Any, websocket))
     assert isinstance(state, ConnectionState)
     assert state.session_id == token_data.sid
+    assert state.access_token_jti == token_data.jti
     assert state.ws_token_expiration is not None
     assert state.warn_task is None
     assert state.hard_task is None

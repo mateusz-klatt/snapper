@@ -95,6 +95,28 @@ class TestListOperators:
         mock_repo.list_active_operators.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_explicit_as_of_drives_the_catalogue_snapshot(self) -> None:
+        """The picker and desk-directory query can share one history horizon.
+
+        Given: An ADMIN and an explicit historical timestamp.
+        When: The operator catalogue is listed at that timestamp.
+        Then: The repository receives the timestamp unchanged.
+        """
+        horizon = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+        mock_repo = AsyncMock()
+        mock_repo.list_active_operators = AsyncMock(return_value=[])
+
+        result = await list_operators(
+            request=_make_request(),
+            principal=AuthPrincipal(username="admin", role=UserRole.ADMIN),
+            repo=mock_repo,
+            as_of=horizon,
+        )
+
+        assert result.payload == []
+        mock_repo.list_active_operators.assert_awaited_once_with(horizon)
+
+    @pytest.mark.asyncio
     async def test_operator_sees_only_membership_operators(self) -> None:
         """OPERATOR filters the full catalogue down to membership IDs.
 
