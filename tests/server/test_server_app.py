@@ -25,10 +25,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from snapper.application.services.candle_query import CandleQueryRow
+from snapper.application.services.settings import SettingsService
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.config.settings import AppSettings
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository_types import PortfolioReconciliationReadContextRow
@@ -100,6 +102,28 @@ def _make_token_listener_recorder(recorded: list[str]) -> MagicMock:
     mock.start_admin_listener = _start
     mock.stop_admin_listener = _stop
     return mock
+
+
+class _PnlWriterStartProbe:
+    """Record the settings dependency observed by real lifespan writer wiring."""
+
+    def __init__(self, expected_settings: object) -> None:
+        self._expected_settings = expected_settings
+        self.settings_services: list[SettingsService] = []
+
+    async def __call__(
+        self,
+        writer_app: FastAPI,
+        *,
+        db_url: str,
+        settings: AppSettings,
+        settings_service: SettingsService,
+    ) -> None:
+        """Require state publication and explicit injection to agree."""
+        assert writer_app.state.settings_service is settings_service
+        assert db_url == TEST_DB_URL
+        assert settings is self._expected_settings
+        self.settings_services.append(settings_service)
 
 
 TEST_DB_URL = "sqlite:///:memory:"
@@ -219,6 +243,8 @@ class TestLifespan:
         stop_ai_review_maintenance = AsyncMock()
         start_trade_integrity_watchdog = MagicMock()
         stop_trade_integrity_watchdog = AsyncMock()
+        pnl_writer_start = _PnlWriterStartProbe(lifespan_settings)
+
         with (
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch(
@@ -275,7 +301,8 @@ class TestLifespan:
                 _stop_ai_delegate_watchdog=AsyncMock(),
                 _start_retention_scheduler=AsyncMock(),
                 _stop_retention_scheduler=AsyncMock(),
-                _start_background_writers=AsyncMock(),
+                _start_db_stats_snapshotter=AsyncMock(),
+                _start_pnl_snapshotter=pnl_writer_start,
                 _stop_background_writers=AsyncMock(),
             ),
             patch(
@@ -317,6 +344,7 @@ class TestLifespan:
         stop_ai_review_maintenance.assert_awaited_once()
         start_trade_integrity_watchdog.assert_called_once()
         stop_trade_integrity_watchdog.assert_awaited_once()
+        assert pnl_writer_start.settings_services == [mock_settings_service]
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio

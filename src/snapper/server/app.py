@@ -1055,7 +1055,13 @@ async def _stop_db_stats_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
-async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSettings) -> None:
+async def _start_pnl_snapshotter(
+    app: FastAPI,
+    *,
+    db_url: str,
+    settings: AppSettings,
+    settings_service: SettingsService,
+) -> None:
     """Build + start the :class:`PortfolioPnlSnapshotter` singleton on instance 0.
 
     Mirrors :func:`_start_db_stats_snapshotter`: the attribute is attached to
@@ -1070,6 +1076,8 @@ async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSett
         app: FastAPI application whose ``state`` will hold the snapshotter.
         db_url: SQLAlchemy URL for the underlying async repository.
         settings: Runtime settings carrying the coordinator partition identity.
+        settings_service: Initialized runtime settings reader for fresh mint-pin
+            resolution.
     """
     if settings.coordinator_instance_count != 1 and settings.coordinator_instance_id != 0:
         logger.info(
@@ -1081,7 +1089,11 @@ async def _start_pnl_snapshotter(app: FastAPI, *, db_url: str, settings: AppSett
     try:
         enabled = _resolve_pnl_snapshotter_enabled(os.environ.get("PNL_SNAPSHOTTER_ENABLED"))
         repo = get_repository(db_url) if enabled else None
-        snapshotter = PortfolioPnlSnapshotter(repo=repo, disabled=not enabled)
+        snapshotter = PortfolioPnlSnapshotter(
+            repo=repo,
+            disabled=not enabled,
+            settings_service=settings_service,
+        )
         await snapshotter.start()
     except Exception:
         logger.exception("PortfolioPnlSnapshotter startup failed — Phase-5B sampling is off")
@@ -1110,7 +1122,13 @@ async def _stop_pnl_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
-async def _start_background_writers(app: FastAPI, *, db_url: str, settings: AppSettings) -> None:
+async def _start_background_writers(
+    app: FastAPI,
+    *,
+    db_url: str,
+    settings: AppSettings,
+    settings_service: SettingsService,
+) -> None:
     """Start the DB-stats and Phase-5B P&L writer singletons in one lifespan step.
 
     Groups the two ``app.state`` background writers behind a single call so the
@@ -1122,9 +1140,16 @@ async def _start_background_writers(app: FastAPI, *, db_url: str, settings: AppS
         app: FastAPI application whose ``state`` will hold the writers.
         db_url: SQLAlchemy URL for the underlying async repositories.
         settings: Runtime settings carrying the coordinator partition identity.
+        settings_service: Initialized runtime settings reader shared with the
+            P&L writer.
     """
     await _start_db_stats_snapshotter(app, db_url=db_url)
-    await _start_pnl_snapshotter(app, db_url=db_url, settings=settings)
+    await _start_pnl_snapshotter(
+        app,
+        db_url=db_url,
+        settings=settings,
+        settings_service=settings_service,
+    )
 
 
 async def _stop_background_writers(app: FastAPI) -> None:
@@ -1337,7 +1362,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _start_ai_review_maintenance(app, db_url=settings.db_url)
         _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
-        await _start_background_writers(app, db_url=settings.db_url, settings=settings)
+        await _start_background_writers(
+            app,
+            db_url=settings.db_url,
+            settings=settings,
+            settings_service=settings_service,
+        )
         await _start_remote_summary_cache(
             app,
             own_coordinator=process_factory.coordinator_topic_slug(),

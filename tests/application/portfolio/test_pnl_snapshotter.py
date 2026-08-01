@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 from typing import cast
+from uuid import UUID
 
 import pytest
 
@@ -27,17 +28,25 @@ from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
+from snapper.application.process_manager.executor_topology import MINT_WALLET_PIN_SETTING_KEY
+from snapper.application.process_manager.executor_topology import ExecutorTopology
+from snapper.application.services.settings import SettingsService
+from snapper.core.json_types import JsonValue
 from snapper.data.repository import PortfolioPnlSampleConflictError
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlSampleRow
+from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
 from snapper.data.repository_types import WalletCredentialRow
+from snapper.data.repository_types import WalletRow
 
 _T0 = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _WALLET = "0000face-0000-7000-8000-0000000000a1"
+_MINT_WALLET = "ffffface-0000-7000-8000-0000000000b2"
 _EPOCH = "00000000-0000-7000-8000-000000000102"
 _SESSION = "00000000-0000-7000-8000-000000000103"
+_UNRESTRICTED_TOPOLOGY = ExecutorTopology("", frozenset())
 
 
 def _minute(offset: int) -> datetime:
@@ -55,16 +64,57 @@ def _clock(now: datetime) -> Any:
     return lambda: now
 
 
-def _cred(exchange: str, *, credential_type: str = "api_key_secret") -> WalletCredentialRow:
+def _fixed_uuid7() -> UUID:
+    """Return one deterministic UUID for byte-identical sample comparisons."""
+    return UUID("00000000-0000-7000-8000-000000000777")
+
+
+def _cred(
+    exchange: str,
+    *,
+    credential_type: str = "api_key_secret",
+    wallet: str = _WALLET,
+) -> WalletCredentialRow:
     """Build one active wallet credential row."""
     return {
-        "public_id": f"cred-{exchange}",
-        "wallet_public_id": _WALLET,
+        "public_id": f"cred-{wallet}-{exchange}",
+        "wallet_public_id": wallet,
         "exchange": exchange,
         "credential_type": credential_type,
         "encrypted_payload": "x",
         "label": None,
         "timestamp": _T0,
+        "session_id": _SESSION,
+        "sequence_id": 1,
+    }
+
+
+def _wallet_row(wallet: str, label: str, *, is_paper: bool = False) -> WalletRow:
+    """Build one active wallet-catalogue row for topology resolution."""
+    return {
+        "public_id": wallet,
+        "label": label,
+        "description": None,
+        "is_paper": is_paper,
+        "timestamp": _T0,
+        "session_id": _SESSION,
+        "sequence_id": 1,
+    }
+
+
+def _scope_grant(wallet: str) -> ScopeGrantRow:
+    """Build one active trading scope grant for topology evidence."""
+    return {
+        "public_id": f"grant-{wallet}",
+        "operator_public_id": "operator-1",
+        "wallet_public_id": wallet,
+        "granted_by_user_public_id": "user-1",
+        "scope_kind": "underlying",
+        "underlying_public_id": "underlying-1",
+        "instrument_public_id": None,
+        "note": None,
+        "timestamp": _T0,
+        "known_to": datetime.max.replace(tzinfo=UTC),
         "session_id": _SESSION,
         "sequence_id": 1,
     }
@@ -140,12 +190,12 @@ def _untrusted_point(point_time: datetime) -> PnlTimelinePoint:
     )
 
 
-def _attempt(minute: datetime) -> VenueAccountObservationAttemptRow:
+def _attempt(minute: datetime, wallet: str = _WALLET) -> VenueAccountObservationAttemptRow:
     """Build one authoritative kraken USD observation attempt for a minute."""
     return {
         "id": 1,
         "public_id": "obs-1",
-        "wallet_public_id": _WALLET,
+        "wallet_public_id": wallet,
         "exchange": "kraken",
         "mode": "live",
         "attempt_status": "observed",
@@ -223,12 +273,41 @@ class _FakeRepo:
         self.retracted: list[tuple[datetime, str, datetime]] = []
         self.peak_before: list[datetime] = []
         self.observation_cuts: list[datetime] = []
+        self.observation_scopes: list[tuple[str, tuple[str, ...]]] = []
         self.sample_windows: list[tuple[datetime, datetime, str | None]] = []
+        self.active_wallets: list[WalletRow] = []
+        self.order_counts: dict[str, int] = {}
+        self.active_scope_grants: dict[str, list[ScopeGrantRow]] = {}
+        self.wallet_catalogue_requests: list[datetime] = []
+        self.order_count_requests: list[tuple[str, ...]] = []
+        self.scope_grant_requests: list[str] = []
 
     async def list_active_wallet_credentials(self, as_of: datetime) -> list[WalletCredentialRow]:
         """Return the canned active credentials."""
         del as_of
         return self._credentials
+
+    async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
+        """Return the canned active wallet catalogue and record its horizon."""
+        self.wallet_catalogue_requests.append(as_of)
+        return self.active_wallets
+
+    async def get_orders_total_count(
+        self, as_of: datetime, wallet_public_ids: list[str] | None = None
+    ) -> int:
+        """Return canned order evidence for the single requested wallet."""
+        del as_of
+        requested = tuple(wallet_public_ids or [])
+        self.order_count_requests.append(requested)
+        return sum(self.order_counts.get(wallet, 0) for wallet in requested)
+
+    async def list_active_scope_grants_for_wallet(
+        self, wallet_public_id: str, as_of: datetime
+    ) -> list[ScopeGrantRow]:
+        """Return canned active grants and record the candidate wallet."""
+        del as_of
+        self.scope_grant_requests.append(wallet_public_id)
+        return self.active_scope_grants.get(wallet_public_id, [])
 
     async def get_portfolio_pnl_anchor(
         self, wallet: str, mode: str, ccy: str, as_of: datetime | None
@@ -265,11 +344,12 @@ class _FakeRepo:
         self, wallet: str, exchanges: Sequence[str], mode: str, at: datetime
     ) -> dict[str, VenueAccountObservationAttemptRow]:
         """Return an authoritative kraken attempt at the requested minute."""
-        del wallet, mode
+        del mode
         self.observation_cuts.append(at)
+        self.observation_scopes.append((wallet, tuple(exchanges)))
         attempts: dict[str, VenueAccountObservationAttemptRow] = {}
         for exchange in exchanges:
-            attempt = _attempt(at)
+            attempt = _attempt(at, wallet)
             attempt["balances_json"] = self._balances_json
             attempts[exchange] = attempt
         return attempts
@@ -361,10 +441,39 @@ class _FakeRepo:
         self.retracted.append((point_time, expected_public_id, bus_time))
 
 
-def _snapshotter(repo: _FakeRepo, now: datetime) -> PortfolioPnlSnapshotter:
+class _FakeSettingsService:
+    """Fresh settings reader with mutable pin and optional failure."""
+
+    def __init__(self, pin: JsonValue = "", failure: Exception | None = None) -> None:
+        """Store the canned pin and failure mode."""
+        self.pin = pin
+        self.failure = failure
+        self.requests: list[str] = []
+
+    async def get_setting_fresh(self, key: str) -> JsonValue:
+        """Return the current pin or raise the configured lookup failure."""
+        self.requests.append(key)
+        assert key == MINT_WALLET_PIN_SETTING_KEY
+        if self.failure is not None:
+            raise self.failure
+        return self.pin
+
+
+def _snapshotter(
+    repo: _FakeRepo,
+    now: datetime,
+    *,
+    mint_pin: JsonValue = "",
+    settings_failure: Exception | None = None,
+) -> PortfolioPnlSnapshotter:
     """Build an enabled snapshotter over a fake repo and a fixed clock."""
+    settings_service = _FakeSettingsService(mint_pin, settings_failure)
     return PortfolioPnlSnapshotter(
-        repo=cast(Repository, repo), interval_seconds=60, disabled=False, clock=_clock(now)
+        repo=cast(Repository, repo),
+        interval_seconds=60,
+        disabled=False,
+        clock=_clock(now),
+        settings_service=cast(SettingsService, settings_service),
     )
 
 
@@ -510,11 +619,15 @@ class TestVenueScope:
             _cred("kraken_futures"),
             _cred("paper", credential_type="paper"),
         ]
-        assert resolve_spot_venues(credentials) == {_WALLET: frozenset({"kraken"})}
+        assert resolve_spot_venues(credentials, _UNRESTRICTED_TOPOLOGY) == {
+            _WALLET: frozenset({"kraken"})
+        }
 
     def test_resolve_futures_only_wallet_is_empty(self) -> None:
         """A wallet with only futures credentials resolves to no spot venues."""
-        assert resolve_spot_venues([_cred("kraken_futures")]) == {_WALLET: frozenset()}
+        assert resolve_spot_venues([_cred("kraken_futures")], _UNRESTRICTED_TOPOLOGY) == {
+            _WALLET: frozenset()
+        }
 
 
 class TestConstructorAndProperties:
@@ -681,6 +794,196 @@ class TestTickDiscoveryAndIsolation:
         assert sum("futures-only" in r.message for r in caplog.records) == 1
 
     @pytest.mark.asyncio
+    async def test_pinned_redundant_mint_wallet_persists_no_samples(self) -> None:
+        """A labelled mint wallet covered by another Kraken wallet writes no point."""
+        repo = _FakeRepo(
+            credentials=[
+                _cred("kraken"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ],
+            anchor=_anchor(),
+        )
+        repo.active_wallets = [
+            _wallet_row(_WALLET, "main"),
+            _wallet_row(_MINT_WALLET, "market-data"),
+        ]
+        snap = _snapshotter(repo, _minute(5), mint_pin="label:market-data")
+        with _patched_series():
+            await snap._tick_once()
+        mint_rows = [row for row in repo.persisted if row["wallet_public_id"] == _MINT_WALLET]
+        trading_rows = [row for row in repo.persisted if row["wallet_public_id"] == _WALLET]
+        assert mint_rows == []
+        assert len(trading_rows) == 3
+        assert all(wallet != _MINT_WALLET for wallet, _venues in repo.observation_scopes)
+        assert repo.order_count_requests == [(_MINT_WALLET,)]
+        assert repo.scope_grant_requests == [_MINT_WALLET]
+
+    @pytest.mark.asyncio
+    async def test_pinned_only_holder_keeps_full_venue_and_samples(self) -> None:
+        """A pinned sole Kraken holder remains executor-backed and sampled."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5), mint_pin=_WALLET)
+        with _patched_series():
+            await snap._tick_once()
+        wallet_rows = [row for row in repo.persisted if row["wallet_public_id"] == _WALLET]
+        assert len(wallet_rows) == 3
+        assert repo.observation_scopes
+        assert all(venues == ("kraken",) for _wallet, venues in repo.observation_scopes)
+        assert repo.order_count_requests == [(_WALLET,)]
+        assert repo.scope_grant_requests == [_WALLET]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("order_count", "has_scope_grant"), [(1, False), (0, True)])
+    async def test_trading_evidence_refuses_mint_exclusion(
+        self, order_count: int, has_scope_grant: bool
+    ) -> None:
+        """Order history or an active scope grant keeps the pinned scope sampled."""
+        repo = _FakeRepo(
+            credentials=[
+                _cred("kraken"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ],
+            anchor=_anchor(),
+        )
+        repo.order_counts[_WALLET] = order_count
+        if has_scope_grant:
+            repo.active_scope_grants[_WALLET] = [_scope_grant(_WALLET)]
+        snap = _snapshotter(repo, _minute(5), mint_pin=_WALLET)
+        with _patched_series():
+            await snap._tick_once()
+        trading_rows = [row for row in repo.persisted if row["wallet_public_id"] == _WALLET]
+        trading_observations = [
+            venues for wallet, venues in repo.observation_scopes if wallet == _WALLET
+        ]
+        assert len(trading_rows) == 3
+        assert trading_observations
+        assert all(venues == ("kraken",) for venues in trading_observations)
+        assert repo.order_count_requests == [(_WALLET,)]
+        assert repo.scope_grant_requests == [_WALLET]
+
+    @pytest.mark.asyncio
+    async def test_trading_wallet_output_is_byte_identical_with_pin_active(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mint exclusion changes no field or observation input for the survivor."""
+        credentials = [
+            _cred("kraken"),
+            _cred("kraken", wallet=_MINT_WALLET),
+        ]
+        control_repo = _FakeRepo(credentials=credentials, anchor=_anchor())
+        pinned_repo = _FakeRepo(credentials=credentials, anchor=_anchor())
+        monkeypatch.setattr(pnl_snapshotter, "uuid7", _fixed_uuid7)
+        control = _snapshotter(control_repo, _minute(5))
+        pinned = _snapshotter(pinned_repo, _minute(5), mint_pin=_MINT_WALLET)
+        with _patched_series():
+            await control._tick_once()
+            await pinned._tick_once()
+        control_rows = [row for row in control_repo.persisted if row["wallet_public_id"] == _WALLET]
+        pinned_rows = [row for row in pinned_repo.persisted if row["wallet_public_id"] == _WALLET]
+        control_observations = [
+            venues for wallet, venues in control_repo.observation_scopes if wallet == _WALLET
+        ]
+        pinned_observations = [
+            venues for wallet, venues in pinned_repo.observation_scopes if wallet == _WALLET
+        ]
+        assert pinned_rows == control_rows
+        assert pinned_observations == control_observations
+        assert pinned_repo.order_count_requests == [(_MINT_WALLET,)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mint_pin", ["", None])
+    async def test_empty_or_absent_pin_preserves_every_wallet(self, mint_pin: JsonValue) -> None:
+        """An empty or absent declaration leaves both Kraken scopes unchanged."""
+        repo = _FakeRepo(
+            credentials=[
+                _cred("kraken"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ],
+            anchor=_anchor(),
+        )
+        snap = _snapshotter(repo, _minute(5), mint_pin=mint_pin)
+        settings_service = cast(_FakeSettingsService, snap._settings_service)
+        with _patched_series():
+            await snap._tick_once()
+        assert sum(row["wallet_public_id"] == _WALLET for row in repo.persisted) == 3
+        assert sum(row["wallet_public_id"] == _MINT_WALLET for row in repo.persisted) == 3
+        assert all(venues == ("kraken",) for _wallet, venues in repo.observation_scopes)
+        assert repo.wallet_catalogue_requests == []
+        assert repo.order_count_requests == []
+        assert repo.scope_grant_requests == []
+        assert settings_service.requests == [MINT_WALLET_PIN_SETTING_KEY]
+
+    @pytest.mark.asyncio
+    async def test_pin_change_is_honored_on_the_next_tick(self) -> None:
+        """A fresh setting read applies a newly declared mint identity immediately."""
+        repo = _FakeRepo(
+            credentials=[
+                _cred("kraken"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ],
+            anchor=_anchor(),
+        )
+        snap = _snapshotter(repo, _minute(5))
+        settings_service = cast(_FakeSettingsService, snap._settings_service)
+        with _patched_series():
+            await snap._tick_once()
+            settings_service.pin = _MINT_WALLET
+            await snap._tick_once()
+        assert sum(row["wallet_public_id"] == _WALLET for row in repo.persisted) == 6
+        assert sum(row["wallet_public_id"] == _MINT_WALLET for row in repo.persisted) == 3
+        assert settings_service.requests == [
+            MINT_WALLET_PIN_SETTING_KEY,
+            MINT_WALLET_PIN_SETTING_KEY,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mint_pin_and_futures_only_notices_are_distinct_and_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The same wallet logs each unsupported reason once as topology changes."""
+        repo = _FakeRepo(
+            credentials=[
+                _cred("kraken"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ],
+            anchor=_anchor(),
+        )
+        snap = _snapshotter(repo, _minute(5), mint_pin=_WALLET)
+        with (
+            _patched_series(),
+            caplog.at_level("INFO", logger="snapper.application.portfolio.pnl_snapshotter"),
+        ):
+            await snap._tick_once()
+            repo._credentials = [
+                _cred("kraken_futures"),
+                _cred("kraken", wallet=_MINT_WALLET),
+            ]
+            await snap._tick_once()
+            await snap._tick_once()
+        wallet_reasons = [
+            getattr(record, "scope_skip_reason", None)
+            for record in caplog.records
+            if _WALLET in record.message
+        ]
+        assert wallet_reasons.count("mint_identity_executor_topology") == 1
+        assert wallet_reasons.count("no_spot_venues") == 1
+
+    @pytest.mark.asyncio
+    async def test_fresh_pin_lookup_failure_fails_open(self) -> None:
+        """A fresh setting query failure leaves the full venue sampled."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(
+            repo,
+            _minute(5),
+            settings_failure=RuntimeError("settings unavailable"),
+        )
+        with _patched_series():
+            await snap._tick_once()
+        assert len(repo.persisted) == 3
+        assert repo.observation_scopes
+        assert repo.order_count_requests == []
+
+    @pytest.mark.asyncio
     async def test_scope_failure_logs_once_then_aggregates(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -716,9 +1019,11 @@ class TestTickDiscoveryAndIsolation:
         repo = _FakeRepo(credentials=[], anchor=None)
         snap = _snapshotter(repo, _minute(5))
         snap._no_anchor_logged.add("gone-wallet")
+        snap._mint_identity_logged.add("gone-wallet")
         snap._baselines["gone-wallet|live|USD|epoch"] = {"kraken": 3}
         await snap._tick_once()
         assert snap._no_anchor_logged == set()
+        assert snap._mint_identity_logged == set()
         assert snap._baselines == {}
 
 

@@ -9,7 +9,8 @@ lifespan gate plus the sample DAL's per-scope advisory lock.
 Per tick the snapshotter discovers every scope that already holds an ACTIVE USD
 live activation anchor (decision R7 — it NEVER creates one), resolves the scope's
 expected SPOT venue set (active wallet credentials minus paper minus futures-class
-venues, decision R11), and for each scope:
+venues minus credentials excluded by the shared executor topology, decision R11),
+and for each scope:
 
   1. reads the durable progress (the last active sample);
   2. runs the EXISTING 5A series engine over the finalized catch-up window in
@@ -93,6 +94,12 @@ from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBu
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence
+from snapper.application.process_manager.executor_topology import MINT_WALLET_PIN_SETTING_KEY
+from snapper.application.process_manager.executor_topology import ExecutorCredentialDisposition
+from snapper.application.process_manager.executor_topology import ExecutorTopology
+from snapper.application.process_manager.executor_topology import resolve_executor_topology
+from snapper.application.services.settings import SettingsService
+from snapper.core.json_types import JsonValue
 from snapper.data.repository import PortfolioPnlSampleConflictError
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
@@ -110,6 +117,9 @@ _LIVE_MODE: Final = "live"
 _USD: Final[str] = "USD"
 _FUTURES_POSITION_METHOD: Final[str] = "futures_position"
 _PAPER_CREDENTIAL_TYPE: Final[str] = "paper"
+_SCOPE_SKIP_MINT_IDENTITY: Final[str] = "mint_identity_executor_topology"
+_SCOPE_SKIP_NO_ANCHOR: Final[str] = "no_active_usd_anchor"
+_SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
 _POOL_KEY_ESTIMATE: Final[int] = 1
 """Chunk-sizing pool estimate; the work-budget split is the true safety net."""
@@ -149,15 +159,21 @@ def is_futures_class_exchange(exchange: str) -> bool:
 
 def resolve_spot_venues(
     credentials: Sequence[WalletCredentialRow],
+    topology: ExecutorTopology,
 ) -> dict[str, frozenset[str]]:
     """Group active credentials into each wallet's expected SPOT venue set (R11).
 
     A credential contributes its exchange to its wallet's denominator only when it
-    is neither a paper credential nor a futures-class venue. A wallet whose every
-    credential is paper or futures resolves to an empty set (unsupported).
+    is neither a paper credential nor a futures-class venue and the shared executor
+    topology says its order executor runs. A wallet whose every credential is
+    unsupported or executor-excluded resolves to an empty set. The venue account
+    observer runs inside that executor, so an executor-less wallet can never emit a
+    ``venue_account_observations`` row. Leaving such a venue in the denominator
+    would therefore make every minute fail ``basket_missing_venue`` forever.
 
     Args:
         credentials: Active wallet credential rows at the tick horizon.
+        topology: Shared executor topology resolved from the same catalogue.
 
     Returns:
         Every seen wallet mapped to its (possibly empty) spot venue set.
@@ -166,13 +182,35 @@ def resolve_spot_venues(
     for credential in credentials:
         wallet = credential["wallet_public_id"]
         grouped.setdefault(wallet, set())
-        if credential["credential_type"] == _PAPER_CREDENTIAL_TYPE:
+        if not _is_spot_credential(credential):
             continue
-        exchange = credential["exchange"]
-        if is_futures_class_exchange(exchange):
+        if (
+            topology.disposition_for(credential)
+            == ExecutorCredentialDisposition.MINT_WALLET_EXCLUDED
+        ):
             continue
-        grouped[wallet].add(exchange)
+        grouped[wallet].add(credential["exchange"])
     return {wallet: frozenset(venues) for wallet, venues in grouped.items()}
+
+
+def _is_spot_credential(credential: WalletCredentialRow) -> bool:
+    """Return whether a credential contributes a spot valuation venue."""
+    if credential["credential_type"] == _PAPER_CREDENTIAL_TYPE:
+        return False
+    return not is_futures_class_exchange(credential["exchange"])
+
+
+def _mint_excluded_spot_wallets(
+    credentials: Sequence[WalletCredentialRow], topology: ExecutorTopology
+) -> frozenset[str]:
+    """Return wallets whose otherwise-spot credential topology excludes."""
+    return frozenset(
+        credential["wallet_public_id"]
+        for credential in credentials
+        if _is_spot_credential(credential)
+        and topology.disposition_for(credential)
+        == ExecutorCredentialDisposition.MINT_WALLET_EXCLUDED
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +245,7 @@ class PortfolioPnlSnapshotter:
         interval_seconds: int | None = None,
         disabled: bool | None = None,
         clock: Callable[[], datetime] | None = None,
+        settings_service: SettingsService | None = None,
     ) -> None:
         """Wire dependencies.
 
@@ -217,6 +256,8 @@ class PortfolioPnlSnapshotter:
             disabled: Disable override; ``None`` reads ``PNL_SNAPSHOTTER_ENABLED``
                 (default disabled).
             clock: Injectable UTC ``now`` for deterministic tests.
+            settings_service: Runtime settings reader used for a fresh mint pin
+                lookup on every tick. ``None`` means no declared exclusion.
         """
         if interval_seconds is None:
             interval_seconds = resolve_interval(os.environ.get(INTERVAL_ENV_VAR))
@@ -226,12 +267,14 @@ class PortfolioPnlSnapshotter:
         self._interval_seconds = interval_seconds
         self._disabled = disabled
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
+        self._settings_service = settings_service
         self._stopping = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
         self._session_id = str(uuid7())
         self._sequence = 0
         self._baselines: dict[str, dict[str, int]] = {}
         self._unsupported_logged: set[str] = set()
+        self._mint_identity_logged: set[str] = set()
         self._no_anchor_logged: set[str] = set()
         self._failure_logged: set[tuple[str, str]] = set()
         self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
@@ -303,13 +346,20 @@ class PortfolioPnlSnapshotter:
             raise RuntimeError("PortfolioPnlSnapshotter._tick_once called in disabled mode")
         as_of = self._clock()
         credentials = await repo.list_active_wallet_credentials(as_of)
-        venues_by_wallet = resolve_spot_venues(credentials)
+        raw_pin = await self._read_mint_wallet_pin()
+        topology = await resolve_executor_topology(repo, credentials, raw_pin, self._clock)
+        venues_by_wallet = resolve_spot_venues(credentials, topology)
+        mint_excluded_wallets = _mint_excluded_spot_wallets(credentials, topology)
         self._prune_absent_scopes(set(venues_by_wallet))
         failures = 0
         for wallet in sorted(venues_by_wallet):
             try:
                 conflicted = await self._process_wallet(
-                    repo, wallet, venues_by_wallet[wallet], as_of
+                    repo,
+                    wallet,
+                    venues_by_wallet[wallet],
+                    as_of,
+                    wallet in mint_excluded_wallets,
                 )
             except Exception:
                 failures += 1
@@ -323,6 +373,18 @@ class PortfolioPnlSnapshotter:
             logger.warning(
                 "PortfolioPnlSnapshotter: %s scope(s) failed this tick; continuing", failures
             )
+
+    async def _read_mint_wallet_pin(self) -> JsonValue:
+        """Read the current mint pin directly from storage, failing open."""
+        if self._settings_service is None:
+            return ""
+        try:
+            return await self._settings_service.get_setting_fresh(MINT_WALLET_PIN_SETTING_KEY)
+        except Exception:
+            logger.exception(
+                "PortfolioPnlSnapshotter: mint-pin lookup failed; applying unrestricted topology"
+            )
+            return ""
 
     def _log_class(
         self, wallet: str, failure_class: str, *args: object, is_exception: bool = False
@@ -355,6 +417,7 @@ class PortfolioPnlSnapshotter:
     def _prune_absent_scopes(self, current_wallets: set[str]) -> None:
         """Drop in-memory state for wallets absent from this discovery pass (B5)."""
         self._unsupported_logged.intersection_update(current_wallets)
+        self._mint_identity_logged.intersection_update(current_wallets)
         self._no_anchor_logged.intersection_update(current_wallets)
         self._failure_logged = {
             (wallet, failure_class)
@@ -378,6 +441,7 @@ class PortfolioPnlSnapshotter:
         wallet: str,
         expected_venues: frozenset[str],
         as_of: datetime,
+        mint_identity_excluded: bool,
     ) -> bool:
         """Resolve one wallet's anchored USD scope and sample it, or skip honestly.
 
@@ -386,12 +450,29 @@ class PortfolioPnlSnapshotter:
         """
         anchor = await repo.get_portfolio_pnl_anchor(wallet, _LIVE_MODE, _USD, None)
         if anchor is None:
-            self._log_once(self._no_anchor_logged, wallet, "no active USD anchor; skipping")
+            self._log_once(
+                self._no_anchor_logged,
+                wallet,
+                "no active USD anchor; skipping",
+                reason=_SCOPE_SKIP_NO_ANCHOR,
+            )
             return False
         if not expected_venues:
-            self._log_once(
-                self._unsupported_logged, wallet, "no spot venues (futures-only); unsupported"
-            )
+            if mint_identity_excluded:
+                self._log_once(
+                    self._mint_identity_logged,
+                    wallet,
+                    "no executor-backed spot venues (pinned equities token-mint identity); "
+                    "unsupported",
+                    reason=_SCOPE_SKIP_MINT_IDENTITY,
+                )
+            else:
+                self._log_once(
+                    self._unsupported_logged,
+                    wallet,
+                    "no spot venues (futures-only); unsupported",
+                    reason=_SCOPE_SKIP_NO_SPOT_VENUES,
+                )
             return False
         ctx = await self._build_scope_context(repo, wallet, anchor, expected_venues, as_of)
         return await self._sample_scope(repo, ctx)
@@ -435,12 +516,17 @@ class PortfolioPnlSnapshotter:
             durable_baseline=durable_baseline,
         )
 
-    def _log_once(self, seen: set[str], wallet: str, detail: str) -> None:
+    def _log_once(self, seen: set[str], wallet: str, detail: str, *, reason: str) -> None:
         """Log one wallet-scoped lifecycle notice at most once per process."""
         if wallet in seen:
             return
         seen.add(wallet)
-        logger.info("PortfolioPnlSnapshotter: wallet %s %s", wallet, detail)
+        logger.info(
+            "PortfolioPnlSnapshotter: wallet %s %s",
+            wallet,
+            detail,
+            extra={"scope_skip_reason": reason},
+        )
 
     def _scope_key(self, ctx: _ScopeContext) -> str:
         """Return the in-memory baseline key for one scope."""
