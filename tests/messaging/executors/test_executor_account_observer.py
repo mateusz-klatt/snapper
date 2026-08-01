@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.application.portfolio.pnl_snapshot_planner import evaluate_basket
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
 from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
@@ -31,6 +32,7 @@ from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import VenueAccountAttemptRow
+from snapper.data.repository_types import VenueAccountObservationAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
@@ -38,6 +40,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.messaging.executors import base as base_module
 from snapper.messaging.executors.base import _ACCOUNT_FRESHNESS_CEILING_S
 from snapper.messaging.executors.base import _ACCOUNT_OBSERVE_INTERVAL_S
@@ -103,13 +106,15 @@ def _make_client(
 ) -> Any:
     """Build an async venue client with real capability enums set.
 
-    ``AsyncMock`` makes every attribute an async child, so the two
-    capability enums are assigned as concrete values; individual tests wire
-    ``read_native_balances``/``read_native_positions`` as needed.
+    ``AsyncMock`` makes every attribute an async child, so all capability
+    declarations are assigned as concrete values. Observation mirrors the
+    policy argument unless an orthogonality test explicitly makes them
+    disagree; individual tests wire the native readers as needed.
     """
     client: Any = AsyncMock()
     client.balance_capability = balance_capability
     client.position_capability = position_capability
+    client.position_observation_capability = position_capability
     return client
 
 
@@ -460,7 +465,7 @@ class TestReadAccountPositions:
     async def test_not_applicable_skips_reader(self) -> None:
         """A venue without positions reports 'not_applicable' without a read.
 
-        Given: a client whose position_capability is NOT_APPLICABLE,
+        Given: a client whose position_observation_capability is NOT_APPLICABLE,
         When: _read_account_positions runs,
         Then: it returns ('not_applicable', None, None, None) and never
             awaits read_native_positions.
@@ -477,7 +482,7 @@ class TestReadAccountPositions:
     async def test_unsupported_capability_skips_reader(self) -> None:
         """An unsupported position component reports 'unsupported' without a read.
 
-        Given: a client whose position_capability is UNSUPPORTED,
+        Given: a client whose position_observation_capability is UNSUPPORTED,
         When: _read_account_positions runs,
         Then: it returns ('unsupported', None, None, None) and never awaits
             the reader.
@@ -563,11 +568,119 @@ class TestReadAccountPositions:
         assert parsed[0]["timestamp"] == ts.isoformat()
 
     @pytest.mark.asyncio
+    async def test_kraken_observation_support_ignores_not_applicable_policy(self) -> None:
+        """Kraken observation support reads positions despite cash-only policy.
+
+        Given: Kraken's reconciliation policy remains NOT_APPLICABLE while its
+            observer declaration is SUPPORTED and its reader returns one
+            position,
+        When: _read_account_positions runs,
+        Then: the position is faithfully serialized as observed and the reader
+            is awaited exactly once. This catches a production mutation that
+            consults ``position_capability`` at the observer boundary or
+            requires both declarations to be SUPPORTED.
+        """
+        ex = _make_executor()
+        now = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+        position_time = datetime(2026, 8, 1, 9, 59, tzinfo=UTC)
+        client = _make_client(
+            CapabilityStatus.UNSUPPORTED,
+            KrakenExchangeClient.position_capability,
+        )
+        client.position_observation_capability = (
+            KrakenExchangeClient.position_observation_capability
+        )
+        client.read_native_positions = AsyncMock(
+            return_value=[
+                OpenPositionSnapshot(
+                    symbol="BTC-EUR",
+                    side=OrderSideEnum.SELL,
+                    size=0.25,
+                    entry_price=100000.0,
+                    mark_price=96000.0,
+                    unrealized_pnl=1000.0,
+                    unrealized_funding=0.0,
+                    timestamp=position_time,
+                )
+            ]
+        )
+
+        status, payload, observed_at, error = await ex._read_account_positions(client, now)
+
+        assert status == "observed"
+        assert observed_at == now
+        assert error is None
+        assert payload is not None
+        assert json.loads(payload) == [
+            {
+                "symbol": "BTC-EUR",
+                "side": "sell",
+                "size": 0.25,
+                "entry_price": 100000.0,
+                "mark_price": 96000.0,
+                "unrealized_pnl": 1000.0,
+                "unrealized_funding": 0.0,
+                "timestamp": position_time.isoformat(),
+            }
+        ]
+        client.read_native_positions.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_not_applicable_observation_ignores_supported_policy(self) -> None:
+        """An explicit observer absence wins over reconciliation support.
+
+        Given: a client whose reconciliation policy is SUPPORTED but whose
+            observer declaration is NOT_APPLICABLE,
+        When: _read_account_positions runs,
+        Then: it reports not_applicable without awaiting the reader. This
+            catches a production mutation that routes observation from the
+            legacy policy declaration instead of the observer declaration.
+        """
+        ex = _make_executor()
+        now = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+        client = _make_client(CapabilityStatus.UNSUPPORTED, CapabilityStatus.SUPPORTED)
+        client.position_observation_capability = CapabilityStatus.NOT_APPLICABLE
+        client.read_native_positions = AsyncMock()
+
+        result = await ex._read_account_positions(client, now)
+
+        assert result == ("not_applicable", None, None, None)
+        client.read_native_positions.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kraken_observed_empty_is_present_empty_array(self) -> None:
+        """Kraken's genuine empty position book is observed as ``[]``.
+
+        Given: Kraken's SUPPORTED observer declaration and an empty successful
+            venue response while reconciliation remains NOT_APPLICABLE,
+        When: _read_account_positions runs,
+        Then: it reports observed with the literal serialized empty array and
+            an observation timestamp. This catches production mutations that
+            turn observed-empty into not_applicable, NULL, or a failed read.
+        """
+        ex = _make_executor()
+        now = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+        client = _make_client(
+            CapabilityStatus.UNSUPPORTED,
+            KrakenExchangeClient.position_capability,
+        )
+        client.position_observation_capability = (
+            KrakenExchangeClient.position_observation_capability
+        )
+        client.read_native_positions = AsyncMock(return_value=[])
+
+        result = await ex._read_account_positions(client, now)
+
+        assert result == ("observed", "[]", now, None)
+        client.read_native_positions.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_non_observable_capability_with_data_is_fail_closed_error(self) -> None:
         """A non-SUPPORTED capability that still returned positions is 'error'.
 
-        Given: a client whose position_capability is SIMULATED (it reaches
-            the read but is not SUPPORTED) whose reader returns a position,
+        Given: a client whose position_observation_capability is SIMULATED (it
+            reaches the read but is not SUPPORTED) whose reader returns a
+            position,
         When: _read_account_positions runs,
         Then: it fail-closes to ('error', None, None, <fixed message>) rather
             than trusting the data as observed.
@@ -673,6 +786,87 @@ class TestObserveAccountOnce:
         assert attempt["authoritative_until"] == attempt["balance_observed_at"] + timedelta(
             seconds=_ACCOUNT_FRESHNESS_CEILING_S
         )
+
+    @pytest.mark.asyncio
+    async def test_position_failure_preserves_balance_authority_and_policy_gate(self) -> None:
+        """A position-only failure leaves balance authority and policy intact.
+
+        Given: Kraken observes a valid USD balance, its supported position
+            reader fails, and its reconciliation policy remains NOT_APPLICABLE,
+        When: one account-observer cycle persists and schedules the attempt,
+        Then: balance status and authority remain observed, only position status
+            is error, reconciliation receives the legacy policy declaration,
+            and the Phase-5B basket gate still accepts the balance despite the
+            shared error text. This catches production mutations that couple
+            position failure to balance authority, gate Phase-5B on the shared
+            error or position status, or pass observation capability into
+            reconciliation.
+        """
+        ex = _make_executor()
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        client = _make_client(
+            CapabilityStatus.SUPPORTED,
+            KrakenExchangeClient.position_capability,
+        )
+        client.position_observation_capability = (
+            KrakenExchangeClient.position_observation_capability
+        )
+        client.read_native_balances = AsyncMock(
+            return_value=[NativeBalanceEntry(currency="USD", total=125.0, free=100.0, used=25.0)]
+        )
+        client.read_native_positions = AsyncMock(
+            side_effect=RuntimeError("Kraken position read failed")
+        )
+        ex.exchange_client = client
+
+        await ex._observe_account_once()
+
+        attempt: VenueAccountAttemptRow = (
+            ex.repository.record_venue_account_snapshot.await_args.args[0]
+        )
+        assert attempt["balance_status"] == "observed"
+        assert attempt["position_status"] == "error"
+        assert attempt["balances_json"] is not None
+        assert attempt["open_positions_json"] is None
+        assert attempt["balance_observed_at"] is not None
+        assert attempt["position_observed_at"] is None
+        assert attempt["authoritative_until"] == attempt["balance_observed_at"] + timedelta(
+            seconds=_ACCOUNT_FRESHNESS_CEILING_S
+        )
+        assert attempt["error"] == "Kraken position read failed"
+        client.read_native_balances.assert_awaited_once_with()
+        client.read_native_positions.assert_awaited_once_with()
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        assert schedule_call.kwargs["position_capability"] is CapabilityStatus.NOT_APPLICABLE
+
+        basket_attempt: VenueAccountObservationAttemptRow = {
+            "id": 1,
+            "public_id": "obs-position-failure",
+            "wallet_public_id": attempt["wallet_public_id"],
+            "exchange": attempt["exchange"],
+            "mode": attempt["mode"],
+            "attempt_status": "error",
+            "balance_status": attempt["balance_status"],
+            "position_status": attempt["position_status"],
+            "balances_json": attempt["balances_json"],
+            "open_positions_json": attempt["open_positions_json"],
+            "balance_observed_at": attempt["balance_observed_at"],
+            "position_observed_at": attempt["position_observed_at"],
+            "error": attempt["error"],
+            "timestamp": attempt["bus_time"],
+            "session_id": attempt["session_id"],
+            "sequence_id": attempt["sequence_id"],
+        }
+        balance_observed_at = attempt["balance_observed_at"]
+        assert balance_observed_at is not None
+        basket = evaluate_basket(
+            balance_observed_at,
+            frozenset({"kraken"}),
+            {"kraken": basket_attempt},
+        )
+        assert basket.reason_codes == frozenset()
+        assert basket.observed_balances == {("kraken", "USD"): 125.0}
 
     @pytest.mark.asyncio
     async def test_snapshot_commit_schedules_reconciliation_before_invalidation(self) -> None:
@@ -892,8 +1086,8 @@ class TestObserveAccountOnce:
     async def test_not_applicable_positions_clears_component(self) -> None:
         """A positionless venue records position_status 'not_applicable'.
 
-        Given: a SUPPORTED balance client whose position_capability is
-            NOT_APPLICABLE,
+        Given: a SUPPORTED balance client whose position observation capability
+            is NOT_APPLICABLE,
         When: _observe_account_once runs,
         Then: the snapshot carries position_status 'not_applicable' with a
             null open_positions_json and the reader is never awaited.

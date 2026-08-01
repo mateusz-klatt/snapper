@@ -929,6 +929,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
 
     balance_capability = CapabilityStatus.SUPPORTED
     """Walutomat reports faithful FX cash balances via ``account/balances``."""
+    position_observation_capability = CapabilityStatus.NOT_APPLICABLE
     position_capability = CapabilityStatus.NOT_APPLICABLE
     """FX spot venue: there are no derivatives positions to track."""
     account_history_capability = CapabilityStatus.SUPPORTED

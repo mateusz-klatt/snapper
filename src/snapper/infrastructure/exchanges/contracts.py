@@ -728,7 +728,7 @@ class FundingRateSnapshot:
 
 @dataclass
 class OpenPositionSnapshot:
-    """Snapshot of an open position on a derivatives exchange."""
+    """Snapshot of an open leveraged or margin position."""
 
     symbol: str
     side: OrderSideEnum

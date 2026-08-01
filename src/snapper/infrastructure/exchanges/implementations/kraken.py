@@ -80,6 +80,7 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -114,9 +115,26 @@ apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _NATIVE_BALANCE_CREDENTIALS_MSG = "API credentials required for balance"
+_NATIVE_POSITION_CREDENTIALS_MSG = "API credentials required for positions"
 _NATIVE_BALANCE_MALFORMED_ROW_MSG = (
     "Kraken spot balance currency row is not a mapping (malformed envelope)"
 )
+_NATIVE_POSITION_MALFORMED_ENVELOPE_MSG = "Kraken spot positions envelope is malformed"
+_NATIVE_POSITION_MALFORMED_ROW_MSG = "Kraken spot position row is malformed"
+_NATIVE_POSITION_PARTIAL_CLOSE_MSG = (
+    "Kraken spot partially closed position is not faithfully interpretable: "
+    "cost/value basis unverified"
+)
+_KRAKEN_NO_SEPARATE_UNREALIZED_FUNDING: Final[float] = 0.0
+"""No separately venue-reported unrealized-funding component.
+
+Kraken reports the margin rate in ``terms``, the next charge boundary in
+``rollovertm``, and the opening fee in ``fee``. None is an accrued funding
+amount, so this explicit zero means only that no separate component is present
+in the position envelope. It does NOT mean the position has no carrying cost;
+``net`` remains wholly represented as ``unrealized_pnl`` and no rollover amount
+is estimated or prorated.
+"""
 _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
     {"free", "used", "total", "info", "timestamp", "datetime"}
 )
@@ -545,6 +563,106 @@ def _parse_native_balance_entry(currency: object, data: object) -> NativeBalance
     )
 
 
+def _strict_native_position_number(data: dict[str, object], field: str) -> float:
+    """Extract one required finite Kraken position number, or raise."""
+    if field not in data:
+        raise ValueError(f"Kraken spot position is missing '{field}'")
+    raw_value = data[field]
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (str, int, float)):
+        raise ValueError(f"Kraken spot position has invalid '{field}'")
+    try:
+        value = float(raw_value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"Kraken spot position has invalid '{field}'") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"Kraken spot position has non-finite '{field}'")
+    return value
+
+
+def _native_position_side(data: dict[str, object]) -> OrderSideEnum:
+    """Map Kraken's raw buy/sell position direction without ccxt coercion."""
+    side = data.get("type")
+    if side == "buy":
+        return OrderSideEnum.BUY
+    if side == "sell":
+        return OrderSideEnum.SELL
+    raise ValueError("Kraken spot position has missing or unknown 'type'")
+
+
+def _parse_native_position_entry(position: object, observed_at: datetime) -> OpenPositionSnapshot:
+    """Validate and project one unambiguously priced ccxt Kraken position.
+
+    A row with ``vol_closed == 0`` has one shared notional basis: ``vol`` is
+    both the live size and the denominator for ``cost`` and ``value``. Kraken's
+    partial-close semantics have not been measured: no real partially closed
+    Kraken margin position has been observed. For ``vol_closed > 0``, either
+    ``cost`` may retain the original ``vol`` basis while ``value`` covers only
+    ``vol - vol_closed``, or both values may scale to the remaining position.
+    Those readings produce different entry prices, so the parser refuses every
+    partially closed row.
+
+    The restriction can be lifted only after capturing a real
+    ``OpenPositions`` payload with ``vol_closed > 0`` and measuring whether
+    ``net`` matches ``value - cost`` for a long or ``cost - value`` for a short
+    within fee tolerance. That experiment establishes the field basis; this
+    parser deliberately does not approximate it with a runtime tolerance check
+    because ``net`` may itself be net of fees.
+
+    Args:
+        position: One raw ccxt position containing retained Kraken ``info``.
+        observed_at: Acquisition time shared by the position-book snapshot.
+
+    Returns:
+        A faithful native snapshot for an unambiguously unclosed position.
+
+    Raises:
+        ValueError: When the row is malformed, partially closed, or cannot be
+            mapped without fabricating account truth.
+    """
+    if not isinstance(position, dict):
+        raise ValueError(_NATIVE_POSITION_MALFORMED_ROW_MSG)
+    row = cast(dict[str, object], position)
+    symbol = row.get("symbol")
+    raw_info = row.get("info")
+    if not isinstance(symbol, str) or not symbol.strip() or not isinstance(raw_info, dict):
+        raise ValueError(_NATIVE_POSITION_MALFORMED_ROW_MSG)
+    info = cast(dict[str, object], raw_info)
+    pair = info.get("pair")
+    if not isinstance(pair, str) or not pair.strip():
+        raise ValueError(_NATIVE_POSITION_MALFORMED_ROW_MSG)
+    opening_size = _strict_native_position_number(info, "vol")
+    closed_size = _strict_native_position_number(info, "vol_closed")
+    if opening_size <= 0:
+        raise ValueError("Kraken spot position has non-positive 'vol'")
+    if closed_size < 0 or closed_size >= opening_size:
+        raise ValueError("Kraken spot position has invalid 'vol_closed'")
+    if closed_size > 0:
+        raise ValueError(_NATIVE_POSITION_PARTIAL_CLOSE_MSG)
+    position_size = opening_size
+    cost = _strict_native_position_number(info, "cost")
+    value = _strict_native_position_number(info, "value")
+    price_denominator = position_size
+    entry_price = cost / price_denominator
+    mark_price = value / price_denominator
+    if not math.isfinite(entry_price) or entry_price <= 0:
+        raise ValueError("Kraken spot position has invalid derived entry price")
+    if not math.isfinite(mark_price) or mark_price < 0:
+        raise ValueError("Kraken spot position has invalid derived mark price")
+    unrealized_pnl = _strict_native_position_number(info, "net")
+    side = _native_position_side(info)
+    native_symbol = ccxt_to_native(symbol)
+    return OpenPositionSnapshot(
+        symbol=native_symbol,
+        side=side,
+        size=position_size,
+        entry_price=entry_price,
+        mark_price=mark_price,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_funding=_KRAKEN_NO_SEPARATE_UNREALIZED_FUNDING,
+        timestamp=observed_at,
+    )
+
+
 class KrakenExchangeClient(ExchangeClientBase):
     """Kraken exchange client with REST and WebSocket support.
 
@@ -563,7 +681,15 @@ class KrakenExchangeClient(ExchangeClientBase):
     """
 
     balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    position_observation_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    """Observe unambiguous Kraken margin positions and fail closed otherwise."""
     position_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
+    """The current spot reconciliation method does not account for margin.
+
+    This policy declaration deliberately disagrees with
+    :attr:`position_observation_capability`: the account observer can see the
+    evidence, while cash-only spot reconciliation remains fail-closed around it.
+    """
 
     def __init__(
         self,
@@ -1778,6 +1904,59 @@ class KrakenExchangeClient(ExchangeClientBase):
                 continue
             entries.append(_parse_native_balance_entry(currency, data))
         return entries
+
+    async def read_native_positions(self) -> list[OpenPositionSnapshot]:
+        """Read faithful Kraken spot-margin positions with strict validation.
+
+        Uses ccxt ``fetch_positions`` through the same authenticated,
+        private-idempotent egress route as native balances. The pinned adapter
+        requests Kraken ``OpenPositions`` with calculations and market
+        consolidation, then retains the venue row under ``info``. Every row
+        must carry a resolvable symbol, an exact raw buy/sell direction, and
+        finite ``vol``/``vol_closed``/``cost``/``value``/``net`` values. When
+        ``vol_closed == 0``, live ``size`` is ``vol`` and both ``entry_price``
+        and ``mark_price`` use that single shared denominator. A row with
+        ``vol_closed > 0`` raises because Kraken's cost/value basis after a
+        partial close has not been measured faithfully. The response
+        acquisition time is the snapshot timestamp because consolidated rows
+        carry no trade timestamp.
+
+        Kraken exposes no accrued rollover amount: ``unrealized_funding`` is
+        explicitly ``0.0`` meaning "no separately venue-reported
+        unrealized-funding component", NOT "no carrying cost". ``net`` maps
+        wholly to ``unrealized_pnl``; ``terms``, ``rollovertm``, and the opening
+        ``fee`` are never estimated, prorated, or relabelled as funding.
+
+        A genuine empty list is authoritative observed-empty. Any malformed
+        envelope raises so the observer records a position failure instead.
+        That failure text enters the account observation's shared ``error``
+        column even when balances succeeded; consumers must use
+        ``balance_status`` and ``position_status`` rather than treating a
+        non-null shared error as proof that the balance read failed.
+
+        Returns:
+            Faithful open-position snapshots, or an empty list when Kraken
+            reports no open margin positions.
+
+        Raises:
+            RuntimeError: When API credentials are not configured.
+            ValueError: When the positions envelope or any row is malformed,
+                partially closed, missing a required field, or carries a
+                non-finite number.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError(_NATIVE_POSITION_CREDENTIALS_MSG)
+        positions_data = await self._with_retry(
+            self._ccxt_client.fetch_positions,
+            retry_network_errors=False,
+            egress_kind="private_idempotent_read",
+            egress_operation="fetch_positions",
+            egress_target=ccxt_proxy_target(self._ccxt_client),
+        )
+        if not isinstance(positions_data, list):
+            raise ValueError(_NATIVE_POSITION_MALFORMED_ENVELOPE_MSG)
+        observed_at = datetime.now(UTC)
+        return [_parse_native_position_entry(position, observed_at) for position in positions_data]
 
     def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None

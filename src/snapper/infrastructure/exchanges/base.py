@@ -198,6 +198,21 @@ class ExchangeClientBase(ABC):
     supports_websocket_executions: bool = True
     balance_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
     position_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
+    """Whether the configured reconciliation method accounts for positions.
+
+    This is a POLICY declaration, not an infrastructure-reader declaration.
+    Reconciliation consumes it fail-closed when deciding whether its method can
+    account for a venue that may carry margin. It may deliberately disagree
+    with :attr:`position_observation_capability`.
+    """
+    position_observation_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
+    """Whether the client can faithfully observe a native position book.
+
+    This is an INFRASTRUCTURE declaration consumed only by the account
+    observer's native-position read. Clients declare it independently from
+    :attr:`position_capability`; the two may disagree when evidence can be
+    observed but the configured reconciliation method cannot account for it.
+    """
     account_history_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
 
     def __init__(
@@ -998,11 +1013,15 @@ class ExchangeClientBase(ABC):
     async def read_native_positions(self) -> list[OpenPositionSnapshot]:
         """Read faithful native open positions for the account observer.
 
-        Called ONLY when ``position_capability`` is ``SUPPORTED``; the default
-        fail-closes by raising. Implementations must STRICTLY validate the venue
-        envelope — reject a missing positions collection, missing/unknown side,
-        an unresolvable symbol, or any non-finite number — rather than coerce
-        them into a zero/default position that would read as authoritative.
+        Called ONLY when ``position_observation_capability`` is
+        ``SUPPORTED``; the default fail-closes by raising. This observer-only
+        declaration answers "can we see the position book?", while
+        ``position_capability`` independently answers "does our reconciliation
+        method account for it?". Implementations must STRICTLY validate the
+        venue envelope — reject a missing positions collection,
+        missing/unknown side, an unresolvable symbol, or any non-finite number
+        — rather than coerce them into a zero/default position that would read
+        as authoritative.
 
         Returns:
             Faithful open-position snapshots.

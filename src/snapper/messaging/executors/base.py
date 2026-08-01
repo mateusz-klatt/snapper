@@ -4741,7 +4741,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _read_account_positions(
         self, client: ExchangeClientBase, now: datetime
     ) -> tuple[str, str | None, datetime | None, str | None]:
-        """Read native positions, mapping capability/outcome to a fail-closed status.
+        """Read positions under the observer-only capability declaration.
 
         Returns ``(position_status, open_positions_json, position_observed_at,
         error)``. ``not_applicable`` (venue has no positions) and
@@ -4750,6 +4750,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         failure is ``error``. A successful read is ``observed`` with the
         serialized positions (empty book → ``[]``, never NULL).
 
+        ``position_observation_capability`` answers only whether this client can
+        see a faithful book. Reconciliation independently consumes only
+        ``position_capability`` and may deliberately disagree. Position failure
+        text is persisted in the account row's shared ``error`` column, so a
+        future consumer must inspect the component statuses rather than infer a
+        balance failure from ``error IS NOT NULL``.
+
         Args:
             client: The executor's authenticated venue client.
             now: The observation instant.
@@ -4757,7 +4764,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             The position status tuple.
         """
-        capability = client.position_capability
+        capability = client.position_observation_capability
         if capability is CapabilityStatus.NOT_APPLICABLE:
             return "not_applicable", None, None, None
         if capability is CapabilityStatus.UNSUPPORTED:

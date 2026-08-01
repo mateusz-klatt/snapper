@@ -37,6 +37,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -103,6 +104,51 @@ def _client() -> KrakenExchangeClient:
 
     client._with_retry = _with_retry
     return client
+
+
+def _spot_margin_position(
+    *,
+    side: str = "sell",
+    info_overrides: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a realistic ccxt-normalized Kraken OpenPositions row.
+
+    Args:
+        side: Raw Kraken position direction.
+        info_overrides: Optional raw venue-field replacements.
+
+    Returns:
+        One normalized ccxt position retaining its raw Kraken payload.
+    """
+    unrealized_pnl = "10.00000" if side == "buy" else "-10.00000"
+    info: dict[str, object] = {
+        "pair": "XXBTZEUR",
+        "positions": "1",
+        "type": side,
+        "leverage": "10.00000",
+        "cost": "500.00000",
+        "fee": "0.13000",
+        "vol": "0.01000000",
+        "vol_closed": "0.00000000",
+        "margin": "50.00000",
+        "value": "510.00000",
+        "net": unrealized_pnl,
+        "terms": "0.0100% per 4 hours",
+        "rollovertm": "1785585600",
+    }
+    if info_overrides is not None:
+        info.update(info_overrides)
+    return {
+        "info": info,
+        "id": None,
+        "symbol": "BTC/EUR",
+        "entryPrice": None,
+        "markPrice": None,
+        "contracts": 0.01,
+        "unrealizedPnl": float(unrealized_pnl),
+        "side": "long" if side == "buy" else "short",
+        "timestamp": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -303,14 +349,17 @@ async def test_get_balance_filters_and_returns_currency() -> None:
 
 
 def test_kraken_declares_native_account_capabilities() -> None:
-    """Kraken spot advertises balance-supported, positions-not-applicable.
+    """Kraken separates supported observation from reconciliation policy.
 
     Given the KrakenExchangeClient class,
     When its account-reading capability attributes are inspected,
-    Then balance is SUPPORTED and positions are NOT_APPLICABLE (spot has no
-        derivatives positions).
+    Then balances and position observation are SUPPORTED while the cash-only
+        reconciliation policy remains NOT_APPLICABLE. This catches either the
+        original missing-observation declaration or an unsafe mutation of the
+        reconciliation declaration to SUPPORTED.
     """
     assert KrakenExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
+    assert KrakenExchangeClient.position_observation_capability is CapabilityStatus.SUPPORTED
     assert KrakenExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
 
 
@@ -474,17 +523,399 @@ async def test_read_native_balances_requires_credentials() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_native_positions_default_raises() -> None:
-    """The Spot client inherits the fail-closed native-position default.
+async def test_read_native_positions_maps_zero_closed_short_on_shared_basis() -> None:
+    """An unclosed Kraken short maps both prices on one shared basis.
 
-    Given a Spot KrakenExchangeClient that declares no position capability
-        and does not override ``read_native_positions``,
-    When read_native_positions is called,
-    Then the base-class default raises NotImplementedError rather than
-        returning a fabricated empty position set.
+    Given a realistic consolidated OpenPositions row with vol_closed equal to
+        zero, a rollover rate, an opening fee, and venue-reported net PnL,
+    When the native position reader parses it,
+    Then live size, entry, and mark all use vol as their single shared basis,
+        net is wholly PnL, and funding is the explicit no-separate-component
+        zero. This catches mutations that reinstate different price
+        denominators, use ccxt's lossy normalized fields, map fee/terms as
+        funding, or omit acquisition time.
     """
     client = _client()
-    with pytest.raises(NotImplementedError):
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position()]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    before = datetime.now(UTC)
+    positions = await client.read_native_positions()
+    after = datetime.now(UTC)
+    assert len(positions) == 1
+    position = positions[0]
+    assert position == OpenPositionSnapshot(
+        symbol="BTC-EUR",
+        side=OrderSideEnum.SELL,
+        size=0.01,
+        entry_price=50000.0,
+        mark_price=51000.0,
+        unrealized_pnl=-10.0,
+        unrealized_funding=0.0,
+        timestamp=position.timestamp,
+    )
+    assert before <= position.timestamp <= after
+
+
+@pytest.mark.asyncio
+async def test_read_native_positions_rejects_partially_closed_row() -> None:
+    """A partially closed Kraken row is refused until its basis is measured.
+
+    Given a plausible partially closed short whose cost and value both scale to
+        its remaining volume,
+    When the native position reader encounters positive vol_closed,
+    Then ValueError is raised instead of deriving a plausible entry price.
+        This catches any mutation that reinstates interpretation of a
+        partially closed row before real venue evidence settles its basis.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        row = _spot_margin_position(
+            info_overrides={
+                "vol_closed": "0.00200000",
+                "cost": "400.00000",
+                "value": "408.00000",
+                "net": "-8.00000",
+            }
+        )
+        row["unrealizedPnl"] = -8.0
+        return [row]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="not faithfully interpretable"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+async def test_read_native_positions_maps_exact_raw_buy_side() -> None:
+    """Raw buy maps to BUY without trusting ccxt's normalized side.
+
+    Given a Kraken row whose exact raw direction is buy,
+    When the native position reader parses it,
+    Then the snapshot side is BUY. This catches a mutation that trusts the
+        normalized side or maps every position to SELL.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(side="buy")]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    positions = await client.read_native_positions()
+    assert positions[0].side is OrderSideEnum.BUY
+
+
+@pytest.mark.asyncio
+async def test_read_native_positions_observed_empty_uses_private_egress() -> None:
+    """A genuine empty book remains observed-empty on the routed private call.
+
+    Given authenticated Kraken credentials and an empty fetch_positions result,
+    When the native reader runs,
+    Then it returns exactly an empty list after one private-idempotent routed
+        call. This catches removal of the added egress, returning a fabricated
+        zero row, or conflating observed-empty with failure.
+    """
+    client = _client()
+    fetch_positions = MagicMock()
+    client._ccxt_client = SimpleNamespace(fetch_positions=fetch_positions)
+    routed_read = AsyncMock(return_value=[])
+    client._with_retry = routed_read
+    positions = await client.read_native_positions()
+    assert positions == []
+    routed_read.assert_awaited_once_with(
+        fetch_positions,
+        retry_network_errors=False,
+        egress_kind="private_idempotent_read",
+        egress_operation="fetch_positions",
+        egress_target=kr.ccxt_proxy_target(client._ccxt_client),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_credential", ["api_key", "api_secret"])
+async def test_read_native_positions_requires_credentials_before_egress(
+    missing_credential: str,
+) -> None:
+    """Missing credentials fail before the authenticated venue call.
+
+    Given a Kraken client without one required credential,
+    When native positions are requested,
+    Then RuntimeError is raised before routing egress. This catches deletion of
+        either credential guard or a mutation that sends an unauthenticated
+        call.
+
+    Args:
+        missing_credential: Credential attribute to remove.
+    """
+    client = _client()
+    setattr(client, missing_credential, None)
+    routed_read = AsyncMock()
+    client._with_retry = routed_read
+    with pytest.raises(RuntimeError, match="API credentials required for positions"):
+        await client.read_native_positions()
+    routed_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_envelope", [None, {}, "positions", 0])
+async def test_read_native_positions_rejects_non_list_envelope(
+    bad_envelope: object,
+) -> None:
+    """A non-list ccxt envelope raises instead of becoming observed-empty.
+
+    Given fetch_positions returns a malformed non-list value,
+    When the strict reader validates the outer envelope,
+    Then ValueError is raised. This catches coercion of a corrupt envelope to
+        an authoritative empty position book.
+
+    Args:
+        bad_envelope: Malformed fetch_positions return value.
+    """
+    client = _client()
+
+    async def _fake_positions() -> object:
+        return bad_envelope
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="positions envelope is malformed"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        None,
+        "position",
+        1.0,
+        {"symbol": "BTC/EUR"},
+        {"symbol": "", "info": {}},
+        {"symbol": "   ", "info": {"pair": "XXBTZEUR"}},
+        {"symbol": "BTC/EUR", "info": []},
+    ],
+)
+async def test_read_native_positions_rejects_malformed_row(bad_row: object) -> None:
+    """Every position must be a mapping with normalized and raw symbols.
+
+    Given a non-mapping row or one missing its symbol or raw info mapping,
+    When the strict reader parses the book,
+    Then ValueError is raised. This catches dropping malformed rows or filling
+        missing structure with defaults.
+
+    Args:
+        bad_row: Malformed member of the positions list.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[object]:
+        return [bad_row]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="position row is malformed"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_pair", [None, "", "   ", 5])
+async def test_read_native_positions_rejects_invalid_raw_pair(bad_pair: object) -> None:
+    """The retained raw Kraken pair is required and non-empty.
+
+    Given a row whose raw pair is absent, blank, or not text,
+    When the strict reader parses it,
+    Then ValueError is raised. This catches accepting a ccxt row that has lost
+        the venue identity needed for faithful evidence.
+
+    Args:
+        bad_pair: Invalid raw pair value.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(info_overrides={"pair": bad_pair})]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="position row is malformed"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+async def test_read_native_positions_rejects_unresolvable_symbol() -> None:
+    """An unknown normalized symbol cannot enter authoritative evidence.
+
+    Given a structurally valid Kraken row whose ccxt symbol is unmapped,
+    When the strict reader resolves the native symbol,
+    Then ValueError propagates. This catches a fallback that passes an unknown
+        symbol through or silently drops the corrupt row.
+    """
+    client = _client()
+    row = _spot_margin_position()
+    row["symbol"] = "UNKNOWN/VOID"
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [row]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="Unknown CCXT symbol"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_side", [None, "long", "short", "", 3])
+async def test_read_native_positions_rejects_unknown_raw_side(bad_side: object) -> None:
+    """Only exact Kraken buy and sell direction values are accepted.
+
+    Given a row whose raw type is missing or not buy/sell,
+    When the strict reader parses it,
+    Then ValueError is raised despite ccxt coercing every non-buy value to
+        short. This catches trusting that lossy normalized direction.
+
+    Args:
+        bad_side: Invalid raw Kraken direction.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(info_overrides={"type": bad_side})]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="missing or unknown 'type'"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["vol", "vol_closed", "cost", "value", "net"])
+async def test_read_native_positions_rejects_missing_number(field: str) -> None:
+    """Every raw numeric input is required.
+
+    Given a position missing one account-truth numeric field,
+    When the strict reader parses it,
+    Then ValueError names the missing field. This catches a default-to-zero
+        mutation for vol, vol_closed, cost, value, or net.
+
+    Args:
+        field: Required raw numeric field to remove.
+    """
+    client = _client()
+    row = _spot_margin_position()
+    info = cast(dict[str, object], row["info"])
+    del info[field]
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [row]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match=f"missing '{field}'"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_value",
+    [None, True, [], "not-a-number", float("nan"), float("inf"), float("-inf")],
+)
+async def test_read_native_positions_rejects_invalid_number(bad_value: object) -> None:
+    """Invalid and non-finite raw numbers poison the entire envelope.
+
+    Given a position whose net is null, boolean, structured, non-numeric, NaN,
+        or infinite,
+    When the strict reader parses it,
+    Then ValueError is raised. This catches numeric coercion or row-dropping
+        that would falsely publish the book as authoritative.
+
+    Args:
+        bad_value: Invalid raw numeric field value.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(info_overrides={"net": bad_value})]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="invalid 'net'|non-finite 'net'"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"vol": "0"},
+        {"vol": "-1"},
+        {"vol_closed": "-1"},
+        {"vol_closed": "10"},
+        {"vol_closed": "11"},
+    ],
+)
+async def test_read_native_positions_rejects_invalid_position_size(
+    overrides: dict[str, object],
+) -> None:
+    """Opening and closed quantities must describe a live exposure.
+
+    Given non-positive opening volume or closed volume outside [0, vol),
+    When the strict reader validates the opening and closed size fields,
+    Then ValueError is raised. This catches zero/negative fabricated exposure
+        and treating a fully closed row as open.
+
+    Args:
+        overrides: Raw size fields that violate the live-position invariant.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(info_overrides=overrides)]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match="non-positive 'vol'|invalid 'vol_closed'"):
+        await client.read_native_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"cost": "0"}, "invalid derived entry price"),
+        ({"cost": "-1"}, "invalid derived entry price"),
+        ({"value": "-1"}, "invalid derived mark price"),
+        (
+            {"vol": "1e-308", "vol_closed": "0", "cost": "1e308"},
+            "invalid derived entry price",
+        ),
+        (
+            {
+                "vol": "1e-308",
+                "vol_closed": "0",
+                "cost": "1e-308",
+                "value": "1e308",
+            },
+            "invalid derived mark price",
+        ),
+    ],
+)
+async def test_read_native_positions_rejects_invalid_derived_price(
+    overrides: dict[str, object],
+    expected_error: str,
+) -> None:
+    """Derived prices must remain finite and economically valid.
+
+    Given finite inputs that derive a non-positive or infinite price,
+    When the strict reader computes entry and mark,
+    Then ValueError is raised. This catches publishing invalid price evidence
+        merely because each raw operand was individually finite.
+
+    Args:
+        overrides: Raw values that poison a derived price.
+        expected_error: Error identifying the derived field.
+    """
+    client = _client()
+
+    async def _fake_positions() -> list[dict[str, object]]:
+        return [_spot_margin_position(info_overrides=overrides)]
+
+    client._ccxt_client = SimpleNamespace(fetch_positions=_fake_positions)
+    with pytest.raises(ValueError, match=expected_error):
         await client.read_native_positions()
 
 

@@ -966,11 +966,13 @@ class TestPaperBalanceManagement:
 
         Given: A paper exchange client,
         When: Its capability class attributes are inspected,
-        Then: balance_capability is SIMULATED and position_capability is
-            NOT_APPLICABLE, so the account observer records balances as
-            simulated and never probes for positions.
+        Then: balance_capability is SIMULATED while both independent position
+            declarations are NOT_APPLICABLE, so the account observer records
+            balances as simulated and never probes for positions. This catches
+            a separation mutation that starts probing the paper venue.
         """
         assert paper_client.balance_capability is CapabilityStatus.SIMULATED
+        assert paper_client.position_observation_capability is CapabilityStatus.NOT_APPLICABLE
         assert paper_client.position_capability is CapabilityStatus.NOT_APPLICABLE
 
     @pytest.mark.asyncio

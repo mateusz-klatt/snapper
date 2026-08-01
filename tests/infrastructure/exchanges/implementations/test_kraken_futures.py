@@ -6542,13 +6542,19 @@ class TestNativeReaderCapabilities:
         """
         assert KrakenFuturesExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
 
-    def test_position_capability_supported(self) -> None:
-        """position_capability advertises SUPPORTED.
+    def test_position_observation_and_reconciliation_capabilities_supported(self) -> None:
+        """Futures keeps both position declarations SUPPORTED.
 
         Given: the KrakenFuturesExchangeClient class,
-        When: its position_capability class attribute is read,
-        Then: it advertises faithful native position reading.
+        When: its independent observation and reconciliation declarations are
+            read,
+        Then: both remain SUPPORTED. This catches a mutation that loses native
+            futures observation while separating the Kraken spot declarations.
         """
+        assert (
+            KrakenFuturesExchangeClient.position_observation_capability
+            is CapabilityStatus.SUPPORTED
+        )
         assert KrakenFuturesExchangeClient.position_capability is CapabilityStatus.SUPPORTED
 
 

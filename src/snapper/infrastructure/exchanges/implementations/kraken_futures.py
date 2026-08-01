@@ -362,6 +362,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
 
     supports_websocket_executions: bool = False
     balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    position_observation_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
     position_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
 
     def __init__(

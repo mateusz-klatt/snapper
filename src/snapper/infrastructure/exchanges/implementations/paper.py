@@ -132,6 +132,7 @@ class PaperExchangeClient(ExchangeClientBase):
     ``observed`` — the SIMULATED flag is how that provenance is signalled.
     """
 
+    position_observation_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
     position_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
     """The paper venue models spot/FX cash balances only and holds no
     derivatives positions, so its position component is a benign

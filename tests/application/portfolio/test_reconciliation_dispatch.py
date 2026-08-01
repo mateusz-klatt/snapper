@@ -32,6 +32,7 @@ from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.messaging.schemas.data import AccountBalanceEntry
 from snapper.messaging.schemas.data import AccountPositionEntry
 from snapper.messaging.schemas.data import PortfolioAccountState
@@ -405,6 +406,60 @@ async def test_each_spot_margin_signal_fails_closed(
     assert result["error"] == "unsupported_margin"
     signal_read.assert_awaited_once()
     bundle_read.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("positions", "expected_error"),
+    [
+        ([], "spot_boundary_unavailable"),
+        ([_position_entry()], "unsupported_margin"),
+    ],
+    ids=["empty_book", "observed_margin_position"],
+)
+async def test_kraken_position_observation_preserves_spot_reconciliation_policy(
+    positions: list[AccountPositionEntry],
+    expected_error: str,
+) -> None:
+    """Kraken observation support leaves cash-only reconciliation unchanged.
+
+    Given: A Kraken spot snapshot with either an empty or populated observed
+        position book, a supported observation declaration, and the legacy
+        NOT_APPLICABLE reconciliation declaration.
+    When: Dispatch evaluates the same snapshot against the literal pre-change
+        policy baseline and Kraken's post-change policy declaration.
+    Then: Both full rows are identical; an empty book stays on the cash path,
+        while a populated book retains the deliberate unsupported-margin
+        refusal. This catches production mutations that replace the legacy
+        policy with observation capability or weaken the fail-closed position
+        guard.
+    """
+    assert KrakenExchangeClient.position_observation_capability is CapabilityStatus.SUPPORTED
+    assert KrakenExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
+    account = _account(positions=positions)
+    baseline_repository, _, _ = _repository()
+    baseline = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        baseline_repository,
+        account,
+        _config("spot_execution_replay"),
+        CapabilityStatus.NOT_APPLICABLE,
+        _NOW,
+    )
+    declared_repository, _, _ = _repository()
+    declared = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        declared_repository,
+        account,
+        _config("spot_execution_replay"),
+        KrakenExchangeClient.position_capability,
+        _NOW,
+    )
+    expected = _evaluation(
+        "spot_execution_replay",
+        "incomplete",
+        expected_error,
+        exchange="kraken",
+    )
+    assert baseline == expected
+    assert declared == baseline
 
 
 async def test_spot_boundary_present_evaluates_the_unanchored_account() -> None:

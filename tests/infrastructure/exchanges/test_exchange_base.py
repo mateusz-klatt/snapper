@@ -18,6 +18,7 @@ import snapper.utils.logging as logging_module
 from snapper.data.repository import ExecutionScopeResolutionError
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
+from snapper.infrastructure.exchanges.base import _NATIVE_POSITIONS_UNSUPPORTED_MSG
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -1419,6 +1420,28 @@ def test_account_history_capability_defaults_unsupported() -> None:
         venue that cannot be faithfully account-history read.
     """
     assert ExchangeClientBase.account_history_capability is CapabilityStatus.UNSUPPORTED
+
+
+@pytest.mark.asyncio()
+async def test_read_native_positions_base_default_fails_loudly() -> None:
+    """The exact inherited base reader rejects unsupported position observation.
+
+    Given: A venue client that inherits the position reader unchanged,
+    When: The base implementation itself is invoked,
+    Then: It raises the exact unsupported-native-positions contract error.
+
+    The method-identity assertion catches deletion or subclass shadowing even
+    when the replacement raises the same exception. The exact argument check
+    catches a changed message, while the raises block catches returning an
+    empty position book instead of failing loudly.
+    """
+    client = DummyExchangeClient(repository=None)
+    assert DummyExchangeClient.read_native_positions is ExchangeClientBase.read_native_positions
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await ExchangeClientBase.read_native_positions(client)
+
+    assert exc_info.value.args == (_NATIVE_POSITIONS_UNSUPPORTED_MSG,)
 
 
 @pytest.mark.asyncio()

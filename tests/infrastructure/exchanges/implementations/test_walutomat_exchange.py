@@ -553,9 +553,14 @@ def test_read_native_balances_capabilities() -> None:
 
     Given: The WalutomatExchangeClient class,
     When: Its capability attributes are inspected,
-    Then: Balances are SUPPORTED and positions are NOT_APPLICABLE (FX spot).
+    Then: Balances are SUPPORTED while both independent position declarations
+        are NOT_APPLICABLE for FX spot. This catches a separation mutation that
+        starts probing Walutomat for a nonexistent position book.
     """
     assert WalutomatExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
+    assert (
+        WalutomatExchangeClient.position_observation_capability is CapabilityStatus.NOT_APPLICABLE
+    )
     assert WalutomatExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
 
 

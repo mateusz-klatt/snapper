@@ -58,6 +58,8 @@ from snapper.data.repository_types import PNL_SAMPLE_RETRYABLE_REASONS
 from snapper.data.repository_types import PortfolioPnlSampleRow
 from snapper.data.repository_types import SampleReasonCode
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 _T0 = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _M1 = _T0 + timedelta(minutes=1)
@@ -683,6 +685,73 @@ class TestAssembleMinuteSample:
         assert plan.sample.position_value_usd == 0.0
         assert plan.sample.drawdown == 0.0
         assert plan.peak == 1000.0
+
+    def test_observed_kraken_position_book_does_not_change_equity(self) -> None:
+        """Observed Kraken margin evidence does not enter Phase-5B valuation.
+
+        Given otherwise identical authoritative Kraken balance attempts, one
+            with the pre-change not-applicable position component and one with
+            a populated observed spot-margin position book,
+        When the basket, valuation, and complete minute planner run,
+        Then their full outputs are identical and equity remains the observed
+            USD balance. This catches production mutations that feed the new
+            evidence into equity, P&L, basket authority, valuation reasons,
+            partitioning, audit output, or the carried peak in this slice, and
+            it catches removal of Kraken's deliberately split observation and
+            reconciliation declarations.
+        """
+        assert KrakenExchangeClient.position_observation_capability is CapabilityStatus.SUPPORTED
+        assert KrakenExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
+        balance_only_attempt = _attempt(minute=_M1)
+        position_attempt: VenueAccountObservationAttemptRow = balance_only_attempt.copy()
+        position_attempt["position_status"] = "observed"
+        position_attempt["open_positions_json"] = json.dumps(
+            [
+                {
+                    "symbol": "BTC-EUR",
+                    "side": "sell",
+                    "size": 0.008,
+                    "entry_price": 50000.0,
+                    "mark_price": 51000.0,
+                    "unrealized_pnl": -8.0,
+                    "unrealized_funding": 0.0,
+                    "timestamp": (_M1 - timedelta(seconds=30)).isoformat(),
+                }
+            ]
+        )
+        position_attempt["position_observed_at"] = _M1 - timedelta(seconds=30)
+        evidence = _crypto_evidence()
+        expected_venues = frozenset({"kraken"})
+        balance_only_attempts = {"kraken": balance_only_attempt}
+        position_attempts = {"kraken": position_attempt}
+
+        balance_only_basket = evaluate_basket(_M1, expected_venues, balance_only_attempts)
+        position_basket = evaluate_basket(_M1, expected_venues, position_attempts)
+        assert position_basket == balance_only_basket
+        balance_only_valuation = value_basket(balance_only_basket.observed_balances, _M1, evidence)
+        position_valuation = value_basket(position_basket.observed_balances, _M1, evidence)
+        assert position_valuation == balance_only_valuation
+        assert position_valuation.equity == 1000.0
+
+        balance_only_plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), balance_only_attempts, evidence),
+            expected_venues,
+            (),
+            None,
+        )
+        position_plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), position_attempts, evidence),
+            expected_venues,
+            (),
+            None,
+        )
+        assert position_plan == balance_only_plan
+        assert position_plan.sample is not None
+        assert position_plan.sample.valuation_status == "complete"
+        assert position_plan.sample.unrealized_pnl == 5.0
+        assert position_plan.sample.cash_usd == 1000.0
+        assert position_plan.sample.position_value_usd == 0.0
+        assert position_plan.peak == 1000.0
 
     def test_complete_point_with_stale_basket_is_incomplete(self) -> None:
         """A complete point over a stale basket demotes to a basket reason."""
