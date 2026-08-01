@@ -1,5 +1,7 @@
 """Transactional worklog proof for the local-UAT trade importer."""
 
+from collections.abc import Awaitable
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import cast
@@ -7,7 +9,14 @@ from typing import cast
 import asyncpg
 import pytest
 
-from proprietary.scripts.uat_refresh_db import _load_dump
+type _LoadDump = Callable[[asyncpg.Connection, str, Path], Awaitable[int]]
+
+_UAT_REFRESH_DB = pytest.importorskip(
+    "proprietary.scripts.uat_refresh_db",
+    reason="requires the materialized proprietary submodule",
+    exc_type=ModuleNotFoundError,
+)
+_load_dump = cast(_LoadDump, getattr(_UAT_REFRESH_DB, "_load_dump"))
 
 
 class _Transaction:
