@@ -59,6 +59,7 @@ from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import ERROR_NOT_AUTHORIZED
+from snapper.application.ai_review.service import ERROR_NOT_SELECTED_BEFORE_FANOUT
 from snapper.application.ai_review.service import ERROR_PEER_RESOLVED
 from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
@@ -100,6 +101,7 @@ _TERMINAL_AI_REVIEW_STATUSES = frozenset(
 _HTTP_STATUS_BY_ERROR_CODE: dict[str, int] = {
     ERROR_REVIEW_NOT_FOUND: status.HTTP_404_NOT_FOUND,
     ERROR_NOT_AUTHORIZED: status.HTTP_403_FORBIDDEN,
+    ERROR_NOT_SELECTED_BEFORE_FANOUT: status.HTTP_409_CONFLICT,
     ERROR_PEER_RESOLVED: status.HTTP_409_CONFLICT,
     ERROR_REVIEW_EXPIRED: status.HTTP_410_GONE,
 }
@@ -245,7 +247,9 @@ def _build_envelope(
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Review not found"},
         status.HTTP_403_FORBIDDEN: {"description": "Caller not authorized"},
-        status.HTTP_409_CONFLICT: {"description": "Already resolved by peer"},
+        status.HTTP_409_CONFLICT: {
+            "description": "Not selected before fanout or already resolved by peer"
+        },
         status.HTTP_410_GONE: {"description": "Deadline elapsed"},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Invalid decision"},
     },

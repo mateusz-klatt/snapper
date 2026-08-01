@@ -1139,14 +1139,16 @@ async def test_list_eligible_returns_delegate_with_underlying_grant(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_list_eligible_orders_candidates_by_last_seen_desc(
+async def test_list_eligible_orders_candidates_by_immutable_creation_identity(
     tmp_path: Path,
 ) -> None:
-    """Multiple eligible delegates returned most-recently-seen first.
+    """Candidate base order ignores heartbeat timing and uses immutable identity.
 
-    The query specifies ``ORDER BY last_seen_at DESC`` so admission
-    control prefers the freshest live connection. The test seeds two
-    delegates 3 seconds apart and asserts the newer one comes first.
+    Given an earlier-created delegate with the older heartbeat and a
+    later-created delegate with the fresher heartbeat,
+    When eligible candidates are listed,
+    Then immutable creation order wins and a heartbeat phase shift cannot
+    reorder the list that owner-affinity selection canonicalises.
     """
     repo = await _build_repo(tmp_path, "eligible_order.db")
     as_of = _now()
@@ -1168,25 +1170,25 @@ async def test_list_eligible_orders_candidates_by_last_seen_desc(
         granted_by_user_public_id=ids["user_public_id"],
         as_of=as_of,
     )
-    older = await _seed_live_delegate(
+    first_created = await _seed_live_delegate(
         repo,
         user_public_id=ids["user_public_id"],
         last_seen_at=as_of - timedelta(seconds=5),
-        creation_time=as_of,
+        creation_time=as_of - timedelta(seconds=10),
     )
-    newer_user_pid = str(uuid7())
-    await _seed_user_row(repo, user_public_id=newer_user_pid, role="ai_delegate", as_of=as_of)
+    second_user_pid = str(uuid7())
+    await _seed_user_row(repo, user_public_id=second_user_pid, role="ai_delegate", as_of=as_of)
     await _add_membership(
         repo,
-        user_public_id=newer_user_pid,
+        user_public_id=second_user_pid,
         operator_public_id=ids["operator_public_id"],
         as_of=as_of,
     )
-    newer = await _seed_live_delegate(
+    second_created = await _seed_live_delegate(
         repo,
-        user_public_id=newer_user_pid,
+        user_public_id=second_user_pid,
         last_seen_at=as_of - timedelta(seconds=2),
-        creation_time=as_of,
+        creation_time=as_of - timedelta(seconds=5),
     )
     result = await repo.list_eligible_delegates_for_ai_review(
         operator_public_id=ids["operator_public_id"],
@@ -1195,7 +1197,7 @@ async def test_list_eligible_orders_candidates_by_last_seen_desc(
         heartbeat_window_seconds=30,
         as_of=as_of,
     )
-    assert [d["public_id"] for d in result] == [newer, older]
+    assert [delegate["public_id"] for delegate in result] == [first_created, second_created]
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from mcp.types import TextContent
 
+from snapper.application.ai_review.service import ERROR_NOT_SELECTED_BEFORE_FANOUT
 from snapper.application.ai_review.service import AiReviewDecisionResult
 from snapper.application.ai_review.service import AiReviewService
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -505,6 +506,10 @@ class TestSubmitAiReviewDecisionTool:
         [
             ("review_not_found", "No review with that id."),
             ("not_authorized", "Caller is not registered as an AI delegate."),
+            (
+                "not_selected_before_fanout",
+                "Only the selected delegate may answer before fanout opens.",
+            ),
             ("review_already_resolved_by_peer", "Peer beat us."),
             ("review_id_expired", "Deadline elapsed before the decision arrived."),
         ],
@@ -540,6 +545,44 @@ class TestSubmitAiReviewDecisionTool:
         assert envelope["success"] is False
         assert envelope["error_code"] == error_code
         assert envelope["message"] == message
+
+    @pytest.mark.asyncio
+    async def test_pre_fanout_selection_error_preserves_retry_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MCP failure envelope keeps the server-owned fanout opening instant.
+
+        Given the service rejects a non-selected delegate before fanout,
+        When the MCP tool wraps that result,
+        Then the distinct error code and retry timestamp survive unchanged.
+        """
+        self._stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=ERROR_NOT_SELECTED_BEFORE_FANOUT,
+                message="Only the selected delegate may answer before fanout opens.",
+                status=AiReviewStatusEnum.PENDING,
+                resolution_mode=None,
+                dispatch_version=0,
+                details={"fanout_opens_at": "2026-08-01T12:00:30+00:00"},
+            ),
+        )
+        server = _build_server(repository=AsyncMock())
+
+        result = await call_raw_tool(
+            server,
+            "submit_ai_review_decision",
+            {"review_id": "rev-1", "decision": "approve"},
+        )
+
+        envelope = _decode_call_tool_result(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == ERROR_NOT_SELECTED_BEFORE_FANOUT
+        assert envelope["details"] == {
+            "fanout_opens_at": "2026-08-01T12:00:30+00:00",
+            "status": "pending",
+            "dispatch_version": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_invalid_decision_short_circuits_with_envelope(

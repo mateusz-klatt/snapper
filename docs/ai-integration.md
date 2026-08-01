@@ -541,6 +541,11 @@ primitive; the service admits it only when an eligible delegate's
 15s). Liveness is maintained by the delegate's WebSocket session: the
 connect handshake bumps `last_seen_at`, and every client ping re-bumps
 it (throttled server-side to at most one write per 5s per delegate).
+Admission ranks the review owner's own live delegate first, then uses
+immutable delegate creation time and public ID for deterministic fallback
+order. A timeout releases the selected delegate's in-flight counter; it does
+not penalize that delegate or let heartbeat arrival timing reorder the next
+consult.
 The bundled `HeartbeatConsult` strategy exercises the full loop with
 one consult per 1h candle and, on approval, a paper signal at the
 configurable `heartbeat_signal_strength` param (default `0.0` =
@@ -593,6 +598,14 @@ Integration-owner steps to arm the wake surface:
     MCP tool before the review deadline (default 25s for
     `HeartbeatConsult`); the strategy resumes with the outcome, and a
     `decision_ack` frame follows on the same `ai_reviews.` family.
+
+The request is published once to every delegate whose grant passes the bridge
+scope filter. Before the persisted `fanout_after` instant, only the selected
+delegate may resolve it; another granted delegate receives
+`not_selected_before_fanout` with `fanout_opens_at` for retry. At the exact
+opening instant and afterward, any granted delegate may win the resolve CAS.
+The fanout scanner changes database state only and publishes no second request
+frame.
 
 After a watch reconnect, `GET /api/ai-reviews/pending` is the
 catch-up read for reviews whose fanout window (`fanout_after`,

@@ -449,12 +449,11 @@ class AiReviewResolutionModeEnum(StrEnum):
     """How an :class:`AiReview` reached its terminal state.
 
     PICK_ONE_PRIMARY: selected delegate (immutable from review
-    creation) responded directly. Most common case.
-    SECONDARY_AFTER_FANOUT: selected delegate went offline; fanout
-    fired; a different delegate (with scope grant) responded.
-    FANOUT_FIRST_RESPONDER: review was created in fanout-dispatched
-    state at INSERT time (selected delegate already offline >
-    heartbeat window); first eligible responder wins.
+    creation) responded before the fanout window opened.
+    SECONDARY_AFTER_FANOUT: selected delegate responded at or after the
+    fanout window opened.
+    FANOUT_FIRST_RESPONDER: a different eligible delegate responded at
+    or after the fanout window opened.
     TIMEOUT_NO_RESPONSE: deadline passed; reaper transitioned to
     TIMEOUT status.
     SUPERSEDED_BY_STRATEGY: strategy abandoned the review (e.g.

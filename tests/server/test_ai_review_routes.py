@@ -349,6 +349,7 @@ class TestSubmitDecisionRoute:
         [
             ("review_not_found", 404),
             ("not_authorized", 403),
+            ("not_selected_before_fanout", 409),
             ("review_already_resolved_by_peer", 409),
             ("review_id_expired", 410),
             ("review_state_race", 503),

@@ -3842,14 +3842,11 @@ class AtomicResolveResult(TypedDict, total=False):
 
     ``resolution_mode`` is populated ONLY by
     :meth:`Repository.atomic_resolve_review_with_audit_and_counter` —
-    derived inside the primitive from the locked ``previous_status`` +
-    ``selected_delegate_public_id`` so the value the service publishes
-    on the post-commit bus event + WS frame matches what the row +
-    audit row hold (the service must not compute ``resolution_mode``
-    from a pre-transaction snapshot of ``status``; if a peer flipped
-    the row from ``pending`` to ``fanout_dispatched`` between the read
-    and the lock, the published ``resolution_mode`` could disagree
-    with the actual transition). The timeout + supersede primitives
+    derived inside the primitive from locked ``fanout_after`` +
+    ``selected_delegate_public_id`` and the resolve timestamp so the
+    value published on the post-commit bus event + WS frame matches the
+    row and audit facts even before the scanner's status CAS. The
+    timeout + supersede primitives
     leave it absent because their ``resolution_mode`` is fixed by the
     transition target (``timeout_no_response`` /
     ``superseded_by_strategy``) and the service does not depend on the

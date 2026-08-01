@@ -3954,6 +3954,12 @@ by itself: the caller must still resolve to a registered `ai_delegates` row and
 have a live scope grant for the review wallet and instrument. The dispatch fans out on `bus.ai_review_decision` and emits
 `ai_reviews.{user}.{strategy}.decision_ack` on the WS surface.
 
+While a review is pending before its persisted `fanout_after`, only its
+`selected_delegate_public_id` may resolve it. A different granted delegate
+receives `409` with `error_code="not_selected_before_fanout"` and
+`details.fanout_opens_at`; the exact opening instant is accepted. At or after
+that instant, any delegate that still passes the same grant check may answer.
+
 Responses use `AiReviewDecisionResponse` — the canonical envelope
 shared with the MCP `CallToolResult` payload:
 
@@ -3967,8 +3973,8 @@ shared with the MCP `CallToolResult` payload:
 ```
 
 Error status codes: `404` (review not found), `403` (caller not
-authorized for this review), `409` (already resolved by peer),
-`410` (deadline elapsed), `422` (invalid decision).
+authorized for this review), `409` (not selected before fanout or already
+resolved by peer), `410` (deadline elapsed), `422` (invalid decision).
 
 ### GET /api/ai-reviews/pending
 

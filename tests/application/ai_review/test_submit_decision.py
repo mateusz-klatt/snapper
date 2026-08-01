@@ -22,9 +22,11 @@ from unittest.mock import MagicMock
 from uuid import uuid7
 
 import pytest
+from loguru import logger
 
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import ERROR_NOT_AUTHORIZED
+from snapper.application.ai_review.service import ERROR_NOT_SELECTED_BEFORE_FANOUT
 from snapper.application.ai_review.service import ERROR_PEER_RESOLVED
 from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
@@ -282,6 +284,59 @@ async def test_first_approve_pending_returns_resolved_approved_pick_one_primary(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
+async def test_pending_other_delegate_before_fanout_is_rejected(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """A granted non-selected delegate cannot resolve a pending pre-fanout review.
+
+    Given a pending review one microsecond before its persisted fanout timestamp,
+    When another granted delegate submits a decision,
+    Then the canonical result carries the retryable selection error and opens-at
+    context while the review remains untouched.
+    """
+    svc = AiReviewService.get_instance()
+    created_at = _now()
+    decision_at = created_at + timedelta(seconds=30) - timedelta(microseconds=1)
+    selected_user = str(uuid7())
+    responding_user = str(uuid7())
+    selected_delegate = await _seed_delegate(repo, user_public_id=selected_user, as_of=created_at)
+    responding_delegate = await _seed_delegate(
+        repo, user_public_id=responding_user, as_of=created_at
+    )
+    review_id = await _seed_pending_review(
+        repo,
+        selected_delegate_public_id=selected_delegate,
+        as_of=created_at,
+    )
+
+    result = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=responding_user,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale=None,
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=decision_at,
+    )
+
+    assert result.error_code == ERROR_NOT_SELECTED_BEFORE_FANOUT
+    assert result.status == AiReviewStatusEnum.PENDING
+    assert result.resolution_mode is None
+    assert result.details == {
+        "selected_delegate_public_id": selected_delegate,
+        "responding_delegate_public_id": responding_delegate,
+        "fanout_opens_at": (created_at + timedelta(seconds=30)).isoformat(),
+    }
+    row = await repo.get_ai_review(review_id)
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["decision"] is None
+    assert row["responding_delegate_public_id"] is None
+    assert row["resolution_mode"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_first_reject_pending_returns_resolved_rejected(
     repo: SQLAlchemyRepository,
 ) -> None:
@@ -417,16 +472,30 @@ async def test_different_delegate_after_resolve_returns_peer_resolved(
         scope_grant_service=_FakeScopeGrantService(),
         now=now,
     )
-    second = await svc.submit_decision(
-        review_public_id=review_id,
-        caller_user_public_id=user_b,
-        decision=AiReviewDecisionEnum.APPROVE,
-        rationale=None,
-        repo=repo,
-        scope_grant_service=_FakeScopeGrantService(),
-        now=now,
-    )
+    captured: list[str] = []
+    sink_id = logger.add(captured.append, format="{level}|{message}", level="INFO")
+    try:
+        second = await svc.submit_decision(
+            review_public_id=review_id,
+            caller_user_public_id=user_b,
+            decision=AiReviewDecisionEnum.APPROVE,
+            rationale=None,
+            repo=repo,
+            scope_grant_service=_FakeScopeGrantService(),
+            now=now,
+        )
+    finally:
+        logger.remove(sink_id)
     assert second.error_code == ERROR_PEER_RESOLVED
+    assert [message.strip() for message in captured] == [
+        (
+            f"INFO|ai_review decision rejected: already resolved by peer "
+            f"error_code={ERROR_PEER_RESOLVED} "
+            f"review_public_id={review_id} "
+            f"responding_delegate_public_id={delegate_a} "
+            f"resolution_mode=pick_one_primary"
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -467,6 +536,45 @@ async def test_late_decision_pending_marks_timeout_returns_review_id_expired(
     assert row is not None
     assert row["status"] == "timeout"
     assert row["resolution_mode"] == "timeout_no_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_late_other_delegate_keeps_timeout_precedence_over_fanout_guard(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """A foreign decision after deadline still drives the existing timeout path.
+
+    Given a deadline that closes before fanout and a non-selected granted caller,
+    When that caller submits after the deadline,
+    Then expiration wins over the pre-fanout selection guard.
+    """
+    svc = AiReviewService.get_instance()
+    created_at = _now()
+    selected_user = str(uuid7())
+    other_user = str(uuid7())
+    selected_delegate = await _seed_delegate(repo, user_public_id=selected_user, as_of=created_at)
+    await _seed_delegate(repo, user_public_id=other_user, as_of=created_at)
+    review_id = await _seed_pending_review(
+        repo,
+        selected_delegate_public_id=selected_delegate,
+        as_of=created_at,
+        deadline_offset_seconds=10,
+    )
+
+    result = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=other_user,
+        decision=AiReviewDecisionEnum.REJECT,
+        rationale=None,
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=created_at + timedelta(seconds=11),
+    )
+
+    assert result.error_code == ERROR_REVIEW_EXPIRED
+    assert result.status == AiReviewStatusEnum.TIMEOUT
+    assert result.resolution_mode == AiReviewResolutionModeEnum.TIMEOUT_NO_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -523,24 +631,24 @@ async def test_late_decision_after_already_terminal_skips_timeout_path(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_fanout_dispatched_selected_responds_returns_secondary_after_fanout(
+async def test_selected_at_fanout_boundary_returns_secondary_after_fanout(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Fanout-dispatched + selected delegate responds -> SECONDARY_AFTER_FANOUT.
+    """Selected delegate at the exact fanout boundary records the post-fanout mode.
 
     Given a configured AiReviewService and seeded repository,
     When submit_decision is invoked with the test parameters,
     Then the service returns the envelope asserted in the test body.
     """
     svc = AiReviewService.get_instance()
-    now = _now()
+    created_at = _now()
+    decision_at = created_at + timedelta(seconds=30)
     user_pid = str(uuid7())
-    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=now)
+    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=created_at)
     review_id = await _seed_pending_review(
         repo,
         selected_delegate_public_id=delegate_pid,
-        as_of=now,
-        initial_status="fanout_dispatched",
+        as_of=created_at,
     )
     result = await svc.submit_decision(
         review_public_id=review_id,
@@ -549,7 +657,7 @@ async def test_fanout_dispatched_selected_responds_returns_secondary_after_fanou
         rationale=None,
         repo=repo,
         scope_grant_service=_FakeScopeGrantService(),
-        now=now,
+        now=decision_at,
     )
     assert result.error_code is None
     assert result.resolution_mode == AiReviewResolutionModeEnum.SECONDARY_AFTER_FANOUT
@@ -557,26 +665,26 @@ async def test_fanout_dispatched_selected_responds_returns_secondary_after_fanou
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_fanout_dispatched_other_delegate_responds_returns_first_responder(
+async def test_pending_other_delegate_at_fanout_boundary_returns_first_responder(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Fanout-dispatched + non-selected delegate responds -> FANOUT_FIRST_RESPONDER.
+    """A non-selected delegate is admitted exactly when persisted fanout opens.
 
     Given a configured AiReviewService and seeded repository,
     When submit_decision is invoked with the test parameters,
     Then the service returns the envelope asserted in the test body.
     """
     svc = AiReviewService.get_instance()
-    now = _now()
+    created_at = _now()
+    decision_at = created_at + timedelta(seconds=30)
     user_a = str(uuid7())
     user_b = str(uuid7())
-    delegate_a = await _seed_delegate(repo, user_public_id=user_a, as_of=now)
-    await _seed_delegate(repo, user_public_id=user_b, as_of=now)
+    delegate_a = await _seed_delegate(repo, user_public_id=user_a, as_of=created_at)
+    delegate_b = await _seed_delegate(repo, user_public_id=user_b, as_of=created_at)
     review_id = await _seed_pending_review(
         repo,
         selected_delegate_public_id=delegate_a,
-        as_of=now,
-        initial_status="fanout_dispatched",
+        as_of=created_at,
     )
     result = await svc.submit_decision(
         review_public_id=review_id,
@@ -585,10 +693,14 @@ async def test_fanout_dispatched_other_delegate_responds_returns_first_responder
         rationale=None,
         repo=repo,
         scope_grant_service=_FakeScopeGrantService(),
-        now=now,
+        now=decision_at,
     )
     assert result.error_code is None
     assert result.resolution_mode == AiReviewResolutionModeEnum.FANOUT_FIRST_RESPONDER
+    row = await repo.get_ai_review(review_id)
+    assert row is not None
+    assert row["responding_delegate_public_id"] == delegate_b
+    assert row["resolution_mode"] == "fanout_first_responder"
 
 
 @pytest.mark.asyncio

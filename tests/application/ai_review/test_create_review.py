@@ -607,6 +607,78 @@ async def test_skips_busy_candidate_picks_next_idle(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
+async def test_owner_selection_stays_stable_after_timeout_and_heartbeat_flip(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """A timeout cannot let a fresher foreign heartbeat take the next review.
+
+    Given an owner delegate and a foreign delegate on the same operator where
+    the foreign heartbeat is fresher,
+    When the owner's first review times out and the next hourly admission sees
+    the foreign heartbeat fresher again,
+    Then the now-idle owner delegate is selected for both reviews.
+    """
+    svc = AiReviewService.get_instance()
+    first_admission_at = _now()
+    owner_seeded_at = first_admission_at - timedelta(seconds=5)
+    foreign_seeded_at = owner_seeded_at - timedelta(seconds=5)
+    ids = await _seed_eligible_delegate(repo, as_of=owner_seeded_at)
+    owner_delegate = ids["delegate_public_id"]
+    foreign_user = str(uuid7())
+    await _seed_user(
+        repo,
+        user_public_id=foreign_user,
+        role="ai_delegate",
+        as_of=foreign_seeded_at,
+    )
+    await _seed_membership(
+        repo,
+        user_public_id=foreign_user,
+        operator_public_id=ids["operator_public_id"],
+        as_of=foreign_seeded_at,
+    )
+    foreign_delegate = await _seed_live_delegate(
+        repo,
+        user_public_id=foreign_user,
+        last_seen_at=foreign_seeded_at,
+    )
+    await repo.update_delegate_last_seen(
+        foreign_delegate,
+        first_admission_at - timedelta(seconds=1),
+    )
+    request = _make_request(ids)
+
+    first = await svc.create_review(request, repo=repo, now=first_admission_at)
+    timed_out = await svc.timeout_review(
+        review_public_id=first.review_public_id,
+        repo=repo,
+        now=first_admission_at + timedelta(seconds=request.deadline_seconds),
+    )
+
+    assert first.selected_delegate_public_id == owner_delegate
+    assert timed_out is True
+    next_admission_at = first_admission_at + timedelta(hours=1)
+    await repo.update_delegate_last_seen(
+        owner_delegate,
+        next_admission_at - timedelta(seconds=3),
+    )
+    await repo.update_delegate_last_seen(
+        foreign_delegate,
+        next_admission_at - timedelta(seconds=1),
+    )
+
+    second = await svc.create_review(
+        _make_request(ids),
+        repo=repo,
+        now=next_admission_at,
+    )
+
+    assert second.selected_delegate_public_id == owner_delegate
+    assert second.selected_delegate_public_id != foreign_delegate
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_signal_envelope_with_nan_raises_value_error(
     repo: SQLAlchemyRepository,
 ) -> None:

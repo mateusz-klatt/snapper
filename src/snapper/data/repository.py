@@ -8226,7 +8226,7 @@ class Repository(ABC):
         ``operator_public_id`` (``users.is_active = TRUE`` and whose role grants
         ``SUBMIT_AI_REVIEW_DECISION``) and whose ``last_seen_at`` falls inside
         the heartbeat window (``as_of - heartbeat_window_seconds``,
-        ``as_of``], ordered by ``last_seen_at DESC``. Pre-checks that the
+        ``as_of``], ordered by immutable ``(created_at, public_id)``. Pre-checks that the
         operator actually holds a matching active scope grant
         (instrument-direct OR underlying-expanded via
         ``InstrumentUnderlyingMapping``) for the ``(wallet, instrument)``
@@ -8236,8 +8236,8 @@ class Repository(ABC):
         Used by :meth:`AiReviewService.create_review` admission control to
         compose the candidate list passed to
         :meth:`claim_and_insert_ai_review`. The order returned is the order
-        the service tries to claim — most-recently-seen first, matching the
-        freshness preference.
+        the service canonicalises with review-owner affinity before the
+        claim, so heartbeat arrival timing never decides admission.
 
         Args:
             operator_public_id: Operator the strategy is consulting under.
@@ -8252,8 +8252,8 @@ class Repository(ABC):
 
         Returns:
             Eligible :class:`AiDelegateRow` rows ordered by
-            ``last_seen_at DESC``. Empty when the operator has no matching
-            grant, no AI review-principal members, or no live members.
+            ``(created_at, public_id)``. Empty when the operator has no
+            matching grant, no AI review-principal members, or no live members.
         """
         ...
 
@@ -8438,15 +8438,17 @@ class Repository(ABC):
         Folds every step into ONE transaction:
 
         1. ``SELECT ... FOR UPDATE`` on the ``ai_reviews`` row to capture
-           ``previous_status`` + ``deadline`` + ``dispatch_version`` AND
-           hold the row lock against concurrent peers. Avoids the
+           ``previous_status`` + ``deadline`` + ``fanout_after`` +
+           ``dispatch_version`` + ``selected_delegate_public_id`` AND hold
+           the row lock against concurrent peers. Avoids the
            previous_status SELECT-then-CAS race on engines that
            support row locking; SQLite serialises the entire transaction
            via the connection-level write lock so the same invariant
            holds.
         2. CAS UPDATE ``ai_reviews`` from non-terminal to ``new_status``
-           with the deadline gate. Returns ``None`` when peer beat us
-           OR deadline elapsed.
+           with the deadline gate and derives ``resolution_mode`` from
+           the locked fanout timestamp, responder, and ``now``. Returns
+           ``None`` when peer beat us OR deadline elapsed.
         3. INSERT the audit-event row using the captured
            ``previous_status`` (the caller's ``audit_event["previous_status"]``
            is overwritten by the actual SELECT-FOR-UPDATE value so a
@@ -8782,36 +8784,32 @@ class Repository(ABC):
 
 def _derive_resolve_resolution_mode(
     *,
-    previous_status: str,
     selected_delegate_public_id: str,
     responding_delegate_public_id: str,
+    fanout_after: datetime,
+    resolved_at: datetime,
 ) -> str:
     """Derive ``resolution_mode`` for the resolve transition.
 
     Enum resolution rules:
 
-    - ``pending`` + selected==responding -> ``pick_one_primary`` (most
-      common path: the originally-selected delegate responds within
-      the natural fanout window).
-    - ``fanout_dispatched`` + selected==responding -> ``secondary_after_fanout``
-      (the originally-selected delegate came back online after
-      fanout had already fired to peers).
-    - ``fanout_dispatched`` + selected!=responding -> ``fanout_first_responder``
-      (a different eligible delegate won the fanout race).
+    - selected==responding before ``fanout_after`` -> ``pick_one_primary``.
+    - selected==responding at or after ``fanout_after`` ->
+      ``secondary_after_fanout``.
+    - selected!=responding -> ``fanout_first_responder``. The submit layer
+      admits this path only at or after ``fanout_after``.
 
     Lives at the repository module level (not on a service or enum
     class) so the resolve primitive can derive it INSIDE its own
-    SELECT-FOR-UPDATE transaction without crossing a layer boundary
-    or duplicating the rules. The service must not compute
-    ``resolution_mode`` from a pre-snapshot ``status`` that could
-    disagree with the actually-locked predecessor under concurrent
-    fanout.
+    SELECT-FOR-UPDATE transaction from the immutable fanout timestamp
+    and actual responder. This remains honest when a delegate resolves
+    exactly as the window opens but before the scanner's status CAS.
     """
-    if previous_status == "pending":
+    if responding_delegate_public_id != selected_delegate_public_id:
+        return "fanout_first_responder"
+    if resolved_at < fanout_after:
         return "pick_one_primary"
-    if responding_delegate_public_id == selected_delegate_public_id:
-        return "secondary_after_fanout"
-    return "fanout_first_responder"
+    return "secondary_after_fanout"
 
 
 _SQLITE_CONNECT_PRAGMAS: tuple[str, ...] = (
@@ -33125,7 +33123,7 @@ class SQLAlchemyRepository(Repository):
                             *where_active(User, as_of),
                             *where_active(UserOperatorMembership, as_of),
                         )
-                        .order_by(AiDelegate.last_seen_at.desc())
+                        .order_by(AiDelegate.created_at.asc(), AiDelegate.public_id.asc())
                     )
                 )
                 .scalars()
@@ -33358,14 +33356,12 @@ class SQLAlchemyRepository(Repository):
         self,
         s: AsyncSession,
         review_public_id: str,
-        *,
-        with_deadline: bool,
-    ) -> tuple[str, datetime | None, int, str] | None:
+    ) -> tuple[str, datetime, datetime, int, str] | None:
         """Helper for the combined terminal-transition primitives.
 
         SELECT-FOR-UPDATE on the ``ai_reviews`` row to capture
-        ``previous_status`` (+ ``deadline`` when the resolve path needs
-        the gate) + ``dispatch_version`` + ``selected_delegate_public_id``.
+        ``previous_status`` + ``deadline`` + ``fanout_after`` +
+        ``dispatch_version`` + ``selected_delegate_public_id``.
         PG holds the row lock for the rest of the open transaction so
         concurrent peers serialise; the SQLite fallback degrades to a
         plain SELECT, but the callers bind the subsequent UPDATE to
@@ -33376,23 +33372,16 @@ class SQLAlchemyRepository(Repository):
         the row does not exist OR is already terminal so callers can
         short-circuit without the UPDATE.
 
-        ``selected_delegate_public_id`` is captured here so the resolve
-        primitive can derive ``resolution_mode`` inside the locked
-        transaction (no second SELECT after the UPDATE is needed).
+        ``fanout_after`` and ``selected_delegate_public_id`` are captured
+        here so the resolve primitive can derive ``resolution_mode``
+        inside the locked transaction without a second SELECT.
         """
         cols = (
-            (
-                AiReview.status,
-                AiReview.deadline,
-                AiReview.dispatch_version,
-                AiReview.selected_delegate_public_id,
-            )
-            if with_deadline
-            else (
-                AiReview.status,
-                AiReview.dispatch_version,
-                AiReview.selected_delegate_public_id,
-            )
+            AiReview.status,
+            AiReview.deadline,
+            AiReview.fanout_after,
+            AiReview.dispatch_version,
+            AiReview.selected_delegate_public_id,
         )
         select_stmt = select(*cols).where(AiReview.public_id == review_public_id)
         try:
@@ -33403,14 +33392,16 @@ class SQLAlchemyRepository(Repository):
             pre_row = unlocked_result.first()
         if pre_row is None:
             return None
-        if with_deadline:
-            previous_status, deadline, dispatch_version, selected = pre_row
-        else:
-            previous_status, dispatch_version, selected = pre_row
-            deadline = None
+        previous_status, deadline, fanout_after, dispatch_version, selected = pre_row
         if previous_status not in ("pending", "fanout_dispatched"):
             return None
-        return str(previous_status), deadline, int(dispatch_version), str(selected)
+        return (
+            str(previous_status),
+            deadline,
+            fanout_after,
+            int(dispatch_version),
+            str(selected),
+        )
 
     async def _decrement_delegate_counter_in_session(
         self,
@@ -33470,13 +33461,11 @@ class SQLAlchemyRepository(Repository):
         """Single-transaction resolve + audit + counter decrement.
 
         ``resolution_mode`` is derived INSIDE the primitive from the
-        SELECT-FOR-UPDATE-captured ``previous_status`` +
-        ``selected_delegate_public_id`` so the row UPDATE, audit-event
-        row, and the value returned to the service all match the
-        actually-locked transition (the service must not compute
-        ``resolution_mode`` from a pre-snapshot ``status`` that could
-        disagree with the lock-time predecessor if a peer flipped
-        pending -> fanout_dispatched in the gap).
+        SELECT-FOR-UPDATE-captured ``fanout_after`` +
+        ``selected_delegate_public_id`` and the resolve timestamp. The
+        row UPDATE, audit-event row, and value returned to the service
+        therefore agree even when the fanout window opens before the
+        scanner changes the predecessor status.
         The UPDATE is bound to ``status == previous_status`` (the
         captured value) so even on engines without row locking
         (SQLite plain-SELECT fallback), a peer transition between the
@@ -33484,16 +33473,17 @@ class SQLAlchemyRepository(Repository):
         rolls back rather than recording a stale predecessor.
         """
         async with self.session() as s:
-            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=True)
+            pre = await self._select_for_update_pre_state(s, review_public_id)
             if pre is None:
                 return None
-            previous_status, deadline, dispatch_version, selected = pre
-            if deadline is None or deadline <= now:
+            previous_status, deadline, fanout_after, dispatch_version, selected = pre
+            if deadline <= now:
                 return None
             resolution_mode = _derive_resolve_resolution_mode(
-                previous_status=previous_status,
                 selected_delegate_public_id=selected,
                 responding_delegate_public_id=responding_delegate_public_id,
+                fanout_after=fanout_after,
+                resolved_at=now,
             )
             update_stmt = (
                 update(AiReview)
@@ -33550,10 +33540,10 @@ class SQLAlchemyRepository(Repository):
         record.
         """
         async with self.session() as s:
-            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
+            pre = await self._select_for_update_pre_state(s, review_public_id)
             if pre is None:
                 return None
-            previous_status, _deadline, dispatch_version, selected = pre
+            previous_status, _deadline, _fanout_after, dispatch_version, selected = pre
             update_stmt = (
                 update(AiReview)
                 .where(
@@ -33601,10 +33591,10 @@ class SQLAlchemyRepository(Repository):
         :meth:`atomic_timeout_review_with_audit_and_counter`.
         """
         async with self.session() as s:
-            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
+            pre = await self._select_for_update_pre_state(s, review_public_id)
             if pre is None:
                 return None
-            previous_status, _deadline, dispatch_version, selected = pre
+            previous_status, _deadline, _fanout_after, dispatch_version, selected = pre
             update_stmt = (
                 update(AiReview)
                 .where(

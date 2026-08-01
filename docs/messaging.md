@@ -300,14 +300,18 @@ in UUID7 form.
 ### AI Reviews
 
 Outbound delegate-consultation frames for the human-in-the-loop review
-queue. The bridge applies a per-frame scope filter so only the selected
-AI delegate receives frames for wallets and instruments covered by its
-live scope grant. Non-delegate WebSocket principals fail closed for this
-topic family even if they somehow request a subscription.
+queue. The bridge applies a per-frame scope filter so only delegates with
+matching live wallet and instrument grants receive frames. Every granted
+delegate receives the same single request publication;
+`selected_delegate_public_id` determines who may answer before
+`fanout_after`, not transport delivery. The fanout scanner opens a database
+CAS window and publishes no second request frame. Non-delegate WebSocket
+principals fail closed for this topic family even if they somehow request a
+subscription.
 
 | Topic | Description |
 | ----- | ----------- |
-| `ai_reviews.<user_public_id>.<strategy_public_id>.request` | Strategy is asking for review |
+| `ai_reviews.<user_public_id>.<strategy_public_id>.request` | Strategy is asking for review; published once to granted delegates |
 | `ai_reviews.<user_public_id>.<strategy_public_id>.decision_ack` | Operator's decision acknowledged |
 | `ai_reviews.<user_public_id>.<strategy_public_id>.caps_violation` | Caps violation after approval |
 

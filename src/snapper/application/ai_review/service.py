@@ -155,6 +155,9 @@ ERROR_REVIEW_NOT_FOUND = "review_not_found"
 ERROR_NOT_AUTHORIZED = "not_authorized"
 """Caller's delegate has no scope grant for the review's wallet+instrument."""
 
+ERROR_NOT_SELECTED_BEFORE_FANOUT = "not_selected_before_fanout"
+"""A non-selected delegate answered before the review's fanout window opened."""
+
 ERROR_PEER_RESOLVED = "review_already_resolved_by_peer"
 """Terminal status reached by another decision (or reaper) before us."""
 
@@ -653,9 +656,14 @@ class AiReviewService:
         :meth:`Repository.claim_and_insert_ai_review` (atomic CAS claim
         on ``ai_delegates.active_reviews_count`` + INSERT of the review
         row + ``created`` audit event in one transaction). The
-        ``signal_snapshot_hash`` is computed from ``request.signal_envelope``
-        so the audit trail can verify the envelope a downstream consumer
-        sees matches the one admission control resolved on.
+        candidate list is canonicalised before the claim: delegates owned
+        by ``request.user_public_id`` sort first, then immutable
+        ``(created_at, public_id)`` breaks all remaining ties. Heartbeat
+        arrival order therefore cannot change the selected delegate.
+        The ``signal_snapshot_hash`` is computed from
+        ``request.signal_envelope`` so the audit trail can verify the
+        envelope a downstream consumer sees matches the one admission
+        control resolved on.
 
         Bus publish of ``bus.ai_review_request`` is intentionally NOT
         performed here — the publisher slot exists on the singleton but
@@ -722,7 +730,15 @@ class AiReviewService:
         envelope_hash = hashlib.sha256(canonical_envelope).hexdigest()
         deadline = wall_clock + timedelta(seconds=request.deadline_seconds)
         fanout_after = wall_clock + timedelta(seconds=policy.fanout_after_seconds)
-        candidate_ids = [candidate["public_id"] for candidate in candidates]
+        ordered_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate["user_public_id"] != request.user_public_id,
+                candidate["created_at"],
+                candidate["public_id"],
+            ),
+        )
+        candidate_ids = [candidate["public_id"] for candidate in ordered_candidates]
 
         review_data: AiReviewInsertRow = {
             "public_id": review_public_id,
@@ -882,14 +898,15 @@ class AiReviewService:
         scope_grant_service: ScopeGrantService,
         now: datetime | None = None,
     ) -> AiReviewDecisionResult:
-        """Submit an AI delegate's decision; nine-step transaction.
+        """Submit an AI delegate's decision through the guarded resolve flow.
 
         Resolves the caller's ``ai_delegates`` row, confirms the review
         exists and is within the caller's scope grant, branches on
         terminal-state shortcuts (idempotent retry vs peer-won),
         runs the inline timeout when the deadline has
-        already elapsed, then performs the atomic CAS resolve + audit
-        event append + counter decrement.
+        already elapsed, enforces selected-only answering until the
+        persisted fanout timestamp, then performs the atomic CAS resolve
+        + audit event append + counter decrement.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
@@ -986,6 +1003,24 @@ class AiReviewService:
                 resolution_mode=AiReviewResolutionModeEnum.TIMEOUT_NO_RESPONSE,
                 dispatch_version=int(review["dispatch_version"]),
                 details={"deadline": review["deadline"].isoformat()},
+            )
+
+        if (
+            review["status"] == AiReviewStatusEnum.PENDING.value
+            and delegate_public_id != review["selected_delegate_public_id"]
+            and wall_clock < review["fanout_after"]
+        ):
+            return AiReviewDecisionResult(
+                error_code=ERROR_NOT_SELECTED_BEFORE_FANOUT,
+                message="Only the selected delegate may answer before fanout opens.",
+                status=AiReviewStatusEnum.PENDING,
+                resolution_mode=None,
+                dispatch_version=int(review["dispatch_version"]),
+                details={
+                    "selected_delegate_public_id": review["selected_delegate_public_id"],
+                    "responding_delegate_public_id": delegate_public_id,
+                    "fanout_opens_at": review["fanout_after"].isoformat(),
+                },
             )
 
         new_status = (
@@ -1242,6 +1277,13 @@ class AiReviewService:
                 dispatch_version=dispatch_version,
                 details={"decision": decision.value},
             )
+        logger.info(
+            f"ai_review decision rejected: already resolved by peer "
+            f"error_code={ERROR_PEER_RESOLVED} "
+            f"review_public_id={review['public_id']} "
+            f"responding_delegate_public_id={responding} "
+            f"resolution_mode={resolution_mode_value}"
+        )
         return AiReviewDecisionResult(
             error_code=ERROR_PEER_RESOLVED,
             message="Review already resolved by another decision or the reaper.",

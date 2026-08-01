@@ -919,11 +919,11 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
 
     Bridge dedup: ``dispatch_version`` is the original review row's
     counter (always 0 on the request frame since the row was just
-    inserted; supersede / fanout retries that increment the counter
-    are surfaced as separate frames). The JS bridge dispatcher
-    dedupes by ``(public_id, dispatch_version)`` so duplicate
-    receives from a flapping subscriber don't replay the consult
-    request.
+    inserted). The fanout scanner later opens the row's database CAS
+    window by incrementing that counter; it does not publish a second
+    request frame. The JS bridge dispatcher dedupes the single
+    publication by ``(public_id, dispatch_version)`` so duplicate
+    receives from a flapping subscriber don't replay the consult request.
 
     Attributes:
         review_public_id: UUID7 of the just-created ``ai_reviews`` row.
@@ -932,9 +932,9 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
         wallet_public_id: Wallet the strategy would trade on.
         instrument_public_id: Instrument the strategy is consulting on.
         selected_delegate_public_id: AI delegate selected by
-            admission control. Threaded onto the frame so the
-            delegate UI can show a "this is for you" affordance vs a
-            broadcast frame received via fanout.
+            admission control. Threaded onto the one broadcast frame so
+            each delegate can distinguish the selected recipient from a
+            peer that must wait for the database fanout window.
         deadline: ISO8601 wall-clock deadline by which the delegate
             must submit a decision before the strategy primitive
             transitions the row to ``timeout``. The delegate UI
