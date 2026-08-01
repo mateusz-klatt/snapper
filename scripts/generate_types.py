@@ -1914,8 +1914,10 @@ def generate_ios_permissions(project_root: Path) -> None:
     """Generate Swift permissions constants from backend source of truth.
 
     Produces ``Permissions.swift`` in ``ios/Snapper/Models/Generated/`` with a
-    ``Permission`` enum, ``rolePermissions`` dictionary, and permission-based
-    ``resourceRequirements`` dictionary that mirror the frontend contract.
+    forward-compatible ``Permission`` value type, ``rolePermissions``
+    dictionary, and permission-based ``resourceRequirements`` dictionary that
+    mirror the frontend contract. ``Permission`` preserves unknown strings so
+    a newer backend capability cannot invalidate an otherwise usable response.
     ``UserRole`` is deliberately omitted because it is already emitted by the
     API schema generator in ``APITypes.swift``.
 
@@ -1924,10 +1926,12 @@ def generate_ios_permissions(project_root: Path) -> None:
     """
     output_path = project_root / _IOS_PERMISSIONS_TARGET
 
-    perm_cases: list[str] = []
+    perm_constants: list[str] = []
+    all_case_entries: list[str] = []
     for perm in Permission:
         case_name = _perm_name_to_swift_case(perm.name)
-        perm_cases.append(f'    case {case_name} = "{perm.value}"')
+        perm_constants.append(f'    static let {case_name} = Permission(rawValue: "{perm.value}")')
+        all_case_entries.append(f"        .{case_name},")
 
     role_perm_entries: list[str] = []
     for role in UserRole:
@@ -1950,8 +1954,28 @@ def generate_ios_permissions(project_root: Path) -> None:
 
     lines = [
         *_SWIFT_HEADER_LINES,
-        "enum Permission: String, CaseIterable, Codable, Sendable {",
-        *perm_cases,
+        "struct Permission: RawRepresentable, Hashable, Codable, CaseIterable, Sendable {",
+        "    let rawValue: String",
+        "",
+        "    init(rawValue: String) {",
+        "        self.rawValue = rawValue",
+        "    }",
+        "",
+        *perm_constants,
+        "",
+        "    static let allCases: [Permission] = [",
+        *all_case_entries,
+        "    ]",
+        "",
+        "    init(from decoder: Decoder) throws {",
+        "        let container = try decoder.singleValueContainer()",
+        "        rawValue = try container.decode(String.self)",
+        "    }",
+        "",
+        "    func encode(to encoder: Encoder) throws {",
+        "        var container = encoder.singleValueContainer()",
+        "        try container.encode(rawValue)",
+        "    }",
         "}",
         "",
         "enum ResourceRequirement: Sendable {",

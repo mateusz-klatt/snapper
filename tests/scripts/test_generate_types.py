@@ -1382,7 +1382,7 @@ class TestGenerateIosTypes:
         assert "struct OrderData" not in ws_content
         assert "struct SystemStatus" in api_content
 
-    def test_permission_enum_owned_by_permissions_file_only(self, tmp_path: Path) -> None:
+    def test_permission_type_owned_by_permissions_file_only(self, tmp_path: Path) -> None:
         """Permission stays in Permissions.swift only, never in APITypes/WSMessages.
 
         The OpenAPI schema exposes ``Permission`` as a top-level enum whose
@@ -1411,9 +1411,11 @@ class TestGenerateIosTypes:
         ws_content = (ios_dir / "WSMessages.swift").read_text()
         permissions_content = (ios_dir / "Permissions.swift").read_text()
         assert "enum Permission" not in api_content
+        assert "struct Permission" not in api_content
         assert "read:market_data" not in api_content
         assert "enum Permission" not in ws_content
-        assert "enum Permission" in permissions_content
+        assert "struct Permission" not in ws_content
+        assert "struct Permission" in permissions_content
 
 
 class TestGenerateIosPermissions:
@@ -1424,14 +1426,14 @@ class TestGenerateIosPermissions:
 
         Given: A project root directory,
         When: generate_ios_permissions is called,
-        Then: Permissions.swift is created with Permission enum and dictionaries.
+        Then: Permissions.swift is created with the Permission value type and dictionaries.
         """
         generate_ios_permissions(tmp_path)
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         assert output.exists()
         content = output.read_text()
-        assert "enum Permission:" in content
+        assert "struct Permission:" in content
         assert "enum ResourceRequirement: Sendable" in content
         assert "rolePermissions" in content
         assert "resourceRequirements" in content
@@ -1505,20 +1507,66 @@ class TestGenerateIosPermissions:
         content = output.read_text()
         assert "enum UserRole" not in content
 
-    def test_permission_cases_use_camel_case(self, tmp_path: Path) -> None:
-        """Permission enum cases are camelCase, not UPPER_SNAKE_CASE.
+    def test_permission_constants_use_camel_case(self, tmp_path: Path) -> None:
+        """Permission constants are camelCase, not UPPER_SNAKE_CASE.
 
-        Given: Permission enum values,
+        Given: Backend permission values,
         When: the Swift file is generated,
-        Then: cases like readMarketData and manageUsers appear.
+        Then: constants like readMarketData and manageUsers appear.
         """
         generate_ios_permissions(tmp_path)
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
-        assert "case readMarketData" in content
-        assert "case manageUsers" in content
+        assert 'static let readMarketData = Permission(rawValue: "read:market_data")' in content
+        assert 'static let manageUsers = Permission(rawValue: "manage:users")' in content
         assert "READ_MARKET_DATA" not in content
+
+    def test_permission_contract_preserves_unknown_raw_values(self, tmp_path: Path) -> None:
+        """Generated permissions decode future strings while enumerating known values.
+
+        Given: The backend's current permission source of truth,
+        When: Permissions.swift is generated,
+        Then: Permission stores and round-trips any string while allCases contains
+        exactly the statically known permissions.
+        """
+        generate_ios_permissions(tmp_path)
+
+        output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
+        content = output.read_text()
+        assert (
+            "struct Permission: RawRepresentable, Hashable, Codable, CaseIterable, Sendable {"
+            in content
+        )
+        assert "    let rawValue: String" in content
+        expected_raw_initializer = "\n".join(
+            ["    init(rawValue: String) {", "        self.rawValue = rawValue", "    }"]
+        )
+        assert expected_raw_initializer in content
+        assert (
+            "    init(from decoder: Decoder) throws {\n"
+            "        let container = try decoder.singleValueContainer()\n"
+            "        rawValue = try container.decode(String.self)\n"
+            "    }"
+        ) in content
+        assert (
+            "    func encode(to encoder: Encoder) throws {\n"
+            "        var container = encoder.singleValueContainer()\n"
+            "        try container.encode(rawValue)\n"
+            "    }"
+        ) in content
+        expected_all_cases = "\n".join(
+            [
+                "    static let allCases: [Permission] = [",
+                *[
+                    f"        .{generate_types._perm_name_to_swift_case(permission.name)},"
+                    for permission in Permission
+                ],
+                "    ]",
+            ]
+        )
+        assert expected_all_cases in content
+        assert "enum Permission:" not in content
 
     def test_ios_types_generates_permissions(self, tmp_path: Path) -> None:
         """generate_ios_types also produces the Permissions.swift file.
