@@ -30,6 +30,7 @@ def _ready_environment(
     return {
         "SNAPPER_DELEGATE_MODEL_ALIAS": "research-primary",
         "SNAPPER_DELEGATE_BASE_URL": "https://api.example.invalid/",
+        "SNAPPER_DELEGATE_SNAPPER_URL": "http://snapper:8000/",
         "SNAPPER_DELEGATE_API_KEY_FILE": str(api_key_file),
         "SNAPPER_DELEGATE_TOKEN_FILE": str(delegate_token_file),
         "SNAPPER_DELEGATE_MAX_TOOL_ROUNDS": "4",
@@ -51,6 +52,7 @@ def test_load_runner_configuration_accepts_one_ready_model(
     assert configuration.model_dump() == {
         "model_alias": "research-primary",
         "base_url": "https://api.example.invalid",
+        "snapper_base_url": "http://snapper:8000",
         "api_key_file": environment["SNAPPER_DELEGATE_API_KEY_FILE"],
         "delegate_token_file": environment["SNAPPER_DELEGATE_TOKEN_FILE"],
         "max_tool_rounds": 4,
@@ -73,11 +75,49 @@ def test_load_runner_configuration_accepts_explicit_https_port(
     assert configuration.base_url == "https://api.example.invalid:443"
 
 
+def test_load_runner_configuration_accepts_https_snapper_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public HTTPS Snapper origin is accepted without a path.
+
+    Given: A complete configuration using a credential-free HTTPS origin,
+    When: The PID1 validates the Snapper endpoint,
+    Then: The normalized origin is available to the runner.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_DELEGATE_SNAPPER_URL"] = "https://snapper.example.invalid/"
+    configuration = pid1.load_runner_configuration(environment)
+    assert configuration.snapper_base_url == "https://snapper.example.invalid"
+
+
+@pytest.mark.parametrize(
+    "snapper_origin",
+    ["http://127.0.0.1:8000", "http://[::1]:8000"],
+)
+def test_load_runner_configuration_accepts_local_snapper_origins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapper_origin: str,
+) -> None:
+    """IP-address control origins are available for local bridges.
+
+    Given: A complete configuration using an IPv4 or IPv6 Snapper origin,
+    When: The PID1 validates the control endpoint,
+    Then: It preserves the valid origin for the runner.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_DELEGATE_SNAPPER_URL"] = snapper_origin
+    configuration = pid1.load_runner_configuration(environment)
+    assert configuration.snapper_base_url == snapper_origin
+
+
 @pytest.mark.parametrize(
     "missing_name",
     [
         "SNAPPER_DELEGATE_MODEL_ALIAS",
         "SNAPPER_DELEGATE_BASE_URL",
+        "SNAPPER_DELEGATE_SNAPPER_URL",
         "SNAPPER_DELEGATE_API_KEY_FILE",
         "SNAPPER_DELEGATE_TOKEN_FILE",
         "SNAPPER_DELEGATE_MAX_TOOL_ROUNDS",
@@ -125,6 +165,21 @@ def test_load_runner_configuration_refuses_missing_values(
         ("SNAPPER_DELEGATE_BASE_URL", "https://127.0.0.1"),
         ("SNAPPER_DELEGATE_BASE_URL", "https://localhost"),
         ("SNAPPER_DELEGATE_BASE_URL", "https://api.example.invalid:bad"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", ""),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", " http://snapper:8000"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "ftp://snapper"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http:///"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://user:password@snapper"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper/api"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper?token=secret"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper#fragment"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper?"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper#"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper:"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper:0"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper:bad"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snap_per"),
+        ("SNAPPER_DELEGATE_SNAPPER_URL", "http://snapper%2Fapi"),
         ("SNAPPER_DELEGATE_API_KEY_FILE", "/tmp/key"),
         ("SNAPPER_DELEGATE_TOKEN_FILE", "/tmp/token"),
         ("SNAPPER_DELEGATE_MAX_TOOL_ROUNDS", "0"),
@@ -245,6 +300,7 @@ def test_configuration_model_is_strict() -> None:
             {
                 "model_alias": "research-primary",
                 "base_url": "https://api.example.invalid",
+                "snapper_base_url": "http://snapper:8000",
                 "api_key_file": str(pid1._API_KEY_PATH),
                 "delegate_token_file": str(pid1._DELEGATE_TOKEN_PATH),
                 "max_tool_rounds": "4",
@@ -280,7 +336,7 @@ async def test_run_pid1_instantiates_existing_runner_directly(
 
     Given: A complete environment and a fake existing runner,
     When: The PID1 starts,
-    Then: It passes only the five runner parameters and awaits start directly.
+    Then: It passes only the six runner parameters and awaits start directly.
     """
     environment = _ready_environment(tmp_path, monkeypatch)
     fake_runner = MagicMock()
@@ -291,6 +347,7 @@ async def test_run_pid1_instantiates_existing_runner_directly(
     runner_factory.assert_called_once_with(
         model_alias="research-primary",
         base_url="https://api.example.invalid",
+        snapper_base_url="http://snapper:8000",
         api_key_file=environment["SNAPPER_DELEGATE_API_KEY_FILE"],
         delegate_token_file=environment["SNAPPER_DELEGATE_TOKEN_FILE"],
         max_tool_rounds=4,

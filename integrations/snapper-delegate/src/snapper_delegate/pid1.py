@@ -1,9 +1,10 @@
 """Run one delegate directly as a container PID1 without Snapper coordination.
 
 The entrypoint owns no database, message-bus, broker, process-launcher, or
-vendor-client lifecycle. It accepts one exact model route from environment
-references, verifies that both credential file references are present and
-readable, and only then instantiates the existing idle ``DelegateRunner``.
+vendor-client lifecycle. It accepts one exact model route, vendor endpoint,
+and Snapper control origin from environment references, verifies that both
+credential file references are present and readable, and only then
+instantiates ``DelegateRunner``.
 Incomplete or malformed configuration stays alive in a signal-aware idle
 state so a profile-enabled canary fails closed without a restart loop.
 """
@@ -29,6 +30,7 @@ from snapper_delegate.runner import DelegateRunner
 _ENV_PREFIX: Final[str] = "SNAPPER_DELEGATE_"
 _MODEL_ALIAS_ENV: Final[str] = f"{_ENV_PREFIX}MODEL_ALIAS"
 _BASE_URL_ENV: Final[str] = f"{_ENV_PREFIX}BASE_URL"
+_SNAPPER_URL_ENV: Final[str] = f"{_ENV_PREFIX}SNAPPER_URL"
 _API_KEY_FILE_ENV: Final[str] = f"{_ENV_PREFIX}API_KEY_FILE"
 _TOKEN_FILE_ENV: Final[str] = f"{_ENV_PREFIX}TOKEN_FILE"
 _MAX_TOOL_ROUNDS_ENV: Final[str] = f"{_ENV_PREFIX}MAX_TOOL_ROUNDS"
@@ -36,6 +38,7 @@ _CONFIG_ENV_NAMES: Final[frozenset[str]] = frozenset(
     {
         _MODEL_ALIAS_ENV,
         _BASE_URL_ENV,
+        _SNAPPER_URL_ENV,
         _API_KEY_FILE_ENV,
         _TOKEN_FILE_ENV,
         _MAX_TOOL_ROUNDS_ENV,
@@ -56,6 +59,10 @@ _KEY_PATTERN: Final[re.Pattern[str]] = re.compile(
 _BASE64_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]{32,}")
 _FQDN_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
+)
+_ORIGIN_HOST_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?"
 )
 _CONFIG_ERROR_MESSAGE: Final[str] = "Runner-only delegate configuration is incomplete or invalid"
 
@@ -80,6 +87,7 @@ class RunnerOnlyConfiguration(BaseModel):
 
     model_alias: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1)
+    snapper_base_url: str = Field(min_length=1)
     api_key_file: str = Field(min_length=1)
     delegate_token_file: str = Field(min_length=1)
     max_tool_rounds: int = Field(ge=1, le=8)
@@ -124,6 +132,43 @@ class RunnerOnlyConfiguration(BaseModel):
         )
         if not valid:
             raise ValueError("invalid endpoint origin")
+        return value.rstrip("/")
+
+    @field_validator("snapper_base_url")
+    @classmethod
+    def _validate_snapper_base_url(cls, value: str) -> str:
+        """Require a credential-free HTTP or HTTPS Snapper origin."""
+        invalid_characters = any(character.isspace() for character in value) or any(
+            delimiter in value for delimiter in ("?", "#")
+        )
+        if value != value.strip() or invalid_characters:
+            raise ValueError("invalid Snapper origin")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("invalid Snapper origin") from error
+        hostname = parsed.hostname
+        valid_hostname = hostname is not None and (
+            ":" in hostname or _ORIGIN_HOST_PATTERN.fullmatch(hostname) is not None
+        )
+        authority_hostname = (
+            f"[{hostname}]" if hostname is not None and ":" in hostname else hostname
+        )
+        canonical_authority = authority_hostname if port is None else f"{authority_hostname}:{port}"
+        valid = (
+            parsed.scheme in {"http", "https"}
+            and valid_hostname
+            and parsed.username is None
+            and parsed.password is None
+            and (port is None or port > 0)
+            and parsed.netloc.lower() == canonical_authority
+            and parsed.path in ("", "/")
+            and parsed.query == ""
+            and parsed.fragment == ""
+        )
+        if not valid:
+            raise ValueError("invalid Snapper origin")
         return value.rstrip("/")
 
     @field_validator("api_key_file")
@@ -183,6 +228,7 @@ def load_runner_configuration(environ: Mapping[str, str]) -> RunnerOnlyConfigura
         payload: dict[str, object] = {
             "model_alias": environ[_MODEL_ALIAS_ENV],
             "base_url": environ[_BASE_URL_ENV],
+            "snapper_base_url": environ[_SNAPPER_URL_ENV],
             "api_key_file": environ[_API_KEY_FILE_ENV],
             "delegate_token_file": environ[_TOKEN_FILE_ENV],
             "max_tool_rounds": _parse_round_count(environ[_MAX_TOOL_ROUNDS_ENV]),
@@ -247,6 +293,7 @@ async def run_pid1(environ: Mapping[str, str] | None = None) -> None:
     runner = DelegateRunner(
         model_alias=configuration.model_alias,
         base_url=configuration.base_url,
+        snapper_base_url=configuration.snapper_base_url,
         api_key_file=configuration.api_key_file,
         delegate_token_file=configuration.delegate_token_file,
         max_tool_rounds=configuration.max_tool_rounds,

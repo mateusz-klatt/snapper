@@ -20,6 +20,7 @@ from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.launcher import is_delegate_process
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
+from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import DelegateProcessParameters
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.cli.app import app
@@ -257,12 +258,14 @@ def test_delegate_runner_registration_is_process_managed() -> None:
     """
     entry: ProcessRegistryEntry = get_registered_processes()["delegate_runner"]
     assert entry.class_ref is ManagedDelegateRunner
+    assert issubclass(entry.class_ref, RegisterableProcess)
     assert entry.parameters_model is DelegateProcessParameters
     assert entry.mode is ProcessModeEnum.PROCESS
     assert entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
     assert entry.role is ProcessRoleEnum.CORE
     assert entry.tags == ("delegate", "runner")
     assert entry.enabled is False
+    assert entry.class_ref.get_default_parameters(object()) == {}
 
 
 def test_delegate_template_parameters_validate_at_spawn_boundary() -> None:
@@ -312,7 +315,12 @@ async def test_delegate_runner_idles_and_stops_cleanly(
     assert runner.get_status() == {
         "state": "stopped",
         "running": False,
+        "ws_connected": False,
         "heartbeat_count": 0,
+        "last_wake_at": None,
+        "consults_processed": 0,
+        "consults_skipped": 0,
+        "quota_degraded": False,
     }
     task = asyncio.create_task(runner.start())
     async with asyncio.timeout(1.0):
