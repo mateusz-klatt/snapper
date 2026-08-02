@@ -203,17 +203,16 @@ services:
     healthcheck:
       disable: true
   snapper-delegate-kimi:
-    image: klattm/snapper:latest
+    image: snapper-delegate:blackbox
     build:
-      context: .
-      target: runtime
+      context: ./integrations/snapper-delegate
     container_name: snapper-delegate-kimi
     profiles:
       - delegate
     entrypoint: ["python", "-m", "snapper_delegate.pid1"]
     command: []
     environment:
-      PYTHONPATH: /app/integrations/snapper-delegate/src
+      PYTHONPATH: /app/src
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONNOUSERSITE: "1"
       PYTHONSAFEPATH: "1"
@@ -255,17 +254,16 @@ services:
     healthcheck:
       disable: true
   snapper-delegate-gemini:
-    image: klattm/snapper:latest
+    image: snapper-delegate:blackbox
     build:
-      context: .
-      target: runtime
+      context: ./integrations/snapper-delegate
     container_name: snapper-delegate-gemini
     profiles:
       - delegate
     entrypoint: ["python", "-m", "snapper_delegate.pid1"]
     command: []
     environment:
-      PYTHONPATH: /app/integrations/snapper-delegate/src
+      PYTHONPATH: /app/src
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONNOUSERSITE: "1"
       PYTHONSAFEPATH: "1"

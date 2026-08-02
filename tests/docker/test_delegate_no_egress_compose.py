@@ -326,13 +326,18 @@ def test_delegate_service_drops_privilege_and_caps_resources() -> None:
 
 
 @pytest.mark.parametrize("profile", _MODEL_PROFILES, ids=("kimi", "gemini"))
-def test_model_delegate_uses_unified_runner_only_image(profile: _ModelProfile) -> None:
-    """Each model runs PID1 directly from the single runtime image."""
+def test_model_delegate_uses_blackbox_image(profile: _ModelProfile) -> None:
+    """Each model runs PID1 from the minimal blackbox image, not the unified one.
+
+    The blackbox image carries no Snapper source, migrations, or seeds, so a
+    compromised model has no backend code to read; its build context is the
+    delegate directory alone.
+    """
     service = _model_service(profile)
     assert service["profiles"] == ["delegate"]
     assert service["container_name"] == f"snapper-delegate-{profile.name}"
-    assert service["image"] == "klattm/snapper:latest"
-    assert service["build"] == {"context": ".", "target": "runtime"}
+    assert service["image"] == "snapper-delegate:blackbox"
+    assert service["build"] == {"context": "./integrations/snapper-delegate"}
     assert service["entrypoint"] == ["python", "-m", "snapper_delegate.pid1"]
     assert service["command"] == []
     assert service["restart"] == "unless-stopped"
@@ -376,6 +381,7 @@ def test_model_delegate_environment_pins_only_reference_configuration(
     assert environment["SNAPPER_DELEGATE_API_KEY_FILE"] == "/run/secrets/delegate/api_key"
     assert environment["SNAPPER_DELEGATE_TOKEN_FILE"] == ("/run/secrets/delegate/delegate_token")
     assert environment["SNAPPER_LOG_FILE"] == "/app/data/log/delegate/model/delegate.log"
+    assert environment["PYTHONPATH"] == "/app/src"
     serialized = repr(environment).upper()
     assert "MASTER_PASSWORD" not in serialized
     assert "HTTP_PROXY" not in serialized
