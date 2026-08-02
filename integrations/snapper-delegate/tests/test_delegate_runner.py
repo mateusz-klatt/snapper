@@ -265,7 +265,11 @@ def test_delegate_runner_registration_is_process_managed() -> None:
     assert entry.role is ProcessRoleEnum.CORE
     assert entry.tags == ("delegate", "runner")
     assert entry.enabled is False
-    assert entry.class_ref.get_default_parameters(object()) == {}
+    settings = AppSettings(
+        BootstrapSettingsLoader(DB_URL="sqlite+aiosqlite:///:memory:"),
+        settings_service=None,
+    )
+    assert entry.class_ref.get_default_parameters(settings) == {}
 
 
 def test_delegate_template_parameters_validate_at_spawn_boundary() -> None:

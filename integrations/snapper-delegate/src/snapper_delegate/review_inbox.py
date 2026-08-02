@@ -78,7 +78,14 @@ class ReviewInbox:
         self._closed = False
 
     async def offer(self, context: ReviewConsultContext) -> InboxOfferOutcome:
-        """Accept, replace, hold, or reject one review request without blocking."""
+        """Accept, replace, hold, or reject one review request without blocking.
+
+        Args:
+            context: Immutable review request proposed for local processing.
+
+        Returns:
+            The queue, hold, replacement, refusal, or closure outcome.
+        """
         async with self._condition:
             if self._closed:
                 return InboxOfferOutcome.CLOSED
@@ -106,7 +113,15 @@ class ReviewInbox:
         review_public_id: str,
         dispatch_version: int,
     ) -> InboxOfferOutcome:
-        """Cancel unresolved work when an equal or newer decision is acknowledged."""
+        """Cancel unresolved work when an equal or newer decision is acknowledged.
+
+        Args:
+            review_public_id: Public identifier of the resolved review.
+            dispatch_version: Version observed in the decision acknowledgement.
+
+        Returns:
+            The cancellation, ignore, or closure outcome.
+        """
         async with self._condition:
             if self._closed:
                 return InboxOfferOutcome.CLOSED
@@ -125,7 +140,11 @@ class ReviewInbox:
             return InboxOfferOutcome.CANCELLED
 
     async def get(self) -> ReviewConsultContext | None:
-        """Wait for the next eligible context or return ``None`` after closure."""
+        """Wait for the next eligible context or return ``None`` after closure.
+
+        Returns:
+            The next ready consultation context, or ``None`` once closed.
+        """
         async with self._condition:
             while not self._closed and not self._ready:
                 await self._condition.wait()

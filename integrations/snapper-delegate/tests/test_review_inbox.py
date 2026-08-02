@@ -99,14 +99,24 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
 
 
 def test_capacity_must_be_positive() -> None:
-    """A zero-sized inbox is rejected before asynchronous use."""
+    """A zero-sized inbox is rejected before asynchronous use.
+
+    Given an inbox configuration with no available slot,
+    When the inbox is constructed,
+    Then construction rejects the invalid capacity.
+    """
     with pytest.raises(ValueError, match="capacity must be positive"):
         ReviewInbox("delegate-own", 0)
 
 
 @pytest.mark.asyncio
 async def test_selected_requests_deduplicate_and_acknowledge_by_highest_version() -> None:
-    """Selected work queues immediately and retains a persistent version watermark."""
+    """Selected work queues immediately and retains a persistent version watermark.
+
+    Given selected requests with duplicate, older, and newer dispatch versions,
+    When requests are offered, consumed, acknowledged, and the inbox is closed,
+    Then only valid new work queues and its high-water marks remain authoritative.
+    """
     inbox = ReviewInbox("delegate-own", 2, clock=lambda: _NOW)
     first = _context().model_copy(update={"dispatch_version": 2})
     older = first.model_copy(update={"dispatch_version": 1})
@@ -133,7 +143,12 @@ async def test_selected_requests_deduplicate_and_acknowledge_by_highest_version(
 
 @pytest.mark.asyncio
 async def test_ack_tombstones_precede_requests_and_watermarks_stay_bounded() -> None:
-    """Early acknowledgements suppress later wakes within fixed dedup memory."""
+    """Early acknowledgements suppress later wakes within fixed dedup memory.
+
+    Given acknowledgements that arrive before matching requests and a bounded cache,
+    When further acknowledgement and request versions advance the watermarks,
+    Then tombstoned work stays suppressed and only the newest keys remain retained.
+    """
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW)
     inbox._dedup_capacity = 2
     first = _context()
@@ -156,7 +171,12 @@ async def test_ack_tombstones_precede_requests_and_watermarks_stay_bounded() -> 
 
 @pytest.mark.asyncio
 async def test_default_time_seams_queue_selected_future_work() -> None:
-    """Production clock and sleeper defaults remain usable without injection."""
+    """Production clock and sleeper defaults remain usable without injection.
+
+    Given selected work with a future aware deadline and default time seams,
+    When the request is offered and consumed,
+    Then it queues immediately and closes cleanly.
+    """
     inbox = ReviewInbox("delegate-own", 1)
     context = _context().model_copy(update={"deadline": datetime.now(UTC) + timedelta(minutes=1)})
     assert await inbox.offer(context) is InboxOfferOutcome.QUEUED
@@ -166,7 +186,12 @@ async def test_default_time_seams_queue_selected_future_work() -> None:
 
 @pytest.mark.asyncio
 async def test_capacity_counts_held_work_without_poisoning_rejected_versions() -> None:
-    """Held entries consume capacity while rejected requests remain retryable."""
+    """Held entries consume capacity while rejected requests remain retryable.
+
+    Given one held foreign request fills the inbox,
+    When another request is refused, the held work is cancelled, and it is retried,
+    Then the rejected version remains eligible and queues after capacity is released.
+    """
     sleeper = _BlockingSleeper()
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW, sleeper=sleeper)
     held = _context().model_copy(update={"selected_delegate_public_id": "delegate-foreign"})
@@ -184,7 +209,12 @@ async def test_capacity_counts_held_work_without_poisoning_rejected_versions() -
 
 @pytest.mark.asyncio
 async def test_newer_versions_replace_held_ready_and_expired_entries() -> None:
-    """Every accepted newer version replaces the prior active representation."""
+    """Every accepted newer version replaces the prior active representation.
+
+    Given one review progresses through held, ready, foreign, and expired versions,
+    When each strictly newer dispatch version is offered,
+    Then it replaces the previous entry while older versions remain duplicates.
+    """
     sleeper = _BlockingSleeper()
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW, sleeper=sleeper)
     foreign = _context().model_copy(update={"selected_delegate_public_id": "delegate-foreign"})
@@ -208,7 +238,12 @@ async def test_newer_versions_replace_held_ready_and_expired_entries() -> None:
 
 @pytest.mark.asyncio
 async def test_foreign_request_queues_after_fanout_and_reschedules_early_timer() -> None:
-    """Foreign work becomes available only after its injected fanout clock passes."""
+    """Foreign work becomes available only after its injected fanout clock passes.
+
+    Given a foreign request and a release sleeper that returns early once,
+    When the inbox waits for fanout eligibility,
+    Then it reschedules the remaining delay and releases the request only afterward.
+    """
     clock = _MutableClock()
     sleeper = _AdvancingSleeper(clock, early_returns=1)
     inbox = ReviewInbox("delegate-own", 1, clock=clock, sleeper=sleeper)
@@ -222,7 +257,12 @@ async def test_foreign_request_queues_after_fanout_and_reschedules_early_timer()
 
 @pytest.mark.asyncio
 async def test_foreign_request_already_past_fanout_queues_immediately() -> None:
-    """A foreign wake received after fanout does not incur another hold."""
+    """A foreign wake received after fanout does not incur another hold.
+
+    Given a foreign request whose fanout boundary has already arrived,
+    When the request is offered,
+    Then it queues immediately without a release timer.
+    """
     context = _context().model_copy(
         update={
             "selected_delegate_public_id": "delegate-foreign",
@@ -247,7 +287,12 @@ async def test_foreign_request_already_past_fanout_queues_immediately() -> None:
 async def test_unusable_fanout_expires_and_releases_capacity(
     fanout_after: datetime | None,
 ) -> None:
-    """Missing, naive, and deadline-equal fanout times never expose foreign work."""
+    """Missing, naive, and deadline-equal fanout times never expose foreign work.
+
+    Given foreign work with a missing, naive, or unusably late fanout boundary,
+    When its hold is evaluated against the deadline,
+    Then the work expires unseen and releases capacity for a valid replacement.
+    """
     clock = _MutableClock()
     sleeper = _AdvancingSleeper(clock)
     inbox = ReviewInbox("delegate-own", 1, clock=clock, sleeper=sleeper)
@@ -273,7 +318,12 @@ async def test_unusable_fanout_expires_and_releases_capacity(
 
 @pytest.mark.asyncio
 async def test_expired_and_naive_requests_fail_closed() -> None:
-    """Elapsed or timezone-naive request times are skipped without consuming capacity."""
+    """Elapsed or timezone-naive request times are skipped without consuming capacity.
+
+    Given elapsed deadlines or a timezone-naive request or clock,
+    When the inbox evaluates each request,
+    Then every ambiguous or expired request fails closed as expired.
+    """
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW)
     expired = _context().model_copy(update={"deadline": _NOW})
     naive = _context().model_copy(
@@ -297,7 +347,12 @@ async def test_expired_and_naive_requests_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_close_cancels_holds_discards_ready_and_wakes_getters() -> None:
-    """Closure promptly cancels all pending forms and unblocks empty consumers."""
+    """Closure promptly cancels all pending forms and unblocks empty consumers.
+
+    Given held work, ready work, and a consumer blocked on an empty inbox,
+    When each inbox is closed,
+    Then timers are cancelled, queued work is discarded, and consumers receive closure.
+    """
     sleeper = _BlockingSleeper()
     inbox = ReviewInbox("delegate-own", 2, clock=lambda: _NOW, sleeper=sleeper)
     held = _context().model_copy(update={"selected_delegate_public_id": "delegate-foreign"})
@@ -319,7 +374,12 @@ async def test_close_cancels_holds_discards_ready_and_wakes_getters() -> None:
 
 @pytest.mark.asyncio
 async def test_release_lookup_ignores_missing_closed_mismatched_and_ready_entries() -> None:
-    """Stale release plans cannot mutate a different active inbox entry."""
+    """Stale release plans cannot mutate a different active inbox entry.
+
+    Given release plans for missing, closed, ready, or mismatched-version entries,
+    When release lookup and delayed release run,
+    Then only the exact currently held entry can be selected for mutation.
+    """
 
     async def _immediate_sleep(seconds: float) -> None:
         """Yield once without waiting for the requested delay."""
@@ -356,7 +416,12 @@ async def test_release_lookup_ignores_missing_closed_mismatched_and_ready_entrie
 
 
 def test_time_helpers_fail_closed_and_cover_timezone_boundaries() -> None:
-    """Clock helpers reject naive comparisons and honor aware boundaries."""
+    """Clock helpers reject naive comparisons and honor aware boundaries.
+
+    Given aware and naive instants at past, equal, and future boundaries,
+    When expiry, fanout, and ordering helpers compare them,
+    Then ambiguous comparisons fail closed and aware comparisons honor boundaries.
+    """
     naive = datetime(2026, 8, 2, 12)
     future = _NOW + timedelta(seconds=1)
 

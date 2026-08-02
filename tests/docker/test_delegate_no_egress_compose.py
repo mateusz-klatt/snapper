@@ -115,6 +115,8 @@ def test_delegate_service_environment_is_minimal_and_reference_only() -> None:
         "PYTHONUNBUFFERED",
         "SNAPPER_DELEGATE_MODEL_ALIAS",
         "SNAPPER_DELEGATE_BASE_URL",
+        "SNAPPER_DELEGATE_ENDPOINT_PATH",
+        "SNAPPER_DELEGATE_SNAPPER_URL",
         "SNAPPER_DELEGATE_API_KEY_FILE",
         "SNAPPER_DELEGATE_TOKEN_FILE",
         "SNAPPER_DELEGATE_MAX_TOOL_ROUNDS",

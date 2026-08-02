@@ -170,7 +170,11 @@ class SnapperControlClient:
         await self._http_client.aclose()
 
     def read_access_token(self) -> SecretStr:
-        """Read the current delegate JWT for one authenticated use."""
+        """Read the current delegate JWT for one authenticated use.
+
+        Returns:
+            The nonempty token with secret-safe representation.
+        """
         try:
             value = self._delegate_token_file.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError) as error:
@@ -180,7 +184,11 @@ class SnapperControlClient:
         return SecretStr(value)
 
     async def mint_ws_token(self) -> WsToken:
-        """Mint a fresh one-shot credential for a WebSocket authentication."""
+        """Mint a fresh one-shot credential for a WebSocket authentication.
+
+        Returns:
+            The validated one-shot token and its expiry timestamp.
+        """
         response = await self._request(_RequestSpec("POST", "api/auth/ws_token"))
         try:
             envelope = _WsTokenEnvelope.model_validate_json(response.content)
@@ -192,7 +200,11 @@ class SnapperControlClient:
         )
 
     async def fetch_delegate_identity(self) -> str:
-        """Return the authenticated principal's delegate public identifier."""
+        """Return the authenticated principal's delegate public identifier.
+
+        Returns:
+            The validated nonempty delegate public identifier.
+        """
         response = await self._request(_RequestSpec("GET", "api/auth/me"))
         try:
             envelope = _IdentityEnvelope.model_validate_json(response.content)
@@ -204,7 +216,14 @@ class SnapperControlClient:
         return delegate_public_id
 
     async def list_pending_reviews(self, limit: int = 100) -> list[PendingReview]:
-        """Return the selected delegate's bounded fanout-eligible snapshot."""
+        """Return the selected delegate's bounded fanout-eligible snapshot.
+
+        Args:
+            limit: Maximum number of pending reviews requested from the server.
+
+        Returns:
+            The validated pending-review snapshot.
+        """
         response = await self._request(
             _RequestSpec("GET", "api/ai-reviews/pending", {"limit": limit})
         )

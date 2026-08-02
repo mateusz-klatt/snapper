@@ -403,7 +403,7 @@ def _runner(runtime: RunnerRuntime, configured: bool = True) -> DelegateRunner:
     return DelegateRunner(
         model_alias="review-model",
         base_url="https://model.invalid",
-        endpoint_path="/v1beta/openai/chat/completions",
+        endpoint_path="/v1beta/compat/chat/completions",
         api_key_file="/missing/model-key",
         delegate_token_file="/missing/delegate-token",
         max_tool_rounds=3,
@@ -425,7 +425,12 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
 async def test_configured_runner_sweeps_wakes_submits_and_routes_foreign_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Configured startup and reconnect work reaches bounded MCP submission."""
+    """Configured startup and reconnect work reaches bounded MCP submission.
+
+    Given a configured runner with pending, selected, foreign, and acknowledged work,
+    When startup sweep and WebSocket wake turns execute before a controlled stop,
+    Then eligible reviews submit once and lifecycle state and counters remain coherent.
+    """
     first = _pending("review-startup")
     ignored = first.model_copy(update={"review_public_id": "review-ignored", "status": "done"})
     reconnect = _pending("review-reconnect").model_copy(
@@ -493,7 +498,12 @@ async def test_configured_runner_sweeps_wakes_submits_and_routes_foreign_ack(
 
 @pytest.mark.asyncio
 async def test_identity_retries_fail_closed_and_stops_without_fetching() -> None:
-    """Identity errors and blanks retry while an existing stop returns inaction."""
+    """Identity errors and blanks retry while an existing stop returns inaction.
+
+    Given scripted identity failures, blank identities, and a later valid identity,
+    When resolution retries with bounded backoff or observes an existing stop,
+    Then transient failures stay local and stopped resolution performs no fetch.
+    """
     unavailable = ControlPlaneError(ControlPlaneErrorKind.TRANSPORT)
     control = _FakeControlClient([unavailable, "  ", " delegate-own "])
     runtime = RunnerRuntime(
@@ -532,7 +542,12 @@ async def test_identity_retries_fail_closed_and_stops_without_fetching() -> None
 async def test_blocked_identity_is_cancelled_by_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stop cancels an indefinitely blocked identity fetch before wake startup."""
+    """Stop cancels an indefinitely blocked identity fetch before wake startup.
+
+    Given identity resolution is blocked indefinitely,
+    When runner shutdown is requested,
+    Then the identity task is cancelled and wake processing never starts.
+    """
     control = _BlockingIdentityControlClient()
     wake = _FakeWakeClient()
     runner = _runner(
@@ -558,7 +573,12 @@ async def test_blocked_identity_is_cancelled_by_stop(
 
 @pytest.mark.asyncio
 async def test_identity_fetch_external_cancellation_propagates() -> None:
-    """Task ownership cancellation remains distinct from lifecycle shutdown."""
+    """Task ownership cancellation remains distinct from lifecycle shutdown.
+
+    Given identity resolution is awaiting an externally owned task,
+    When that task is cancelled without setting the runner stop event,
+    Then cancellation propagates instead of being mistaken for normal shutdown.
+    """
     control = _BlockingIdentityControlClient()
     runner = _runner(RunnerRuntime(control_client=control))
     task = asyncio.create_task(runner._fetch_identity_or_stop())
@@ -573,7 +593,12 @@ async def test_identity_fetch_external_cancellation_propagates() -> None:
 
 @pytest.mark.asyncio
 async def test_identity_stop_wins_when_fetch_completes_concurrently() -> None:
-    """A set stop event wins even when identity completion occurs in the same turn."""
+    """A set stop event wins even when identity completion occurs in the same turn.
+
+    Given identity fetch completion races with an already signalled stop,
+    When the resolution turn observes both outcomes,
+    Then shutdown wins and no delegate identity is admitted.
+    """
 
     class _StoppingControlClient(_FakeControlClient):
         """Set lifecycle stop immediately before returning identity."""
@@ -592,7 +617,12 @@ async def test_identity_stop_wins_when_fetch_completes_concurrently() -> None:
 async def test_blocked_startup_sweep_runs_with_wake_and_is_cancelled_on_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup catch-up cannot delay connection and is drained during shutdown."""
+    """Startup catch-up cannot delay connection and is drained during shutdown.
+
+    Given the initial pending-review sweep blocks indefinitely,
+    When wake processing starts and the runner is stopped,
+    Then the connection remains live and the sweep is cancelled and drained.
+    """
     control = _BlockingSweepControlClient()
     wake = _FakeWakeClient()
     runner = _runner(
@@ -620,7 +650,12 @@ async def test_blocked_startup_sweep_runs_with_wake_and_is_cancelled_on_stop(
 
 @pytest.mark.asyncio
 async def test_wake_returns_and_errors_are_retried_until_stop() -> None:
-    """Unexpected wake returns and exceptions stay within the retry loop."""
+    """Unexpected wake returns and exceptions stay within the retry loop.
+
+    Given wake runs that return unexpectedly or raise recoverable exceptions,
+    When the configured runner supervises successive wake turns,
+    Then it retries both outcomes until an explicit stop terminates the loop.
+    """
     actions: list[_WakeAction] = []
 
     async def _return(callbacks: WakeCallbacks) -> None:
@@ -668,7 +703,12 @@ async def _noop_frame(frame: WakeFrame) -> None:
 
 @pytest.mark.asyncio
 async def test_pending_sweep_errors_filters_and_normalizes_sparse_rows() -> None:
-    """Sweep failures stay local and non-pending rows never enter the inbox."""
+    """Sweep failures stay local and non-pending rows never enter the inbox.
+
+    Given a failed sweep followed by sparse pending and non-pending review rows,
+    When startup catch-up normalizes and offers the snapshot,
+    Then failures stay local and only valid pending contexts reach the inbox.
+    """
     error = ControlPlaneError(
         ControlPlaneErrorKind.HTTP_STATUS,
         status_code=422,
@@ -697,7 +737,12 @@ async def test_pending_sweep_errors_filters_and_normalizes_sparse_rows() -> None
 
 @pytest.mark.asyncio
 async def test_offer_context_counts_expiry_capacity_and_closed_drops() -> None:
-    """Only terminal local inbox drops increment the skipped counter."""
+    """Only terminal local inbox drops increment the skipped counter.
+
+    Given contexts producing expiry, capacity, closure, and nonterminal inbox outcomes,
+    When the runner offers each context,
+    Then only locally terminal drops increment the skipped consultation counter.
+    """
     runner = _runner(RunnerRuntime(clock=lambda: _NOW))
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW)
     runner._inbox = inbox
@@ -719,7 +764,12 @@ async def test_offer_context_counts_expiry_capacity_and_closed_drops() -> None:
 
 @pytest.mark.asyncio
 async def test_wake_callbacks_cover_missing_inbox_ack_and_status_transitions() -> None:
-    """Callbacks update status while acknowledgements cancel held foreign work."""
+    """Callbacks update status while acknowledgements cancel held foreign work.
+
+    Given connection callbacks, a missing inbox, and held foreign review work,
+    When status events, wakes, heartbeats, and decision acknowledgements arrive,
+    Then lifecycle state updates and the matching held work is cancelled safely.
+    """
     control = _FakeControlClient()
     runner = _runner(RunnerRuntime(control_client=control, clock=lambda: _NOW))
 
@@ -753,7 +803,12 @@ async def test_wake_callbacks_cover_missing_inbox_ack_and_status_transitions() -
 
 @pytest.mark.asyncio
 async def test_consult_outcomes_quota_cooldown_exception_and_recovery() -> None:
-    """Consult outcomes update counters while quota cooldown preserves liveness."""
+    """Consult outcomes update counters while quota cooldown preserves liveness.
+
+    Given submitted, skipped, quota-exhausted, exceptional, and recovered consult turns,
+    When contexts are processed across the configured quota cooldown,
+    Then counters and degraded state advance without stopping later consultations.
+    """
     monotonic = _MutableMonotonic()
     runner = _runner(RunnerRuntime(monotonic=monotonic, clock=lambda: _NOW))
     scripted = _ScriptedConsultRunner(
@@ -788,7 +843,12 @@ async def test_consult_outcomes_quota_cooldown_exception_and_recovery() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_chat_key_skips_consult_without_blocking_liveness() -> None:
-    """A missing model credential yields a counted local skip."""
+    """A missing model credential yields a counted local skip.
+
+    Given consultation work but no readable chat-completions credential,
+    When the runner tries to initialize the consult path,
+    Then it records a local skip while preserving runner liveness.
+    """
 
     def _missing_key(
         base_url: str,
@@ -814,7 +874,12 @@ async def test_missing_chat_key_skips_consult_without_blocking_liveness() -> Non
 
 @pytest.mark.asyncio
 async def test_consult_worker_returns_on_closed_inbox() -> None:
-    """Closing an empty inbox cleanly terminates its consult worker."""
+    """Closing an empty inbox cleanly terminates its consult worker.
+
+    Given a consult worker blocked on an empty inbox,
+    When the inbox is closed,
+    Then the worker returns cleanly without fabricating work or failures.
+    """
     runner = _runner(RunnerRuntime())
     inbox = ReviewInbox("delegate-own", 1, clock=lambda: _NOW)
     await inbox.close()
@@ -828,7 +893,12 @@ async def test_consult_worker_returns_on_closed_inbox() -> None:
 
 @pytest.mark.asyncio
 async def test_consult_worker_contains_factory_bug_and_processes_later_context() -> None:
-    """One unexpected context failure cannot terminate the serial consult worker."""
+    """One unexpected context failure cannot terminate the serial consult worker.
+
+    Given one context triggers an unexpected consult-factory failure before valid work,
+    When the serial worker consumes both contexts,
+    Then it contains the first failure and still processes the later context.
+    """
     attempts = 0
     chat = _SubmittingChatClient()
 
@@ -867,7 +937,12 @@ async def test_consult_worker_contains_factory_bug_and_processes_later_context()
 
 @pytest.mark.asyncio
 async def test_signal_size_unicode_failure_is_log_safe() -> None:
-    """Malformed Unicode cannot prevent an otherwise successful consultation."""
+    """Malformed Unicode cannot prevent an otherwise successful consultation.
+
+    Given a signal envelope containing malformed Unicode for size logging,
+    When an otherwise valid consultation is processed,
+    Then logging remains safe and the successful outcome is still counted.
+    """
     runner = _runner(RunnerRuntime(clock=lambda: _NOW))
     scripted = _ScriptedConsultRunner([ConsultResult(ConsultOutcome.SUBMITTED)])
     runner._consult_runner = cast(BoundedConsultRunner, scripted)
@@ -884,7 +959,12 @@ async def test_signal_size_unicode_failure_is_log_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_and_shutdown_contain_all_client_close_failures() -> None:
-    """Wake, model, and control close failures do not mask later cleanup."""
+    """Wake, model, and control close failures do not mask later cleanup.
+
+    Given wake, model, and control clients whose close operations fail,
+    When stop and shutdown traverse every owned resource,
+    Then each failure is contained and all later cleanup is still attempted.
+    """
     control = _FakeControlClient(close_error=True)
     wake = _FakeWakeClient(close_error=True)
     chat = _SubmittingChatClient(close_error=True)
@@ -911,7 +991,12 @@ async def test_stop_and_shutdown_contain_all_client_close_failures() -> None:
 
 @pytest.mark.asyncio
 async def test_required_client_guards_and_initialized_values() -> None:
-    """Required-client accessors expose missing initialization as programming errors."""
+    """Required-client accessors expose missing initialization as programming errors.
+
+    Given a runner before and after its injected clients are initialized,
+    When required-client guards and accessors are evaluated,
+    Then missing dependencies fail explicitly and configured values remain exact.
+    """
     empty = _runner(RunnerRuntime())
     with pytest.raises(RuntimeError, match="Control client"):
         empty._required_control()
@@ -935,7 +1020,12 @@ async def test_required_client_guards_and_initialized_values() -> None:
 async def test_double_start_is_rejected_and_idle_runner_stops_promptly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live runner rejects duplicate ownership and remains promptly stoppable."""
+    """A live runner rejects duplicate ownership and remains promptly stoppable.
+
+    Given one idle runner task already owns the lifecycle,
+    When a second start is attempted and stop is requested,
+    Then duplicate ownership is rejected and the original task stops promptly.
+    """
     monkeypatch.setattr(DelegateRunner, "_install_stop_signal_handlers", lambda self: ())
     monkeypatch.setattr(runner_module, "_HEARTBEAT_INTERVAL_SECONDS", 600.0)
     runner = _runner(RunnerRuntime(), configured=False)
@@ -954,7 +1044,12 @@ async def test_double_start_is_rejected_and_idle_runner_stops_promptly(
 async def test_idle_timeout_and_signal_stop_close_active_wake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idle timeouts heartbeat again while signal stop closes active wake state."""
+    """Idle timeouts heartbeat again while signal stop closes active wake state.
+
+    Given idle heartbeat waits and an installed termination callback with active wake,
+    When timeouts recur and the signal callback requests shutdown,
+    Then heartbeats continue until active wake state is closed and stopped.
+    """
     runner = _runner(RunnerRuntime(), configured=False)
     waits = 0
 
@@ -996,7 +1091,12 @@ async def test_idle_timeout_and_signal_stop_close_active_wake(
 async def test_wait_backoff_signal_and_value_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backoff, wait, signal, clock, context, and size helpers cover boundaries."""
+    """Backoff, wait, signal, clock, context, and size helpers cover boundaries.
+
+    Given boundary values for retry timing, stop waits, signals, clocks, and payloads,
+    When the runner's deterministic helper functions evaluate them,
+    Then each result is bounded, normalized, and fail-closed where required.
+    """
     runner = _runner(RunnerRuntime())
     await runner._wait_for_stop(0.0)
     runner._stop_event.set()
@@ -1036,7 +1136,12 @@ async def test_wait_backoff_signal_and_value_helpers(
 def test_default_client_initialization_and_chat_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing clients are built once through production constructor seams."""
+    """Missing clients are built once through production constructor seams.
+
+    Given a configured runner without injected production clients,
+    When client initialization and the default chat factory are invoked repeatedly,
+    Then each dependency is constructed once with the expected production arguments.
+    """
     control = _FakeControlClient()
     wake = _FakeWakeClient()
     bridge = _FakeMCPBridge()
@@ -1094,7 +1199,7 @@ def test_default_client_initialization_and_chat_factory(
         (
             "https://model.invalid",
             "/missing/model-key",
-            "/v1beta/openai/chat/completions",
+            "/v1beta/compat/chat/completions",
         ),
     ]
 
@@ -1102,7 +1207,12 @@ def test_default_client_initialization_and_chat_factory(
 def test_signal_handler_runtime_error_is_fail_soft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported loop signal registration returns an empty handler set."""
+    """Unsupported loop signal registration returns an empty handler set.
+
+    Given an event loop that rejects signal-handler registration,
+    When the runner installs its termination handlers,
+    Then the runtime error is contained and no handlers are reported as installed.
+    """
 
     class _SignalLoop:
         """Reject managed signal registration."""
@@ -1124,7 +1234,12 @@ def test_signal_handler_runtime_error_is_fail_soft(
 def test_signal_handlers_install_and_remove(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Supported loops install and remove the managed termination handler."""
+    """Supported loops install and remove the managed termination handler.
+
+    Given an event loop that supports managed termination signals,
+    When the runner installs and later removes its handlers,
+    Then each supported signal is registered and removed through the loop API.
+    """
     callbacks: dict[signal.Signals, Callable[[], None]] = {}
     removed: list[signal.Signals] = []
 

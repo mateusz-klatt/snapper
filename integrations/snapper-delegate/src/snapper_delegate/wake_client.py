@@ -43,11 +43,19 @@ class WakeCredentials(Protocol):
     """Supply rotating credentials for WebSocket authentication."""
 
     async def mint_ws_token(self) -> WsToken:
-        """Mint one fresh single-use WebSocket credential."""
+        """Mint one fresh single-use WebSocket credential.
+
+        Returns:
+            The one-shot token and its expiry timestamp.
+        """
         ...
 
     def read_access_token(self) -> SecretStr:
-        """Read the current access bearer for one upgrade request."""
+        """Read the current access bearer for one upgrade request.
+
+        Returns:
+            The current bearer token with secret-safe representation.
+        """
         ...
 
 
@@ -55,15 +63,28 @@ class WakeSocket(Protocol):
     """Narrow asynchronous WebSocket surface used by one session."""
 
     async def send(self, message: str) -> None:
-        """Send one encoded client frame."""
+        """Send one encoded client frame.
+
+        Args:
+            message: Serialized text frame to transmit.
+        """
         ...
 
     async def recv(self) -> str | bytes:
-        """Receive one encoded server frame."""
+        """Receive one encoded server frame.
+
+        Returns:
+            The next text or binary frame from the server.
+        """
         ...
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        """Close the socket gracefully."""
+        """Close the socket gracefully.
+
+        Args:
+            code: WebSocket close status code.
+            reason: Public close reason sent to the peer.
+        """
         ...
 
 
@@ -188,7 +209,11 @@ class EnvelopeMinter:
         self._sequence_id = 0
 
     def next(self) -> JsonObject:
-        """Return a fresh strict envelope for one client-to-server frame."""
+        """Return a fresh strict envelope for one client-to-server frame.
+
+        Returns:
+            New provenance with a stable session and incremented sequence.
+        """
         self._sequence_id += 1
         return {
             "session_id": self._session_id,
@@ -204,7 +229,14 @@ class WakeSessionError(RuntimeError):
 
 
 async def default_wake_connect(request: WakeConnectRequest) -> WakeSocket:
-    """Open one production WebSocket without implicit proxy or protocol pings."""
+    """Open one production WebSocket without implicit proxy or protocol pings.
+
+    Args:
+        request: Authenticated URL and headers for the connection upgrade.
+
+    Returns:
+        The connected asynchronous WebSocket.
+    """
     return await connect(
         request.url,
         additional_headers=request.additional_headers,
@@ -242,7 +274,11 @@ class WakeClient:
         self._running = False
 
     async def run(self, callbacks: WakeCallbacks) -> None:
-        """Reconnect until a clean close while containing session failures."""
+        """Reconnect until a clean close while containing session failures.
+
+        Args:
+            callbacks: Nonblocking lifecycle and frame callbacks.
+        """
         if self._running:
             raise RuntimeError("Wake client is already running")
         self._running = True

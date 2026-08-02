@@ -19,14 +19,5 @@ from snapper_delegate.runner import DelegateRunner
     enabled=False,
     mode=ProcessModeEnum.PROCESS,
 )
-class ManagedDelegateRunner(DelegateRunner):
+class ManagedDelegateRunner(DelegateRunner, RegisterableProcess):
     """Expose the consult delegate through Snapper's existing process registry."""
-
-    @staticmethod
-    def get_default_parameters(settings: object) -> dict[str, object]:
-        """Return no unsafe implicit defaults for a managed delegate template."""
-        del settings
-        return {}
-
-
-RegisterableProcess.register(ManagedDelegateRunner)

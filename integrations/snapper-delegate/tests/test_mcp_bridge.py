@@ -21,7 +21,7 @@ from snapper_delegate.mcp_bridge import MCPToolCallFailure
 from snapper_delegate.mcp_bridge import MCPToolCallSuccess
 from snapper_delegate.mcp_bridge import MCPToolCatalogFailure
 from snapper_delegate.mcp_bridge import MCPToolCatalogSuccess
-from snapper_delegate.mcp_bridge import sanitize_openai_schema
+from snapper_delegate.mcp_bridge import sanitize_chat_tool_schema
 
 type RawCallResult = types.CallToolResult | types.InputRequiredResult | types.Result
 
@@ -437,7 +437,12 @@ def _assert_gemini_schema_subset(value: JsonValue) -> None:
 
 
 def test_real_tool_schema_fixture_covers_current_catalog() -> None:
-    """The golden catalog names pin every current Snapper MCP tool schema."""
+    """The golden catalog names pin every current Snapper MCP tool schema.
+
+    Given: Captured input schemas for the current Snapper MCP catalog,
+    When: The fixture names are compared with the expected tool inventory,
+    Then: Every tool with an input schema is represented exactly once.
+    """
     assert {name for name, schema in _REAL_TOOL_SCHEMAS if schema} == {
         "cancel_order",
         "get_ai_review_aftermath",
@@ -461,12 +466,17 @@ def test_real_tool_schema_fixture_covers_current_catalog() -> None:
     [pytest.param(schema, id=name) for name, schema in _REAL_TOOL_SCHEMAS],
 )
 def test_real_tool_schemas_sanitize_to_gemini_subset(schema: JsonObject) -> None:
-    """Every current golden MCP input schema remains Gemini-compatible."""
-    _assert_gemini_schema_subset(sanitize_openai_schema(schema))
+    """Every current golden MCP input schema remains Gemini-compatible.
+
+    Given: One captured input schema from the current Snapper MCP catalog,
+    When: The schema is sanitized for a chat-completions tool definition,
+    Then: No key forbidden by the supported Gemini subset remains.
+    """
+    _assert_gemini_schema_subset(sanitize_chat_tool_schema(schema))
 
 
-def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
-    """OpenAI function schemas omit metadata at every nested schema level.
+def test_chat_tool_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
+    """Chat-completions tool schemas omit metadata at every nested schema level.
 
     Given: A FastMCP schema with nullable fields, arrays, and retained unions,
     When: The schema is sanitized for a chat-completions tool definition,
@@ -495,7 +505,7 @@ def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
         },
     }
 
-    sanitized = sanitize_openai_schema(schema)
+    sanitized = sanitize_chat_tool_schema(schema)
 
     assert sanitized == {
         "type": "object",
@@ -514,8 +524,13 @@ def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
     assert schema["title"] == "SubmitDecision"
 
 
-def test_schema_sanitizer_inlines_definitions_and_preserves_ref_siblings() -> None:
-    """Local definition references inline after recursive sanitization."""
+def test_chat_tool_schema_sanitizer_inlines_definitions_and_ref_siblings() -> None:
+    """Local definition references inline after recursive sanitization.
+
+    Given: A local definition reference with a sibling description,
+    When: The chat-tool schema sanitizer resolves the reference,
+    Then: The sanitized definition and sibling metadata are both retained.
+    """
     schema: JsonObject = {
         "$defs": {
             "Filter": {
@@ -537,7 +552,7 @@ def test_schema_sanitizer_inlines_definitions_and_preserves_ref_siblings() -> No
         "type": "object",
     }
 
-    assert sanitize_openai_schema(schema) == {
+    assert sanitize_chat_tool_schema(schema) == {
         "properties": {
             "filter": {
                 "properties": {"symbol": {"type": "string"}},
@@ -550,8 +565,13 @@ def test_schema_sanitizer_inlines_definitions_and_preserves_ref_siblings() -> No
     }
 
 
-def test_schema_sanitizer_drops_additional_properties_at_every_level() -> None:
-    """Gemini-incompatible additional-properties declarations are omitted."""
+def test_chat_tool_schema_sanitizer_drops_additional_properties() -> None:
+    """Gemini-incompatible additional-properties declarations are omitted.
+
+    Given: Nested schemas that declare additional-properties behavior,
+    When: The schemas are sanitized for a chat-completions tool definition,
+    Then: Every additional-properties declaration is removed recursively.
+    """
     schema: JsonObject = {
         "additionalProperties": False,
         "properties": {
@@ -563,14 +583,19 @@ def test_schema_sanitizer_drops_additional_properties_at_every_level() -> None:
         "type": "object",
     }
 
-    assert sanitize_openai_schema(schema) == {
+    assert sanitize_chat_tool_schema(schema) == {
         "properties": {"metadata": {"type": "object"}},
         "type": "object",
     }
 
 
-def test_schema_sanitizer_inlines_reference_inside_array_items() -> None:
-    """Definition references nested in array items inline recursively."""
+def test_chat_tool_schema_sanitizer_inlines_reference_inside_array_items() -> None:
+    """Definition references nested in array items inline recursively.
+
+    Given: An array whose item schema references a local definition,
+    When: The chat-tool schema sanitizer visits the array,
+    Then: The item reference is replaced by its sanitized definition.
+    """
     schema: JsonObject = {
         "$defs": {
             "Amount": {
@@ -582,7 +607,7 @@ def test_schema_sanitizer_inlines_reference_inside_array_items() -> None:
         "type": "array",
     }
 
-    assert sanitize_openai_schema(schema) == {
+    assert sanitize_chat_tool_schema(schema) == {
         "items": {
             "properties": {"value": {"type": "number"}},
             "type": "object",
@@ -591,10 +616,15 @@ def test_schema_sanitizer_inlines_reference_inside_array_items() -> None:
     }
 
 
-def test_schema_sanitizer_leaves_cycles_and_logs_once(
+def test_chat_tool_schema_sanitizer_leaves_cycles_and_logs_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cyclic references remain visible and emit one bounded warning."""
+    """Cyclic references remain visible and emit one bounded warning.
+
+    Given: A local schema definition that refers to itself twice,
+    When: The chat-tool schema sanitizer expands the root reference,
+    Then: Recursive references remain visible and one warning is logged.
+    """
     warning = MagicMock()
     monkeypatch.setattr("snapper_delegate.mcp_bridge.logger.warning", warning)
     schema: JsonObject = {
@@ -611,7 +641,7 @@ def test_schema_sanitizer_leaves_cycles_and_logs_once(
         "$ref": "#/$defs/Node",
     }
 
-    assert sanitize_openai_schema(schema) == {
+    assert sanitize_chat_tool_schema(schema) == {
         "properties": {
             "left": {"$ref": "#/$defs/Node"},
             "right": {"$ref": "#/$defs/Node"},
@@ -623,10 +653,15 @@ def test_schema_sanitizer_leaves_cycles_and_logs_once(
     )
 
 
-def test_schema_sanitizer_bounds_long_reference_chains(
+def test_chat_tool_schema_sanitizer_bounds_long_reference_chains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Acyclic local reference expansion stops at the fixed depth bound."""
+    """Acyclic local reference expansion stops at the fixed depth bound.
+
+    Given: A local reference chain longer than the configured depth limit,
+    When: The chat-tool schema sanitizer expands the chain,
+    Then: Expansion stops at the boundary and one warning is logged.
+    """
     warning = MagicMock()
     monkeypatch.setattr("snapper_delegate.mcp_bridge.logger.warning", warning)
     definitions: JsonObject = {}
@@ -640,7 +675,7 @@ def test_schema_sanitizer_bounds_long_reference_chains(
         "$ref": "#/$defs/Node0",
     }
 
-    assert sanitize_openai_schema(schema) == {
+    assert sanitize_chat_tool_schema(schema) == {
         "$ref": f"#/$defs/Node{mcp_bridge._MAX_REFERENCE_DEPTH}"
     }
     warning.assert_called_once_with(
@@ -664,12 +699,17 @@ def test_schema_sanitizer_bounds_long_reference_chains(
         ),
     ],
 )
-def test_schema_sanitizer_leaves_foreign_and_missing_references(
+def test_chat_tool_schema_sanitizer_leaves_foreign_and_missing_references(
     schema: JsonObject,
     expected: JsonObject,
 ) -> None:
-    """Only resolvable local top-level definitions are eligible for inlining."""
-    assert sanitize_openai_schema(schema) == expected
+    """Only resolvable local top-level definitions are eligible for inlining.
+
+    Given: A foreign or missing schema reference,
+    When: The chat-tool schema sanitizer processes the reference,
+    Then: The unresolved reference is retained while metadata is sanitized.
+    """
+    assert sanitize_chat_tool_schema(schema) == expected
 
 
 @pytest.mark.parametrize(
@@ -688,14 +728,16 @@ def test_schema_sanitizer_leaves_foreign_and_missing_references(
         },
     ],
 )
-def test_schema_sanitizer_preserves_non_nullable_any_of(schema: JsonObject) -> None:
+def test_chat_tool_schema_sanitizer_preserves_non_nullable_any_of(
+    schema: JsonObject,
+) -> None:
     """Shapes other than one base plus one null option remain unions.
 
     Given: A value that is not the FastMCP two-object nullable pattern,
     When: The schema sanitizer visits it,
     Then: It preserves the union value after recursively sanitizing it.
     """
-    assert sanitize_openai_schema(schema) == schema
+    assert sanitize_chat_tool_schema(schema) == schema
 
 
 @pytest.mark.asyncio

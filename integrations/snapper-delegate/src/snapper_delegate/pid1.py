@@ -47,11 +47,10 @@ _CONFIG_ENV_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 _DEFAULT_ENDPOINT_PATH: Final[str] = "/v1/chat/completions"
-_ENDPOINT_PATHS: Final[frozenset[str]] = frozenset(
-    {
-        _DEFAULT_ENDPOINT_PATH,
-        "/v1beta/openai/chat/completions",
-    }
+_ENDPOINT_VERSION_PATTERN: Final[str] = r"/v[1-9][0-9]{0,2}(?:[a-z][a-z0-9]{0,15})?/"
+_ENDPOINT_COMPATIBILITY_PATTERN: Final[str] = r"(?:[a-z][a-z0-9_-]{0,31}/)?chat/completions"
+_ENDPOINT_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(
+    _ENDPOINT_VERSION_PATTERN + _ENDPOINT_COMPATIBILITY_PATTERN
 )
 _API_KEY_PATH: Final[Path] = Path("/run/secrets/delegate/api_key")
 _DELEGATE_TOKEN_PATH: Final[Path] = Path("/run/secrets/delegate/delegate_token")
@@ -96,7 +95,7 @@ class RunnerOnlyConfiguration(BaseModel):
 
     model_alias: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1)
-    endpoint_path: str = _DEFAULT_ENDPOINT_PATH
+    endpoint_path: str = Field(default=_DEFAULT_ENDPOINT_PATH, min_length=1, max_length=128)
     snapper_base_url: str = Field(min_length=1)
     api_key_file: str = Field(min_length=1)
     delegate_token_file: str = Field(min_length=1)
@@ -147,8 +146,8 @@ class RunnerOnlyConfiguration(BaseModel):
     @field_validator("endpoint_path")
     @classmethod
     def _validate_endpoint_path(cls, value: str) -> str:
-        """Require one exact reviewed chat-completions endpoint path."""
-        if value not in _ENDPOINT_PATHS:
+        """Require a bounded provider-neutral chat-completions endpoint path."""
+        if _ENDPOINT_PATH_PATTERN.fullmatch(value) is None:
             raise ValueError("invalid endpoint path")
         return value
 

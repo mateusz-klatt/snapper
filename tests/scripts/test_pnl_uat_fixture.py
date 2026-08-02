@@ -106,7 +106,7 @@ def oss_seeded_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     with pytest.MonkeyPatch.context() as patch:
         patch.chdir(template_dir)
         patch.setenv("DB_URL", f"sqlite+aiosqlite:///{template_path}")
-        assert run_seed("dev") == (3, 11)
+        assert run_seed("dev") == (3, 13)
     return template_path
 
 
@@ -954,6 +954,7 @@ async def test_seed_rejects_a_database_behind_schema_head(
         "UPDATE settings SET description = 'changed' WHERE key = 'live_trading_mode'",
         "UPDATE settings SET updated_by = 'tester' WHERE key = 'live_trading_mode'",
         "UPDATE settings SET known_to = '2030-01-01 00:00:00+00:00' WHERE key = 'ui_origin'",
+        "UPDATE settings SET value = 'not-a-token' WHERE key = 'gemini_api_key'",
         "UPDATE symbols SET base = 'XBT' WHERE native_symbol = 'BTC-USD'",
         (
             "UPDATE symbols SET known_to = '2030-01-01 00:00:00+00:00' "

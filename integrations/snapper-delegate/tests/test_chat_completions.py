@@ -55,8 +55,8 @@ def _request() -> ChatCompletionRequest:
             "https://models.invalid/proxy/v1/chat/completions",
         ),
         (
-            "/v1beta/openai/chat/completions",
-            "https://models.invalid/proxy/v1beta/openai/chat/completions",
+            "/v1beta/compat/chat/completions",
+            "https://models.invalid/proxy/v1beta/compat/chat/completions",
         ),
     ],
 )

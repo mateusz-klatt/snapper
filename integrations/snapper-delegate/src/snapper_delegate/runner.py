@@ -57,19 +57,38 @@ class RunnerControlClient(Protocol):
     """Structural control-plane surface used by the lifecycle."""
 
     async def fetch_delegate_identity(self) -> str:
-        """Return the authenticated delegate identifier."""
+        """Return the authenticated delegate identifier.
+
+        Returns:
+            The nonempty public identifier for the authenticated delegate.
+        """
         ...
 
     async def list_pending_reviews(self, limit: int = 100) -> list[PendingReview]:
-        """Return the caller's bounded catch-up snapshot."""
+        """Return the caller's bounded catch-up snapshot.
+
+        Args:
+            limit: Maximum number of pending reviews requested.
+
+        Returns:
+            The pending reviews visible to the authenticated delegate.
+        """
         ...
 
     async def mint_ws_token(self) -> WsToken:
-        """Mint one one-shot WebSocket credential."""
+        """Mint one one-shot WebSocket credential.
+
+        Returns:
+            The token and expiry used for one WebSocket authentication.
+        """
         ...
 
     def read_access_token(self) -> SecretStr:
-        """Read one current access credential."""
+        """Read one current access credential.
+
+        Returns:
+            The current bearer token with secret-safe representation.
+        """
         ...
 
     async def aclose(self) -> None:
@@ -81,7 +100,11 @@ class RunnerWakeClient(Protocol):
     """Structural reconnecting wake-client surface used by the lifecycle."""
 
     async def run(self, callbacks: WakeCallbacks) -> None:
-        """Run reconnecting sessions until closed."""
+        """Run reconnecting sessions until closed.
+
+        Args:
+            callbacks: Nonblocking lifecycle and frame callbacks.
+        """
         ...
 
     async def close(self) -> None:
@@ -220,7 +243,11 @@ class DelegateRunner:
         await asyncio.sleep(0)
 
     def get_status(self) -> dict[str, object]:
-        """Return JSON-compatible lifecycle, liveness, and consult counters."""
+        """Return JSON-compatible lifecycle, liveness, and consult counters.
+
+        Returns:
+            A snapshot of externally visible runner state and counters.
+        """
         return {
             "state": self._state.value,
             "running": self._running,

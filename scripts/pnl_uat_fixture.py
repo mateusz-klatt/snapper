@@ -127,7 +127,7 @@ _OSS_BASELINE_REFUSAL: Final[str] = (
 )
 _OSS_BASELINE_TABLE_COUNTS: Final[dict[str, int]] = {
     "operators": 1,
-    "settings": 11,
+    "settings": 13,
     "symbol_aliases": 36,
     "symbol_exchange_capabilities": 20,
     "symbols": 11,
@@ -141,6 +141,9 @@ _OSS_BASELINE_USERS: Final[dict[str, tuple[str, str, int, int]]] = {
     "operator": ("operator@snapper.local", "operator", 2, 2),
     "viewer": ("viewer@snapper.local", "viewer", 3, 3),
 }
+_OSS_BASELINE_ENCRYPTED_SETTINGS: Final[frozenset[str]] = frozenset(
+    {"gemini_api_key", "kimi_api_key"}
+)
 _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
     "ui_origin": (
         "http://localhost:3000,http://localhost:8000",
@@ -250,6 +253,27 @@ _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
         ),
         11,
         11,
+    ),
+    "gemini_api_key": (
+        "",
+        "api",
+        (
+            "Google Gemini API key (OpenAI-compat, "
+            "generativelanguage.googleapis.com/v1beta/openai). Placeholder: real value "
+            "lives in the environment seed, never this skeleton."
+        ),
+        12,
+        12,
+    ),
+    "kimi_api_key": (
+        "",
+        "api",
+        (
+            "Moonshot Kimi K3 API key (OpenAI-compat, api.moonshot.ai/v1). Placeholder: "
+            "real value lives in the environment seed, never this skeleton."
+        ),
+        13,
+        13,
     ),
 }
 _OSS_BASELINE_SYMBOLS: Final[set[tuple[str, str, str | None, str]]] = {
@@ -891,26 +915,33 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
         raise PnlUatFixtureError(_OSS_BASELINE_REFUSAL)
     seed_session_id = next(iter(user_sessions))
     setting_rows = (await session.execute(select(Setting).order_by(Setting.id))).scalars().all()
-    settings = {
-        setting.key: (
-            setting.value,
-            setting.category,
-            setting.description,
-            setting.is_encrypted,
-            setting.updated_by,
-            setting.id,
-            setting.sequence_id,
-            setting.known_to,
-            setting.session_id == seed_session_id,
-        )
-        for setting in setting_rows
-    }
+    try:
+        settings = {
+            setting.key: (
+                (
+                    get_encryption_service().decrypt(setting.value)
+                    if setting.is_encrypted
+                    else setting.value
+                ),
+                setting.category,
+                setting.description,
+                setting.is_encrypted,
+                setting.updated_by,
+                setting.id,
+                setting.sequence_id,
+                setting.known_to,
+                setting.session_id == seed_session_id,
+            )
+            for setting in setting_rows
+        }
+    except (InvalidToken, TypeError, ValueError):
+        raise PnlUatFixtureError(_OSS_BASELINE_REFUSAL) from None
     expected_settings = {
         key: (
             value,
             category,
             description,
-            False,
+            key in _OSS_BASELINE_ENCRYPTED_SETTINGS,
             None,
             row_id,
             sequence_id,

@@ -58,7 +58,11 @@ class AccessTokenProvider(Protocol):
     """Read the current delegate access token for one MCP use."""
 
     def read_access_token(self) -> SecretStr:
-        """Return the freshly loaded bearer credential."""
+        """Return the freshly loaded bearer credential.
+
+        Returns:
+            The current access token with secret-safe representation.
+        """
         ...
 
 
@@ -66,7 +70,14 @@ class ChatCompletionClient(Protocol):
     """Structural chat-completions surface used by consult orchestration."""
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        """Return one typed completion outcome."""
+        """Return one typed completion outcome.
+
+        Args:
+            request: Validated model, message, and tool request.
+
+        Returns:
+            The successful, quota-exhausted, or failed completion outcome.
+        """
         ...
 
 
@@ -140,7 +151,14 @@ class BoundedConsultRunner:
         self._tools: list[ChatTool] | None = None
 
     async def run(self, context: ReviewConsultContext) -> ConsultResult:
-        """Run one consult until submission, quota degradation, or bounded skip."""
+        """Run one consult until submission, quota degradation, or bounded skip.
+
+        Args:
+            context: Immutable review facts and deadline for this consultation.
+
+        Returns:
+            The terminal consultation outcome.
+        """
         if _is_expired(context.deadline, self._clock()):
             return ConsultResult(ConsultOutcome.SKIPPED)
         tools = await self._load_tools()

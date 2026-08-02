@@ -26,7 +26,12 @@ def _token_file(tmp_path: Path, value: str = _TOKEN) -> Path:
 async def test_control_plane_happy_path_uses_fresh_bearer_and_typed_payloads(
     tmp_path: Path,
 ) -> None:
-    """All supported endpoints retain their typed public response fields."""
+    """All supported endpoints retain their typed public response fields.
+
+    Given a rotating bearer file and valid typed responses from every endpoint,
+    When the client mints a socket token, resolves identity, and lists pending work,
+    Then it authenticates each request freshly and preserves validated public fields.
+    """
     requests: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -98,7 +103,12 @@ async def test_control_plane_happy_path_uses_fresh_bearer_and_typed_payloads(
 async def test_unauthorized_response_rereads_rotated_token_before_success(
     tmp_path: Path,
 ) -> None:
-    """A 401 causes one immediate file refresh before normal backoff is needed."""
+    """A 401 causes one immediate file refresh before normal backoff is needed.
+
+    Given the credential file rotates after the first request is refused,
+    When the client retries the identity request once,
+    Then it rereads the file and succeeds with the new bearer.
+    """
     token_file = _token_file(tmp_path, "old-token")
     authorizations: list[str] = []
 
@@ -144,7 +154,12 @@ async def test_http_failures_expose_only_status_and_public_error_code(
     body: object,
     expected_error_code: str | None,
 ) -> None:
-    """REST refusals become credential-free typed failures."""
+    """REST refusals become credential-free typed failures.
+
+    Given a public error envelope or an unparseable HTTP failure body,
+    When a pending-review request fails,
+    Then the typed error exposes only status and any stable public error code.
+    """
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if isinstance(body, dict):
@@ -169,7 +184,12 @@ async def test_http_failures_expose_only_status_and_public_error_code(
 
 @pytest.mark.asyncio
 async def test_transport_failure_is_recoverable_and_value_safe(tmp_path: Path) -> None:
-    """Network exceptions remain inside the typed control boundary."""
+    """Network exceptions remain inside the typed control boundary.
+
+    Given the HTTP transport cannot connect,
+    When the client requests a one-shot WebSocket credential,
+    Then it raises a recoverable transport error without leaking request values.
+    """
 
     def _handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)
@@ -190,7 +210,12 @@ async def test_transport_failure_is_recoverable_and_value_safe(tmp_path: Path) -
 
 @pytest.mark.parametrize("file_state", ["missing", "empty", "invalid_utf8"])
 def test_access_token_file_failures_are_generic(tmp_path: Path, file_state: str) -> None:
-    """Missing, empty, and undecodable credentials share one safe outcome."""
+    """Missing, empty, and undecodable credentials share one safe outcome.
+
+    Given an absent, blank, or invalid UTF-8 token file,
+    When the client reads the current access token,
+    Then it reports one generic token-file failure without revealing its path.
+    """
     token_file = tmp_path / "delegate-token"
     if file_state == "empty":
         token_file.write_text(" \n", encoding="utf-8")
@@ -212,7 +237,12 @@ async def test_malformed_success_payloads_fail_closed(
     tmp_path: Path,
     endpoint: str,
 ) -> None:
-    """Malformed success bodies never escape their local parse boundary."""
+    """Malformed success bodies never escape their local parse boundary.
+
+    Given a successful status carrying an invalid endpoint-specific payload,
+    When the client validates the response body,
+    Then it fails closed with the common malformed-response category.
+    """
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if endpoint == "identity_schema":

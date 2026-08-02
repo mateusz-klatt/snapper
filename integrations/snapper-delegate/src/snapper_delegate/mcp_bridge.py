@@ -24,7 +24,7 @@ from snapper.core.json_types import JsonValue
 from snapper_delegate.chat_completions import ChatFunctionDefinition
 from snapper_delegate.chat_completions import ChatTool
 
-_SCHEMA_KEYS_TO_STRIP = frozenset({"$defs", "additionalProperties", "default", "title"})
+_CHAT_TOOL_SCHEMA_KEYS_TO_STRIP = frozenset({"$defs", "additionalProperties", "default", "title"})
 _LOCAL_REFERENCE_PREFIX = "#/$defs/"
 _MAX_REFERENCE_DEPTH = 32
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
@@ -55,11 +55,19 @@ class MCPSession(Protocol):
     """Narrow subset of an initialized MCP client session used by the bridge."""
 
     async def initialize(self) -> object:
-        """Negotiate MCP protocol capabilities."""
+        """Negotiate MCP protocol capabilities.
+
+        Returns:
+            The MCP initialization result supplied by the session.
+        """
         ...
 
     async def list_tools(self) -> types.ListToolsResult:
-        """Return the current MCP tool catalog."""
+        """Return the current MCP tool catalog.
+
+        Returns:
+            The tools advertised by the initialized MCP session.
+        """
         ...
 
     async def call_tool(
@@ -67,7 +75,15 @@ class MCPSession(Protocol):
         name: str,
         arguments: JsonObject | None = None,
     ) -> types.CallToolResult | types.InputRequiredResult | types.Result:
-        """Invoke one MCP tool."""
+        """Invoke one MCP tool.
+
+        Args:
+            name: Exact advertised tool name.
+            arguments: Validated JSON arguments, or no arguments when omitted.
+
+        Returns:
+            The raw typed result returned by the MCP session.
+        """
         ...
 
 
@@ -145,7 +161,14 @@ class MCPBridgeClient(Protocol):
     """Structural interface accepted by bounded consult orchestration."""
 
     async def list_tools(self, access_token: str) -> MCPToolCatalogResult:
-        """Return a sanitized tool catalog for the current credential."""
+        """Return a sanitized tool catalog for the current credential.
+
+        Args:
+            access_token: Bearer credential used for this stateless session.
+
+        Returns:
+            A sanitized catalog or a typed recoverable failure.
+        """
         ...
 
     async def call_tool(
@@ -154,7 +177,16 @@ class MCPBridgeClient(Protocol):
         name: str,
         arguments: JsonObject,
     ) -> MCPToolCallResult:
-        """Invoke one tool and return replayable typed content."""
+        """Invoke one tool and return replayable typed content.
+
+        Args:
+            access_token: Bearer credential used for this stateless session.
+            name: Exact MCP tool name to invoke.
+            arguments: Validated JSON object supplied to the tool.
+
+        Returns:
+            A replayable tool result or a typed recoverable failure.
+        """
         ...
 
 
@@ -241,7 +273,7 @@ class _SchemaSanitizer:
         sanitized = {
             key: self.sanitize_value(value, active_references)
             for key, value in schema.items()
-            if key not in _SCHEMA_KEYS_TO_STRIP
+            if key not in _CHAT_TOOL_SCHEMA_KEYS_TO_STRIP
         }
         nullable_base = _nullable_base(schema.get("anyOf"))
         if nullable_base is None:
@@ -260,8 +292,15 @@ class _SchemaSanitizer:
         logger.warning("MCP tool schema contains cyclic or excessively deep local references")
 
 
-def sanitize_openai_schema(schema: JsonObject) -> JsonObject:
-    """Inline local definitions and remove unsupported function-schema features."""
+def sanitize_chat_tool_schema(schema: JsonObject) -> JsonObject:
+    """Inline definitions and remove unsupported chat-tool schema features.
+
+    Args:
+        schema: JSON schema emitted by the MCP tool catalog.
+
+    Returns:
+        A recursively sanitized schema accepted by chat completions.
+    """
     raw_definitions = schema.get("$defs")
     definitions = raw_definitions if isinstance(raw_definitions, dict) else {}
     sanitizer = _SchemaSanitizer(definitions)
@@ -300,7 +339,7 @@ def _catalog_from_result(result: types.ListToolsResult) -> MCPToolCatalogResult:
                 function=ChatFunctionDefinition(
                     name=tool.name,
                     description=tool.description,
-                    parameters=sanitize_openai_schema(
+                    parameters=sanitize_chat_tool_schema(
                         _JSON_OBJECT_ADAPTER.validate_python(tool.input_schema, strict=True)
                     ),
                 ),
@@ -372,7 +411,14 @@ class MCPBridge:
         return "MCPBridge()"
 
     async def list_tools(self, access_token: str) -> MCPToolCatalogResult:
-        """Initialize a session and return its sanitized tool catalog."""
+        """Initialize a session and return its sanitized tool catalog.
+
+        Args:
+            access_token: Bearer credential used for this stateless session.
+
+        Returns:
+            A sanitized catalog or a typed session or validation failure.
+        """
         try:
             async with self._session_factory(self._endpoint_url, access_token) as session:
                 await session.initialize()
@@ -387,7 +433,16 @@ class MCPBridge:
         name: str,
         arguments: JsonObject,
     ) -> MCPToolCallResult:
-        """Initialize a session, invoke one tool, and parse its result envelope."""
+        """Initialize a session, invoke one tool, and parse its result envelope.
+
+        Args:
+            access_token: Bearer credential used for this stateless session.
+            name: Exact MCP tool name to invoke.
+            arguments: Validated JSON object supplied to the tool.
+
+        Returns:
+            The replayable tool result or a typed contained failure.
+        """
         try:
             async with self._session_factory(self._endpoint_url, access_token) as session:
                 await session.initialize()

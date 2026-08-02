@@ -37,7 +37,7 @@ from snapper_delegate.wake_client import _utc_now
 from snapper_delegate.wake_client import _websocket_url
 from snapper_delegate.wake_client import default_wake_connect
 
-_JSON_OBJECT_ADAPTER = TypeAdapter(JsonObject)
+_JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 _TIMESTAMP = "2026-08-02T12:00:00+00:00"
 _DEADLINE = "2026-08-02T12:00:25+00:00"
 
@@ -242,11 +242,13 @@ def _subscription_frame(
     topics: list[str] | None = None,
 ) -> str:
     """Encode one subscription result."""
+    accepted_topics: list[JsonValue] = []
+    accepted_topics.extend(("ai_reviews.",) if topics is None else topics)
     return _control_frame(
         "subscription_success",
         action=action,
         status=status,
-        topics=["ai_reviews."] if topics is None else topics,
+        topics=accepted_topics,
         denied_topics=[],
     )
 
@@ -348,7 +350,12 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
 def test_envelope_minter_uses_stable_uuid7_and_monotonic_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every client frame gets fresh provenance under one stable process session."""
+    """Client envelopes retain a stable session and advance their provenance.
+
+    Given: A deterministic UUID7 source and UTC clock,
+    When: Two envelopes are minted by the same minter,
+    Then: They share one session while public IDs and sequence numbers advance.
+    """
     identifiers = [uuid.UUID(int=index, version=7) for index in (1, 2, 3)]
     uuid7 = MagicMock(side_effect=identifiers)
     monkeypatch.setattr("snapper_delegate.wake_client.uuid.uuid7", uuid7)
@@ -375,7 +382,12 @@ def test_envelope_minter_uses_stable_uuid7_and_monotonic_sequence(
 def test_envelope_minter_default_clock_and_utc_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The production minter uses the module UTC clock when none is injected."""
+    """The default envelope minter uses the module UTC clock.
+
+    Given: A patched module clock and UUID7 source,
+    When: An envelope is minted without an injected clock,
+    Then: Its timestamp and the UTC helper remain timezone-aware UTC values.
+    """
     now = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
     monkeypatch.setattr("snapper_delegate.wake_client._utc_now", MagicMock(return_value=now))
     monkeypatch.setattr(
@@ -397,12 +409,22 @@ def test_envelope_minter_default_clock_and_utc_helper(
     ],
 )
 def test_websocket_url_uses_control_origin(base_url: str, expected: str) -> None:
-    """HTTP origins map to the fixed WebSocket endpoint and matching scheme."""
+    """Control origins map to the fixed WebSocket endpoint.
+
+    Given: An HTTP or HTTPS Snapper control-plane origin,
+    When: The wake WebSocket URL is derived,
+    Then: It uses the matching WS scheme and the fixed API path.
+    """
     assert _websocket_url(base_url) == expected
 
 
 def test_connect_request_repr_hides_authorization() -> None:
-    """Upgrade request representations cannot expose bearer contents."""
+    """Connection request representations conceal authorization data.
+
+    Given: A WebSocket upgrade request carrying a bearer secret,
+    When: Its representation is rendered,
+    Then: Neither the secret nor the authorization header name is exposed.
+    """
     request = WakeConnectRequest(
         url="ws://snapper/api/ws",
         additional_headers={"Authorization": "Bearer access-secret"},
@@ -415,7 +437,12 @@ def test_connect_request_repr_hides_authorization() -> None:
 async def test_default_connect_disables_proxy_protocol_ping_and_bounds_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The production connector uses only the explicit authenticated direct route."""
+    """The default connector establishes a bounded direct WebSocket route.
+
+    Given: An authenticated wake connection request and a patched connector,
+    When: The production connection factory opens the socket,
+    Then: Proxying and protocol pings are disabled and frame size is bounded.
+    """
     socket = _FakeSocket()
     connect = AsyncMock(return_value=socket)
     monkeypatch.setattr("snapper_delegate.wake_client.connect", connect)
@@ -437,7 +464,12 @@ async def test_default_connect_disables_proxy_protocol_ping_and_bounds_frames(
 
 
 def test_client_rejects_nonpositive_dedup_capacity() -> None:
-    """A bounded dedup cache must retain at least one entry."""
+    """The client rejects an unusable deduplication capacity.
+
+    Given: A wake configuration with zero deduplication entries,
+    When: A wake client is constructed,
+    Then: Configuration validation raises a positive-capacity error.
+    """
     with pytest.raises(ValueError, match="dedup_capacity must be positive"):
         _client(config=WakeClientConfig(dedup_capacity=0))
 
@@ -454,7 +486,12 @@ def test_client_rejects_nonpositive_dedup_capacity() -> None:
 def test_backoff_is_exponential_capped_jittered_and_nonnegative(
     case: tuple[int, float, float, float, float, float],
 ) -> None:
-    """Reconnect delays obey all cap, exponent, jitter, and lower-bound rules."""
+    """Reconnect delays obey every configured timing boundary.
+
+    Given: Attempts spanning exponential, capped, jittered, and zero-delay cases,
+    When: The reconnect backoff is calculated,
+    Then: The delay matches the expected bounded nonnegative value.
+    """
     attempt, base, cap, jitter, random_value, expected = case
     config = WakeClientConfig(
         backoff_base_seconds=base,
@@ -481,7 +518,12 @@ def test_subscription_health_requires_accepted_subscribe_topics(
     topics: list[str],
     expected: bool,
 ) -> None:
-    """The shared response type is healthy only for an accepted subscribe action."""
+    """Subscription health requires an accepted subscribe result.
+
+    Given: Subscription results with varied actions, statuses, and topic lists,
+    When: Each result is evaluated for health,
+    Then: Only an accepted subscribe action with topics is healthy.
+    """
     frame = _SubscriptionFrame(
         type="subscription_success",
         action=action,
@@ -492,7 +534,12 @@ def test_subscription_health_requires_accepted_subscribe_topics(
 
 
 def test_subscription_health_rejects_a_non_subscription_model() -> None:
-    """A matching type string without the subscription result fields is not healthy."""
+    """Non-subscription models cannot satisfy subscription health.
+
+    Given: Incomplete and forward-compatible control frames,
+    When: They are decoded and evaluated as subscription results,
+    Then: The incomplete frame is dropped and the unknown control is unhealthy.
+    """
     frame = _decode_frame(_control_frame("subscription_success", action="subscribe"))
     assert frame is None
     unknown = _decode_frame(_control_frame("future.control"))
@@ -501,7 +548,12 @@ def test_subscription_health_rejects_a_non_subscription_model() -> None:
 
 
 def test_frame_model_selects_only_locally_consumed_specializations() -> None:
-    """Known request, acknowledgement, and subscription types have local models."""
+    """Frame dispatch selects only locally consumed specializations.
+
+    Given: Known wake types and an unknown future frame type,
+    When: Their local model classes are selected,
+    Then: Known frames map precisely and the unknown type has no specialization.
+    """
     assert _frame_model("ai_review.request") is AiReviewRequestFrame
     assert _frame_model("ai_review.decision_ack") is AiReviewDecisionAckFrame
     assert _frame_model("subscription_success") is _SubscriptionFrame
@@ -509,7 +561,12 @@ def test_frame_model_selects_only_locally_consumed_specializations() -> None:
 
 
 def test_decode_valid_request_and_ack_preserves_extensions_and_sizes_signal() -> None:
-    """Valid data wakes become typed models while opaque future fields survive."""
+    """Valid wake frames retain typed data and forward-compatible extensions.
+
+    Given: A review request with Unicode signal data and a decision acknowledgement,
+    When: Both frames are decoded,
+    Then: Typed models preserve extensions, timezone data, and exact signal size.
+    """
     request = _decode_frame(_request_frame(signal_envelope={"headline": "żółć"}))
     acknowledgement = _decode_frame(_ack_frame())
 
@@ -531,18 +588,33 @@ def test_decode_valid_request_and_ack_preserves_extensions_and_sizes_signal() ->
     ],
 )
 def test_decode_drops_malformed_frames(raw: str | bytes) -> None:
-    """Malformed general and known frames are discarded without raising."""
+    """Malformed wake frames are discarded safely.
+
+    Given: Invalid JSON, invalid UTF-8, missing types, or incomplete known frames,
+    When: The decoder processes each raw value,
+    Then: It returns no frame without raising an exception.
+    """
     assert _decode_frame(raw) is None
 
 
 def test_decode_drops_unencodable_and_oversized_raw_frames() -> None:
-    """Raw frame budgets apply before JSON parsing for text and bytes inputs."""
+    """Raw frame limits apply before JSON parsing.
+
+    Given: Unencodable text and a byte frame above the transport budget,
+    When: Each raw frame is decoded,
+    Then: Both are rejected before model validation.
+    """
     assert _decode_frame("\ud800") is None
     assert _decode_frame(b"x" * (64 * 1024 + 1)) is None
 
 
 def test_decode_drops_oversized_signal_but_accepts_unknown_control() -> None:
-    """The nested signal budget is independent from forward-compatible controls."""
+    """Signal budgets do not block valid future control frames.
+
+    Given: An oversized nested signal and a small unknown control frame,
+    When: Both payloads are decoded,
+    Then: The signal is rejected while the forward-compatible control survives.
+    """
     oversized = _request_frame(signal_envelope={"value": "x" * (16 * 1024)})
     assert _decode_frame(oversized) is None
     unknown = _decode_frame(_control_frame("future.control", value=True).encode())
@@ -552,7 +624,12 @@ def test_decode_drops_oversized_signal_but_accepts_unknown_control() -> None:
 
 @pytest.mark.asyncio
 async def test_handshake_waits_for_auth_complete_and_sends_strict_envelopes() -> None:
-    """Auth acknowledgement alone cannot advance subscription or omit provenance."""
+    """The handshake waits for complete authentication before subscribing.
+
+    Given: A server that acknowledges authentication before completing it,
+    When: The client performs its handshake through an intervening control frame,
+    Then: Authentication and subscription frames carry strict ordered provenance.
+    """
     minter = EnvelopeMinter(lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC))
     client = _client(minter=minter)
     socket = _FakeSocket([_control_frame("auth_required"), _control_frame("auth_ok")])
@@ -577,7 +654,12 @@ async def test_handshake_waits_for_auth_complete_and_sends_strict_envelopes() ->
 
 @pytest.mark.asyncio
 async def test_handshake_ignores_a_malformed_frame_before_expected_control() -> None:
-    """Malformed forward traffic does not prevent a later valid handshake."""
+    """Malformed traffic does not prevent a later valid handshake.
+
+    Given: Invalid JSON followed by a complete authentication sequence,
+    When: The client performs its handshake,
+    Then: It ignores the malformed frame and sends authentication and subscription.
+    """
     socket = _FakeSocket(
         [
             "not-json",
@@ -593,7 +675,12 @@ async def test_handshake_ignores_a_malformed_frame_before_expected_control() -> 
 @pytest.mark.parametrize("failure_type", ["auth_failed", "auth_expired"])
 @pytest.mark.asyncio
 async def test_handshake_rejects_authentication_failures(failure_type: str) -> None:
-    """Authentication failure controls terminate a session at either auth wait."""
+    """Authentication failure controls terminate the handshake.
+
+    Given: A server authentication-failed or authentication-expired control,
+    When: The client waits for handshake progress,
+    Then: It raises a wake session authentication error.
+    """
     client = _client()
     socket = _FakeSocket([_control_frame(failure_type)])
     with pytest.raises(WakeSessionError, match="authentication failed"):
@@ -602,7 +689,12 @@ async def test_handshake_rejects_authentication_failures(failure_type: str) -> N
 
 @pytest.mark.asyncio
 async def test_handshake_times_out_without_server_progress() -> None:
-    """A silent peer cannot hold the authentication phase indefinitely."""
+    """A silent peer cannot hold the handshake indefinitely.
+
+    Given: A wake client with a minimal handshake timeout and a silent socket,
+    When: The authentication handshake starts,
+    Then: The operation raises a timeout error.
+    """
     client = _client(config=WakeClientConfig(handshake_timeout_seconds=0.001))
     with pytest.raises(TimeoutError):
         await client._handshake(_FakeSocket(), SecretStr("ws-secret"))
@@ -622,7 +714,12 @@ async def test_handshake_rejects_unhealthy_subscription_results(
     status: str,
     topics: list[str],
 ) -> None:
-    """Denied, wrong-action, and empty subscription responses force reconnect."""
+    """Unhealthy subscription results force session rejection.
+
+    Given: A completed authentication followed by an invalid subscription result,
+    When: The client finishes its handshake,
+    Then: It raises a subscription-rejected wake session error.
+    """
     socket = _FakeSocket(
         [
             _control_frame("auth_required"),
@@ -636,7 +733,12 @@ async def test_handshake_rejects_unhealthy_subscription_results(
 
 @pytest.mark.asyncio
 async def test_run_session_rereads_access_token_and_reports_connection_lifecycle() -> None:
-    """Each successful upgrade uses the current bearer without exposing it in repr."""
+    """A session uses fresh credentials and reports its connection lifecycle.
+
+    Given: Queued one-shot and rotated access tokens with a disconnecting socket,
+    When: One wake session runs,
+    Then: Fresh credentials are used privately and connect-disconnect callbacks fire.
+    """
     credentials = _FakeCredentials(
         ws_tokens=[_ws_token("one-shot-secret")],
         access_tokens=[SecretStr("rotated-access-secret")],
@@ -662,7 +764,12 @@ async def test_run_session_rereads_access_token_and_reports_connection_lifecycle
 
 @pytest.mark.asyncio
 async def test_run_session_streams_and_pings_while_subscription_callback_blocks() -> None:
-    """A reconnect sweep cannot delay wake receipt, liveness, or session cleanup."""
+    """Streaming and liveness continue while subscription work blocks.
+
+    Given: A subscription callback waiting on an unreleased event,
+    When: The session receives a review wake and later disconnects,
+    Then: Frames and heartbeats proceed before the callback is cancelled at cleanup.
+    """
     subscription_started = asyncio.Event()
     subscription_cancelled = asyncio.Event()
     subscription_release = asyncio.Event()
@@ -698,7 +805,12 @@ async def test_run_session_streams_and_pings_while_subscription_callback_blocks(
 
 @pytest.mark.asyncio
 async def test_run_session_contains_background_subscription_callback_failure() -> None:
-    """A failed reconnect sweep cannot terminate normal frame streaming."""
+    """A background subscription callback failure is contained.
+
+    Given: A subscription callback that fails once after a healthy handshake,
+    When: The session receives a review wake,
+    Then: Frame streaming continues until the transport disconnects.
+    """
     recorder = _CallbackRecorder()
     recorder.subscription_failures = 1
     socket = _FakeSocket(_handshake_frames())
@@ -716,7 +828,12 @@ async def test_run_session_contains_background_subscription_callback_failure() -
 
 @pytest.mark.asyncio
 async def test_run_session_stops_after_token_mint_when_close_arrives() -> None:
-    """Closing during credential mint avoids reading a bearer or opening a socket."""
+    """A close during token mint prevents connection setup.
+
+    Given: Credentials that close their owning client while minting a token,
+    When: A wake session begins,
+    Then: It skips bearer reads and WebSocket connection attempts.
+    """
     credentials = _ClosingCredentials()
     connector = _FakeConnector([])
     client = _client(credentials, connector)
@@ -733,7 +850,12 @@ async def test_run_session_stops_after_token_mint_when_close_arrives() -> None:
 async def test_run_session_preserves_a_replaced_active_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cleanup cannot clear a newer socket reference installed by another session edge."""
+    """Session cleanup preserves a concurrently replaced active socket.
+
+    Given: A stream edge that installs a replacement socket before failing,
+    When: The session handles the stream failure,
+    Then: The newer active-socket reference remains installed.
+    """
     socket = _FakeSocket(_handshake_frames())
     replacement = _FakeSocket()
     client = _client(connector=_FakeConnector([socket]))
@@ -757,7 +879,12 @@ async def test_run_session_preserves_a_replaced_active_socket(
 async def test_run_reconnects_with_backoff_and_resets_only_after_subscription(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A healthy subscription resets attempts while upgrade failures retain backoff."""
+    """Reconnect backoff resets only after a healthy subscription.
+
+    Given: An upgrade failure followed by a subscribed session that disconnects,
+    When: The reconnect supervisor runs through both attempts,
+    Then: It uses fresh credentials and resets the post-subscription delay.
+    """
     credentials = _FakeCredentials(
         ws_tokens=[_ws_token("ws-one"), _ws_token("ws-two")],
         access_tokens=[SecretStr("access-one"), SecretStr("access-two")],
@@ -795,7 +922,12 @@ async def test_run_reconnects_with_backoff_and_resets_only_after_subscription(
 
 @pytest.mark.asyncio
 async def test_run_rejects_concurrent_invocation_and_restores_state() -> None:
-    """One client has exactly one reconnect supervisor at a time."""
+    """A wake client permits only one reconnect supervisor.
+
+    Given: A running client blocked during credential minting,
+    When: A second run invocation is attempted and the first is closed,
+    Then: The duplicate raises and the running state is restored afterward.
+    """
     credentials = _BlockingCredentials()
     client = _client(credentials, _FakeConnector([ConnectionError("unused")]))
     task = asyncio.create_task(client.run(_CallbackRecorder().bundle()))
@@ -812,7 +944,12 @@ async def test_run_rejects_concurrent_invocation_and_restores_state() -> None:
 
 @pytest.mark.asyncio
 async def test_run_propagates_external_session_cancellation() -> None:
-    """Cancellation unrelated to client close remains visible to the task owner."""
+    """External session cancellation remains visible to the task owner.
+
+    Given: A running client whose active session task is externally cancelled,
+    When: The reconnect supervisor observes that cancellation,
+    Then: It propagates cancellation and clears its running state.
+    """
     credentials = _BlockingCredentials()
     client = _client(credentials, _FakeConnector([]))
     task = asyncio.create_task(client.run(_CallbackRecorder().bundle()))
@@ -830,7 +967,12 @@ async def test_run_propagates_external_session_cancellation() -> None:
 async def test_run_forever_preserves_replaced_session_task_and_observes_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A replaced task reference is not cleared and a completed session can stop cleanly."""
+    """The reconnect loop preserves a replaced session-task reference.
+
+    Given: A session edge that replaces its task reference and signals close,
+    When: The reconnect loop completes that session,
+    Then: It exits cleanly without clearing the replacement task.
+    """
     client = _client()
     replacement = asyncio.create_task(asyncio.sleep(0))
 
@@ -848,7 +990,12 @@ async def test_run_forever_preserves_replaced_session_task_and_observes_close(
 
 @pytest.mark.asyncio
 async def test_closed_client_run_returns_without_connecting() -> None:
-    """A close requested before run makes the reconnect supervisor a no-op."""
+    """A client closed before run performs no connection work.
+
+    Given: A wake client closed idempotently before startup,
+    When: Its reconnect supervisor is invoked,
+    Then: It returns without issuing a connection request.
+    """
     connector = _FakeConnector([])
     client = _client(connector=connector)
     await client.close()
@@ -859,7 +1006,12 @@ async def test_closed_client_run_returns_without_connecting() -> None:
 
 @pytest.mark.asyncio
 async def test_wait_for_close_handles_zero_timeout_event_and_elapsed_timeout() -> None:
-    """Reconnect waits yield at zero and finish on either close or timeout."""
+    """Reconnect waits handle immediate, closed, and elapsed cases.
+
+    Given: Clients with zero delay, a preexisting close, and a short timeout,
+    When: Each client waits for closure,
+    Then: Every wait finishes without blocking indefinitely.
+    """
     zero_client = _client()
     await zero_client._wait_for_close(0.0)
     closed_client = _client()
@@ -871,7 +1023,12 @@ async def test_wait_for_close_handles_zero_timeout_event_and_elapsed_timeout() -
 
 @pytest.mark.asyncio
 async def test_ping_loop_sends_enveloped_liveness_and_stops_on_close() -> None:
-    """Application heartbeats remain independent and stop promptly with the client."""
+    """Application heartbeats carry provenance and stop with the client.
+
+    Given: A short heartbeat interval and a callback that closes the client,
+    When: The application ping loop runs,
+    Then: It sends one enveloped ping and exits without closing the socket itself.
+    """
     client = _client(config=WakeClientConfig(heartbeat_interval_seconds=0.001))
     socket = _FakeSocket()
     recorder = _CallbackRecorder()
@@ -889,7 +1046,12 @@ async def test_ping_loop_sends_enveloped_liveness_and_stops_on_close() -> None:
 
 @pytest.mark.asyncio
 async def test_ping_loop_contains_send_failure_and_closes_socket() -> None:
-    """A failed application ping ends only its transport session."""
+    """A failed application ping ends only its transport session.
+
+    Given: A socket whose next heartbeat send fails,
+    When: The application ping loop attempts a heartbeat,
+    Then: It contains the failure and closes the socket normally.
+    """
     client = _client(config=WakeClientConfig(heartbeat_interval_seconds=0.001))
     socket = _FakeSocket(send_failures=[ConnectionError("send failed")])
     await client._ping_loop(socket, _CallbackRecorder().bundle())
@@ -898,7 +1060,12 @@ async def test_ping_loop_contains_send_failure_and_closes_socket() -> None:
 
 @pytest.mark.asyncio
 async def test_ping_loop_returns_when_close_event_wins_wait() -> None:
-    """A close arriving during the heartbeat delay prevents another ping."""
+    """A close during the heartbeat delay prevents another ping.
+
+    Given: A ping loop waiting on a long heartbeat interval,
+    When: The client close event wins the wait,
+    Then: The loop returns without sending a frame.
+    """
     client = _client(config=WakeClientConfig(heartbeat_interval_seconds=10.0))
     socket = _FakeSocket()
     task = asyncio.create_task(client._ping_loop(socket, _CallbackRecorder().bundle()))
@@ -910,7 +1077,12 @@ async def test_ping_loop_returns_when_close_event_wins_wait() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_handles_reauth_wakes_dedup_and_auth_expiry() -> None:
-    """The sole receive loop keeps flowing while an in-socket reauth task waits."""
+    """The receive loop handles reauthentication and deduplicated wakes.
+
+    Given: Reauth controls, duplicate review requests, an acknowledgement, and expiry,
+    When: The client streams all queued frames through one socket,
+    Then: It reauthenticates once, delivers unique wakes, and raises on expiry.
+    """
     credentials = _FakeCredentials(ws_tokens=[_ws_token("reauth-secret")])
     client = _client(credentials)
     socket = _FakeSocket()
@@ -941,7 +1113,12 @@ async def test_stream_handles_reauth_wakes_dedup_and_auth_expiry() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_returns_without_receive_when_client_is_already_closed() -> None:
-    """A preexisting close request bypasses the streaming receive loop."""
+    """A preexisting close bypasses the receive loop.
+
+    Given: A wake client whose close event is already set,
+    When: Streaming is invoked with an idle socket,
+    Then: It returns without waiting for a frame.
+    """
     client = _client()
     client._closed.set()
     await client._stream(_FakeSocket(), _CallbackRecorder().bundle())
@@ -949,7 +1126,12 @@ async def test_stream_returns_without_receive_when_client_is_already_closed() ->
 
 @pytest.mark.asyncio
 async def test_stream_starts_new_reauth_after_prior_task_completes() -> None:
-    """A later warning mints a new one-shot token after reauth_ok completed the prior task."""
+    """A later reauth warning starts a fresh completed-token cycle.
+
+    Given: Two reauth warnings separated by acknowledgements,
+    When: The stream processes both cycles and a final auth failure,
+    Then: It mints two one-shot tokens before terminating the session.
+    """
     credentials = _FakeCredentials(ws_tokens=[_ws_token("reauth-one"), _ws_token("reauth-two")])
     client = _client(credentials)
     socket = _FakeSocket()
@@ -973,7 +1155,12 @@ async def test_stream_starts_new_reauth_after_prior_task_completes() -> None:
 @pytest.mark.parametrize("failure_stage", ["mint", "send", "timeout"])
 @pytest.mark.asyncio
 async def test_reauthentication_failure_closes_with_private_reason(failure_stage: str) -> None:
-    """Mint, send, and acknowledgement failures cycle the socket without escaping."""
+    """Every reauthentication failure closes the socket privately.
+
+    Given: A token-mint, frame-send, or acknowledgement-timeout failure,
+    When: In-socket reauthentication runs,
+    Then: It contains the failure and closes with the private reauth reason.
+    """
     credentials = _FakeCredentials(
         ws_tokens=(
             [RuntimeError("mint failed")]
@@ -999,7 +1186,12 @@ async def test_reauthentication_failure_closes_with_private_reason(failure_stage
 
 @pytest.mark.asyncio
 async def test_delivery_commits_after_success_updates_versions_and_evicts_oldest() -> None:
-    """Dedup is at-least-once, type-aware, version-aware, and capacity bounded."""
+    """Successful delivery advances bounded type-aware deduplication state.
+
+    Given: Duplicate and increasing request versions plus an acknowledgement type,
+    When: Frames are delivered through a one-entry deduplication cache,
+    Then: Only eligible versions reach callbacks and the newest key remains cached.
+    """
     client = _client(config=WakeClientConfig(dedup_capacity=1))
     recorder = _CallbackRecorder()
     request_v0 = _decode_frame(_request_frame(dispatch_version=0))
@@ -1028,7 +1220,12 @@ async def test_delivery_commits_after_success_updates_versions_and_evicts_oldest
 
 @pytest.mark.asyncio
 async def test_delivery_callback_failure_is_retryable() -> None:
-    """A failed consumer callback does not poison dedup state for redelivery."""
+    """A failed consumer callback leaves delivery retryable.
+
+    Given: A review frame and a callback that fails on its first attempt,
+    When: The same frame is delivered twice,
+    Then: The retry succeeds and only then commits deduplication state.
+    """
     client = _client()
     recorder = _CallbackRecorder()
     recorder.frame_failures = 1
@@ -1044,7 +1241,12 @@ async def test_delivery_callback_failure_is_retryable() -> None:
 
 @pytest.mark.asyncio
 async def test_notification_failures_are_contained() -> None:
-    """Status, subscription, and heartbeat hooks cannot kill the wake client."""
+    """Notification callback failures remain inside the wake boundary.
+
+    Given: Connection, subscription, and heartbeat callbacks that each fail once,
+    When: The client invokes all notification helpers,
+    Then: Every callback is recorded without an escaping exception.
+    """
     client = _client()
     recorder = _CallbackRecorder()
     recorder.connection_failures = 1
@@ -1065,7 +1267,12 @@ async def test_notification_failures_are_contained() -> None:
 async def test_safe_socket_close_contains_transport_outcomes(
     close_failure: Exception | None,
 ) -> None:
-    """Both successful and failed close handshakes stay inside the boundary."""
+    """Safe socket closure contains every transport outcome.
+
+    Given: A socket whose close handshake either succeeds or raises,
+    When: The safe close boundary requests a private cycle,
+    Then: The close intent is recorded without propagating transport failure.
+    """
     socket = _FakeSocket(close_failure=close_failure)
     await _safe_socket_close(socket, 4001, "cycle")
     assert socket.close_calls == [(4001, "cycle")]
@@ -1073,7 +1280,12 @@ async def test_safe_socket_close_contains_transport_outcomes(
 
 @pytest.mark.asyncio
 async def test_close_active_handles_present_and_absent_socket() -> None:
-    """Client shutdown is idempotent around an optional active connection."""
+    """Active-socket shutdown handles both absent and present connections.
+
+    Given: A client first without and then with an active socket,
+    When: Active shutdown runs in both states,
+    Then: The absent case is a no-op and the present socket closes once.
+    """
     client = _client()
     await client._close_active()
     socket = _FakeSocket()

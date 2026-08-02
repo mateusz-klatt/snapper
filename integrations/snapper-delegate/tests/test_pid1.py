@@ -64,17 +64,17 @@ def test_load_runner_configuration_accepts_one_ready_model(
     "endpoint_path",
     [
         "/v1/chat/completions",
-        "/v1beta/openai/chat/completions",
+        "/v1beta/compat/chat/completions",
     ],
 )
-def test_load_runner_configuration_accepts_allowlisted_endpoint_paths(
+def test_load_runner_configuration_accepts_bounded_endpoint_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     endpoint_path: str,
 ) -> None:
-    """Either reviewed vendor path is accepted when supplied explicitly.
+    """A bounded compatibility path is accepted when supplied explicitly.
 
-    Given: A ready one-model configuration with an allowlisted endpoint path,
+    Given: A ready one-model configuration with a bounded endpoint path,
     When: PID1 validates the environment,
     Then: It preserves that exact path separately from the origin.
     """
@@ -191,6 +191,8 @@ def test_load_runner_configuration_refuses_missing_values(
         ("SNAPPER_DELEGATE_BASE_URL", "https://localhost"),
         ("SNAPPER_DELEGATE_BASE_URL", "https://api.example.invalid:bad"),
         ("SNAPPER_DELEGATE_ENDPOINT_PATH", "/v2/foo"),
+        ("SNAPPER_DELEGATE_ENDPOINT_PATH", "/v1/../chat/completions"),
+        ("SNAPPER_DELEGATE_ENDPOINT_PATH", "/v1/%2e%2e/chat/completions"),
         (
             "SNAPPER_DELEGATE_ENDPOINT_PATH",
             "/v1/chat/completions\nSNAPPER_DELEGATE_BASE_URL=https://evil.invalid",
