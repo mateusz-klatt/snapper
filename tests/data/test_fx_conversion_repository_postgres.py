@@ -62,6 +62,16 @@ def _artifact() -> tuple[FxConversionElectionInsertRow, FxConversionProofInsertR
         "selected_base": "EUR",
         "selected_quote": "USD",
         "selected_orientation": "direct",
+        "considered_candidate_planes": (
+            {
+                "source_exchange": "kraken",
+                "source_instrument_public_id": instrument_id,
+                "native_symbol": "EUR/USD",
+                "base": "EUR",
+                "quote": "USD",
+                "orientation": "direct",
+            },
+        ),
         "completeness_state": "complete",
         "refusal_reason_json": None,
     }
@@ -89,7 +99,7 @@ def _artifact() -> tuple[FxConversionElectionInsertRow, FxConversionProofInsertR
 
 @pytest.mark.asyncio
 async def test_postgresql_identity_race_and_refusal_partial_predicate() -> None:
-    """Concurrent winners converge while duplicate refusal audits both persist."""
+    """Concurrent winners and byte-identical refusal audits both converge."""
     first = SQLAlchemyRepository(os.environ["DB_URL"])
     second = SQLAlchemyRepository(os.environ["DB_URL"])
     election_a, proof_a = _artifact()
@@ -108,7 +118,7 @@ async def test_postgresql_identity_race_and_refusal_partial_predicate() -> None:
         **election_a,
         "public_id": str(uuid4()),
         "completeness_state": "refused",
-        "refusal_reason_json": "{}",
+        "refusal_reason_json": '{"reason":"no_candidate"}',
         "selected_source_exchange": None,
         "selected_source_instrument_public_id": None,
         "selected_native_symbol": None,
@@ -124,6 +134,6 @@ async def test_postgresql_identity_race_and_refusal_partial_predicate() -> None:
         first.pin_fx_conversion_artifact(refusal, []),
         second.pin_fx_conversion_artifact(second_refusal, []),
     )
-    assert refused[0]["election"]["public_id"] != refused[1]["election"]["public_id"]
+    assert refused[0]["election"]["public_id"] == refused[1]["election"]["public_id"]
     await first.engine.dispose()
     await second.engine.dispose()

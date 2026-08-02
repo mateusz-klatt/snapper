@@ -1674,6 +1674,49 @@ class FxConversionElection(TemporalMixin, Base):
             ),
         ),
         Index(
+            "uq_fx_elections_shared_refusal",
+            "requirement_manifest_digest",
+            "election_policy_version",
+            "calculation_version",
+            "scope_kind",
+            "source_currency",
+            "target_currency",
+            "unordered_pair",
+            "resolved_knowledge_at",
+            "refusal_reason_json",
+            unique=True,
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair' "
+                "AND completeness_state = 'refused'"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair' "
+                "AND completeness_state = 'refused'"
+            ),
+        ),
+        Index(
+            "uq_fx_elections_instrument_refusal",
+            "requirement_manifest_digest",
+            "election_policy_version",
+            "calculation_version",
+            "scope_kind",
+            "consumer_instrument_public_id",
+            "source_currency",
+            "target_currency",
+            "unordered_pair",
+            "resolved_knowledge_at",
+            "refusal_reason_json",
+            unique=True,
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' "
+                "AND scope_kind = 'instrument_owned' AND completeness_state = 'refused'"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' "
+                "AND scope_kind = 'instrument_owned' AND completeness_state = 'refused'"
+            ),
+        ),
+        Index(
             "ix_fx_elections_public_id",
             "public_id",
             unique=True,
@@ -1694,7 +1737,11 @@ class FxConversionElection(TemporalMixin, Base):
             name="ck_fx_elections_completeness",
         ),
         CheckConstraint(
-            "(completeness_state IN ('complete', 'partial') AND refusal_reason_json IS NULL AND "
+            "(completeness_state = 'complete' AND refusal_reason_json IS NULL AND "
+            "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
+            "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
+            "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
+            "(completeness_state = 'partial' AND refusal_reason_json IS NOT NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "

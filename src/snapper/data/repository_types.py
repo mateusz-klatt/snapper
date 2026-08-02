@@ -25,6 +25,17 @@ FxConversionCompleteness = Literal["complete", "partial", "refused"]
 FxConversionOperation = Literal["direct", "inverse"]
 
 
+class FxConversionCandidatePlane(TypedDict):
+    """One normalized plane considered by exact-coverage election."""
+
+    source_exchange: str
+    source_instrument_public_id: str
+    native_symbol: str
+    base: str
+    quote: str
+    orientation: FxConversionOperation
+
+
 class FxConversionElectionBaseRow(TypedDict):
     """Columns shared by FX election insert and stored row contracts."""
 
@@ -55,6 +66,7 @@ class FxConversionElectionInsertRow(FxConversionElectionBaseRow):
     """Election payload whose canonical digests are repository-derived."""
 
     required_minutes: tuple[datetime, ...]
+    considered_candidate_planes: tuple[FxConversionCandidatePlane, ...]
 
 
 class FxConversionElectionRow(FxConversionElectionBaseRow):

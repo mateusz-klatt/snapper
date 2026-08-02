@@ -72,8 +72,12 @@ def build_decision_inputs_digest(
     election: FxConversionElectionInsertRow,
     proofs: Sequence[FxConversionProofInsertRow],
 ) -> str:
-    """Derive the decision digest from the selected plane and ordered proofs."""
+    """Derive the digest from every considered plane, the winner, and proofs."""
+    candidates = sorted(
+        _canonical_json(candidate) for candidate in election["considered_candidate_planes"]
+    )
     payload = {
+        "considered_candidate_planes": candidates,
         "source_exchange": election["selected_source_exchange"],
         "source_instrument_public_id": election["selected_source_instrument_public_id"],
         "native_symbol": election["selected_native_symbol"],

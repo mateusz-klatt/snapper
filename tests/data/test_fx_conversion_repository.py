@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql import select
 from sqlalchemy.sql.expression import Executable
 
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
@@ -22,7 +23,10 @@ from snapper.data.fx_conversion_digests import build_proof_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.fx_conversion_triggers import drop_fx_conversion_immutability_triggers
 from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
+from snapper.data.models import FxConversionElection
+from snapper.data.models import FxConversionProof
 from snapper.data.repository import FxConversionArtifactConflictError
+from snapper.data.repository import FxConversionArtifactUpgradeRequiredError
 from snapper.data.repository import FxConversionArtifactValueError
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
@@ -66,6 +70,16 @@ def _election(
         "selected_base": "EUR",
         "selected_quote": "USD",
         "selected_orientation": operation,
+        "considered_candidate_planes": (
+            {
+                "source_exchange": "kraken",
+                "source_instrument_public_id": _INSTRUMENT,
+                "native_symbol": "EUR/USD",
+                "base": "EUR",
+                "quote": "USD",
+                "orientation": operation,
+            },
+        ),
         "completeness_state": "complete",
         "refusal_reason_json": None,
     }
@@ -142,6 +156,20 @@ async def test_direct_and_inverse_decimals_round_trip_exactly(
     """Direct and reciprocal inverse values retain every Decimal digit."""
     repository = await _repository(tmp_path)
     election = _election("00000000-0000-7000-8000-000000000010", operation=operation)
+    if operation == "inverse":
+        election["selected_native_symbol"] = "USD/EUR"
+        election["selected_base"] = "USD"
+        election["selected_quote"] = "EUR"
+        election["considered_candidate_planes"] = (
+            {
+                "source_exchange": "kraken",
+                "source_instrument_public_id": _INSTRUMENT,
+                "native_symbol": "USD/EUR",
+                "base": "USD",
+                "quote": "EUR",
+                "orientation": "inverse",
+            },
+        )
     proof = _proof(
         election["public_id"],
         "00000000-0000-7000-8000-000000000011",
@@ -206,6 +234,9 @@ async def test_partial_pins_nonempty_proper_subset(tmp_path: Path) -> None:
     election = _election("00000000-0000-7000-8000-000000000025")
     election["required_minutes"] = (_MINUTE, _MINUTE.replace(minute=54))
     election["completeness_state"] = "partial"
+    election["refusal_reason_json"] = (
+        '{"reason":"missing_candle","unproven_minutes":["2026-07-26T14:54:00+00:00"]}'
+    )
     artifact = await repository.pin_fx_conversion_artifact(
         election, [_proof(election["public_id"], "00000000-0000-7000-8000-000000000026")]
     )
@@ -240,8 +271,149 @@ async def test_identical_writers_converge_but_canonical_value_conflicts(tmp_path
     )
     with pytest.raises(FxConversionArtifactConflictError):
         await second.pin_fx_conversion_artifact(conflict, [conflicting_proof])
+    candidates_conflict = _election("00000000-0000-7000-8000-00000000006a")
+    candidates_conflict["considered_candidate_planes"] = (
+        *candidates_conflict["considered_candidate_planes"],
+        {
+            "source_exchange": "walutomat",
+            "source_instrument_public_id": "00000000-0000-7000-8000-00000000006b",
+            "native_symbol": "EURUSD",
+            "base": "EUR",
+            "quote": "USD",
+            "orientation": "direct",
+        },
+    )
+    with pytest.raises(FxConversionArtifactConflictError):
+        await second.pin_fx_conversion_artifact(
+            candidates_conflict,
+            [
+                _proof(
+                    candidates_conflict["public_id"],
+                    "00000000-0000-7000-8000-00000000006c",
+                )
+            ],
+        )
     await first.engine.dispose()
     await second.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refusal_audit_does_not_shadow_winner_and_converges(tmp_path: Path) -> None:
+    """Successful identity reads ignore refusals while identical audits converge."""
+    repository = await _repository(tmp_path)
+    winner = _election("00000000-0000-7000-8000-000000000036")
+    artifact = await repository.pin_fx_conversion_artifact(
+        winner, [_proof(winner["public_id"], "00000000-0000-7000-8000-000000000037")]
+    )
+    refusal = _election("00000000-0000-7000-8000-000000000038")
+    refusal["completeness_state"] = "refused"
+    refusal["refusal_reason_json"] = '{"reason":"candidate_timeout"}'
+    refusal["selected_source_exchange"] = None
+    refusal["selected_source_instrument_public_id"] = None
+    refusal["selected_native_symbol"] = None
+    refusal["selected_base"] = None
+    refusal["selected_quote"] = None
+    refusal["selected_orientation"] = None
+    refusal["considered_candidate_planes"] = ()
+    first_refusal = await repository.pin_fx_conversion_artifact(refusal, [])
+    repeated = {**refusal, "public_id": "00000000-0000-7000-8000-000000000039"}
+    second_refusal = await repository.pin_fx_conversion_artifact(repeated, [])
+    assert first_refusal["election"]["public_id"] == second_refusal["election"]["public_id"]
+    visible = await repository.get_fx_conversion_artifact(winner)
+    assert visible is not None
+    assert visible["election"]["public_id"] == artifact["election"]["public_id"]
+    repinned = {**winner, "public_id": "00000000-0000-7000-8000-00000000003a"}
+    repinned_proof = _proof(repinned["public_id"], "00000000-0000-7000-8000-00000000003b")
+    converged = await repository.pin_fx_conversion_artifact(repinned, [repinned_proof])
+    assert converged["election"]["public_id"] == artifact["election"]["public_id"]
+    owned_refusal = {
+        **refusal,
+        "public_id": "00000000-0000-7000-8000-00000000006d",
+        "scope_kind": "instrument_owned",
+        "consumer_instrument_public_id": _INSTRUMENT,
+    }
+    await repository.pin_fx_conversion_artifact(owned_refusal, [])
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refusal_collision_resolution_preserves_integrity_errors(tmp_path: Path) -> None:
+    """The refusal race path returns a winner or preserves an unrelated collision."""
+    repository = await _repository(tmp_path)
+    refusal = _election("00000000-0000-7000-8000-00000000006e")
+    refusal["completeness_state"] = "refused"
+    refusal["refusal_reason_json"] = '{"reason":"timeout"}'
+    refusal["selected_source_exchange"] = None
+    refusal["selected_source_instrument_public_id"] = None
+    refusal["selected_native_symbol"] = None
+    refusal["selected_base"] = None
+    refusal["selected_quote"] = None
+    refusal["selected_orientation"] = None
+    refusal["considered_candidate_planes"] = ()
+    collision = IntegrityError("statement", {}, RuntimeError("collision"))
+    winner = await repository.pin_fx_conversion_artifact(refusal, [])
+    async with repository.session() as session:
+        with patch.object(
+            repository, "_read_fx_conversion_refusal", AsyncMock(return_value=winner)
+        ):
+            assert (
+                await repository._resolve_fx_conversion_collision(
+                    session, refusal, [], "digest", collision
+                )
+                == winner
+            )
+        with (
+            patch.object(repository, "_read_fx_conversion_refusal", AsyncMock(return_value=None)),
+            pytest.raises(IntegrityError) as raised,
+        ):
+            await repository._resolve_fx_conversion_collision(
+                session, refusal, [], "digest", collision
+            )
+        assert raised.value is collision
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_partial_reason_and_complete_upgrade_fail_closed(tmp_path: Path) -> None:
+    """Partial gaps are exact and same-horizon completion requires operator correction."""
+    repository = await _repository(tmp_path)
+    partial = _election("00000000-0000-7000-8000-00000000003c")
+    missing = _MINUTE + timedelta(minutes=2)
+    partial["required_minutes"] = (_MINUTE, missing)
+    partial["completeness_state"] = "partial"
+    partial["refusal_reason_json"] = (
+        '{"reason":"missing_candle","unproven_minutes":["2026-07-26T14:54:00+00:00"]}'
+    )
+    await repository.pin_fx_conversion_artifact(
+        partial, [_proof(partial["public_id"], "00000000-0000-7000-8000-00000000003d")]
+    )
+    malformed = {**partial, "public_id": "00000000-0000-7000-8000-00000000003e"}
+    malformed["resolved_knowledge_at"] = _HORIZON + timedelta(minutes=1)
+    malformed["refusal_reason_json"] = (
+        '{"reason":"missing_candle","unproven_minutes":["2026-07-26T14:55:00+00:00"]}'
+    )
+    with pytest.raises(ValueError, match="exactly"):
+        await repository.pin_fx_conversion_artifact(
+            malformed,
+            [_proof(malformed["public_id"], "00000000-0000-7000-8000-00000000003f")],
+        )
+    complete = {**partial, "public_id": "00000000-0000-7000-8000-00000000004a"}
+    complete["completeness_state"] = "complete"
+    complete["refusal_reason_json"] = None
+    second_proof: FxConversionProofInsertRow = {
+        **_proof(complete["public_id"], "00000000-0000-7000-8000-00000000004b"),
+        "conversion_minute": missing,
+        "candle_open_minute": missing - timedelta(minutes=1),
+    }
+    with pytest.raises(FxConversionArtifactUpgradeRequiredError):
+        await repository.pin_fx_conversion_artifact(
+            complete,
+            [
+                _proof(complete["public_id"], "00000000-0000-7000-8000-00000000004c"),
+                second_proof,
+            ],
+        )
+    await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -273,6 +445,51 @@ async def test_operation_and_completeness_validation_fail_closed(tmp_path: Path)
     election["completeness_state"] = "partial"
     with pytest.raises(ValueError, match="proper"):
         await repository.pin_fx_conversion_artifact(election, [])
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason_json",
+    [
+        None,
+        "[]",
+        "{}",
+        '{"reason":"missing","unproven_minutes":null}',
+        (
+            '{"reason":"missing","unproven_minutes":["2026-07-26T14:54:00+00:00",'
+            '"2026-07-26T14:54:00+00:00"]}'
+        ),
+    ],
+)
+async def test_structured_partial_reason_rejects_every_invalid_shape(
+    tmp_path: Path, reason_json: str | None
+) -> None:
+    """Partial reasons are objects with a reason and a duplicate-free exact gap set."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-00000000006f")
+    election["required_minutes"] = (_MINUTE, _MINUTE + timedelta(minutes=2))
+    election["completeness_state"] = "partial"
+    election["refusal_reason_json"] = reason_json
+    with pytest.raises(ValueError):
+        await repository.pin_fx_conversion_artifact(
+            election,
+            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000070")],
+        )
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_reason_is_rejected(tmp_path: Path) -> None:
+    """A complete election cannot retain a failure reason."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000071")
+    election["refusal_reason_json"] = '{"reason":"stale"}'
+    with pytest.raises(ValueError, match="must not"):
+        await repository.pin_fx_conversion_artifact(
+            election,
+            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000072")],
+        )
     await repository.engine.dispose()
 
 
@@ -341,6 +558,66 @@ async def test_absent_reads_and_impossible_post_commit_disappearance_fail_closed
 
 
 @pytest.mark.asyncio
+async def test_latest_visible_reread_uses_the_same_as_of_interval(tmp_path: Path) -> None:
+    """The second-stage election and proof read preserves historical visibility."""
+    repository = await _repository(tmp_path)
+    active = _election("00000000-0000-7000-8000-000000000056")
+    active_proof = _proof(active["public_id"], "00000000-0000-7000-8000-000000000057")
+    await repository.pin_fx_conversion_artifact(active, [active_proof])
+    historical_time = _HORIZON - timedelta(minutes=2)
+    historical_end = _HORIZON - timedelta(minutes=1)
+    historical_id = "00000000-0000-7000-8000-000000000058"
+    async with repository.session() as session:
+        election_row = dict(
+            (
+                await session.execute(
+                    select(FxConversionElection.__table__).where(
+                        FxConversionElection.public_id == active["public_id"]
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        election_row.pop("id")
+        election_row.update(
+            public_id=historical_id,
+            timestamp=historical_time,
+            known_to=historical_end,
+            requested_knowledge_at=historical_time,
+            resolved_knowledge_at=historical_time,
+        )
+        proof_row = dict(
+            (
+                await session.execute(
+                    select(FxConversionProof.__table__).where(
+                        FxConversionProof.election_public_id == active["public_id"]
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        proof_row.pop("id")
+        proof_row.update(
+            public_id="00000000-0000-7000-8000-000000000059",
+            election_public_id=historical_id,
+            timestamp=historical_time,
+            known_to=historical_end,
+        )
+        await session.execute(FxConversionElection.__table__.insert(), election_row)
+        await session.execute(FxConversionProof.__table__.insert(), proof_row)
+        await session.commit()
+    visible = await repository.get_latest_visible_fx_conversion_artifact(
+        _query(active), historical_time + timedelta(seconds=30)
+    )
+    assert visible is not None
+    assert visible["election"]["public_id"] == historical_id
+    assert visible["proofs"][0]["public_id"] == proof_row["public_id"]
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unrelated_integrity_collision_is_not_reclassified(tmp_path: Path) -> None:
     """A proof-public-id collision without an election winner remains an integrity error."""
     repository = await _repository(tmp_path)
@@ -388,6 +665,30 @@ def test_digest_canonicalization_normalizes_instants_and_rejects_bad_minutes() -
     assert build_proof_digest(proof) == build_proof_digest(shifted)
     assert build_decision_inputs_digest(election, [proof]) == build_decision_inputs_digest(
         election, [shifted]
+    )
+    rejected = {
+        "source_exchange": "walutomat",
+        "source_instrument_public_id": "00000000-0000-7000-8000-000000000055",
+        "native_symbol": "EURPLN",
+        "base": "EUR",
+        "quote": "PLN",
+        "orientation": "direct",
+    }
+    with_rejected: FxConversionElectionInsertRow = {
+        **election,
+        "considered_candidate_planes": (*election["considered_candidate_planes"], rejected),
+    }
+    reordered = {
+        **with_rejected,
+        "considered_candidate_planes": tuple(
+            reversed(with_rejected["considered_candidate_planes"])
+        ),
+    }
+    assert build_decision_inputs_digest(with_rejected, [proof]) == build_decision_inputs_digest(
+        reordered, [proof]
+    )
+    assert build_decision_inputs_digest(election, [proof]) != build_decision_inputs_digest(
+        with_rejected, [proof]
     )
     invalid: FxConversionProofInsertRow = {
         **proof,

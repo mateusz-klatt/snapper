@@ -119,6 +119,7 @@ def test_0044_upgrade_downgrade_and_reupgrade_contract(migrated_db_path: Path) -
         {"completeness_state": "bad"},
         {"selected_orientation": "sideways"},
         {"completeness_state": "refused", "refusal_reason_json": "{}"},
+        {"completeness_state": "partial", "refusal_reason_json": None},
         {"completeness_state": "complete", "selected_source_exchange": None},
     ],
 )
@@ -162,7 +163,7 @@ def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
 
 
 def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Path) -> None:
-    """Successful identities collide across requested horizons while refusals do not."""
+    """Successful identities collide and identical refusal audits are unique."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
     first = _election("00000000-0000-7000-8000-000000000020")
     _insert(engine, "fx_conversion_elections", first)
@@ -187,10 +188,29 @@ def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Pat
         selected_orientation=None,
     )
     _insert(engine, "fx_conversion_elections", refused)
+    with pytest.raises(IntegrityError):
+        _insert(
+            engine,
+            "fx_conversion_elections",
+            {**refused, "public_id": "00000000-0000-7000-8000-000000000023"},
+        )
     _insert(
         engine,
         "fx_conversion_elections",
-        {**refused, "public_id": "00000000-0000-7000-8000-000000000023"},
+        {
+            **refused,
+            "public_id": "00000000-0000-7000-8000-000000000024",
+            "refusal_reason_json": '{"reason":"different"}',
+        },
+    )
+    _insert(
+        engine,
+        "fx_conversion_elections",
+        {
+            **refused,
+            "public_id": "00000000-0000-7000-8000-000000000025",
+            "requirement_manifest_digest": "d" * 64,
+        },
     )
     engine.dispose()
 
