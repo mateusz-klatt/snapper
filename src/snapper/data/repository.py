@@ -195,6 +195,7 @@ from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_proof_digest
+from snapper.data.fx_conversion_digests import build_refusal_reason_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
@@ -9269,6 +9270,7 @@ class SQLAlchemyRepository(Repository):
             decision_inputs_digest=election.decision_inputs_digest,
             completeness_state=cast(FxConversionCompleteness, election.completeness_state),
             refusal_reason_json=election.refusal_reason_json,
+            refusal_reason_digest=election.refusal_reason_digest,
         )
 
     @staticmethod
@@ -9640,7 +9642,8 @@ class SQLAlchemyRepository(Repository):
             FxConversionElection.target_currency == identity["target_currency"],
             FxConversionElection.unordered_pair == identity["unordered_pair"],
             FxConversionElection.resolved_knowledge_at == identity["resolved_knowledge_at"],
-            FxConversionElection.refusal_reason_json == identity["refusal_reason_json"],
+            FxConversionElection.refusal_reason_digest
+            == build_refusal_reason_digest(identity["refusal_reason_json"]),
         ]
         if identity["scope_kind"] == "instrument_owned":
             filters.append(
@@ -9713,6 +9716,9 @@ class SQLAlchemyRepository(Repository):
                 election_values.pop("considered_candidate_planes")
                 election_values["requirement_manifest_digest"] = manifest_digest
                 election_values["decision_inputs_digest"] = decision_digest
+                election_values["refusal_reason_digest"] = build_refusal_reason_digest(
+                    election["refusal_reason_json"]
+                )
                 session.add(FxConversionElection(**election_values, known_to=KNOWN_TO_MAX))
                 for proof, proof_digest in zip(proofs, proof_digests, strict=True):
                     values = dict(proof)
@@ -19355,7 +19361,10 @@ class SQLAlchemyRepository(Repository):
                     Instrument.public_id,
                     Candle.id,
                     Candle.public_id,
+                    Candle.session_id,
+                    Candle.sequence_id,
                     Candle.timestamp,
+                    Candle.known_to,
                 )
                 .select_from(Candle)
                 .join(
@@ -19397,7 +19406,10 @@ class SQLAlchemyRepository(Repository):
                     "instrument_public_id": instrument_public_id,
                     "candle_id": candle_id,
                     "candle_public_id": candle_public_id,
+                    "candle_session_id": candle_session_id,
+                    "candle_sequence_id": candle_sequence_id,
                     "candle_timestamp": candle_timestamp,
+                    "candle_known_to": candle_known_to,
                 }
                 for (
                     base,
@@ -19409,7 +19421,10 @@ class SQLAlchemyRepository(Repository):
                     instrument_public_id,
                     candle_id,
                     candle_public_id,
+                    candle_session_id,
+                    candle_sequence_id,
                     candle_timestamp,
+                    candle_known_to,
                 ) in result.all()
             ]
             rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))

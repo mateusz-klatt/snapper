@@ -52,6 +52,7 @@ def _election(public_id: str, **overrides: object) -> dict[str, object]:
         "decision_inputs_digest": "b" * 64,
         "completeness_state": "complete",
         "refusal_reason_json": None,
+        "refusal_reason_digest": None,
     }
     row.update(overrides)
     return row
@@ -165,6 +166,17 @@ def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
 def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Path) -> None:
     """Successful identities collide and identical refusal audits are unique."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
+    refusal_indexes = {
+        index["name"]: index["column_names"]
+        for index in sa.inspect(engine).get_indexes("fx_conversion_elections")
+        if index["name"]
+        in {
+            "uq_fx_elections_shared_refusal",
+            "uq_fx_elections_instrument_refusal",
+        }
+    }
+    assert all("refusal_reason_digest" in columns for columns in refusal_indexes.values())
+    assert all("refusal_reason_json" not in columns for columns in refusal_indexes.values())
     first = _election("00000000-0000-7000-8000-000000000020")
     _insert(engine, "fx_conversion_elections", first)
     with pytest.raises(IntegrityError):
@@ -180,6 +192,7 @@ def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Pat
         "00000000-0000-7000-8000-000000000022",
         completeness_state="refused",
         refusal_reason_json="{}",
+        refusal_reason_digest="d" * 64,
         selected_source_exchange=None,
         selected_source_instrument_public_id=None,
         selected_native_symbol=None,
@@ -201,6 +214,7 @@ def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Pat
             **refused,
             "public_id": "00000000-0000-7000-8000-000000000024",
             "refusal_reason_json": '{"reason":"different"}',
+            "refusal_reason_digest": "e" * 64,
         },
     )
     _insert(

@@ -563,7 +563,10 @@ def _fx_row(base: str, quote: str, minute: int, close: float, exchange: str) -> 
         "instrument_public_id": f"ins-{base}{quote}-{exchange}",
         "candle_id": minute,
         "candle_public_id": f"cdl-{base}{quote}-{minute}",
+        "candle_session_id": _SESSION,
+        "candle_sequence_id": minute,
         "candle_timestamp": _minute(minute - 1),
+        "candle_known_to": datetime.max.replace(tzinfo=UTC),
     }
 
 

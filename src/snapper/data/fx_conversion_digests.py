@@ -21,6 +21,22 @@ def _sha256(payload: object) -> str:
     return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
 
 
+def canonical_fx_refusal_reason(payload: object) -> str:
+    """Serialize a stable refusal reason without attempt-specific decoration."""
+    return _canonical_json(payload)
+
+
+def build_refusal_reason_digest(reason_json: str | None) -> str | None:
+    """Digest one canonical structured reason for fixed-width uniqueness."""
+    if reason_json is None:
+        return None
+    parsed: object = json.loads(reason_json)
+    canonical = canonical_fx_refusal_reason(parsed)
+    if reason_json != canonical:
+        raise ValueError("FX election reasons must use canonical JSON serialization")
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _canonical_instant(value: datetime) -> str:
     """Return one aware instant in the canonical UTC spelling."""
     if value.tzinfo is None or value.utcoffset() is None:

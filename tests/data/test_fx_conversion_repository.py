@@ -20,6 +20,7 @@ from sqlalchemy.sql.expression import Executable
 
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_proof_digest
+from snapper.data.fx_conversion_digests import build_refusal_reason_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.fx_conversion_triggers import drop_fx_conversion_immutability_triggers
 from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
@@ -696,6 +697,10 @@ def test_digest_canonicalization_normalizes_instants_and_rejects_bad_minutes() -
     }
     with pytest.raises(TypeError, match="must be Decimal"):
         build_proof_digest(invalid)
+    canonical_reason = '{"reason":"missing","unproven_minutes":[]}'
+    assert build_refusal_reason_digest(canonical_reason) is not None
+    with pytest.raises(ValueError, match="canonical JSON"):
+        build_refusal_reason_digest('{"unproven_minutes": [], "reason": "missing"}')
 
 
 def test_postgresql_trigger_ddl_covers_install_and_drop_shapes() -> None:

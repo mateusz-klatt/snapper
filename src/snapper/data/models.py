@@ -1683,7 +1683,7 @@ class FxConversionElection(TemporalMixin, Base):
             "target_currency",
             "unordered_pair",
             "resolved_knowledge_at",
-            "refusal_reason_json",
+            "refusal_reason_digest",
             unique=True,
             sqlite_where=text(
                 "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair' "
@@ -1705,7 +1705,7 @@ class FxConversionElection(TemporalMixin, Base):
             "target_currency",
             "unordered_pair",
             "resolved_knowledge_at",
-            "refusal_reason_json",
+            "refusal_reason_digest",
             unique=True,
             sqlite_where=text(
                 "known_to = '9999-12-31 23:59:59.000000' "
@@ -1738,14 +1738,17 @@ class FxConversionElection(TemporalMixin, Base):
         ),
         CheckConstraint(
             "(completeness_state = 'complete' AND refusal_reason_json IS NULL AND "
+            "refusal_reason_digest IS NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
             "(completeness_state = 'partial' AND refusal_reason_json IS NOT NULL AND "
+            "refusal_reason_digest IS NOT NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
             "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL AND "
+            "refusal_reason_digest IS NOT NULL AND "
             "selected_source_exchange IS NULL AND selected_source_instrument_public_id IS NULL "
             "AND selected_native_symbol IS NULL AND selected_base IS NULL "
             "AND selected_quote IS NULL AND selected_orientation IS NULL)",
@@ -1777,6 +1780,7 @@ class FxConversionElection(TemporalMixin, Base):
     decision_inputs_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     completeness_state: Mapped[str] = mapped_column(String(16), nullable=False)
     refusal_reason_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refusal_reason_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class FxConversionProof(TemporalMixin, Base):
@@ -1787,8 +1791,8 @@ class FxConversionProof(TemporalMixin, Base):
     persist its canonical fixed-point spelling, preserving every supplied digit
     on SQLite and PostgreSQL without a float round-trip or inverse-rate rounding.
     ``candle_known_to`` records knowledge-at-pin-time provenance and is never a
-    candle-version join key. F2 must extend its candle loader to supply the
-    non-null candle session, sequence, and known-to provenance fields.
+    candle-version join key. The fiat candle loader supplies the non-null candle
+    session, sequence, and known-to provenance fields at shadow-pin time.
     """
 
     __tablename__ = "fx_conversion_proofs"

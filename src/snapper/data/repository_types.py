@@ -75,6 +75,7 @@ class FxConversionElectionRow(FxConversionElectionBaseRow):
     known_to: datetime
     requirement_manifest_digest: str
     decision_inputs_digest: str
+    refusal_reason_digest: str | None
 
 
 class FxConversionProofInsertRow(TypedDict):
@@ -1317,10 +1318,10 @@ class PnlFxRateRow(TypedDict):
     ``candle_id`` is the row's immutable internal primary key and
     ``candle_timestamp`` its SCD2 version time; with ``candle_public_id`` they pin
     the exact candle VERSION a conversion consumed, because a candle correction
-    reuses ``public_id`` while changing ``close``. ``instrument_public_id`` and
-    ``native_symbol`` complete the plane provenance so a valuation's fiat leg
-    records the same version identity the crypto plane already carries. These
-    fields are additive; existing consumers read only the denomination and close.
+    reuses ``public_id`` while changing ``close``. Session and sequence preserve
+    the temporal author identity. ``candle_known_to`` is provenance observed at
+    pin time and never a candle-version join key. ``instrument_public_id`` and
+    ``native_symbol`` complete the selected plane provenance.
     """
 
     base: str
@@ -1332,7 +1333,10 @@ class PnlFxRateRow(TypedDict):
     instrument_public_id: str
     candle_id: int
     candle_public_id: str
+    candle_session_id: str
+    candle_sequence_id: int
     candle_timestamp: datetime
+    candle_known_to: datetime
 
 
 class PnlCryptoUsdPlaneRow(TypedDict):

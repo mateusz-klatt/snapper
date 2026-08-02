@@ -26,6 +26,8 @@ from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
+from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
@@ -542,7 +544,10 @@ def _fx_row(
         "instrument_public_id": f"ins-{base.lower()}{quote.lower()}-{exchange}",
         "candle_id": minute,
         "candle_public_id": f"cdl-{base.lower()}{quote.lower()}-{minute}",
+        "candle_session_id": _FX_SESSION,
+        "candle_sequence_id": minute,
         "candle_timestamp": _m(minute - 1),
+        "candle_known_to": datetime.max.replace(tzinfo=UTC),
     }
 
 
@@ -6328,6 +6333,7 @@ class TestLoadBasketFiatEvidence:
 
     async def test_walutomat_eur_and_pln_price_via_forex_planes(self) -> None:
         """EUR and PLN legs value off EUR-USD and inverse USD-PLN candles."""
+        reset_fx_shadow_pin_metrics()
         fx_rows = [
             _fx_row("EUR", "USD", 1, 1.1, exchange="kraken"),
             _fx_row("EUR", "USD", 2, 1.1, exchange="kraken"),
@@ -6347,6 +6353,7 @@ class TestLoadBasketFiatEvidence:
         assert pln_leg.usd_value == pytest.approx(100.0)
         assert eur_leg.provenance is not None
         assert eur_leg.provenance.candle is not None
+        assert fx_shadow_pin_metrics().failure == 2
 
     async def test_missing_pln_close_at_minute_fails_that_minute_closed(self) -> None:
         """A fiat pair with no close at a minute withholds that minute's leg."""

@@ -64,6 +64,7 @@ def upgrade() -> None:
         sa.Column("decision_inputs_digest", sa.String(64), nullable=False),
         sa.Column("completeness_state", sa.String(16), nullable=False),
         sa.Column("refusal_reason_json", sa.Text(), nullable=True),
+        sa.Column("refusal_reason_digest", sa.String(64), nullable=True),
         sa.CheckConstraint(
             "scope_kind IN ('shared_pair', 'instrument_owned')",
             name="ck_fx_elections_scope_kind",
@@ -79,14 +80,17 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(completeness_state = 'complete' AND refusal_reason_json IS NULL AND "
+            "refusal_reason_digest IS NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
             "(completeness_state = 'partial' AND refusal_reason_json IS NOT NULL AND "
+            "refusal_reason_digest IS NOT NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
             "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL AND "
+            "refusal_reason_digest IS NOT NULL AND "
             "selected_source_exchange IS NULL AND selected_source_instrument_public_id IS NULL "
             "AND selected_native_symbol IS NULL AND selected_base IS NULL "
             "AND selected_quote IS NULL AND selected_orientation IS NULL)",
@@ -161,7 +165,7 @@ def upgrade() -> None:
         "target_currency",
         "unordered_pair",
         "resolved_knowledge_at",
-        "refusal_reason_json",
+        "refusal_reason_digest",
     ]
     op.create_index(
         "uq_fx_elections_shared_refusal",
