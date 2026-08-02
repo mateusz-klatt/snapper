@@ -32,6 +32,43 @@ make pre-refresh
 make update
 ```
 
+## Isolated Worktrees for Parallel Sessions
+
+When more than one agent or developer session works on the repository at
+the same time, a shared checkout makes every quality-gate verdict
+unattributable: a red result cannot be assigned to either change, and a
+green one proves nothing about either. Concurrent frontend coverage runs
+in one checkout also corrupt each other through the shared
+`frontend/coverage/.tmp/` directory. Run each session in its own git
+worktree instead:
+
+```bash
+make worktree NAME=my-task
+```
+
+This creates `../snapper-wt-<NAME>` on a fresh `wt/<NAME>` branch cut
+from `master` and prepares the full verification harness:
+
+- initializes the `frontend`, `integrations/snapper-mcp`, `ios`, and
+    `proprietary` submodules, because missing submodules manufacture
+    failures that look inherited but are environmental
+- writes a minimal `.env` pointing `DB_URL` at the isolated SQLite test
+    fixture (`./data/dev.db`); the real `.env` is never copied because it
+    carries live venue credentials
+- builds a dedicated `.venv` and asserts that `import snapper` resolves
+    inside the worktree rather than the main checkout
+- installs frontend dependencies, reuses the main checkout's
+    `frontend/dist` through a symlink when one exists, and installs
+    `snapper-mcp` node modules
+
+The target requires a POSIX shell and is not available on Windows. Tear
+a worktree down with:
+
+```bash
+git worktree remove --force ../snapper-wt-<NAME>
+git branch -D wt/<NAME>
+```
+
 ## Quality Gates
 
 ### Main Command
