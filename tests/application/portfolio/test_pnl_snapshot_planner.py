@@ -27,6 +27,7 @@ from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
+from snapper.application.portfolio.pnl_snapshot_planner import _add_margin_component
 from snapper.application.portfolio.pnl_snapshot_planner import _bounded_diagnostics
 from snapper.application.portfolio.pnl_snapshot_planner import _coverage
 from snapper.application.portfolio.pnl_snapshot_planner import _incomplete_audit_json
@@ -40,6 +41,7 @@ from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_re
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
 from snapper.application.portfolio.pnl_snapshot_planner import resolve_drawdown
 from snapper.application.portfolio.pnl_snapshot_planner import value_basket
+from snapper.application.portfolio.pnl_snapshot_planner import value_margin_unrealized
 from snapper.application.portfolio.pnl_snapshotter import _extract_reason_codes
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
@@ -686,8 +688,8 @@ class TestAssembleMinuteSample:
         assert plan.sample.drawdown == 0.0
         assert plan.peak == 1000.0
 
-    def test_observed_kraken_position_book_does_not_change_equity(self) -> None:
-        """Observed Kraken margin evidence does not enter Phase-5B valuation.
+    def test_observed_kraken_position_book_changes_equity_and_position_equally(self) -> None:
+        """Observed Kraken margin P&L enters equity and position equally.
 
         Given otherwise identical authoritative Kraken balance attempts, one
             with the pre-change not-applicable position component and one with
@@ -727,11 +729,15 @@ class TestAssembleMinuteSample:
 
         balance_only_basket = evaluate_basket(_M1, expected_venues, balance_only_attempts)
         position_basket = evaluate_basket(_M1, expected_venues, position_attempts)
-        assert position_basket == balance_only_basket
+        assert position_basket.margin_unrealized == (("kraken", "EUR", -8.0),)
         balance_only_valuation = value_basket(balance_only_basket.observed_balances, _M1, evidence)
-        position_valuation = value_basket(position_basket.observed_balances, _M1, evidence)
-        assert position_valuation == balance_only_valuation
-        assert position_valuation.equity == 1000.0
+        position_valuation = value_margin_unrealized(
+            position_basket.margin_unrealized,
+            _M1,
+            _fiat_evidence(_M1, 2.0),
+        )
+        assert balance_only_valuation.equity == 1000.0
+        assert position_valuation.equity == -16.0
 
         balance_only_plan = assemble_minute_sample(
             MinuteInputs(_complete_point(_M1), balance_only_attempts, evidence),
@@ -740,18 +746,300 @@ class TestAssembleMinuteSample:
             None,
         )
         position_plan = assemble_minute_sample(
-            MinuteInputs(_complete_point(_M1), position_attempts, evidence),
+            MinuteInputs(_complete_point(_M1), position_attempts, _fiat_evidence(_M1, 2.0)),
             expected_venues,
             (),
             None,
         )
-        assert position_plan == balance_only_plan
         assert position_plan.sample is not None
+        assert balance_only_plan.sample is not None
         assert position_plan.sample.valuation_status == "complete"
         assert position_plan.sample.unrealized_pnl == 5.0
-        assert position_plan.sample.cash_usd == 1000.0
-        assert position_plan.sample.position_value_usd == 0.0
-        assert position_plan.peak == 1000.0
+        assert position_plan.sample.cash_usd == balance_only_plan.sample.cash_usd
+        assert position_plan.sample.position_value_usd == -16.0
+        assert position_plan.peak == 984.0
+        audit = json.loads(position_plan.sample.audit_json)
+        assert audit["coverage"]["margin_unrealized_included"] is True
+        assert any(record["component"] == "margin_unrealized" for record in audit["valuation"])
+
+    def test_position_error_demotes_an_otherwise_complete_minute(self) -> None:
+        """An unproven position book withholds equity instead of guessing zero."""
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "error"
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["position_book_unproven"]
+
+    @pytest.mark.parametrize("symbol", ["BTC", "-USD", "btc-usd"])
+    def test_noncanonical_complete_position_symbol_demotes_the_minute(self, symbol: str) -> None:
+        """A structurally complete book still requires canonical native symbols."""
+        position = {
+            "symbol": symbol,
+            "side": "buy",
+            "size": 1.0,
+            "entry_price": 100.0,
+            "mark_price": 101.0,
+            "unrealized_pnl": 1.0,
+            "unrealized_funding": 0.0,
+            "timestamp": _M1.isoformat(),
+        }
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "observed"
+        attempt["position_observed_at"] = _M1
+        attempt["open_positions_json"] = json.dumps([position])
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["position_book_unproven"]
+
+    def test_finite_position_fields_whose_sum_overflows_demote_the_minute(self) -> None:
+        """Finite reported P&L fields may not combine into a non-finite component."""
+        position = {
+            "symbol": "BTC-USD",
+            "side": "buy",
+            "size": 1.0,
+            "entry_price": 100.0,
+            "mark_price": 101.0,
+            "unrealized_pnl": 1e308,
+            "unrealized_funding": 1e308,
+            "timestamp": _M1.isoformat(),
+        }
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "observed"
+        attempt["position_observed_at"] = _M1
+        attempt["open_positions_json"] = json.dumps([position])
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["non_finite"]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_reason"),
+        [
+            (None, "position_book_unproven"),
+            ("not-json", "position_book_unproven"),
+            ('{"symbol":"BTC-USD"}', "position_book_unproven"),
+            ("[1]", "position_book_unproven"),
+            ('[{"symbol":"BTC"}]', "position_book_unproven"),
+            ('[{"symbol":"-USD"}]', "position_book_unproven"),
+            ('[{"symbol":"btc-usd"}]', "position_book_unproven"),
+            (
+                '[{"symbol":"BTC-USD","unrealized_pnl":true,"unrealized_funding":0.0}]',
+                "position_book_unproven",
+            ),
+        ],
+    )
+    def test_observed_position_payload_faults_demote_the_minute(
+        self, payload: str | None, expected_reason: str
+    ) -> None:
+        """Malformed observed books never contribute a guessed partial value."""
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "observed"
+        attempt["open_positions_json"] = payload
+        attempt["position_observed_at"] = _M1 if payload is not None else None
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == [expected_reason]
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "symbol",
+            "side",
+            "size",
+            "entry_price",
+            "mark_price",
+            "unrealized_pnl",
+            "unrealized_funding",
+            "timestamp",
+        ],
+    )
+    def test_each_missing_position_field_demotes_the_minute(self, missing_field: str) -> None:
+        """Every field in the strict observed-position schema is authoritative."""
+        position: dict[str, object] = {
+            "symbol": "BTC-USD",
+            "side": "buy",
+            "size": 1.0,
+            "entry_price": 100.0,
+            "mark_price": 101.0,
+            "unrealized_pnl": 1.0,
+            "unrealized_funding": 0.0,
+            "timestamp": _M1.isoformat(),
+        }
+        position.pop(missing_field)
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "observed"
+        attempt["position_observed_at"] = _M1
+        attempt["open_positions_json"] = json.dumps([position])
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["position_book_unproven"]
+
+    @pytest.mark.parametrize("status", ["not_applicable", "unsupported"])
+    def test_absent_position_authority_keeps_legacy_economics(self, status: str) -> None:
+        """Structural position absence changes no legacy monetary output."""
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = status
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        frozen_5b1_values = {
+            "valuation_status": "complete",
+            "realized_pnl": 1.0,
+            "fee_pnl": -0.5,
+            "accrual_pnl": 0.25,
+            "unrealized_pnl": 5.0,
+            "cash_usd": 1000.0,
+            "position_value_usd": 0.0,
+            "drawdown": 0.0,
+        }
+        actual = {key: getattr(plan.sample, key) for key in frozen_5b1_values}
+        assert actual == frozen_5b1_values
+
+    def test_empty_observed_position_book_includes_exact_zero(self) -> None:
+        """An authoritative empty book includes a zero component and stays complete."""
+        attempt = _attempt(minute=_M1)
+        attempt["position_status"] = "observed"
+        attempt["open_positions_json"] = "[]"
+        attempt["position_observed_at"] = _M1
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "complete"
+        assert plan.sample.cash_usd == 1000.0
+        assert plan.sample.position_value_usd == 0.0
+        assert json.loads(plan.sample.audit_json)["coverage"]["margin_unrealized_included"] is True
+
+    def test_unpriceable_margin_quote_demotes_with_fx_reason(self) -> None:
+        """A failed quote conversion withholds the whole minute."""
+        outcome = value_margin_unrealized(
+            (("kraken", "EUR", 2.0),),
+            _M1,
+            _crypto_evidence(),
+        )
+        assert outcome.equity is None
+        assert outcome.reason_codes == frozenset({"crypto_plane_unpriced"})
+
+    def test_zero_margin_leg_is_currency_invariant(self) -> None:
+        """A reported exact-zero margin leg needs no quote evidence."""
+        outcome = value_margin_unrealized(
+            (("kraken", "UNKNOWN", 0.0),),
+            _M1,
+            _crypto_evidence(),
+        )
+        assert outcome.equity == 0.0
+        assert outcome.reason_codes == frozenset()
+
+    def test_margin_component_preserves_cash_across_adversarial_rounding(self) -> None:
+        """One shared margin subtotal keeps the reviewed disparate-magnitude cash exact."""
+        balance_total = math.fsum((1_000_000.0, 0.1, 0.1))
+        position_total = -1_000_000.0
+        margin_total = math.fsum((0.3, 100.0, -0.1, -1.0))
+        totals = _add_margin_component(balance_total, position_total, margin_total)
+        assert totals is not None
+        equity, position_value = totals
+        assert equity - position_value == balance_total - position_total
+
+    def test_margin_component_refuses_either_total_overflow(self) -> None:
+        """Overflow in either adjusted total withholds the shared component."""
+        assert _add_margin_component(1e308, 0.0, 1e308) is None
+        assert _add_margin_component(0.0, 1e308, 1e308) is None
+
+    def test_margin_inclusion_total_overflow_demotes_the_minute(self) -> None:
+        """Finite balance and margin subtotals that overflow together are withheld."""
+        attempt = _attempt(minute=_M1)
+        attempt["balances_json"] = '[{"currency":"USD","total":1e308}]'
+        attempt["position_status"] = "observed"
+        attempt["position_observed_at"] = _M1
+        attempt["open_positions_json"] = json.dumps(
+            [
+                {
+                    "symbol": "BTC-USD",
+                    "side": "buy",
+                    "size": 1.0,
+                    "entry_price": 1.0,
+                    "mark_price": 1.0,
+                    "unrealized_pnl": 1e308,
+                    "unrealized_funding": 0.0,
+                    "timestamp": _M1.isoformat(),
+                }
+            ]
+        )
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["valuation_overflow"]
+
+    def test_margin_only_overflow_demotes_after_cancelling_equity_sum(self) -> None:
+        """Margin aggregation overflow cannot hide behind basket cancellation."""
+        attempt = _attempt(minute=_M1)
+        attempt["balances_json"] = '[{"currency":"USD","total":-1e308}]'
+        attempt["position_status"] = "observed"
+        attempt["position_observed_at"] = _M1
+        attempt["open_positions_json"] = json.dumps(
+            [
+                {
+                    "symbol": symbol,
+                    "side": "buy",
+                    "size": 1.0,
+                    "entry_price": 1.0,
+                    "mark_price": 1.0,
+                    "unrealized_pnl": 1e308,
+                    "unrealized_funding": 0.0,
+                    "timestamp": _M1.isoformat(),
+                }
+                for symbol in ("BTC-USD", "ETH-USD")
+            ]
+        )
+        plan = assemble_minute_sample(
+            MinuteInputs(_complete_point(_M1), {"kraken": attempt}, _crypto_evidence()),
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.sample is not None
+        assert plan.sample.valuation_status == "incomplete"
+        assert json.loads(plan.sample.audit_json)["reason_codes"] == ["valuation_overflow"]
 
     def test_complete_point_with_stale_basket_is_incomplete(self) -> None:
         """A complete point over a stale basket demotes to a basket reason."""
@@ -948,7 +1236,7 @@ class TestReasonCodeContract:
         ``empty_parameter_set_mark`` is unset, so a regression that emptied a set
         would silently SKIP every case rather than fail.
         """
-        assert len(PNL_SAMPLE_REASON_CODES) == 16
+        assert len(PNL_SAMPLE_REASON_CODES) == 17
         assert len(PNL_SAMPLE_FINAL_REASONS) == 4
 
     def test_never_persist_is_final(self) -> None:

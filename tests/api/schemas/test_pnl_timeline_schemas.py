@@ -135,7 +135,7 @@ def _sampled_coverage() -> PnlEquityCoverageData:
         complete_minutes=3,
         first_minute=_NOW,
         last_minute=_NOW,
-        sample_calc_version="5B.1",
+        sample_calc_version="5B.2",
     )
 
 
@@ -507,7 +507,7 @@ class TestEquityCoverageContract:
         coverage = _sampled_coverage()
         assert coverage.sampled is True
         assert coverage.venue_scope == "spot_only"
-        assert coverage.sample_calc_version == "5B.1"
+        assert coverage.sample_calc_version == "5B.2"
 
     def test_unsampled_coverage_round_trips(self) -> None:
         """A wholly null unsampled disclosure validates."""

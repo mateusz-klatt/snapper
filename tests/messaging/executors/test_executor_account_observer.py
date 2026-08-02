@@ -865,8 +865,8 @@ class TestObserveAccountOnce:
             frozenset({"kraken"}),
             {"kraken": basket_attempt},
         )
-        assert basket.reason_codes == frozenset()
-        assert basket.observed_balances == {("kraken", "USD"): 125.0}
+        assert basket.reason_codes == frozenset({"position_book_unproven"})
+        assert basket.observed_balances == {}
 
     @pytest.mark.asyncio
     async def test_snapshot_commit_schedules_reconciliation_before_invalidation(self) -> None:

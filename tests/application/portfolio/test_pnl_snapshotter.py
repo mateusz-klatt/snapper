@@ -33,7 +33,10 @@ from snapper.application.process_manager.executor_topology import ExecutorTopolo
 from snapper.application.services.settings import SettingsService
 from snapper.core.json_types import JsonValue
 from snapper.data.repository import PortfolioPnlSampleConflictError
+from snapper.data.repository import PortfolioPnlSampleQuery
+from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
+from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlSampleRow
 from snapper.data.repository_types import ScopeGrantRow
@@ -316,10 +319,40 @@ class _FakeRepo:
         del wallet, mode, ccy, as_of
         return self._anchor
 
-    async def get_latest_portfolio_pnl_sample(self, query: Any) -> PortfolioPnlSampleRow | None:
+    async def get_latest_portfolio_pnl_sample(
+        self, query: PortfolioPnlSampleQuery
+    ) -> PortfolioPnlSampleRow | None:
         """Return the canned durable-progress sample."""
-        del query
-        return self._latest
+        return (
+            self._latest
+            if self._latest is None or self._latest["calc_version"] == query.calc_version
+            else None
+        )
+
+    async def get_latest_active_portfolio_pnl_sample_any_version(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PortfolioPnlSampleRow | None:
+        """Return the canned active progress across versions."""
+        candidates = [
+            row for row in self.persisted if row["epoch_public_id"] == scope.epoch_public_id
+        ]
+        if (
+            self._latest is not None
+            and self._latest["epoch_public_id"] == scope.epoch_public_id
+            and self._latest not in candidates
+        ):
+            candidates.append(self._latest)
+        return max(candidates, key=lambda row: row["point_time"]) if candidates else None
+
+    async def get_active_portfolio_pnl_samples_any_version(
+        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> list[PortfolioPnlSampleRow]:
+        """Return canned active rows in the window across versions."""
+        return [
+            row
+            for row in self.persisted
+            if row["epoch_public_id"] == scope.epoch_public_id and start <= row["point_time"] <= end
+        ]
 
     async def get_portfolio_pnl_sample_peak(self, query: Any, before: datetime) -> float | None:
         """Return the canned causal peak, recording the ``before`` bound."""
@@ -498,7 +531,7 @@ def _persisted_sample(
         "point_time": point_time,
         "point_kind": "sample",
         "epoch_public_id": _EPOCH,
-        "calc_version": "5B.1",
+        "calc_version": PNL_SAMPLE_CALC_VERSION,
         "valuation_status": status,
         "realized_pnl": realized,
         "fee_pnl": -0.5,
@@ -1071,6 +1104,46 @@ class TestCatchupAndCorrections:
         assert seen[0] == {"kraken": 4}
 
     @pytest.mark.asyncio
+    async def test_stale_version_recomputes_from_t0_through_supersede(self) -> None:
+        """A stale active tip rebuilds the entire epoch through SCD2 supersedes."""
+        stale_rows = [_persisted_sample(_minute(offset), status="complete") for offset in (1, 2)]
+        for row in stale_rows:
+            row["calc_version"] = "5B.1"
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")],
+            anchor=_anchor(),
+            latest=stale_rows[-1],
+            persisted=stale_rows,
+        )
+        snap = _snapshotter(repo, _minute(4))
+        with _patched_series(seq=7):
+            await snap._tick_once()
+        assert [row[0]["point_time"] for row in repo.superseded] == [
+            _minute(1),
+            _minute(2),
+        ]
+        assert all(row[0]["calc_version"] == "5B.2" for row in repo.superseded)
+
+    @pytest.mark.asyncio
+    async def test_stale_transition_ignores_a_newer_foreign_epoch_tip(self) -> None:
+        """Version transition progress and supersedes stay inside the anchored epoch."""
+        stale = _persisted_sample(_minute(1), status="complete")
+        stale["calc_version"] = "5B.1"
+        foreign = _persisted_sample(_minute(3), status="complete")
+        foreign["epoch_public_id"] = "00000000-0000-7000-8000-000000000999"
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")],
+            anchor=_anchor(),
+            latest=foreign,
+            persisted=[stale, foreign],
+        )
+        snap = _snapshotter(repo, _minute(4))
+        with _patched_series(seq=7):
+            await snap._tick_once()
+        assert [row[0]["point_time"] for row in repo.superseded] == [_minute(1)]
+        assert all(row[0]["epoch_public_id"] == _EPOCH for row in repo.superseded)
+
+    @pytest.mark.asyncio
     async def test_late_fill_recomputes_forward_under_cas(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1494,6 +1567,25 @@ class TestBudgetSplitAndHelpers:
     def test_observed_currencies_collects_non_usd(self) -> None:
         """Observed non-USD currencies are collected for the crypto load."""
         assert _observed_currencies(_attempt(_minute(1))) == {"BTC"}
+
+    @pytest.mark.parametrize(
+        ("positions_json", "expected"),
+        [
+            ('[{"symbol":"BTC-EUR"}]', {"BTC", "EUR"}),
+            ('[{"symbol":"BTC-USD"}]', {"BTC"}),
+            ("not-json", {"BTC"}),
+            ('{"symbol":"BTC-EUR"}', {"BTC"}),
+            ('[1,{"symbol":2},{"symbol":"bad"}]', {"BTC"}),
+        ],
+    )
+    def test_observed_currencies_collects_only_canonical_position_quotes(
+        self, positions_json: str, expected: set[str]
+    ) -> None:
+        """Position quotes extend evidence currencies without certifying bad JSON."""
+        attempt = _attempt(_minute(1))
+        attempt["position_status"] = "observed"
+        attempt["open_positions_json"] = positions_json
+        assert _observed_currencies(attempt) == expected
 
     @pytest.mark.parametrize("balances_json", ["{bad", '{"currency":"USD"}', "[123]", None])
     def test_observed_currencies_tolerates_malformed(self, balances_json: str | None) -> None:

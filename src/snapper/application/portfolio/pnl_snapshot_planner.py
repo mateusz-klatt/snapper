@@ -52,6 +52,7 @@ from typing import cast
 
 from snapper.application.portfolio.account_status import ACCOUNT_FRESHNESS_CEILING_S
 from snapper.application.portfolio.account_status import AUTHORITY_MAX_WINDOW
+from snapper.application.portfolio.account_view import _parse_positions
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import ValuationProvenance
@@ -64,6 +65,8 @@ from snapper.data.repository_types import PNL_SAMPLE_FINAL_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
 from snapper.data.repository_types import SampleReasonCode
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
+from snapper.infrastructure.symbols.mapper import NATIVE_SEPARATOR
+from snapper.infrastructure.symbols.mapper import make_native_symbol
 
 _POINT_REASON_TO_SAMPLE_CODE: Final[dict[PnlIncompletenessReason, SampleReasonCode]] = {
     "mark_unavailable": "missing_mark",
@@ -210,6 +213,8 @@ class BasketOutcome:
     observations: tuple[dict[str, str], ...]
     reason_codes: frozenset[SampleReasonCode]
     diagnostics: tuple[dict[str, str], ...]
+    margin_unrealized: tuple[tuple[str, str, float], ...]
+    margin_unrealized_included: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +459,48 @@ def _parse_balance_entries(
     return tuple(legs)
 
 
+def _native_quote_currency(symbol: str) -> str | None:
+    """Return the quote from one canonical native spot symbol, or ``None``."""
+    parts = symbol.split(NATIVE_SEPARATOR)
+    if len(parts) != 2:
+        return None
+    base, quote = parts
+    try:
+        canonical = make_native_symbol(base, quote)
+    except ValueError:
+        return None
+    return quote if canonical == symbol else None
+
+
+def _parse_margin_entries(
+    attempt: VenueAccountObservationAttemptRow,
+) -> tuple[tuple[str, str, float], ...] | _GateFailure:
+    """Authority-gate and parse one venue's reported margin P&L legs."""
+    status = attempt["position_status"]
+    if status in ("not_applicable", "unsupported"):
+        return ()
+    if status != "observed":
+        return _GateFailure("position_book_unproven", "position_book_not_observed")
+    raw = attempt["open_positions_json"]
+    observed_at = attempt["position_observed_at"]
+    if raw is None or observed_at is None:
+        return _GateFailure("position_book_unproven", "position_book_evidence_missing")
+    try:
+        positions = _parse_positions(raw)
+    except (ValueError, TypeError):
+        return _GateFailure("position_book_unproven", "position_book_incoherent")
+    legs: list[tuple[str, str, float]] = []
+    for position in positions:
+        quote = _native_quote_currency(position.symbol)
+        if quote is None:
+            return _GateFailure("position_book_unproven", "position_symbol_not_canonical")
+        amount = position.unrealized_pnl + position.unrealized_funding
+        if not math.isfinite(amount):
+            return _GateFailure("non_finite", "position_unrealized_non_finite")
+        legs.append((attempt["exchange"], quote, amount))
+    return tuple(legs)
+
+
 def _gate_attempt(
     minute: datetime, attempt: VenueAccountObservationAttemptRow
 ) -> tuple[tuple[str, float], ...] | _GateFailure:
@@ -521,6 +568,8 @@ def evaluate_basket(
     diagnostics: list[dict[str, str]] = []
     reasons: set[SampleReasonCode] = set()
     resolved: dict[tuple[str, str], float] = {}
+    margin_unrealized: list[tuple[str, str, float]] = []
+    margin_unrealized_included = False
     for exchange in sorted(expected_venues):
         attempt = attempts.get(exchange)
         if attempt is None:
@@ -541,22 +590,39 @@ def evaluate_basket(
                 _diagnostic_record("basket_gate", gated.cause, gated.code, {"exchange": exchange})
             )
             continue
+        margin = _parse_margin_entries(attempt)
+        if isinstance(margin, _GateFailure):
+            reasons.add(margin.code)
+            diagnostics.append(
+                _diagnostic_record(
+                    "position_book", margin.cause, margin.code, {"exchange": exchange}
+                )
+            )
+            continue
+        margin_unrealized_included = margin_unrealized_included or (
+            attempt["position_status"] == "observed"
+        )
         for currency, total in gated:
             key = (exchange, currency)
             resolved[key] = resolved.get(key, 0.0) + total
         observations.append(_observation_record(attempt))
+        margin_unrealized.extend(margin)
     if reasons:
         return BasketOutcome(
             observed_balances={},
             observations=(),
             reason_codes=frozenset(reasons),
             diagnostics=_bounded_diagnostics(diagnostics),
+            margin_unrealized=(),
+            margin_unrealized_included=False,
         )
     return BasketOutcome(
         observed_balances=resolved,
         observations=tuple(observations),
         reason_codes=frozenset(),
         diagnostics=(),
+        margin_unrealized=tuple(margin_unrealized),
+        margin_unrealized_included=margin_unrealized_included,
     )
 
 
@@ -584,7 +650,9 @@ def _orientation(currency: str, provenance: ValuationProvenance) -> str:
     return "direct" if provenance.base == currency else "inverse"
 
 
-def _valuation_record(currency: str, provenance: ValuationProvenance) -> dict[str, object]:
+def _valuation_record(
+    currency: str, provenance: ValuationProvenance, component: str
+) -> dict[str, object]:
     """Project one priced leg's provenance into an A3/A5 audit valuation record.
 
     Records the CONSUMED basket ``currency``, the explicit ``orientation`` and,
@@ -601,6 +669,7 @@ def _valuation_record(currency: str, provenance: ValuationProvenance) -> dict[st
         "exchange": provenance.exchange,
         "rate": provenance.rate,
         "close": provenance.close,
+        "component": component,
     }
     candle = provenance.candle
     if candle is not None:
@@ -637,6 +706,19 @@ def _fsum_guarded(values: Sequence[float]) -> float | None:
     return total if math.isfinite(total) else None
 
 
+def _add_margin_component(
+    balance_total: float,
+    position_total: float,
+    margin_total: float,
+) -> tuple[float, float] | None:
+    """Add one pre-aggregated margin float identically to both equity partitions."""
+    equity = _fsum_guarded((balance_total, margin_total))
+    position_value = _fsum_guarded((position_total, margin_total))
+    if equity is None or position_value is None:
+        return None
+    return equity, position_value
+
+
 def value_basket(
     observed_balances: Mapping[tuple[str, str], float],
     minute: datetime,
@@ -659,7 +741,7 @@ def value_basket(
         The USD equity with audit provenance, or the reason set.
     """
     legs: list[float] = []
-    provenances: list[tuple[str, ValuationProvenance]] = []
+    provenances: list[tuple[str, ValuationProvenance, str]] = []
     reasons: set[SampleReasonCode] = set()
     diagnostics: list[dict[str, str]] = []
     for (exchange, currency), qty in sorted(observed_balances.items()):
@@ -678,7 +760,7 @@ def value_basket(
             continue
         legs.append(leg.usd_value)
         if leg.provenance is not None:
-            provenances.append((currency, leg.provenance))
+            provenances.append((currency, leg.provenance, "balance"))
     if reasons:
         return EquityOutcome(
             equity=None,
@@ -704,14 +786,84 @@ def value_basket(
     )
 
 
+def value_margin_unrealized(
+    margin_unrealized: Sequence[tuple[str, str, float]],
+    minute: datetime,
+    evidence: ValuationEvidence,
+) -> EquityOutcome:
+    """Value and aggregate the margin component exactly once for one minute.
+
+    Args:
+        margin_unrealized: Venue-reported ``(exchange, quote, amount)`` legs.
+        minute: Grid instant selecting the shared valuation evidence.
+        evidence: Pre-loaded fiat and crypto price evidence for the minute.
+
+    Returns:
+        The finite shared margin USD subtotal and its audit provenance, or the
+        reason set withholding the whole component.
+    """
+    legs: list[float] = []
+    provenances: list[tuple[str, ValuationProvenance, str]] = []
+    reasons: set[SampleReasonCode] = set()
+    diagnostics: list[dict[str, str]] = []
+    for exchange, currency, amount in margin_unrealized:
+        leg = value_currency(exchange, currency, amount, minute, evidence)
+        if leg.usd_value is None:
+            code = _map_valuation_reason(leg.reason)
+            reasons.add(code)
+            diagnostics.append(
+                _diagnostic_record(
+                    "margin_valuation",
+                    leg.reason or "unmapped",
+                    code,
+                    {"exchange": exchange, "currency": currency},
+                )
+            )
+            continue
+        legs.append(leg.usd_value)
+        if leg.provenance is not None:
+            provenances.append((currency, leg.provenance, "margin_unrealized"))
+    if reasons:
+        return EquityOutcome(
+            equity=None,
+            valuation=(),
+            reason_codes=frozenset(reasons),
+            diagnostics=_bounded_diagnostics(diagnostics),
+        )
+    total = _fsum_guarded(legs)
+    if total is None:
+        return EquityOutcome(
+            equity=None,
+            valuation=(),
+            reason_codes=frozenset({"valuation_overflow"}),
+            diagnostics=(
+                _diagnostic_record("margin_aggregation", "overflow", "valuation_overflow"),
+            ),
+        )
+    return EquityOutcome(
+        equity=total,
+        valuation=_dedupe_valuation_records(provenances),
+        reason_codes=frozenset(),
+        diagnostics=(),
+    )
+
+
 def _dedupe_valuation_records(
-    provenances: Sequence[tuple[str, ValuationProvenance]],
+    provenances: Sequence[tuple[str, ValuationProvenance, str]],
 ) -> tuple[dict[str, object], ...]:
     """Return one audit valuation record per distinct priced leg, deterministically."""
     by_key: dict[str, dict[str, object]] = {}
-    for currency, provenance in provenances:
-        record = _valuation_record(currency, provenance)
+    for currency, provenance, component in provenances:
+        record = _valuation_record(currency, provenance, component)
         by_key[_canonical_json(record)] = record
+    return tuple(by_key[key] for key in sorted(by_key))
+
+
+def _dedupe_valuation_records_from_records(
+    records: Sequence[dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Merge already-projected balance and margin audit records deterministically."""
+    by_key = {_canonical_json(record): record for record in records}
     return tuple(by_key[key] for key in sorted(by_key))
 
 
@@ -775,13 +927,18 @@ def _partition_position(
     )
 
 
-def _coverage(leveraged_excluded: bool, non_finite_excluded: bool) -> dict[str, object]:
+def _coverage(
+    leveraged_excluded: bool,
+    non_finite_excluded: bool,
+    margin_unrealized_included: bool = False,
+) -> dict[str, object]:
     """Build the self-describing coverage disclosure block (A4/R10/R11)."""
     return {
         "leveraged_inventory_excluded": leveraged_excluded,
         "non_finite_position_excluded": non_finite_excluded,
         "venue_scope": VENUE_SCOPE,
         "external_flows_adjusted": False,
+        "margin_unrealized_included": margin_unrealized_included,
     }
 
 
@@ -1046,13 +1203,16 @@ def _assemble_complete_minute(
 ) -> MinutePlan:
     """Price, partition and draw-down a mark-complete, authoritative minute."""
     point = inputs.point
-    equity_outcome = value_basket(basket.observed_balances, point.point_time, inputs.evidence)
-    if equity_outcome.equity is None:
+    balance_outcome = value_basket(basket.observed_balances, point.point_time, inputs.evidence)
+    margin_outcome = value_margin_unrealized(
+        basket.margin_unrealized, point.point_time, inputs.evidence
+    )
+    if balance_outcome.equity is None or margin_outcome.equity is None:
         return MinutePlan(
             sample=_incomplete_sample(
                 point,
-                equity_outcome.reason_codes,
-                equity_outcome.diagnostics,
+                balance_outcome.reason_codes | margin_outcome.reason_codes,
+                _bounded_diagnostics(balance_outcome.diagnostics + margin_outcome.diagnostics),
                 _coverage(False, False),
             ),
             peak=prior_peak,
@@ -1070,7 +1230,21 @@ def _assemble_complete_minute(
             ),
             peak=prior_peak,
         )
-    drawdown = resolve_drawdown(prior_peak, equity_outcome.equity)
+    totals = _add_margin_component(
+        balance_outcome.equity, partition.position_value, margin_outcome.equity
+    )
+    if totals is None:
+        return MinutePlan(
+            sample=_incomplete_sample(
+                point,
+                frozenset({"valuation_overflow"}),
+                (_diagnostic_record("margin_inclusion", "overflow", "valuation_overflow"),),
+                _coverage(partition.leveraged_excluded, partition.non_finite_excluded),
+            ),
+            peak=prior_peak,
+        )
+    equity, position_value = totals
+    drawdown = resolve_drawdown(prior_peak, equity)
     if drawdown.demoted or drawdown.drawdown is None:
         code: SampleReasonCode = (
             "non_finite" if drawdown.reason == "prior_peak_non_finite" else "drawdown_unpriceable"
@@ -1084,13 +1258,18 @@ def _assemble_complete_minute(
             ),
             peak=prior_peak,
         )
-    cash = equity_outcome.equity - partition.position_value
-    coverage = _coverage(partition.leveraged_excluded, partition.non_finite_excluded)
-    audit_json = _complete_audit_json(equity_outcome.valuation, basket.observations, coverage)
+    cash = equity - position_value
+    coverage = _coverage(
+        partition.leveraged_excluded,
+        partition.non_finite_excluded,
+        basket.margin_unrealized_included,
+    )
+    valuation = _dedupe_valuation_records_from_records(
+        balance_outcome.valuation + margin_outcome.valuation
+    )
+    audit_json = _complete_audit_json(valuation, basket.observations, coverage)
     return MinutePlan(
-        sample=_complete_sample(
-            point, cash, partition.position_value, drawdown.drawdown, audit_json
-        ),
+        sample=_complete_sample(point, cash, position_value, drawdown.drawdown, audit_json),
         peak=drawdown.peak,
     )
 

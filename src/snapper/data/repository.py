@@ -4826,6 +4826,24 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_latest_active_portfolio_pnl_sample_any_version(
+        self,
+        scope: PortfolioPnlSampleScope,
+    ) -> PortfolioPnlSampleRow | None:
+        """Return the last active sample for one scope without a version filter."""
+        ...
+
+    @abstractmethod
+    async def get_active_portfolio_pnl_samples_any_version(
+        self,
+        scope: PortfolioPnlSampleScope,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[PortfolioPnlSampleRow]:
+        """Return active scope samples in a window without a version filter."""
+        ...
+
+    @abstractmethod
     async def get_venue_account_observation_attempts_at(
         self,
         wallet_public_id: str,
@@ -15612,6 +15630,45 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             row = (await s.execute(stmt)).scalars().first()
             return None if row is None else self._portfolio_pnl_sample_to_row(row)
+
+    async def get_latest_active_portfolio_pnl_sample_any_version(
+        self,
+        scope: PortfolioPnlSampleScope,
+    ) -> PortfolioPnlSampleRow | None:
+        """Return latest active scope progress so version transitions are detectable."""
+        stmt = (
+            select(PortfolioPnlPoint)
+            .where(
+                *self._portfolio_pnl_sample_scope_filters(scope),
+                PortfolioPnlPoint.epoch_public_id == scope.epoch_public_id,
+            )
+            .order_by(PortfolioPnlPoint.point_time.desc())
+            .limit(1)
+        )
+        async with self.session() as s:
+            row = (await s.execute(stmt)).scalars().first()
+            return None if row is None else self._portfolio_pnl_sample_to_row(row)
+
+    async def get_active_portfolio_pnl_samples_any_version(
+        self,
+        scope: PortfolioPnlSampleScope,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[PortfolioPnlSampleRow]:
+        """Return active scope samples in a window across algorithm versions."""
+        stmt = (
+            select(PortfolioPnlPoint)
+            .where(
+                *self._portfolio_pnl_sample_scope_filters(scope),
+                PortfolioPnlPoint.epoch_public_id == scope.epoch_public_id,
+                PortfolioPnlPoint.point_time >= window_start,
+                PortfolioPnlPoint.point_time <= window_end,
+            )
+            .order_by(PortfolioPnlPoint.point_time)
+        )
+        async with self.session() as s:
+            rows = (await s.execute(stmt)).scalars().all()
+            return [self._portfolio_pnl_sample_to_row(row) for row in rows]
 
     @staticmethod
     def _venue_account_observation_attempt_to_row(

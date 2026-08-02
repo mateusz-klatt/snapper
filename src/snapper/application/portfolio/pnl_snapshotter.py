@@ -225,6 +225,7 @@ class _ScopeContext:
     as_of: datetime
     last_minute: datetime | None
     durable_baseline: dict[str, int]
+    stale_version: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,9 +503,16 @@ class PortfolioPnlSnapshotter:
             epoch_public_id=epoch,
             calc_version=PNL_SAMPLE_CALC_VERSION,
         )
+        active_latest = await repo.get_latest_active_portfolio_pnl_sample_any_version(scope)
+        stale_version = (
+            active_latest is not None and active_latest["calc_version"] != PNL_SAMPLE_CALC_VERSION
+        )
         latest = await repo.get_latest_portfolio_pnl_sample(query)
-        last_minute = latest["point_time"] if latest is not None else None
-        durable_baseline = _parse_baseline(latest["watermarks_json"]) if latest is not None else {}
+        progress = active_latest if stale_version else latest
+        last_minute = progress["point_time"] if progress is not None else None
+        durable_baseline = (
+            _parse_baseline(progress["watermarks_json"]) if progress is not None else {}
+        )
         return _ScopeContext(
             wallet_public_id=wallet,
             scope=scope,
@@ -514,6 +522,7 @@ class PortfolioPnlSnapshotter:
             as_of=as_of,
             last_minute=last_minute,
             durable_baseline=durable_baseline,
+            stale_version=stale_version,
         )
 
     def _log_once(self, seen: set[str], wallet: str, detail: str, *, reason: str) -> None:
@@ -604,6 +613,8 @@ class PortfolioPnlSnapshotter:
         late_start = plan_late_fill_recompute(earliest_affected, ctx.last_minute)
         self_heal_start = await self._self_heal_start(repo, ctx)
         candidates = [start for start in (late_start, self_heal_start) if start is not None]
+        if ctx.stale_version:
+            candidates.append(ctx.t0 + _MINUTE)
         return min(candidates) if candidates else None
 
     async def _self_heal_start(self, repo: Repository, ctx: _ScopeContext) -> datetime | None:
@@ -704,10 +715,12 @@ class PortfolioPnlSnapshotter:
         Returns:
             Whether any chunk hit a reconcile conflict.
         """
-        current = {
-            row["point_time"]: row
-            for row in await repo.get_portfolio_pnl_samples(ctx.query, start, tip)
-        }
+        rows = (
+            await repo.get_active_portfolio_pnl_samples_any_version(ctx.scope, start, tip)
+            if ctx.stale_version
+            else await repo.get_portfolio_pnl_samples(ctx.query, start, tip)
+        )
+        current = {row["point_time"]: row for row in rows}
         pending: deque[ChunkWindow] = deque(
             plan_catchup_chunks(
                 ChunkWindow(start=start, end=tip),
@@ -1072,9 +1085,14 @@ def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]
     Returns:
         The non-USD currency codes in the attempt's balances, or an empty set.
     """
-    if attempt["balance_status"] != "observed":
-        return set()
-    balances_json = attempt["balances_json"]
+    currencies = _observed_balance_currencies(attempt)
+    currencies |= _observed_position_quote_currencies(attempt)
+    return currencies
+
+
+def _observed_balance_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]:
+    """Collect valid non-USD balance currencies without certifying the payload."""
+    balances_json = attempt["balances_json"] if attempt["balance_status"] == "observed" else None
     if balances_json is None:
         return set()
     try:
@@ -1089,6 +1107,34 @@ def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]
             currency = entry.get("currency")
             if isinstance(currency, str) and currency and currency != _USD:
                 currencies.add(currency)
+    return currencies
+
+
+def _observed_position_quote_currencies(
+    attempt: VenueAccountObservationAttemptRow,
+) -> set[str]:
+    """Collect canonical non-USD position quotes for evidence preloading."""
+    positions_json = (
+        attempt["open_positions_json"] if attempt["position_status"] == "observed" else None
+    )
+    if positions_json is None:
+        return set()
+    try:
+        positions = json.loads(positions_json)
+    except ValueError, TypeError:
+        return set()
+    if not isinstance(positions, list):
+        return set()
+    currencies: set[str] = set()
+    for entry in positions:
+        if not isinstance(entry, dict):
+            continue
+        symbol = entry.get("symbol")
+        if not isinstance(symbol, str):
+            continue
+        parts = symbol.split("-")
+        if len(parts) == 2 and parts[1] != _USD:
+            currencies.add(parts[1])
     return currencies
 
 

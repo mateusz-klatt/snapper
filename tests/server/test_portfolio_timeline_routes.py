@@ -1247,7 +1247,7 @@ class TestEquityOverlayResponse:
             "complete_minutes": 3,
             "first_minute": "2026-07-20T10:00:00Z",
             "last_minute": "2026-07-20T10:02:00Z",
-            "sample_calc_version": "5B.1",
+            "sample_calc_version": "5B.2",
         }
         points = payload["points"]
         assert (points[0]["equity"], points[0]["cash"], points[0]["position_value"]) == (

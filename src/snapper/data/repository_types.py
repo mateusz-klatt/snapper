@@ -855,7 +855,7 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5B.1"
+PNL_SAMPLE_CALC_VERSION = "5B.2"
 """Algorithm version stamped on every persisted Phase-5B sample point.
 
 Independent of the anchor read gate's frozen ``5A.13`` timeline contract: the
@@ -884,6 +884,7 @@ type SampleReasonCode = Literal[
     "non_finite",
     "future_clock",
     "pnl_untrusted",
+    "position_book_unproven",
 ]
 """Canonical persisted Phase-5B sample reason code (R9) — single source of truth.
 
@@ -942,6 +943,7 @@ PNL_SAMPLE_RETRYABLE_REASONS: Final[frozenset[SampleReasonCode]] = frozenset(
         "cost_basis_unproven",
         "pnl_point_withheld",
         "basket_leg_withheld",
+        "position_book_unproven",
     }
 )
 """Canonical retryable reason codes (R9): a self-heal may start at an

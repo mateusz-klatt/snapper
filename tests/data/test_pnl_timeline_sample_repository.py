@@ -1152,6 +1152,31 @@ async def test_latest_sample_returns_none_when_empty(
     assert await repository.get_latest_portfolio_pnl_sample(_query()) is None
 
 
+async def test_unpinned_active_sample_reads_support_version_transition(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Unpinned transition reads expose only rows in the requested epoch."""
+    await repository.record_portfolio_pnl_samples(
+        [_complete_sample(_M1), _incomplete_sample(_M3)], _scope()
+    )
+    foreign = _complete_sample(_M5)
+    foreign["epoch_public_id"] = _OTHER_EPOCH
+    async with repository.session() as s:
+        s.add(
+            PortfolioPnlPoint(
+                **repository._portfolio_pnl_sample_orm_kwargs(foreign),
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await s.commit()
+    latest = await repository.get_latest_active_portfolio_pnl_sample_any_version(_scope())
+    rows = await repository.get_active_portfolio_pnl_samples_any_version(_scope(), _M1, _M5)
+    assert latest is not None
+    assert latest["point_time"] == _M3
+    assert [row["point_time"] for row in rows] == [_M1, _M3]
+    assert all(row["epoch_public_id"] == _EPOCH for row in rows)
+
+
 async def test_observation_read_boundary_selects_the_latest_by_bus_time(
     repository: SQLAlchemyRepository,
 ) -> None:
