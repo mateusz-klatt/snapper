@@ -574,6 +574,23 @@ used locally in additional build and smoke stages:
 6.  `make cov-xml` — Export coverage XML, consumed by the SonarCloud scan step
 7.  Docker smoke stage — `make docker-build-dev`, `make docker-migrate-dev`, `docker compose up` for the `snapper` and `snapper-web` services, then a `make server-check` health check
 
+SonarCloud analyzes all checked-out backend code, data, migrations, and tooling
+without coverage, duplication, analyzer, or issue suppressions. The parent project
+excludes only `frontend/`, `integrations/snapper-mcp/`, and `ios/` because those
+public submodules have independent SonarCloud projects. Parent-owned
+`integrations/snapper-delegate/` remains in the backend analysis; each independent
+project likewise suppresses no owned sources or findings.
+`tests/meta/test_sonar_configuration.py` pins this boundary and also rejects
+equivalent workflow, command-line, and inline overrides. Every project workflow
+waits for the pin-versioned SonarCloud Quality Gate after its scan, so a failed gate
+fails CI instead of leaving the GitHub check green.
+
+The private `proprietary/` submodule is not initialized by the public CI workflow,
+so it is not present in the current SonarCloud analysis. Covering it requires either
+a CI credential with read access to that repository or a separate private
+SonarCloud workflow/project; the root configuration cannot compensate for an absent
+checkout.
+
 For debugging a failing `make check-all` locally, the equivalent steps are:
 
 1.  `make check` — Backend quality checks
