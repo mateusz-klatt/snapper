@@ -3,36 +3,72 @@
 }
 
 :8000 {
-	encode gzip zstd
+	@delegate_control_on_public remote_ip 172.30.10.0/29 172.30.11.0/29
+	route {
+		respond @delegate_control_on_public 403
+		encode gzip zstd
 
-	handle /api/* {
-		reverse_proxy snapper:8000
-	}
-	handle /docs* {
-		reverse_proxy snapper:8000
-	}
-	handle /redoc* {
-		reverse_proxy snapper:8000
-	}
-	handle /openapi.json {
-		reverse_proxy snapper:8000
-	}
+		handle /api/* {
+			reverse_proxy snapper:8000
+		}
+		handle /docs* {
+			reverse_proxy snapper:8000
+		}
+		handle /redoc* {
+			reverse_proxy snapper:8000
+		}
+		handle /openapi.json {
+			reverse_proxy snapper:8000
+		}
 
-	handle /assets/* {
-		root * /srv/dist
-		header Cache-Control "public, max-age=31536000, immutable"
-		file_server
-	}
+		handle /assets/* {
+			root * /srv/dist
+			header Cache-Control "public, max-age=31536000, immutable"
+			file_server
+		}
 
-	handle {
-		root * /srv/dist
-		try_files {path} /index.html
-		header Cache-Control "no-cache"
-		file_server
+		handle {
+			root * /srv/dist
+			try_files {path} /index.html
+			header Cache-Control "no-cache"
+			file_server
+		}
 	}
 
 	log {
 		output stdout
 		format console
 	}
+}
+
+:8300 {
+	@delegate_control remote_ip 172.30.10.0/29 172.30.11.0/29
+	@delegate_ws_token {
+		method POST
+		path /api/auth/ws_token
+	}
+	@delegate_pending_reviews {
+		method GET
+		path /api/ai-reviews/pending
+	}
+	@delegate_websocket {
+		method GET
+		path /api/ws
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	@delegate_mcp {
+		method POST
+		path /api/mcp
+	}
+
+	route @delegate_control {
+		reverse_proxy @delegate_ws_token snapper:8000
+		reverse_proxy @delegate_pending_reviews snapper:8000
+		reverse_proxy @delegate_websocket snapper:8000
+		reverse_proxy @delegate_mcp snapper:8000
+		respond 403
+	}
+
+	respond 403
 }

@@ -1,0 +1,28 @@
+{
+  "base_origin": "https://api.anthropic.com",
+  "endpoint_path": "/v1/chat/completions",
+  "model": "claude",
+  "response": {
+    "id": "msg-claude-contract",
+    "object": "chat.completion",
+    "created": 1785664803,
+    "model": "claude",
+    "request_id": "req-claude-contract",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The standard compatibility response parsed successfully.",
+          "stop_reason": "end_turn"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 29,
+      "completion_tokens": 10,
+      "total_tokens": 39
+    }
+  }
+}

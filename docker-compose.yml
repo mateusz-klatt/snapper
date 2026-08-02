@@ -202,6 +202,110 @@ services:
     restart: unless-stopped
     healthcheck:
       disable: true
+  snapper-delegate-kimi:
+    image: klattm/snapper:latest
+    build:
+      context: .
+      target: runtime
+    container_name: snapper-delegate-kimi
+    profiles:
+      - delegate
+    entrypoint: ["python", "-m", "snapper_delegate.pid1"]
+    command: []
+    environment:
+      PYTHONPATH: /app/integrations/snapper-delegate/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONSAFEPATH: "1"
+      PYTHONUNBUFFERED: "1"
+      SNAPPER_DELEGATE_MODEL_ALIAS: ${SNAPPER_DELEGATE_KIMI_MODEL:-kimi-k3}
+      SNAPPER_DELEGATE_BASE_URL: ${SNAPPER_DELEGATE_KIMI_BASE_URL:-https://api.moonshot.ai}
+      SNAPPER_DELEGATE_ENDPOINT_PATH: /v1/chat/completions
+      SNAPPER_DELEGATE_SNAPPER_URL: ${SNAPPER_DELEGATE_SNAPPER_URL:-http://snapper-web:8300}
+      SNAPPER_DELEGATE_API_KEY_FILE: /run/secrets/delegate/api_key
+      SNAPPER_DELEGATE_TOKEN_FILE: /run/secrets/delegate/delegate_token
+      SNAPPER_DELEGATE_MAX_TOOL_ROUNDS: ${SNAPPER_DELEGATE_MAX_TOOL_ROUNDS:-4}
+      SNAPPER_LOG_FILE: /app/data/log/delegate/model/delegate.log
+    user: "888:888"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - delegate-kimi-control
+    volumes:
+      - type: bind
+        source: ./data/log/delegate/kimi
+        target: /app/data/log/delegate/model
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/secrets/delegate/kimi
+        target: /run/secrets/delegate
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,uid=888,gid=888,mode=1770
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+  snapper-delegate-gemini:
+    image: klattm/snapper:latest
+    build:
+      context: .
+      target: runtime
+    container_name: snapper-delegate-gemini
+    profiles:
+      - delegate
+    entrypoint: ["python", "-m", "snapper_delegate.pid1"]
+    command: []
+    environment:
+      PYTHONPATH: /app/integrations/snapper-delegate/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONSAFEPATH: "1"
+      PYTHONUNBUFFERED: "1"
+      SNAPPER_DELEGATE_MODEL_ALIAS: ${SNAPPER_DELEGATE_GEMINI_MODEL:-gemini-2.5-pro}
+      SNAPPER_DELEGATE_BASE_URL: ${SNAPPER_DELEGATE_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      SNAPPER_DELEGATE_ENDPOINT_PATH: /v1beta/openai/chat/completions
+      SNAPPER_DELEGATE_SNAPPER_URL: ${SNAPPER_DELEGATE_SNAPPER_URL:-http://snapper-web:8300}
+      SNAPPER_DELEGATE_API_KEY_FILE: /run/secrets/delegate/api_key
+      SNAPPER_DELEGATE_TOKEN_FILE: /run/secrets/delegate/delegate_token
+      SNAPPER_DELEGATE_MAX_TOOL_ROUNDS: ${SNAPPER_DELEGATE_MAX_TOOL_ROUNDS:-4}
+      SNAPPER_LOG_FILE: /app/data/log/delegate/model/delegate.log
+    user: "888:888"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - delegate-gemini-control
+    volumes:
+      - type: bind
+        source: ./data/log/delegate/gemini
+        target: /app/data/log/delegate/model
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/secrets/delegate/gemini
+        target: /run/secrets/delegate
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,uid=888,gid=888,mode=1770
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      disable: true
   snapper-web:
     image: klattm/snapper:latest
     container_name: snapper-web
@@ -209,11 +313,15 @@ services:
     command: ["run", "--config", "/etc/caddy/Caddyfile"]
     ports:
       - "127.0.0.1:8000:8000"
+    expose:
+      - "8300"
     depends_on:
       snapper:
         condition: service_healthy
     networks:
       - snapper-internal
+      - delegate-kimi-control
+      - delegate-gemini-control
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/ | grep -q 'id=\"root\"' || exit 1"]
@@ -242,3 +350,21 @@ networks:
   snapper-internal:
     driver: bridge
     internal: false
+  delegate-kimi-control:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.10.0/29
+  delegate-kimi-vendor:
+    driver: bridge
+    internal: true
+  delegate-gemini-control:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.11.0/29
+  delegate-gemini-vendor:
+    driver: bridge
+    internal: true

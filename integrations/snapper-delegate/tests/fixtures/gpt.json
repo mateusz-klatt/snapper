@@ -1,0 +1,28 @@
+{
+  "base_origin": "https://api.openai.com",
+  "endpoint_path": "/v1/chat/completions",
+  "model": "gpt",
+  "response": {
+    "id": "chatcmpl-gpt-contract",
+    "object": "chat.completion",
+    "created": 1785664802,
+    "model": "gpt",
+    "system_fingerprint": "fp_contract",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The standard response parsed successfully.",
+          "refusal": null
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 31,
+      "completion_tokens": 9,
+      "total_tokens": 40
+    }
+  }
+}

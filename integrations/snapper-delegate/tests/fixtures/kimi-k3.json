@@ -1,0 +1,27 @@
+{
+  "base_origin": "https://api.moonshot.ai",
+  "endpoint_path": "/v1/chat/completions",
+  "model": "kimi-k3",
+  "response": {
+    "id": "cmpl-kimi-contract",
+    "object": "chat.completion",
+    "created": 1785664800,
+    "model": "kimi-k3",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The recorded market context is internally consistent.",
+          "reasoning_content": "I compared the quoted context before answering."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 42,
+      "completion_tokens": 18,
+      "total_tokens": 60
+    }
+  }
+}

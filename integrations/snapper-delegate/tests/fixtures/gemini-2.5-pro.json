@@ -1,0 +1,44 @@
+{
+  "base_origin": "https://generativelanguage.googleapis.com",
+  "endpoint_path": "/v1beta/openai/chat/completions",
+  "model": "gemini-2.5-pro",
+  "response": {
+    "id": "cmpl-gemini-contract",
+    "object": "chat.completion",
+    "created": 1785664801,
+    "model": "gemini-2.5-pro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "I will inspect the recorded context.",
+          "tool_calls": [
+            {
+              "id": "call-gemini-contract",
+              "type": "function",
+              "function": {
+                "name": "lookup_context",
+                "arguments": "{\"query\":{\"topic\":\"risk\"}}"
+              },
+              "extra_content": {
+                "google": {
+                  "thought_signature": "recorded-signature"
+                }
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 37,
+      "completion_tokens": 11,
+      "total_tokens": 48,
+      "prompt_tokens_details": {
+        "cached_tokens": 6
+      }
+    }
+  }
+}
