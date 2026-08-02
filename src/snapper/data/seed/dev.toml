@@ -114,3 +114,15 @@ credential_type = "paper"
 reconciliation_method = "unclassified"
 initial_balance = "10000.0"
 label = "paper bootstrap"
+
+[[settings]]
+key = "gemini_api_key"
+value = ""
+category = "api"
+description = "Google Gemini API key (OpenAI-compat, generativelanguage.googleapis.com/v1beta/openai). Placeholder: real value lives in the environment seed, never this skeleton."
+
+[[settings]]
+key = "kimi_api_key"
+value = ""
+category = "api"
+description = "Moonshot Kimi K3 API key (OpenAI-compat, api.moonshot.ai/v1). Placeholder: real value lives in the environment seed, never this skeleton."
