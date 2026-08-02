@@ -352,6 +352,39 @@ class PolygonExchangeClient(ExchangeClientBase):
             return value.isoformat()
         return str(value)
 
+    @staticmethod
+    def _validate_aggregate_pages(pages: list[dict[str, Any]]) -> list[PolygonAgg]:
+        """Validate aggregate records from decoded response pages.
+
+        Args:
+            pages: Decoded Polygon aggregate response pages.
+
+        Returns:
+            Valid aggregate records with timestamps.
+        """
+        validated: list[PolygonAgg] = []
+        for page in pages:
+            for item in page.get("results", []):
+                try:
+                    agg = PolygonAgg(
+                        open=item.get("o"),
+                        high=item.get("h"),
+                        low=item.get("l"),
+                        close=item.get("c"),
+                        volume=item.get("v"),
+                        vwap=item.get("vw"),
+                        timestamp=item.get("t"),
+                        transactions=item.get("n"),
+                        otc=item.get("otc"),
+                    )
+                    if agg.timestamp is None:
+                        logger.debug("Skipping aggregate with missing timestamp")
+                        continue
+                    validated.append(agg)
+                except Exception as e:
+                    logger.warning(f"Skipping invalid aggregate record: {e}")
+        return validated
+
     async def list_aggregates(
         self,
         ticker: str,
@@ -409,46 +442,28 @@ class PolygonExchangeClient(ExchangeClientBase):
             return pages
 
         pages = await self._make_request_with_retry(_request)
-        validated: list[PolygonAgg] = []
-        for page in pages:
-            for item in page.get("results", []):
-                try:
-                    agg = PolygonAgg(
-                        open=item.get("o"),
-                        high=item.get("h"),
-                        low=item.get("l"),
-                        close=item.get("c"),
-                        volume=item.get("v"),
-                        vwap=item.get("vw"),
-                        timestamp=item.get("t"),
-                        transactions=item.get("n"),
-                        otc=item.get("otc"),
-                    )
-                    if agg.timestamp is None:
-                        logger.debug("Skipping aggregate with missing timestamp")
-                        continue
-                    validated.append(agg)
-                except Exception as e:
-                    logger.warning(f"Skipping invalid aggregate record: {e}")
+        validated = self._validate_aggregate_pages(pages)
         if validated:
             logger.info(f"Total fetched: {len(validated)} bars")
         request_ids = tuple(
             request_id for page in pages if isinstance(request_id := page.get("request_id"), str)
         )
+        results_counts = (page.get("resultsCount") for page in pages)
+        results_count = sum(count for count in results_counts if isinstance(count, int))
+        query_counts = (page.get("queryCount") for page in pages)
+        query_count = sum(count for count in query_counts if isinstance(count, int))
+        adjusted_values = (page.get("adjusted") for page in pages)
+        adjusted_value = next(
+            (value for value in adjusted_values if isinstance(value, bool)),
+            None,
+        )
         return PolygonAggregateResponse(
             aggregates=validated,
             affirmative=bool(pages) and all(page.get("status") == "OK" for page in pages),
-            results_count=sum(
-                count for page in pages if isinstance(count := page.get("resultsCount"), int)
-            ),
-            query_count=sum(
-                count for page in pages if isinstance(count := page.get("queryCount"), int)
-            ),
+            results_count=results_count,
+            query_count=query_count,
             request_ids=request_ids,
-            adjusted=next(
-                (value for page in pages if isinstance(value := page.get("adjusted"), bool)),
-                None,
-            ),
+            adjusted=adjusted_value,
         )
 
     async def list_splits(
