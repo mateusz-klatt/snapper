@@ -222,19 +222,21 @@ class ChatCompletionsClient:
         base_url: str,
         api_key_file: str | Path,
         *,
+        endpoint_path: str = "/v1/chat/completions",
         transport: httpx.AsyncBaseTransport | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         """Initialize an inert client using a key loaded from a file.
 
         Args:
-            base_url: Endpoint base URL to which the standard path is appended.
+            base_url: Endpoint origin to which the configured path is appended.
             api_key_file: File containing the bearer credential.
+            endpoint_path: Allowlisted chat-completions path supplied by PID1.
             transport: Optional injected transport for hermetic callers and tests.
             timeout_seconds: Per-request timeout in seconds.
         """
         api_key = load_api_key_file(api_key_file)
-        self._endpoint_url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        self._endpoint_url = f"{base_url.rstrip('/')}{endpoint_path}"
         self._http_client = httpx.AsyncClient(
             headers={
                 "Authorization": f"Bearer {api_key.get_secret_value()}",

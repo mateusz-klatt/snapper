@@ -403,6 +403,7 @@ def _runner(runtime: RunnerRuntime, configured: bool = True) -> DelegateRunner:
     return DelegateRunner(
         model_alias="review-model",
         base_url="https://model.invalid",
+        endpoint_path="/v1beta/openai/chat/completions",
         api_key_file="/missing/model-key",
         delegate_token_file="/missing/delegate-token",
         max_tool_rounds=3,
@@ -789,9 +790,13 @@ async def test_consult_outcomes_quota_cooldown_exception_and_recovery() -> None:
 async def test_missing_chat_key_skips_consult_without_blocking_liveness() -> None:
     """A missing model credential yields a counted local skip."""
 
-    def _missing_key(base_url: str, api_key_file: str) -> RunnerChatClient:
+    def _missing_key(
+        base_url: str,
+        api_key_file: str,
+        endpoint_path: str,
+    ) -> RunnerChatClient:
         """Raise the typed credential outcome."""
-        del base_url, api_key_file
+        del base_url, api_key_file, endpoint_path
         raise ApiKeyFileError("missing key")
 
     runtime = RunnerRuntime(
@@ -827,10 +832,14 @@ async def test_consult_worker_contains_factory_bug_and_processes_later_context()
     attempts = 0
     chat = _SubmittingChatClient()
 
-    def _flaky_factory(base_url: str, api_key_file: str) -> RunnerChatClient:
+    def _flaky_factory(
+        base_url: str,
+        api_key_file: str,
+        endpoint_path: str,
+    ) -> RunnerChatClient:
         """Raise once before returning a usable model client."""
         nonlocal attempts
-        del base_url, api_key_file
+        del base_url, api_key_file, endpoint_path
         attempts += 1
         if attempts == 1:
             raise RuntimeError("factory bug")
@@ -1032,7 +1041,7 @@ def test_default_client_initialization_and_chat_factory(
     wake = _FakeWakeClient()
     bridge = _FakeMCPBridge()
     chat = _SubmittingChatClient()
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, ...]] = []
 
     def _control_factory(base_url: str, token_file: str) -> RunnerControlClient:
         """Record default control-client construction."""
@@ -1053,9 +1062,14 @@ def test_default_client_initialization_and_chat_factory(
         calls.append(("wake", base_url))
         return wake
 
-    def _chat_factory(base_url: str, api_key_file: str) -> _SubmittingChatClient:
+    def _chat_factory(
+        base_url: str,
+        api_key_file: str,
+        *,
+        endpoint_path: str,
+    ) -> _SubmittingChatClient:
         """Record default chat construction."""
-        calls.append((base_url, api_key_file))
+        calls.append((base_url, api_key_file, endpoint_path))
         return chat
 
     monkeypatch.setattr(runner_module, "SnapperControlClient", _control_factory)
@@ -1077,7 +1091,11 @@ def test_default_client_initialization_and_chat_factory(
         ("https://snapper.invalid", "/missing/delegate-token"),
         ("mcp", "https://snapper.invalid"),
         ("wake", "https://snapper.invalid"),
-        ("https://model.invalid", "/missing/model-key"),
+        (
+            "https://model.invalid",
+            "/missing/model-key",
+            "/v1beta/openai/chat/completions",
+        ),
     ]
 
 

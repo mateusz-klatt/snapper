@@ -30,6 +30,7 @@ from snapper_delegate.runner import DelegateRunner
 _ENV_PREFIX: Final[str] = "SNAPPER_DELEGATE_"
 _MODEL_ALIAS_ENV: Final[str] = f"{_ENV_PREFIX}MODEL_ALIAS"
 _BASE_URL_ENV: Final[str] = f"{_ENV_PREFIX}BASE_URL"
+_ENDPOINT_PATH_ENV: Final[str] = f"{_ENV_PREFIX}ENDPOINT_PATH"
 _SNAPPER_URL_ENV: Final[str] = f"{_ENV_PREFIX}SNAPPER_URL"
 _API_KEY_FILE_ENV: Final[str] = f"{_ENV_PREFIX}API_KEY_FILE"
 _TOKEN_FILE_ENV: Final[str] = f"{_ENV_PREFIX}TOKEN_FILE"
@@ -38,10 +39,18 @@ _CONFIG_ENV_NAMES: Final[frozenset[str]] = frozenset(
     {
         _MODEL_ALIAS_ENV,
         _BASE_URL_ENV,
+        _ENDPOINT_PATH_ENV,
         _SNAPPER_URL_ENV,
         _API_KEY_FILE_ENV,
         _TOKEN_FILE_ENV,
         _MAX_TOOL_ROUNDS_ENV,
+    }
+)
+_DEFAULT_ENDPOINT_PATH: Final[str] = "/v1/chat/completions"
+_ENDPOINT_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        _DEFAULT_ENDPOINT_PATH,
+        "/v1beta/openai/chat/completions",
     }
 )
 _API_KEY_PATH: Final[Path] = Path("/run/secrets/delegate/api_key")
@@ -87,6 +96,7 @@ class RunnerOnlyConfiguration(BaseModel):
 
     model_alias: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1)
+    endpoint_path: str = _DEFAULT_ENDPOINT_PATH
     snapper_base_url: str = Field(min_length=1)
     api_key_file: str = Field(min_length=1)
     delegate_token_file: str = Field(min_length=1)
@@ -133,6 +143,14 @@ class RunnerOnlyConfiguration(BaseModel):
         if not valid:
             raise ValueError("invalid endpoint origin")
         return value.rstrip("/")
+
+    @field_validator("endpoint_path")
+    @classmethod
+    def _validate_endpoint_path(cls, value: str) -> str:
+        """Require one exact reviewed chat-completions endpoint path."""
+        if value not in _ENDPOINT_PATHS:
+            raise ValueError("invalid endpoint path")
+        return value
 
     @field_validator("snapper_base_url")
     @classmethod
@@ -228,6 +246,7 @@ def load_runner_configuration(environ: Mapping[str, str]) -> RunnerOnlyConfigura
         payload: dict[str, object] = {
             "model_alias": environ[_MODEL_ALIAS_ENV],
             "base_url": environ[_BASE_URL_ENV],
+            "endpoint_path": environ.get(_ENDPOINT_PATH_ENV, _DEFAULT_ENDPOINT_PATH),
             "snapper_base_url": environ[_SNAPPER_URL_ENV],
             "api_key_file": environ[_API_KEY_FILE_ENV],
             "delegate_token_file": environ[_TOKEN_FILE_ENV],
@@ -293,6 +312,7 @@ async def run_pid1(environ: Mapping[str, str] | None = None) -> None:
     runner = DelegateRunner(
         model_alias=configuration.model_alias,
         base_url=configuration.base_url,
+        endpoint_path=configuration.endpoint_path,
         snapper_base_url=configuration.snapper_base_url,
         api_key_file=configuration.api_key_file,
         delegate_token_file=configuration.delegate_token_file,

@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Literal
 from typing import Protocol
 
+from loguru import logger
 from mcp import ClientSession
 from mcp import types
 from mcp.client.streamable_http import streamable_http_client
@@ -23,7 +24,9 @@ from snapper.core.json_types import JsonValue
 from snapper_delegate.chat_completions import ChatFunctionDefinition
 from snapper_delegate.chat_completions import ChatTool
 
-_SCHEMA_KEYS_TO_STRIP = frozenset({"default", "title"})
+_SCHEMA_KEYS_TO_STRIP = frozenset({"$defs", "additionalProperties", "default", "title"})
+_LOCAL_REFERENCE_PREFIX = "#/$defs/"
+_MAX_REFERENCE_DEPTH = 32
 _JSON_OBJECT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 _TOOL_FAILURE_CONTENT = (
     '{"success":false,"error_code":"mcp_bridge_error",'
@@ -171,27 +174,98 @@ def _nullable_base(options: JsonValue) -> JsonObject | None:
     return base_options[0]
 
 
-def _sanitize_schema_value(value: JsonValue) -> JsonValue:
-    """Recursively sanitize one JSON schema value."""
-    if isinstance(value, dict):
-        return sanitize_openai_schema(value)
-    if isinstance(value, list):
-        return [_sanitize_schema_value(item) for item in value]
-    return value
+def _local_reference_name(value: JsonValue) -> str | None:
+    """Return the definition name for a local top-level definition reference."""
+    if isinstance(value, str) and value.startswith(_LOCAL_REFERENCE_PREFIX):
+        return value[len(_LOCAL_REFERENCE_PREFIX) :]
+    return None
+
+
+@dataclass(slots=True)
+class _SchemaSanitizer:
+    """Sanitize a schema against one immutable top-level definition map."""
+
+    definitions: JsonObject
+    warned_about_reference_recursion: bool = False
+
+    def sanitize_value(
+        self,
+        value: JsonValue,
+        active_references: frozenset[str],
+    ) -> JsonValue:
+        """Recursively sanitize one JSON schema value."""
+        if isinstance(value, dict):
+            return self.sanitize_object(value, active_references)
+        if isinstance(value, list):
+            return [self.sanitize_value(item, active_references) for item in value]
+        return value
+
+    def sanitize_object(
+        self,
+        schema: JsonObject,
+        active_references: frozenset[str],
+    ) -> JsonObject:
+        """Sanitize one schema object, resolving an eligible local reference."""
+        reference_name = _local_reference_name(schema.get("$ref"))
+        if reference_name is not None:
+            resolved = self._resolve_reference(schema, reference_name, active_references)
+            if resolved is not None:
+                return resolved
+        return self._sanitize_plain_object(schema, active_references)
+
+    def _resolve_reference(
+        self,
+        schema: JsonObject,
+        reference_name: str,
+        active_references: frozenset[str],
+    ) -> JsonObject | None:
+        """Inline one known acyclic reference or decline it fail closed."""
+        definition = self.definitions.get(reference_name)
+        if not isinstance(definition, dict):
+            return None
+        if reference_name in active_references or len(active_references) >= _MAX_REFERENCE_DEPTH:
+            self._warn_about_reference_recursion()
+            return None
+        nested_references = active_references.union((reference_name,))
+        sanitized_definition = self.sanitize_object(definition, nested_references)
+        siblings = {key: value for key, value in schema.items() if key != "$ref"}
+        sanitized_siblings = self._sanitize_plain_object(siblings, active_references)
+        return {**sanitized_definition, **sanitized_siblings}
+
+    def _sanitize_plain_object(
+        self,
+        schema: JsonObject,
+        active_references: frozenset[str],
+    ) -> JsonObject:
+        """Strip unsupported keys and flatten one nullable schema object."""
+        sanitized = {
+            key: self.sanitize_value(value, active_references)
+            for key, value in schema.items()
+            if key not in _SCHEMA_KEYS_TO_STRIP
+        }
+        nullable_base = _nullable_base(schema.get("anyOf"))
+        if nullable_base is None:
+            return sanitized
+        sanitized.pop("anyOf")
+        return {
+            **self.sanitize_object(nullable_base, active_references),
+            **sanitized,
+        }
+
+    def _warn_about_reference_recursion(self) -> None:
+        """Log one warning when local reference expansion cannot remain bounded."""
+        if self.warned_about_reference_recursion:
+            return
+        self.warned_about_reference_recursion = True
+        logger.warning("MCP tool schema contains cyclic or excessively deep local references")
 
 
 def sanitize_openai_schema(schema: JsonObject) -> JsonObject:
-    """Remove unsupported metadata and flatten nullable ``anyOf`` schemas."""
-    sanitized = {
-        key: _sanitize_schema_value(value)
-        for key, value in schema.items()
-        if key not in _SCHEMA_KEYS_TO_STRIP
-    }
-    nullable_base = _nullable_base(schema.get("anyOf"))
-    if nullable_base is None:
-        return sanitized
-    sanitized.pop("anyOf")
-    return {**sanitize_openai_schema(nullable_base), **sanitized}
+    """Inline local definitions and remove unsupported function-schema features."""
+    raw_definitions = schema.get("$defs")
+    definitions = raw_definitions if isinstance(raw_definitions, dict) else {}
+    sanitizer = _SchemaSanitizer(definitions)
+    return sanitizer.sanitize_object(schema, frozenset())
 
 
 @asynccontextmanager

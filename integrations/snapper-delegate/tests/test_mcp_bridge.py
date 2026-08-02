@@ -5,12 +5,14 @@ from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from types import TracebackType
+from unittest.mock import MagicMock
 
 import pytest
 from mcp import types
 
 import snapper_delegate.mcp_bridge as mcp_bridge
 from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper_delegate.mcp_bridge import MCPBridge
 from snapper_delegate.mcp_bridge import MCPErrorKind
 from snapper_delegate.mcp_bridge import MCPOutcome
@@ -22,6 +24,335 @@ from snapper_delegate.mcp_bridge import MCPToolCatalogSuccess
 from snapper_delegate.mcp_bridge import sanitize_openai_schema
 
 type RawCallResult = types.CallToolResult | types.InputRequiredResult | types.Result
+
+_GEMINI_FORBIDDEN_SCHEMA_KEYS = frozenset(
+    {"$defs", "$ref", "additionalProperties", "anyOf", "default", "title"}
+)
+_REAL_TOOL_SCHEMAS: tuple[tuple[str, JsonObject], ...] = (
+    (
+        "list_instruments",
+        {
+            "properties": {"exchange": {"title": "Exchange", "type": "string"}},
+            "required": ["exchange"],
+            "title": "list_instrumentsArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "get_ohlcv",
+        {
+            "properties": {
+                "exchange": {"title": "Exchange", "type": "string"},
+                "instrument": {"title": "Instrument", "type": "string"},
+                "limit": {"default": 200, "title": "Limit", "type": "integer"},
+                "since": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Since",
+                },
+                "timeframe": {"title": "Timeframe", "type": "string"},
+                "until": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Until",
+                },
+            },
+            "required": ["exchange", "instrument", "timeframe"],
+            "title": "get_ohlcvArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "submit_ai_review_decision",
+        {
+            "properties": {
+                "decision": {"title": "Decision", "type": "string"},
+                "rationale": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Rationale",
+                },
+                "review_id": {"title": "Review Id", "type": "string"},
+            },
+            "required": ["review_id", "decision"],
+            "title": "submit_ai_review_decisionArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "submit_market_view",
+        {
+            "$defs": {
+                "JsonObject": {
+                    "additionalProperties": {"$ref": "#/$defs/JsonValue"},
+                    "type": "object",
+                },
+                "JsonPrimitive": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "integer"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "null"},
+                    ]
+                },
+                "JsonValue": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/JsonPrimitive"},
+                        {
+                            "items": {"$ref": "#/$defs/JsonValue"},
+                            "type": "array",
+                        },
+                        {
+                            "additionalProperties": {"$ref": "#/$defs/JsonValue"},
+                            "type": "object",
+                        },
+                    ]
+                },
+            },
+            "properties": {
+                "payload": {"$ref": "#/$defs/JsonObject"},
+                "research_round_public_id": {
+                    "title": "Research Round Public Id",
+                    "type": "string",
+                },
+            },
+            "required": ["research_round_public_id", "payload"],
+            "title": "submit_market_viewArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "get_latest_research",
+        {
+            "properties": {},
+            "title": "get_latest_researchArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "list_orders",
+        {
+            "properties": {
+                "exchange": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Exchange",
+                },
+                "instrument": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Instrument",
+                },
+                "limit": {"default": 50, "title": "Limit", "type": "integer"},
+                "offset": {"default": 0, "title": "Offset", "type": "integer"},
+                "status": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Status",
+                },
+                "wallet_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Wallet Public Id",
+                },
+            },
+            "title": "list_ordersArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "get_order_status",
+        {
+            "properties": {
+                "command_public_id": {
+                    "title": "Command Public Id",
+                    "type": "string",
+                }
+            },
+            "required": ["command_public_id"],
+            "title": "get_order_statusArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "list_positions",
+        {
+            "properties": {
+                "exchange": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Exchange",
+                },
+                "instrument": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Instrument",
+                },
+                "wallet_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Wallet Public Id",
+                },
+            },
+            "title": "list_positionsArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "list_venue_account_states",
+        {
+            "properties": {
+                "exchange": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Exchange",
+                },
+                "wallet_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Wallet Public Id",
+                },
+            },
+            "title": "list_venue_account_statesArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "get_position_cycle",
+        {
+            "properties": {
+                "cycle_public_id": {
+                    "title": "Cycle Public Id",
+                    "type": "string",
+                }
+            },
+            "required": ["cycle_public_id"],
+            "title": "get_position_cycleArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "get_ai_review_aftermath",
+        {
+            "properties": {
+                "review_public_id": {
+                    "title": "Review Public Id",
+                    "type": "string",
+                }
+            },
+            "required": ["review_public_id"],
+            "title": "get_ai_review_aftermathArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "cancel_order",
+        {
+            "properties": {
+                "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string",
+                },
+                "plan_public_id": {
+                    "title": "Plan Public Id",
+                    "type": "string",
+                },
+            },
+            "required": ["plan_public_id", "idempotency_key"],
+            "title": "cancel_orderArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "list_recent_signals",
+        {
+            "properties": {
+                "exchange": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Exchange",
+                },
+                "instrument": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Instrument",
+                },
+                "limit": {"default": 50, "title": "Limit", "type": "integer"},
+                "since": {"title": "Since", "type": "string"},
+                "strategy": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Strategy",
+                },
+                "wallet_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Wallet Public Id",
+                },
+            },
+            "required": ["since"],
+            "title": "list_recent_signalsArguments",
+            "type": "object",
+        },
+    ),
+    (
+        "submit_manual_order",
+        {
+            "properties": {
+                "ai_review_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Ai Review Public Id",
+                },
+                "exchange": {"title": "Exchange", "type": "string"},
+                "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string",
+                },
+                "instrument": {"title": "Instrument", "type": "string"},
+                "instrument_public_id": {
+                    "title": "Instrument Public Id",
+                    "type": "string",
+                },
+                "operator_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Operator Public Id",
+                },
+                "order_type": {"title": "Order Type", "type": "string"},
+                "price": {
+                    "anyOf": [{"type": "number"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Price",
+                },
+                "quantity": {"title": "Quantity", "type": "number"},
+                "side": {"title": "Side", "type": "string"},
+                "stop_price": {
+                    "anyOf": [{"type": "number"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Stop Price",
+                },
+                "wallet_public_id": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Wallet Public Id",
+                },
+            },
+            "required": [
+                "exchange",
+                "instrument",
+                "instrument_public_id",
+                "side",
+                "order_type",
+                "quantity",
+                "idempotency_key",
+            ],
+            "title": "submit_manual_orderArguments",
+            "type": "object",
+        },
+    ),
+)
 
 
 class FakeSession:
@@ -93,6 +424,47 @@ def _text_result(payload: JsonObject, is_error: bool = False) -> types.CallToolR
     )
 
 
+def _assert_gemini_schema_subset(value: JsonValue) -> None:
+    """Assert recursively that a sanitized schema uses the supported subset."""
+    if isinstance(value, dict):
+        assert _GEMINI_FORBIDDEN_SCHEMA_KEYS.isdisjoint(value)
+        for nested in value.values():
+            _assert_gemini_schema_subset(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _assert_gemini_schema_subset(nested)
+
+
+def test_real_tool_schema_fixture_covers_current_catalog() -> None:
+    """The golden catalog names pin every current Snapper MCP tool schema."""
+    assert {name for name, schema in _REAL_TOOL_SCHEMAS if schema} == {
+        "cancel_order",
+        "get_ai_review_aftermath",
+        "get_latest_research",
+        "get_ohlcv",
+        "get_order_status",
+        "get_position_cycle",
+        "list_instruments",
+        "list_orders",
+        "list_positions",
+        "list_recent_signals",
+        "list_venue_account_states",
+        "submit_ai_review_decision",
+        "submit_manual_order",
+        "submit_market_view",
+    }
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [pytest.param(schema, id=name) for name, schema in _REAL_TOOL_SCHEMAS],
+)
+def test_real_tool_schemas_sanitize_to_gemini_subset(schema: JsonObject) -> None:
+    """Every current golden MCP input schema remains Gemini-compatible."""
+    _assert_gemini_schema_subset(sanitize_openai_schema(schema))
+
+
 def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
     """OpenAI function schemas omit metadata at every nested schema level.
 
@@ -142,6 +514,164 @@ def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
     assert schema["title"] == "SubmitDecision"
 
 
+def test_schema_sanitizer_inlines_definitions_and_preserves_ref_siblings() -> None:
+    """Local definition references inline after recursive sanitization."""
+    schema: JsonObject = {
+        "$defs": {
+            "Filter": {
+                "additionalProperties": False,
+                "properties": {
+                    "symbol": {"title": "Symbol", "type": "string"},
+                },
+                "required": ["symbol"],
+                "title": "Filter",
+                "type": "object",
+            }
+        },
+        "properties": {
+            "filter": {
+                "$ref": "#/$defs/Filter",
+                "description": "Selected instrument",
+            }
+        },
+        "type": "object",
+    }
+
+    assert sanitize_openai_schema(schema) == {
+        "properties": {
+            "filter": {
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+                "type": "object",
+                "description": "Selected instrument",
+            }
+        },
+        "type": "object",
+    }
+
+
+def test_schema_sanitizer_drops_additional_properties_at_every_level() -> None:
+    """Gemini-incompatible additional-properties declarations are omitted."""
+    schema: JsonObject = {
+        "additionalProperties": False,
+        "properties": {
+            "metadata": {
+                "additionalProperties": {"type": "string"},
+                "type": "object",
+            }
+        },
+        "type": "object",
+    }
+
+    assert sanitize_openai_schema(schema) == {
+        "properties": {"metadata": {"type": "object"}},
+        "type": "object",
+    }
+
+
+def test_schema_sanitizer_inlines_reference_inside_array_items() -> None:
+    """Definition references nested in array items inline recursively."""
+    schema: JsonObject = {
+        "$defs": {
+            "Amount": {
+                "properties": {"value": {"default": 0, "title": "Value", "type": "number"}},
+                "type": "object",
+            }
+        },
+        "items": {"$ref": "#/$defs/Amount"},
+        "type": "array",
+    }
+
+    assert sanitize_openai_schema(schema) == {
+        "items": {
+            "properties": {"value": {"type": "number"}},
+            "type": "object",
+        },
+        "type": "array",
+    }
+
+
+def test_schema_sanitizer_leaves_cycles_and_logs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cyclic references remain visible and emit one bounded warning."""
+    warning = MagicMock()
+    monkeypatch.setattr("snapper_delegate.mcp_bridge.logger.warning", warning)
+    schema: JsonObject = {
+        "$defs": {
+            "Node": {
+                "properties": {
+                    "left": {"$ref": "#/$defs/Node"},
+                    "right": {"$ref": "#/$defs/Node"},
+                },
+                "title": "Node",
+                "type": "object",
+            }
+        },
+        "$ref": "#/$defs/Node",
+    }
+
+    assert sanitize_openai_schema(schema) == {
+        "properties": {
+            "left": {"$ref": "#/$defs/Node"},
+            "right": {"$ref": "#/$defs/Node"},
+        },
+        "type": "object",
+    }
+    warning.assert_called_once_with(
+        "MCP tool schema contains cyclic or excessively deep local references"
+    )
+
+
+def test_schema_sanitizer_bounds_long_reference_chains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acyclic local reference expansion stops at the fixed depth bound."""
+    warning = MagicMock()
+    monkeypatch.setattr("snapper_delegate.mcp_bridge.logger.warning", warning)
+    definitions: JsonObject = {}
+    for index in range(mcp_bridge._MAX_REFERENCE_DEPTH):
+        definitions[f"Node{index}"] = {
+            "$ref": f"#/$defs/Node{index + 1}",
+        }
+    definitions[f"Node{mcp_bridge._MAX_REFERENCE_DEPTH}"] = {"type": "string"}
+    schema: JsonObject = {
+        "$defs": definitions,
+        "$ref": "#/$defs/Node0",
+    }
+
+    assert sanitize_openai_schema(schema) == {
+        "$ref": f"#/$defs/Node{mcp_bridge._MAX_REFERENCE_DEPTH}"
+    }
+    warning.assert_called_once_with(
+        "MCP tool schema contains cyclic or excessively deep local references"
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        (
+            {"$ref": "#/components/schemas/Foreign", "title": "Foreign"},
+            {"$ref": "#/components/schemas/Foreign"},
+        ),
+        (
+            {
+                "$defs": {"Known": {"type": "string"}},
+                "$ref": "#/$defs/Missing",
+            },
+            {"$ref": "#/$defs/Missing"},
+        ),
+    ],
+)
+def test_schema_sanitizer_leaves_foreign_and_missing_references(
+    schema: JsonObject,
+    expected: JsonObject,
+) -> None:
+    """Only resolvable local top-level definitions are eligible for inlining."""
+    assert sanitize_openai_schema(schema) == expected
+
+
 @pytest.mark.parametrize(
     "schema",
     [
@@ -149,6 +679,13 @@ def test_schema_sanitizer_flattens_nullable_and_strips_metadata() -> None:
         {"anyOf": []},
         {"anyOf": [{"type": "string"}, "null"]},
         {"anyOf": [{"type": "null"}, {"type": "null"}]},
+        {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "integer"},
+                {"type": "boolean"},
+            ]
+        },
     ],
 )
 def test_schema_sanitizer_preserves_non_nullable_any_of(schema: JsonObject) -> None:

@@ -97,9 +97,17 @@ class RunnerChatClient(ChatCompletionClient, Protocol):
         ...
 
 
-def _default_chat_factory(base_url: str, api_key_file: str) -> RunnerChatClient:
+def _default_chat_factory(
+    base_url: str,
+    api_key_file: str,
+    endpoint_path: str,
+) -> RunnerChatClient:
     """Build the production standard chat-completions client."""
-    return ChatCompletionsClient(base_url, api_key_file)
+    return ChatCompletionsClient(
+        base_url,
+        api_key_file,
+        endpoint_path=endpoint_path,
+    )
 
 
 def _utc_now() -> datetime:
@@ -126,7 +134,7 @@ class RunnerRuntime:
     wake_client: RunnerWakeClient | None = None
     mcp_bridge: MCPBridgeClient | None = None
     chat_client: RunnerChatClient | None = None
-    chat_factory: Callable[[str, str], RunnerChatClient] = _default_chat_factory
+    chat_factory: Callable[[str, str, str], RunnerChatClient] = _default_chat_factory
     clock: Callable[[], datetime] = _utc_now
     monotonic: Callable[[], float] = time.monotonic
     tuning: RunnerTuning = RunnerTuning()
@@ -136,6 +144,7 @@ class DelegateRunnerParameters(TypedDict):
     """Type keyword-only runner options without exceeding function arg limits."""
 
     max_tool_rounds: int
+    endpoint_path: NotRequired[str]
     snapper_base_url: NotRequired[str]
     runtime: NotRequired[RunnerRuntime]
 
@@ -154,6 +163,7 @@ class DelegateRunner:
         """Initialize an inert delegate lifecycle and its local status."""
         self.model_alias = model_alias
         self.base_url = base_url
+        self.endpoint_path = parameters.get("endpoint_path", "/v1/chat/completions")
         self.api_key_file = api_key_file
         self.delegate_token_file = delegate_token_file
         self.max_tool_rounds = parameters["max_tool_rounds"]
@@ -394,6 +404,7 @@ class DelegateRunner:
                 self._chat_client = self._runtime.chat_factory(
                     self.base_url,
                     self.api_key_file,
+                    self.endpoint_path,
                 )
             except ApiKeyFileError:
                 logger.warning("Delegate model credential is unavailable")

@@ -52,11 +52,36 @@ def test_load_runner_configuration_accepts_one_ready_model(
     assert configuration.model_dump() == {
         "model_alias": "research-primary",
         "base_url": "https://api.example.invalid",
+        "endpoint_path": "/v1/chat/completions",
         "snapper_base_url": "http://snapper:8000",
         "api_key_file": environment["SNAPPER_DELEGATE_API_KEY_FILE"],
         "delegate_token_file": environment["SNAPPER_DELEGATE_TOKEN_FILE"],
         "max_tool_rounds": 4,
     }
+
+
+@pytest.mark.parametrize(
+    "endpoint_path",
+    [
+        "/v1/chat/completions",
+        "/v1beta/openai/chat/completions",
+    ],
+)
+def test_load_runner_configuration_accepts_allowlisted_endpoint_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_path: str,
+) -> None:
+    """Either reviewed vendor path is accepted when supplied explicitly.
+
+    Given: A ready one-model configuration with an allowlisted endpoint path,
+    When: PID1 validates the environment,
+    Then: It preserves that exact path separately from the origin.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_DELEGATE_ENDPOINT_PATH"] = endpoint_path
+    configuration = pid1.load_runner_configuration(environment)
+    assert configuration.endpoint_path == endpoint_path
 
 
 def test_load_runner_configuration_accepts_explicit_https_port(
@@ -165,6 +190,11 @@ def test_load_runner_configuration_refuses_missing_values(
         ("SNAPPER_DELEGATE_BASE_URL", "https://127.0.0.1"),
         ("SNAPPER_DELEGATE_BASE_URL", "https://localhost"),
         ("SNAPPER_DELEGATE_BASE_URL", "https://api.example.invalid:bad"),
+        ("SNAPPER_DELEGATE_ENDPOINT_PATH", "/v2/foo"),
+        (
+            "SNAPPER_DELEGATE_ENDPOINT_PATH",
+            "/v1/chat/completions\nSNAPPER_DELEGATE_BASE_URL=https://evil.invalid",
+        ),
         ("SNAPPER_DELEGATE_SNAPPER_URL", ""),
         ("SNAPPER_DELEGATE_SNAPPER_URL", " http://snapper:8000"),
         ("SNAPPER_DELEGATE_SNAPPER_URL", "ftp://snapper"),
@@ -336,7 +366,7 @@ async def test_run_pid1_instantiates_existing_runner_directly(
 
     Given: A complete environment and a fake existing runner,
     When: The PID1 starts,
-    Then: It passes only the six runner parameters and awaits start directly.
+    Then: It passes the validated runner parameters and awaits start directly.
     """
     environment = _ready_environment(tmp_path, monkeypatch)
     fake_runner = MagicMock()
@@ -347,6 +377,7 @@ async def test_run_pid1_instantiates_existing_runner_directly(
     runner_factory.assert_called_once_with(
         model_alias="research-primary",
         base_url="https://api.example.invalid",
+        endpoint_path="/v1/chat/completions",
         snapper_base_url="http://snapper:8000",
         api_key_file=environment["SNAPPER_DELEGATE_API_KEY_FILE"],
         delegate_token_file=environment["SNAPPER_DELEGATE_TOKEN_FILE"],

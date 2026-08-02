@@ -47,10 +47,25 @@ def _request() -> ChatCompletionRequest:
     )
 
 
+@pytest.mark.parametrize(
+    ("endpoint_path", "expected_url"),
+    [
+        (
+            "/v1/chat/completions",
+            "https://models.invalid/proxy/v1/chat/completions",
+        ),
+        (
+            "/v1beta/openai/chat/completions",
+            "https://models.invalid/proxy/v1beta/openai/chat/completions",
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_success_parses_completion_and_sends_expected_request(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    endpoint_path: str,
+    expected_url: str,
 ) -> None:
     """A successful response remains typed and the credential remains secret.
 
@@ -103,6 +118,7 @@ async def test_success_parses_completion_and_sends_expected_request(
     client = ChatCompletionsClient(
         "https://models.invalid/proxy/",
         key_file,
+        endpoint_path=endpoint_path,
         transport=httpx.MockTransport(_handler),
     )
     assert repr(client) == "ChatCompletionsClient()"
@@ -133,7 +149,7 @@ async def test_success_parses_completion_and_sends_expected_request(
     assert isinstance(replay_result, ChatCompletionSuccess)
     assert len(captured_requests) == 2
     sent_request = captured_requests[0]
-    assert str(sent_request.url) == "https://models.invalid/proxy/v1/chat/completions"
+    assert str(sent_request.url) == expected_url
     assert sent_request.headers["Authorization"] == f"Bearer {_API_KEY}"
     assert sent_request.headers["Content-Type"] == "application/json"
     assert sent_request.content == (
