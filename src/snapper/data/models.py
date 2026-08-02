@@ -251,6 +251,8 @@ __all__ = [
     "InstrumentFeedHealth",
     "PortfolioSpotReconciliationAnchor",
     "PortfolioReconciliationMethodConfig",
+    "FxConversionElection",
+    "FxConversionProof",
 ]
 
 
@@ -1622,6 +1624,154 @@ class PortfolioPnlPoint(TemporalMixin, Base):
     watermarks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     opening_basket_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     contributions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FxConversionElection(TemporalMixin, Base):
+    """Bitemporal decision selecting one exact-coverage conversion plane."""
+
+    __tablename__ = "fx_conversion_elections"
+    __table_args__ = (
+        Index(
+            "uq_fx_elections_shared_identity",
+            "requirement_manifest_digest",
+            "election_policy_version",
+            "calculation_version",
+            "scope_kind",
+            "source_currency",
+            "target_currency",
+            "unordered_pair",
+            "requested_knowledge_at",
+            "resolved_knowledge_at",
+            unique=True,
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair'"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair'"
+            ),
+        ),
+        Index(
+            "uq_fx_elections_instrument_identity",
+            "requirement_manifest_digest",
+            "election_policy_version",
+            "calculation_version",
+            "scope_kind",
+            "consumer_instrument_public_id",
+            "source_currency",
+            "target_currency",
+            "unordered_pair",
+            "requested_knowledge_at",
+            "resolved_knowledge_at",
+            unique=True,
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned'"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned'"
+            ),
+        ),
+        Index(
+            "ix_fx_elections_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "scope_kind IN ('shared_pair', 'instrument_owned')",
+            name="ck_fx_elections_scope_kind",
+        ),
+        CheckConstraint(
+            "(scope_kind = 'shared_pair' AND consumer_instrument_public_id IS NULL) OR "
+            "(scope_kind = 'instrument_owned' AND consumer_instrument_public_id IS NOT NULL)",
+            name="ck_fx_elections_scope_owner",
+        ),
+        CheckConstraint(
+            "completeness_state IN ('successful', 'refused')",
+            name="ck_fx_elections_completeness",
+        ),
+        CheckConstraint(
+            "(completeness_state = 'successful' AND refusal_reason_json IS NULL AND "
+            "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
+            "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
+            "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
+            "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL)",
+            name="ck_fx_elections_outcome",
+        ),
+        CheckConstraint(
+            "selected_orientation IS NULL OR selected_orientation IN ('direct', 'inverse')",
+            name="ck_fx_elections_orientation",
+        ),
+    )
+    scope_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    consumer_instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    source_currency: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_currency: Mapped[str] = mapped_column(String(16), nullable=False)
+    unordered_pair: Mapped[str] = mapped_column(String(33), nullable=False)
+    requirement_manifest_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_knowledge_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    resolved_knowledge_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    election_policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    calculation_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    selected_source_exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selected_source_instrument_public_id: Mapped[str | None] = mapped_column(
+        UUIDColumn(), nullable=True
+    )
+    selected_native_symbol: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    selected_base: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    selected_quote: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    selected_orientation: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    decision_inputs_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    completeness_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    refusal_reason_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FxConversionProof(TemporalMixin, Base):
+    """Exact-minute child proof carrying canonical decimal text.
+
+    ``raw_close_decimal`` and ``conversion_rate_decimal`` are text rather than
+    floating or fixed-scale numeric columns. Writers accept ``Decimal`` and
+    persist its canonical fixed-point spelling, preserving every supplied digit
+    on SQLite and PostgreSQL without a float round-trip or inverse-rate rounding.
+    """
+
+    __tablename__ = "fx_conversion_proofs"
+    __table_args__ = (
+        Index(
+            "uq_fx_proofs_election_minute",
+            "election_public_id",
+            "conversion_minute",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_fx_proofs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),
+        CheckConstraint(
+            "conversion_minute = candle_open_minute",
+            name="ck_fx_proofs_exact_minute",
+        ),
+    )
+    election_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    conversion_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    candle_open_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    candle_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candle_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    candle_session_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    candle_sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    candle_timestamp: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    candle_known_to: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    raw_close_decimal: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str] = mapped_column(String(8), nullable=False)
+    conversion_rate_decimal: Mapped[str] = mapped_column(Text, nullable=False)
+    source_instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    proof_digest: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class VenueAccountObservation(TemporalMixin, Base):

@@ -20,6 +20,79 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import OrderExchange
 
 TradeIntegrityMonitor = Literal["m1", "m2"]
+FxConversionScopeKind = Literal["shared_pair", "instrument_owned"]
+FxConversionCompleteness = Literal["successful", "refused"]
+FxConversionOperation = Literal["direct", "inverse"]
+
+
+class FxConversionElectionInsertRow(TypedDict):
+    """Complete temporal election payload accepted by the atomic pin writer."""
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    scope_kind: FxConversionScopeKind
+    consumer_instrument_public_id: str | None
+    source_currency: str
+    target_currency: str
+    unordered_pair: str
+    requirement_manifest_digest: str
+    requested_knowledge_at: datetime
+    resolved_knowledge_at: datetime
+    election_policy_version: str
+    calculation_version: str
+    selected_source_exchange: str | None
+    selected_source_instrument_public_id: str | None
+    selected_native_symbol: str | None
+    selected_base: str | None
+    selected_quote: str | None
+    selected_orientation: FxConversionOperation | None
+    decision_inputs_digest: str
+    completeness_state: FxConversionCompleteness
+    refusal_reason_json: str | None
+
+
+class FxConversionElectionRow(FxConversionElectionInsertRow):
+    """Visible election row returned with its temporal interval."""
+
+    known_to: datetime
+
+
+class FxConversionProofInsertRow(TypedDict):
+    """Exact child proof accepted as part of one election transaction."""
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    election_public_id: str
+    conversion_minute: datetime
+    candle_open_minute: datetime
+    candle_id: int
+    candle_public_id: str
+    candle_session_id: str
+    candle_sequence_id: int
+    candle_timestamp: datetime
+    candle_known_to: datetime
+    raw_close: Decimal
+    operation: FxConversionOperation
+    conversion_rate: Decimal
+    source_instrument_public_id: str
+    proof_digest: str
+
+
+class FxConversionProofRow(FxConversionProofInsertRow):
+    """Visible proof row returned with its temporal interval."""
+
+    known_to: datetime
+
+
+class FxConversionArtifactRow(TypedDict):
+    """One election and its complete, minute-ordered visible proof set."""
+
+    election: FxConversionElectionRow
+    proofs: tuple[FxConversionProofRow, ...]
 
 
 class TradeIntegrityWorkItemInsertRow(TypedDict):
