@@ -70,6 +70,8 @@ from uuid import uuid7
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
+from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
+from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
 from snapper.application.portfolio.pnl_snapshot_planner import SELF_HEAL_LOOKBACK
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkPlan
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -83,6 +85,7 @@ from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_sample
 from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_recompute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
+from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
@@ -279,6 +282,8 @@ class PortfolioPnlSnapshotter:
         self._no_anchor_logged: set[str] = set()
         self._failure_logged: set[tuple[str, str]] = set()
         self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
+        self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
+        self._fx_shadow_context: FxShadowPinContext | None = None
 
     @property
     def disabled(self) -> bool:
@@ -346,6 +351,22 @@ class PortfolioPnlSnapshotter:
         if repo is None:
             raise RuntimeError("PortfolioPnlSnapshotter._tick_once called in disabled mode")
         as_of = self._clock()
+        self._fx_shadow_context = (
+            FxShadowPinContext(calculation_version=PNL_SAMPLE_CALC_VERSION, evaluations=[])
+            if self._fx_shadow_pinning_enabled
+            else None
+        )
+        try:
+            with activate_fx_shadow_context(self._fx_shadow_context):
+                await self._tick_valuation(repo, as_of)
+        finally:
+            context = self._fx_shadow_context
+            self._fx_shadow_context = None
+            if context is not None:
+                await context.flush_bounded(repo)
+
+    async def _tick_valuation(self, repo: Repository, as_of: datetime) -> None:
+        """Run one tick's valuation and durable sample work before shadow flushing."""
         credentials = await repo.list_active_wallet_credentials(as_of)
         raw_pin = await self._read_mint_wallet_pin()
         topology = await resolve_executor_topology(repo, credentials, raw_pin, self._clock)
@@ -939,7 +960,11 @@ class PortfolioPnlSnapshotter:
             minute += _MINUTE
         crypto_planes = await self._load_crypto_planes(repo, ctx, chunk, currencies)
         fiat_rates, fiat_venues, fiat_versions = await load_basket_fiat_evidence(
-            repo, frozenset(currencies), chunk.start, chunk.end, ctx.as_of
+            repo,
+            frozenset(currencies),
+            chunk.start,
+            chunk.end,
+            ctx.as_of,
         )
         evidence = ValuationEvidence(
             fiat_rates=fiat_rates,

@@ -13,9 +13,15 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy import select
 
+from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
+from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
+from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
+from snapper.data.models import FxConversionElection
+from snapper.data.models import FxConversionProof
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
@@ -104,6 +110,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Candle.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repo.create_all()
     async with repo.session() as s:
         s.add_all(
             [
@@ -142,6 +149,32 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         yield repo
     finally:
         await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_repository_basket_shadow_matches_returned_evidence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Enabled basket collection pins the same manifest, plane, and close it returns."""
+    context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+    with activate_fx_shadow_context(context):
+        rates, venues, _ = await load_basket_fiat_evidence(
+            repository,
+            frozenset({"EUR"}),
+            _M + timedelta(minutes=1),
+            _M + timedelta(minutes=1),
+            _NOW + timedelta(days=1),
+        )
+    await context.flush(repository)
+    async with repository.session() as session:
+        election = (await session.execute(select(FxConversionElection))).scalars().one()
+        proof = (await session.execute(select(FxConversionProof))).scalars().one()
+    assert venues == {("EUR", "USD"): ("EUR", "USD", "kraken")}
+    assert rates[("EUR", "USD", "kraken", _M + timedelta(minutes=1))] == 1.25
+    assert election.calculation_version == "5B.2"
+    assert election.selected_source_exchange == "kraken"
+    assert proof.conversion_minute == _M + timedelta(minutes=1)
+    assert proof.raw_close_decimal == "1.25"
 
 
 class TestGetPnlFxRateExchanges:

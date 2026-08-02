@@ -164,7 +164,6 @@ def upgrade() -> None:
         "source_currency",
         "target_currency",
         "unordered_pair",
-        "resolved_knowledge_at",
         "refusal_reason_digest",
     ]
     op.create_index(
@@ -214,7 +213,7 @@ def upgrade() -> None:
         sa.Column("candle_known_to", _TIMESTAMP, nullable=False),
         sa.Column("raw_close_decimal", sa.Text(), nullable=False),
         sa.Column("operation", sa.String(8), nullable=False),
-        sa.Column("conversion_rate_decimal", sa.Text(), nullable=False),
+        sa.Column("conversion_rate_decimal", sa.Text(), nullable=True),
         sa.Column("source_instrument_public_id", _UUID, nullable=False),
         sa.Column("proof_digest", sa.String(64), nullable=False),
         sa.CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),

@@ -1,7 +1,8 @@
 """Write-through shadow witnesses for fiat FX proof pinning."""
 
+import asyncio
 import math
-from collections.abc import Sequence
+from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -9,25 +10,30 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
+from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
+from snapper.application.portfolio.fx_conversion_shadow import _artifact_matches_raw
+from snapper.application.portfolio.fx_conversion_shadow import _build_artifact
 from snapper.application.portfolio.fx_conversion_shadow import canonical_candidate_planes
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
+from snapper.application.portfolio.fx_conversion_shadow import replay_proof_rate
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
+from snapper.application.portfolio.fx_rates import convert_amount
+from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.data.models import FxConversionElection
 from snapper.data.models import FxConversionProof
+from snapper.data.repository import FxConversionArtifactUpgradeRequiredError
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import FxConversionArtifactRow
+from snapper.data.repository_types import FxConversionCandidatePlane
 from snapper.data.repository_types import FxConversionElectionInsertRow
-from snapper.data.repository_types import FxConversionProofInsertRow
-from snapper.data.repository_types import FxConversionProofRow
 from snapper.data.repository_types import PnlFxRateRow
 
 _MINUTE = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
@@ -62,8 +68,17 @@ def _row(
 def _evaluation(
     minutes: frozenset[datetime] = frozenset({_MINUTE}),
     selected: tuple[str, str, str] | None = ("EUR", "USD", "kraken"),
+    rows: tuple[PnlFxRateRow, ...] | None = None,
+    requested_at: datetime = _AS_OF,
 ) -> FxShadowEvaluation:
     """Build one shared-pair raw election result."""
+    evidence_rows = rows if rows is not None else (_row(),)
+    rates = {
+        (row["base"], row["quote"], row["exchange"], row["open_at"] + timedelta(minutes=1)): row[
+            "close"
+        ]
+        for row in evidence_rows
+    }
     return FxShadowEvaluation(
         scope_kind="shared_pair",
         consumer_instrument_public_id=None,
@@ -72,6 +87,9 @@ def _evaluation(
         required_minutes=minutes,
         candidate_planes=frozenset({("EUR", "USD", "kraken")}),
         selected_plane=selected,
+        requested_knowledge_at=requested_at,
+        rows=evidence_rows,
+        authoritative_rates=rates,
     )
 
 
@@ -102,36 +120,66 @@ async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
     reset_fx_shadow_pin_metrics()
     repository = await _repository(tmp_path)
     next_minute = _MINUTE + timedelta(minutes=1)
-    complete = _evaluation(frozenset({_MINUTE, next_minute}))
     complete_rows = [_row(), _row(next_minute)]
-    await shadow_pin_fx_evaluations(repository, [complete], complete_rows, _AS_OF, "5A.13")
-    await shadow_pin_fx_evaluations(repository, [complete], complete_rows, _AS_OF, "5A.13")
+    complete = _evaluation(frozenset({_MINUTE, next_minute}), rows=tuple(complete_rows))
+    await shadow_pin_fx_evaluations(repository, [complete], "5A.13")
+    await shadow_pin_fx_evaluations(
+        repository,
+        [replace(complete, requested_knowledge_at=_AS_OF + timedelta(minutes=5))],
+        "5A.13",
+    )
     rejected_row = _row(exchange="walutomat", instrument="00000000-0000-7000-8000-000000000805")
     conflict = replace(
         complete,
         candidate_planes=frozenset({("EUR", "USD", "kraken"), ("EUR", "USD", "walutomat")}),
     )
-    await shadow_pin_fx_evaluations(
-        repository, [conflict], [*complete_rows, rejected_row], _AS_OF, "5A.13"
+    conflict = replace(
+        conflict,
+        rows=(*complete.rows, rejected_row),
+        authoritative_rates={
+            **complete.authoritative_rates,
+            ("EUR", "USD", "walutomat", _MINUTE): rejected_row["close"],
+        },
     )
+    await shadow_pin_fx_evaluations(repository, [conflict], "5A.13")
     missing = _MINUTE + timedelta(minutes=2)
     invalid_row: PnlFxRateRow = {**_row(missing), "close": math.nan}
     await shadow_pin_fx_evaluations(
         repository,
-        [_evaluation(frozenset({_MINUTE, missing}))],
-        [_row(), invalid_row],
-        _AS_OF + timedelta(minutes=1),
+        [
+            _evaluation(
+                frozenset({_MINUTE, missing}),
+                rows=(_row(), invalid_row),
+                requested_at=_AS_OF + timedelta(minutes=1),
+            )
+        ],
+        "5A.13",
+    )
+    refusal = _evaluation(
+        frozenset({missing}),
+        None,
+        rows=(),
+        requested_at=_AS_OF + timedelta(minutes=2),
+    )
+    await shadow_pin_fx_evaluations(
+        repository,
+        [refusal],
         "5A.13",
     )
     await shadow_pin_fx_evaluations(
         repository,
-        [_evaluation(frozenset({missing}), None)],
-        [],
-        _AS_OF + timedelta(minutes=2),
+        [replace(refusal, requested_knowledge_at=_AS_OF + timedelta(minutes=8))],
         "5A.13",
     )
     metrics = fx_shadow_pin_metrics()
-    assert (metrics.creation, metrics.reuse, metrics.conflict, metrics.failure) == (3, 1, 1, 0)
+    assert (
+        metrics.creation,
+        metrics.reuse,
+        metrics.conflict,
+        metrics.upgrade_required,
+        metrics.mismatch,
+        metrics.failure,
+    ) == (3, 2, 1, 0, 0, 0)
     async with repository.session() as session:
         states: dict[str, int] = dict(
             (
@@ -169,30 +217,137 @@ async def test_shadow_failure_is_isolated_from_the_raw_caller() -> None:
 
     reset_fx_shadow_pin_metrics()
     repository = cast(Repository, _FailingRepository())
-    await shadow_pin_fx_evaluations(repository, [_evaluation()], [_row()], _AS_OF, "5A.13")
+    await shadow_pin_fx_evaluations(repository, [_evaluation()], "5A.13")
     assert fx_shadow_pin_metrics().failure == 1
 
 
 @pytest.mark.asyncio
 async def test_shadow_canonical_mismatch_is_observed_without_escaping(tmp_path: Path) -> None:
-    """A committed artifact differing from raw proof values increments failure."""
+    """A divergence from the authoritative raw rate fold increments mismatch."""
     reset_fx_shadow_pin_metrics()
     repository = await _repository(tmp_path)
-    original = repository.pin_fx_conversion_artifact
+    evaluation = replace(
+        _evaluation(),
+        authoritative_rates={("EUR", "USD", "kraken", _MINUTE): 9.0},
+    )
+    await shadow_pin_fx_evaluations(repository, [evaluation], "5A.13")
+    assert fx_shadow_pin_metrics().mismatch == 1
+    await repository.engine.dispose()
 
-    async def _mismatching_pin(
-        election: FxConversionElectionInsertRow,
-        proofs: Sequence[FxConversionProofInsertRow],
-    ) -> FxConversionArtifactRow:
-        """Return a deliberately altered reread artifact after a real commit."""
-        artifact = await original(election, proofs)
-        altered = cast(
-            FxConversionProofRow,
-            {**artifact["proofs"][0], "conversion_rate": Decimal("9")},
-        )
-        return {"election": artifact["election"], "proofs": (altered,)}
 
-    with patch.object(repository, "pin_fx_conversion_artifact", _mismatching_pin):
-        await shadow_pin_fx_evaluations(repository, [_evaluation()], [_row()], _AS_OF, "5A.13")
+def test_context_guards_collection_and_skips_bulk_manifests() -> None:
+    """Collection exceptions and catch-up-sized manifests never reach the tick."""
+    reset_fx_shadow_pin_metrics()
+    context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+
+    def _broken() -> list[FxShadowEvaluation]:
+        """Raise before an evaluations list can escape the guarded scope."""
+        raise KeyError("missing provenance")
+
+    context.collect(_broken)
+    context.collect(
+        lambda: [_evaluation(frozenset(_MINUTE + timedelta(minutes=index) for index in range(16)))]
+    )
+    context.collect(
+        lambda: [_evaluation(frozenset(_MINUTE + timedelta(minutes=index) for index in range(16)))]
+    )
+    assert context.evaluations == []
     assert fx_shadow_pin_metrics().failure == 1
+
+
+@pytest.mark.asyncio
+async def test_context_flush_deadline_is_failure_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single per-tick wait budget times out without leaking its coroutine."""
+    context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+    reset_fx_shadow_pin_metrics()
+
+    async def _timeout(coro: Coroutine[object, object, None], timeout: float) -> None:
+        """Close the pending flush before simulating the deadline."""
+        assert timeout == 10.0
+        coro.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", _timeout)
+    await context.flush_bounded(cast(Repository, object()))
+    assert fx_shadow_pin_metrics().failure == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_version_alignment_and_inverse_replay(tmp_path: Path) -> None:
+    """Last candle identity wins and inverse replay divides by the raw close."""
+    repository = await _repository(tmp_path)
+    older = _row()
+    newer: PnlFxRateRow = {
+        **older,
+        "candle_id": 99,
+        "candle_public_id": "00000000-0000-7000-8000-000000000899",
+    }
+    evaluation = _evaluation(rows=(older, newer))
+    await shadow_pin_fx_evaluations(repository, [evaluation], "5B.2")
+    async with repository.session() as session:
+        proof = (await session.execute(select(FxConversionProof))).scalars().one()
+    assert proof.candle_id == 99
+    inverse_close = Decimal("0.9")
+    replayed = replay_proof_rate(inverse_close, "inverse")
+    converted = convert_amount(
+        1.0,
+        "EUR",
+        "USD",
+        _MINUTE,
+        {("USD", "EUR", "kraken", _MINUTE): 0.9},
+        {currency_pair_key("EUR", "USD"): ("USD", "EUR", "kraken")},
+    )
+    assert converted is not None
+    assert float(replayed) == converted
+    await repository.engine.dispose()
+
+
+def test_discovered_candidates_override_row_fallback_and_resolve_from_evidence() -> None:
+    """Caller-supplied discovery retains row-less planes and evidence fixes identity time."""
+    selected = FxConversionCandidatePlane(
+        source_exchange="kraken",
+        source_instrument_public_id=_INSTRUMENT,
+        native_symbol="EUR/USD",
+        base="EUR",
+        quote="USD",
+        orientation="direct",
+    )
+    rowless = FxConversionCandidatePlane(
+        source_exchange="walutomat",
+        source_instrument_public_id="00000000-0000-7000-8000-0000000008aa",
+        native_symbol="EURUSD",
+        base="EUR",
+        quote="USD",
+        orientation="direct",
+    )
+    evaluation = replace(_evaluation(), discovered_candidates=(selected, rowless))
+    election, _ = _build_artifact(evaluation, _AS_OF, "5B.2")
+    assert election["considered_candidate_planes"] == (selected, rowless)
+    assert election["resolved_knowledge_at"] == _row()["candle_timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_upgrade_metric_and_impossible_selected_plane_guard(tmp_path: Path) -> None:
+    """Upgrade incidents stay distinct and malformed committed planes mismatch."""
+
+    class _UpgradeRepository:
+        async def pin_fx_conversion_artifact(self, election: object, proofs: object) -> object:
+            """Raise the typed operator-gated upgrade incident."""
+            winner = cast(
+                FxConversionArtifactRow,
+                {"election": {"public_id": "winner"}, "proofs": ()},
+            )
+            raise FxConversionArtifactUpgradeRequiredError(winner)
+
+    reset_fx_shadow_pin_metrics()
+    await shadow_pin_fx_evaluations(cast(Repository, _UpgradeRepository()), [_evaluation()], "5B.2")
+    assert fx_shadow_pin_metrics().upgrade_required == 1
+    repository = await _repository(tmp_path)
+    evaluation = _evaluation()
+    election, proofs = _build_artifact(evaluation, _AS_OF, "5B.2")
+    artifact = await repository.pin_fx_conversion_artifact(election, proofs)
+    malformed = cast(FxConversionElectionInsertRow, {**election, "selected_base": None})
+    assert not _artifact_matches_raw(artifact, malformed, proofs, evaluation)
     await repository.engine.dispose()

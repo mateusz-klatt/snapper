@@ -64,6 +64,14 @@ class TestRingBuffer:
                 "disk_critical": False,
                 "status": HealthStatusEnum.HEALTHY,
             },
+            fx_shadow_pins={
+                "creation": 0,
+                "reuse": 0,
+                "conflict": 0,
+                "upgrade_required": 0,
+                "mismatch": 0,
+                "failure": 0,
+            },
             tracemalloc_active=False,
             cgroup_version=None,
         )

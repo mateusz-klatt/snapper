@@ -5,6 +5,7 @@ import pytest
 from snapper.application.portfolio.pnl_snapshotter_config import DEFAULT_INTERVAL_SECONDS
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ENV_VARS
+from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
@@ -49,8 +50,8 @@ class TestResolveEnabled:
 
 
 class TestEnvVarsContract:
-    """The exported allowlist names the two contract keys."""
+    """The exported allowlist names every snapshotter contract key."""
 
     def test_env_vars_lists_both_keys(self) -> None:
-        """``ENV_VARS`` is exactly the interval and enabled keys."""
-        assert frozenset({INTERVAL_ENV_VAR, ENABLED_ENV_VAR}) == ENV_VARS
+        """``ENV_VARS`` includes interval, snapshotting, and shadow pinning."""
+        assert frozenset({INTERVAL_ENV_VAR, ENABLED_ENV_VAR, FX_SHADOW_PINNING_ENV_VAR}) == ENV_VARS

@@ -8,6 +8,7 @@ from datetime import timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import patch
@@ -90,7 +91,7 @@ def _proof(
     election_public_id: str,
     public_id: str,
     raw_close: Decimal = Decimal("1.123456789012345678901234567890"),
-    conversion_rate: Decimal = Decimal("1.123456789012345678901234567890"),
+    conversion_rate: Decimal | None = Decimal("1.123456789012345678901234567890"),
     operation: FxConversionOperation = "direct",
 ) -> FxConversionProofInsertRow:
     """Build one proof using the production M-minus-one candle relation."""
@@ -145,14 +146,14 @@ async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
             Decimal("1.123456789012345678901234567890"),
             Decimal("1.123456789012345678901234567890"),
         ),
-        ("inverse", Decimal("3"), Decimal(1) / Decimal(3)),
+        ("inverse", Decimal("3"), None),
     ],
 )
 async def test_direct_and_inverse_decimals_round_trip_exactly(
     tmp_path: Path,
     operation: FxConversionOperation,
     raw_close: Decimal,
-    conversion_rate: Decimal,
+    conversion_rate: Decimal | None,
 ) -> None:
     """Direct and reciprocal inverse values retain every Decimal digit."""
     repository = await _repository(tmp_path)
@@ -427,8 +428,38 @@ async def test_non_decimal_runtime_values_are_typed_errors(tmp_path: Path, field
     if field == "raw_close":
         proof["raw_close"] = cast(Decimal, 1.123456789012345)
     else:
-        proof["conversion_rate"] = cast(Decimal, 1.123456789012345)
+        proof["raw_close"] = Decimal("1")
+        proof["conversion_rate"] = cast(Decimal, 1.0)
     with pytest.raises(FxConversionArtifactValueError):
+        await repository.pin_fx_conversion_artifact(election, [proof])
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("orientation", "conversion_rate", "message"),
+    [
+        ("direct", Decimal("2"), "must equal raw_close"),
+        ("inverse", Decimal("1"), "must be null"),
+    ],
+)
+async def test_conversion_rate_shape_matches_operation(
+    tmp_path: Path,
+    orientation: Literal["direct", "inverse"],
+    conversion_rate: Decimal,
+    message: str,
+) -> None:
+    """Direct and inverse proofs enforce their distinct replay representation."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000140")
+    election["selected_orientation"] = orientation
+    proof = _proof(
+        election["public_id"],
+        "00000000-0000-7000-8000-000000000141",
+        operation=orientation,
+        conversion_rate=conversion_rate,
+    )
+    with pytest.raises(FxConversionArtifactValueError, match=message):
         await repository.pin_fx_conversion_artifact(election, [proof])
     await repository.engine.dispose()
 

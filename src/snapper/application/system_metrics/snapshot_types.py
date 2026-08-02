@@ -132,6 +132,17 @@ class DiskMetrics(TypedDict):
     status: HealthStatus
 
 
+class FxShadowPinMetricsSnapshot(TypedDict):
+    """Process-local write-through FX proof comparison counters."""
+
+    creation: int
+    reuse: int
+    conflict: int
+    upgrade_required: int
+    mismatch: int
+    failure: int
+
+
 class SystemMetricsSnapshot(TypedDict):
     """One sampled snapshot held in the ring buffer.
 
@@ -151,5 +162,6 @@ class SystemMetricsSnapshot(TypedDict):
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
     disk: DiskMetrics
+    fx_shadow_pins: FxShadowPinMetricsSnapshot
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None

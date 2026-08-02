@@ -14,8 +14,11 @@ INTERVAL_MIN_SECONDS: Final[int] = 10
 INTERVAL_MAX_SECONDS: Final[int] = 3600
 INTERVAL_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_INTERVAL_SECONDS"
 ENABLED_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_ENABLED"
+FX_SHADOW_PINNING_ENV_VAR: Final[str] = "PNL_FX_SHADOW_PINNING_ENABLED"
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
-ENV_VARS: Final[frozenset[str]] = frozenset({INTERVAL_ENV_VAR, ENABLED_ENV_VAR})
+ENV_VARS: Final[frozenset[str]] = frozenset(
+    {INTERVAL_ENV_VAR, ENABLED_ENV_VAR, FX_SHADOW_PINNING_ENV_VAR}
+)
 """Public allowlist of env vars this snapshotter reads via ``os.environ``.
 
 Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys against

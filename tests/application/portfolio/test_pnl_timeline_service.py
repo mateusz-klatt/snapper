@@ -26,6 +26,8 @@ from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
+from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_rates import convert_amount
@@ -2209,16 +2211,18 @@ class TestCrossCurrencyPrices:
                 _fx_row("PLN", "EUR", 1, 0.19, exchange="walutomat"),
             ],
         )
-        result = await build_wallet_pnl_series(
-            repo,
-            _W1,
-            "live",
-            _T0,
-            _m(1),
-            "1m",
-            _m(2),
-            valuation_ccy="EUR",
-        )
+        shadow_context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+        with activate_fx_shadow_context(shadow_context):
+            result = await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _m(1),
+                "1m",
+                _m(2),
+                valuation_ccy="EUR",
+            )
         assert [point.valuation_status for point in result.points] == ["complete", "complete"]
         assert result.points[1].unrealized_pnl == 0.0
         assert result.points[1].net_pnl == 0.0
@@ -2226,6 +2230,15 @@ class TestCrossCurrencyPrices:
             (source.base_currency, source.quote_currency, source.exchange)
             for source in result.rate_sources
         ] == [("EUR", "PLN", "walutomat")]
+        owned = [
+            evaluation
+            for evaluation in shadow_context.evaluations
+            if evaluation.scope_kind == "instrument_owned"
+        ]
+        assert len(owned) == 1
+        assert owned[0].consumer_instrument_public_id == _I1
+        assert owned[0].pair == currency_pair_key("EUR", "PLN")
+        assert owned[0].candidate_planes == frozenset({("EUR", "PLN", "walutomat")})
 
     async def test_identity_plane_gap_does_not_switch_to_reverse_orientation(
         self,
@@ -6353,7 +6366,7 @@ class TestLoadBasketFiatEvidence:
         assert pln_leg.usd_value == pytest.approx(100.0)
         assert eur_leg.provenance is not None
         assert eur_leg.provenance.candle is not None
-        assert fx_shadow_pin_metrics().failure == 2
+        assert fx_shadow_pin_metrics().failure == 0
 
     async def test_missing_pln_close_at_minute_fails_that_minute_closed(self) -> None:
         """A fiat pair with no close at a minute withholds that minute's leg."""

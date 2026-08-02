@@ -44,6 +44,7 @@ from uuid import uuid7
 import psutil
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.system_metrics.cgroup import CgroupReading
 from snapper.application.system_metrics.cgroup import read_cgroup
 from snapper.application.system_metrics.ring_buffer import DEFAULT_HISTORY_CAP
@@ -426,6 +427,7 @@ class SystemMetricsSnapshotter:
         )
         db_internal_metrics = self._sample_db_internal_metrics()
         disk_metrics = self._sample_disk_metrics()
+        fx_metrics = fx_shadow_pin_metrics()
         return SystemMetricsSnapshot(
             bus_time=datetime.now(UTC),
             process=process_metrics,
@@ -437,6 +439,14 @@ class SystemMetricsSnapshotter:
             saturation=saturation_metrics,
             db_internal=db_internal_metrics,
             disk=disk_metrics,
+            fx_shadow_pins={
+                "creation": fx_metrics.creation,
+                "reuse": fx_metrics.reuse,
+                "conflict": fx_metrics.conflict,
+                "upgrade_required": fx_metrics.upgrade_required,
+                "mismatch": fx_metrics.mismatch,
+                "failure": fx_metrics.failure,
+            },
             tracemalloc_active=self._tracemalloc.is_active(),
             cgroup_version=cgroup_version,
         )

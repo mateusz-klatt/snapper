@@ -9293,7 +9293,11 @@ class SQLAlchemyRepository(Repository):
             candle_known_to=proof.candle_known_to,
             raw_close=Decimal(proof.raw_close_decimal),
             operation=cast(FxConversionOperation, proof.operation),
-            conversion_rate=Decimal(proof.conversion_rate_decimal),
+            conversion_rate=(
+                None
+                if proof.conversion_rate_decimal is None
+                else Decimal(proof.conversion_rate_decimal)
+            ),
             source_instrument_public_id=proof.source_instrument_public_id,
             proof_digest=proof.proof_digest,
         )
@@ -9599,8 +9603,20 @@ class SQLAlchemyRepository(Repository):
         for proof in proofs:
             if not isinstance(proof["raw_close"], Decimal):
                 raise FxConversionArtifactValueError("FX proof raw_close must be Decimal")
-            if not isinstance(proof["conversion_rate"], Decimal):
-                raise FxConversionArtifactValueError("FX proof conversion_rate must be Decimal")
+            if proof["operation"] == "direct" and proof["conversion_rate"] != proof["raw_close"]:
+                raise FxConversionArtifactValueError(
+                    "direct FX proof conversion_rate must equal raw_close"
+                )
+            if proof["operation"] == "inverse" and proof["conversion_rate"] is not None:
+                raise FxConversionArtifactValueError(
+                    "inverse FX proof conversion_rate must be null"
+                )
+            if proof["conversion_rate"] is not None and not isinstance(
+                proof["conversion_rate"], Decimal
+            ):
+                raise FxConversionArtifactValueError(
+                    "FX proof conversion_rate must be Decimal or null"
+                )
 
     @classmethod
     def _validate_fx_conversion_artifact(
@@ -9641,7 +9657,6 @@ class SQLAlchemyRepository(Repository):
             FxConversionElection.source_currency == identity["source_currency"],
             FxConversionElection.target_currency == identity["target_currency"],
             FxConversionElection.unordered_pair == identity["unordered_pair"],
-            FxConversionElection.resolved_knowledge_at == identity["resolved_knowledge_at"],
             FxConversionElection.refusal_reason_digest
             == build_refusal_reason_digest(identity["refusal_reason_json"]),
         ]
@@ -9723,7 +9738,10 @@ class SQLAlchemyRepository(Repository):
                 for proof, proof_digest in zip(proofs, proof_digests, strict=True):
                     values = dict(proof)
                     values["raw_close_decimal"] = format(values.pop("raw_close"), "f")
-                    values["conversion_rate_decimal"] = format(values.pop("conversion_rate"), "f")
+                    conversion_rate = values.pop("conversion_rate")
+                    values["conversion_rate_decimal"] = (
+                        None if conversion_rate is None else format(conversion_rate, "f")
+                    )
                     values["proof_digest"] = proof_digest
                     session.add(FxConversionProof(**values, known_to=KNOWN_TO_MAX))
                 await session.commit()

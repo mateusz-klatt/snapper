@@ -78,7 +78,11 @@ def build_proof_digest(proof: FxConversionProofInsertRow) -> str:
         "candle_known_to": _canonical_instant(proof["candle_known_to"]),
         "raw_close": _canonical_decimal(proof["raw_close"]),
         "operation": proof["operation"],
-        "conversion_rate": _canonical_decimal(proof["conversion_rate"]),
+        "conversion_rate": (
+            None
+            if proof["conversion_rate"] is None
+            else _canonical_decimal(proof["conversion_rate"])
+        ),
         "source_instrument_public_id": proof["source_instrument_public_id"],
     }
     return _sha256({"proof": payload})

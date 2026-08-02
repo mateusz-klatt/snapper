@@ -1682,7 +1682,6 @@ class FxConversionElection(TemporalMixin, Base):
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "resolved_knowledge_at",
             "refusal_reason_digest",
             unique=True,
             sqlite_where=text(
@@ -1704,7 +1703,6 @@ class FxConversionElection(TemporalMixin, Base):
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "resolved_knowledge_at",
             "refusal_reason_digest",
             unique=True,
             sqlite_where=text(
@@ -1786,10 +1784,10 @@ class FxConversionElection(TemporalMixin, Base):
 class FxConversionProof(TemporalMixin, Base):
     """Exact-minute child proof carrying canonical decimal text.
 
-    ``raw_close_decimal`` and ``conversion_rate_decimal`` are text rather than
-    floating or fixed-scale numeric columns. Writers accept ``Decimal`` and
-    persist its canonical fixed-point spelling, preserving every supplied digit
-    on SQLite and PostgreSQL without a float round-trip or inverse-rate rounding.
+    ``raw_close_decimal`` and a direct ``conversion_rate_decimal`` are text rather
+    than floating or fixed-scale numeric columns. Inverse proofs leave the latter
+    null because production divides the amount by ``raw_close`` and never
+    multiplies by a precomputed reciprocal. F4 replay uses raw close plus operation.
     ``candle_known_to`` records knowledge-at-pin-time provenance and is never a
     candle-version join key. The fiat candle loader supplies the non-null candle
     session, sequence, and known-to provenance fields at shadow-pin time.
@@ -1833,7 +1831,7 @@ class FxConversionProof(TemporalMixin, Base):
     candle_known_to: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     raw_close_decimal: Mapped[str] = mapped_column(Text, nullable=False)
     operation: Mapped[str] = mapped_column(String(8), nullable=False)
-    conversion_rate_decimal: Mapped[str] = mapped_column(Text, nullable=False)
+    conversion_rate_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     proof_digest: Mapped[str] = mapped_column(String(64), nullable=False)
 

@@ -690,6 +690,17 @@ class TestConstructorAndProperties:
         assert snap.disabled is False
         assert snap.interval_seconds == 120
 
+    def test_fx_shadow_kill_switch_defaults_off_and_requires_truthy_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Snapshot writes do not collect shadow pins without the separate opt-in."""
+        monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+        parked = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()), disabled=False)
+        assert parked._fx_shadow_pinning_enabled is False
+        monkeypatch.setenv("PNL_FX_SHADOW_PINNING_ENABLED", "true")
+        enabled = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()), disabled=False)
+        assert enabled._fx_shadow_pinning_enabled is True
+
 
 class TestLifecycle:
     """Start/stop/loop lifecycle mirroring the DbStats snapshotter."""
@@ -800,6 +811,27 @@ class TestLifecycle:
         snap = PortfolioPnlSnapshotter(repo=None, disabled=True)
         with pytest.raises(RuntimeError, match="disabled mode"):
             await snap._tick_once()
+
+    @pytest.mark.asyncio
+    async def test_tick_once_flushes_enabled_shadow_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An enabled durable tick flushes its collected shadow work afterward."""
+        repo = _FakeRepo()
+        snap = _snapshotter(repo, _minute(5))
+        snap._fx_shadow_pinning_enabled = True
+        flushed: list[object] = []
+
+        async def valuation(unused_repo: object, unused_as_of: datetime) -> None:
+            return None
+
+        async def flush(context: object, flushed_repo: object) -> None:
+            flushed.append(flushed_repo)
+
+        monkeypatch.setattr(snap, "_tick_valuation", valuation)
+        monkeypatch.setattr(pnl_snapshotter.FxShadowPinContext, "flush_bounded", flush)
+        await snap._tick_once()
+        assert flushed == [repo]
 
 
 class TestTickDiscoveryAndIsolation:

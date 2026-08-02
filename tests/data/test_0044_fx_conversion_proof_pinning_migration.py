@@ -163,6 +163,28 @@ def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
     engine.dispose()
 
 
+def test_0044_inverse_proof_keeps_reciprocal_rate_null(migrated_db_path: Path) -> None:
+    """Inverse replay is represented by raw close plus operation, never a reciprocal."""
+    engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
+    election_id = "00000000-0000-7000-8000-000000000012"
+    _insert(
+        engine,
+        "fx_conversion_elections",
+        _election(election_id, selected_orientation="inverse"),
+    )
+    _insert(
+        engine,
+        "fx_conversion_proofs",
+        _proof(
+            "00000000-0000-7000-8000-000000000013",
+            election_id,
+            operation="inverse",
+            conversion_rate_decimal=None,
+        ),
+    )
+    engine.dispose()
+
+
 def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Path) -> None:
     """Successful identities collide and identical refusal audits are unique."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
@@ -177,6 +199,7 @@ def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Pat
     }
     assert all("refusal_reason_digest" in columns for columns in refusal_indexes.values())
     assert all("refusal_reason_json" not in columns for columns in refusal_indexes.values())
+    assert all("resolved_knowledge_at" not in columns for columns in refusal_indexes.values())
     first = _election("00000000-0000-7000-8000-000000000020")
     _insert(engine, "fx_conversion_elections", first)
     with pytest.raises(IntegrityError):
@@ -205,7 +228,12 @@ def test_0044_partial_unique_indexes_and_refusal_predicate(migrated_db_path: Pat
         _insert(
             engine,
             "fx_conversion_elections",
-            {**refused, "public_id": "00000000-0000-7000-8000-000000000023"},
+            {
+                **refused,
+                "public_id": "00000000-0000-7000-8000-000000000023",
+                "requested_knowledge_at": _HORIZON + timedelta(hours=1),
+                "resolved_knowledge_at": _HORIZON + timedelta(hours=1),
+            },
         )
     _insert(
         engine,

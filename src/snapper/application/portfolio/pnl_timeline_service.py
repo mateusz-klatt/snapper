@@ -67,7 +67,7 @@ from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fill_booking import booked_signed_quantity
 from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
-from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
+from snapper.application.portfolio.fx_conversion_shadow import current_fx_shadow_context
 from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateKey
 from snapper.application.portfolio.fx_rates import FxRateMap
@@ -1454,26 +1454,28 @@ async def load_basket_fiat_evidence(
     candidate_planes = _candidate_planes(candidates, {})
     rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
     resolved = _resolve_fx_planes(requirements, candidate_planes, rows, "USD")
-    await shadow_pin_fx_evaluations(
-        repo,
-        [
-            FxShadowEvaluation(
-                scope_kind="shared_pair",
-                consumer_instrument_public_id=None,
-                pair=pair,
-                target_currency="USD",
-                required_minutes=frozenset(pair_minutes),
-                candidate_planes=frozenset(candidate_planes.get(pair, set())),
-                selected_plane=resolved.get(pair),
-            )
-            for pair, pair_minutes in sorted(requirements.items())
-        ],
-        rows,
-        as_of,
-        PNL_TIMELINE_CALC_VERSION,
-    )
+    rates = build_fx_rates(rows)
+    shadow_context = current_fx_shadow_context()
+    if shadow_context is not None:
+        shadow_context.collect(
+            lambda: [
+                FxShadowEvaluation(
+                    scope_kind="shared_pair",
+                    consumer_instrument_public_id=None,
+                    pair=pair,
+                    target_currency="USD",
+                    required_minutes=frozenset(pair_minutes),
+                    candidate_planes=frozenset(candidate_planes.get(pair, set())),
+                    selected_plane=resolved.get(pair),
+                    requested_knowledge_at=as_of,
+                    rows=tuple(rows),
+                    authoritative_rates=rates,
+                )
+                for pair, pair_minutes in sorted(requirements.items())
+            ]
+        )
     return (
-        build_fx_rates(rows),
+        rates,
         resolved,
         _build_fiat_versions(rows),
     )
@@ -3211,41 +3213,50 @@ async def _load_request_fx_rates(
         row for row in rows if (row["base"], row["quote"], row["exchange"]) in selected_planes
     ]
     general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
-    evaluations = [
-        FxShadowEvaluation(
-            scope_kind="shared_pair",
-            consumer_instrument_public_id=None,
-            pair=pair,
-            target_currency=valuation_ccy,
-            required_minutes=frozenset(minutes),
-            candidate_planes=frozenset(candidate_planes.get(pair, set())),
-            selected_plane=shared_planes.get(pair),
+    rates = build_fx_rates(selected_rows)
+    all_rates = build_fx_rates(rows)
+    shadow_context = current_fx_shadow_context()
+    if shadow_context is not None:
+        shadow_context.collect(
+            lambda: [
+                *(
+                    FxShadowEvaluation(
+                        scope_kind="shared_pair",
+                        consumer_instrument_public_id=None,
+                        pair=pair,
+                        target_currency=valuation_ccy,
+                        required_minutes=frozenset(minutes),
+                        candidate_planes=frozenset(candidate_planes.get(pair, set())),
+                        selected_plane=shared_planes.get(pair),
+                        requested_knowledge_at=as_of,
+                        rows=tuple(rows),
+                        authoritative_rates=all_rates,
+                    )
+                    for pair, minutes in sorted(general_requirements.items())
+                ),
+                *(
+                    FxShadowEvaluation(
+                        scope_kind="instrument_owned",
+                        consumer_instrument_public_id=instrument_public_id,
+                        pair=pair,
+                        target_currency=valuation_ccy,
+                        required_minutes=frozenset(minutes),
+                        candidate_planes=frozenset({identity_plane}),
+                        selected_plane=resolved_identity_planes.get(instrument_public_id),
+                        requested_knowledge_at=as_of,
+                        rows=tuple(rows),
+                        authoritative_rates=all_rates,
+                    )
+                    for instrument_public_id, instrument_minutes in sorted(
+                        instrument_requirements.items()
+                    )
+                    if (identity_plane := identity_planes.get(instrument_public_id)) is not None
+                    for pair, minutes in sorted(instrument_minutes.items())
+                    if pair == currency_pair_key(identity_plane[0], identity_plane[1])
+                ),
+            ]
         )
-        for pair, minutes in sorted(general_requirements.items())
-    ]
-    evaluations.extend(
-        FxShadowEvaluation(
-            scope_kind="instrument_owned",
-            consumer_instrument_public_id=instrument_public_id,
-            pair=pair,
-            target_currency=valuation_ccy,
-            required_minutes=frozenset(minutes),
-            candidate_planes=frozenset({identity_plane}),
-            selected_plane=resolved_identity_planes.get(instrument_public_id),
-        )
-        for instrument_public_id, instrument_minutes in sorted(instrument_requirements.items())
-        if (identity_plane := identity_planes.get(instrument_public_id)) is not None
-        for pair, minutes in sorted(instrument_minutes.items())
-        if pair == currency_pair_key(identity_plane[0], identity_plane[1])
-    )
-    await shadow_pin_fx_evaluations(
-        repo,
-        evaluations,
-        rows,
-        as_of,
-        PNL_TIMELINE_CALC_VERSION,
-    )
-    return build_fx_rates(selected_rows), planes_by_instrument, used_planes
+    return rates, planes_by_instrument, used_planes
 
 
 def _opening_nonflat_instruments(

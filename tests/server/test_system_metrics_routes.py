@@ -130,6 +130,14 @@ def _build_synthetic_snapshot(
             disk_critical=False,
             status=HealthStatusEnum.WARNING,
         ),
+        fx_shadow_pins={
+            "creation": 1,
+            "reuse": 2,
+            "conflict": 3,
+            "upgrade_required": 4,
+            "mismatch": 5,
+            "failure": 6,
+        },
         tracemalloc_active=tracemalloc_active,
         cgroup_version=cgroup_version,
     )

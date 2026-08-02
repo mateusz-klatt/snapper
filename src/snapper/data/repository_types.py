@@ -96,7 +96,7 @@ class FxConversionProofInsertRow(TypedDict):
     candle_known_to: datetime
     raw_close: Decimal
     operation: FxConversionOperation
-    conversion_rate: Decimal
+    conversion_rate: Decimal | None
     source_instrument_public_id: str
 
 

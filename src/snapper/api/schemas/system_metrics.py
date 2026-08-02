@@ -159,6 +159,17 @@ class DiskMetrics(StrictBody):
     status: HealthStatus
 
 
+class FxShadowPinMetrics(StrictBody):
+    """Write-through FX proof comparison counters for the process."""
+
+    creation: int
+    reuse: int
+    conflict: int
+    upgrade_required: int
+    mismatch: int
+    failure: int
+
+
 class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
     """Latest sampled snapshot returned by ``GET /api/metrics/system``.
 
@@ -195,6 +206,7 @@ class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
     disk: DiskMetrics
+    fx_shadow_pins: FxShadowPinMetrics
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None
 
@@ -217,6 +229,7 @@ class SystemMetricsHistoryItem(StrictDataSchema[Literal["system_metrics_history_
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
     disk: DiskMetrics
+    fx_shadow_pins: FxShadowPinMetrics
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None
 
