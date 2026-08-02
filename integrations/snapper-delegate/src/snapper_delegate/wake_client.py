@@ -24,9 +24,9 @@ from pydantic import SecretStr
 from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
-from snapper.core.json_types import JsonObject
-from snapper.core.json_types import JsonValue
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.json_types import JsonObject
+from snapper_delegate.json_types import JsonValue
 
 _RAW_FRAME_LIMIT_BYTES = 64 * 1024
 _SIGNAL_ENVELOPE_LIMIT_BYTES = 16 * 1024

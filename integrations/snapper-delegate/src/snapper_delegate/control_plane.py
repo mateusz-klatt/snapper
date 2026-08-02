@@ -14,8 +14,8 @@ from pydantic import Field
 from pydantic import SecretStr
 from pydantic import ValidationError
 
-from snapper.core.json_types import JsonObject
-from snapper.core.json_types import JsonValue
+from snapper_delegate.json_types import JsonObject
+from snapper_delegate.json_types import JsonValue
 
 _WIRE_MODEL_CONFIG = ConfigDict(
     extra="allow",

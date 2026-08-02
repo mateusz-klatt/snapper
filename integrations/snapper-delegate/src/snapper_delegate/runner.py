@@ -18,7 +18,6 @@ from typing import Unpack
 from loguru import logger
 from pydantic import SecretStr
 
-from snapper.core.json_types import JsonValue
 from snapper_delegate.chat_completions import ApiKeyFileError
 from snapper_delegate.chat_completions import ChatCompletionsClient
 from snapper_delegate.consult import BoundedConsultRunner
@@ -30,6 +29,7 @@ from snapper_delegate.control_plane import ControlPlaneError
 from snapper_delegate.control_plane import PendingReview
 from snapper_delegate.control_plane import SnapperControlClient
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.json_types import JsonValue
 from snapper_delegate.mcp_bridge import MCPBridge
 from snapper_delegate.mcp_bridge import MCPBridgeClient
 from snapper_delegate.review_inbox import InboxOfferOutcome

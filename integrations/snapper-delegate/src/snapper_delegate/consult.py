@@ -15,7 +15,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
-from snapper.core.json_types import JsonObject
 from snapper_delegate.chat_completions import ChatCompletionFailure
 from snapper_delegate.chat_completions import ChatCompletionQuotaExhausted
 from snapper_delegate.chat_completions import ChatCompletionRequest
@@ -25,6 +24,7 @@ from snapper_delegate.chat_completions import ChatRole
 from snapper_delegate.chat_completions import ChatTool
 from snapper_delegate.chat_completions import ChatToolCall
 from snapper_delegate.control_plane import ControlPlaneError
+from snapper_delegate.json_types import JsonObject
 from snapper_delegate.mcp_bridge import MCPBridgeClient
 from snapper_delegate.mcp_bridge import MCPToolCatalogSuccess
 

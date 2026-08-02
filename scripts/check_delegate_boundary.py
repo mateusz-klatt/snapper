@@ -34,7 +34,7 @@ _REGISTRATION_ALLOWLIST: Final[frozenset[str]] = frozenset(
         "snapper.core.types",
     }
 )
-_DEFAULT_ALLOWLIST: Final[frozenset[str]] = frozenset({"snapper.core.json_types"})
+_DEFAULT_ALLOWLIST: Final[frozenset[str]] = frozenset()
 _PER_FILE_ALLOWLIST: Final[dict[str, frozenset[str]]] = {"registration.py": _REGISTRATION_ALLOWLIST}
 
 

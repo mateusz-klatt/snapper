@@ -19,10 +19,10 @@ from pydantic import ConfigDict
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
-from snapper.core.json_types import JsonObject
-from snapper.core.json_types import JsonValue
 from snapper_delegate.chat_completions import ChatFunctionDefinition
 from snapper_delegate.chat_completions import ChatTool
+from snapper_delegate.json_types import JsonObject
+from snapper_delegate.json_types import JsonValue
 
 _CHAT_TOOL_SCHEMA_KEYS_TO_STRIP = frozenset({"$defs", "additionalProperties", "default", "title"})
 _LOCAL_REFERENCE_PREFIX = "#/$defs/"
