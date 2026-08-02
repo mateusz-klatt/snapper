@@ -61,7 +61,7 @@ _JWT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
 _KEY_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(?:api|key|pk|rk|secret|sk|token)[_-][A-Za-z0-9_.-]{12,}",
+    r"(?:api|key|pk|rk|secret|sk|token)[_-][a-z0-9_.-]{12,}",
     re.IGNORECASE,
 )
 _BASE64_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]{32,}")
@@ -73,6 +73,8 @@ _ORIGIN_HOST_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?"
 )
 _CONFIG_ERROR_MESSAGE: Final[str] = "Runner-only delegate configuration is incomplete or invalid"
+_INVALID_ENDPOINT_ORIGIN: Final[str] = "invalid endpoint origin"
+_INVALID_SNAPPER_ORIGIN: Final[str] = "invalid Snapper origin"
 
 
 class RunnerOnlyConfigurationError(ValueError):
@@ -119,12 +121,12 @@ class RunnerOnlyConfiguration(BaseModel):
     def _validate_base_url(cls, value: str) -> str:
         """Require a credential-free HTTPS origin on TCP port 443."""
         if value != value.strip() or any(character.isspace() for character in value):
-            raise ValueError("invalid endpoint origin")
+            raise ValueError(_INVALID_ENDPOINT_ORIGIN)
         try:
             parsed = urlsplit(value)
             port = parsed.port
         except ValueError as error:
-            raise ValueError("invalid endpoint origin") from error
+            raise ValueError(_INVALID_ENDPOINT_ORIGIN) from error
         hostname = parsed.hostname
         canonical_authority = hostname if port is None else f"{hostname}:{port}"
         valid = (
@@ -140,7 +142,7 @@ class RunnerOnlyConfiguration(BaseModel):
             and port in (None, 443)
         )
         if not valid:
-            raise ValueError("invalid endpoint origin")
+            raise ValueError(_INVALID_ENDPOINT_ORIGIN)
         return value.rstrip("/")
 
     @field_validator("endpoint_path")
@@ -159,12 +161,12 @@ class RunnerOnlyConfiguration(BaseModel):
             delimiter in value for delimiter in ("?", "#")
         )
         if value != value.strip() or invalid_characters:
-            raise ValueError("invalid Snapper origin")
+            raise ValueError(_INVALID_SNAPPER_ORIGIN)
         try:
             parsed = urlsplit(value)
             port = parsed.port
         except ValueError as error:
-            raise ValueError("invalid Snapper origin") from error
+            raise ValueError(_INVALID_SNAPPER_ORIGIN) from error
         hostname = parsed.hostname
         valid_hostname = hostname is not None and (
             ":" in hostname or _ORIGIN_HOST_PATTERN.fullmatch(hostname) is not None
@@ -185,7 +187,7 @@ class RunnerOnlyConfiguration(BaseModel):
             and parsed.fragment == ""
         )
         if not valid:
-            raise ValueError("invalid Snapper origin")
+            raise ValueError(_INVALID_SNAPPER_ORIGIN)
         return value.rstrip("/")
 
     @field_validator("api_key_file")
@@ -286,7 +288,7 @@ async def _idle_unconfigured() -> None:
     try:
         loop.add_signal_handler(signal.SIGTERM, stop_event.set)
         installed = True
-    except (NotImplementedError, RuntimeError):
+    except RuntimeError:
         pass
     try:
         await stop_event.wait()

@@ -291,12 +291,7 @@ class WakeClient:
     async def close(self) -> None:
         """Stop reconnect waits and close the active socket promptly."""
         self._closed.set()
-        session_task = self._session_task
-        if session_task is not None:
-            session_task.cancel()
         await self._close_active()
-        if session_task is not None:
-            await asyncio.gather(session_task, return_exceptions=True)
 
     async def _run_forever(self, callbacks: WakeCallbacks) -> None:
         """Run recoverable sessions with jittered exponential backoff."""
@@ -304,11 +299,7 @@ class WakeClient:
             session_task = asyncio.create_task(self._run_session(callbacks))
             self._session_task = session_task
             try:
-                await session_task
-            except asyncio.CancelledError:
-                if self._closed.is_set():
-                    return
-                raise
+                await self._await_session_or_close(session_task)
             except Exception:
                 logger.warning("Delegate wake session failed; reconnecting")
             finally:
@@ -319,6 +310,21 @@ class WakeClient:
             delay = _backoff_seconds(self._reconnect_attempt, self._config)
             self._reconnect_attempt += 1
             await self._wait_for_close(delay)
+
+    async def _await_session_or_close(self, session_task: asyncio.Task[None]) -> None:
+        """Await one session while giving lifecycle closure ownership of shutdown."""
+        close_task = asyncio.create_task(self._closed.wait())
+        try:
+            await asyncio.wait(
+                (session_task, close_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not self._closed.is_set():
+                await session_task
+        finally:
+            session_task.cancel()
+            close_task.cancel()
+            await asyncio.gather(session_task, close_task, return_exceptions=True)
 
     async def _run_session(self, callbacks: WakeCallbacks) -> None:
         """Authenticate, subscribe, sweep, and stream one socket session."""

@@ -8,7 +8,17 @@ import filecmp
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from stat import S_IMODE
+
+
+@dataclass(frozen=True, slots=True)
+class FileBackup:
+    """Content backup plus the original file permission bits."""
+
+    path: Path
+    mode: int
 
 
 def get_files_to_check(project_root: Path) -> list[Path]:
@@ -39,7 +49,7 @@ def get_files_to_check(project_root: Path) -> list[Path]:
     ]
 
 
-def backup_files(files: list[Path], backup_dir: Path) -> dict[Path, Path]:
+def backup_files(files: list[Path], backup_dir: Path) -> dict[Path, FileBackup]:
     """Backup files to temporary directory.
 
     Args:
@@ -47,25 +57,26 @@ def backup_files(files: list[Path], backup_dir: Path) -> dict[Path, Path]:
         backup_dir: Directory to store backup copies.
 
     Returns:
-        Mapping of original file paths to their backup paths.
+        Mapping of original paths to content and permission backups.
     """
-    backups: dict[Path, Path] = {}
+    backups: dict[Path, FileBackup] = {}
     for f in files:
         if f.exists():
             backup = backup_dir / f.name
-            shutil.copy2(f, backup)
-            backups[f] = backup
+            shutil.copyfile(f, backup)
+            backups[f] = FileBackup(path=backup, mode=S_IMODE(f.stat().st_mode))
     return backups
 
 
-def restore_files(backups: dict[Path, Path]) -> None:
+def restore_files(backups: dict[Path, FileBackup]) -> None:
     """Restore files from backups.
 
     Args:
-        backups: Mapping of original file paths to their backup paths.
+        backups: Mapping of original paths to content and permission backups.
     """
     for original, backup in backups.items():
-        shutil.copy2(backup, original)
+        shutil.copyfile(backup.path, original)
+        original.chmod(backup.mode)
 
 
 def regenerate_types(project_root: Path) -> subprocess.CompletedProcess[str]:
@@ -86,11 +97,11 @@ def regenerate_types(project_root: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def check_drift(backups: dict[Path, Path], project_root: Path) -> list[Path]:
+def check_drift(backups: dict[Path, FileBackup], project_root: Path) -> list[Path]:
     """Compare files with backups and return list of drifted files.
 
     Args:
-        backups: Mapping of original file paths to their backup paths.
+        backups: Mapping of original paths to content and permission backups.
         project_root: Root directory of the project for relative path display.
 
     Returns:
@@ -98,7 +109,7 @@ def check_drift(backups: dict[Path, Path], project_root: Path) -> list[Path]:
     """
     drifted: list[Path] = []
     for original, backup in backups.items():
-        if not filecmp.cmp(original, backup, shallow=False):
+        if not filecmp.cmp(original, backup.path, shallow=False):
             print(f"  Drift detected: {original.relative_to(project_root)}")
             drifted.append(original)
     return drifted

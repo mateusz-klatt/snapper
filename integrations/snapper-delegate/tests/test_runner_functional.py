@@ -548,6 +548,7 @@ async def test_blocked_identity_is_cancelled_by_stop(
     When runner shutdown is requested,
     Then the identity task is cancelled and wake processing never starts.
     """
+    initial_tasks = asyncio.all_tasks()
     control = _BlockingIdentityControlClient()
     wake = _FakeWakeClient()
     runner = _runner(
@@ -569,6 +570,7 @@ async def test_blocked_identity_is_cancelled_by_stop(
     assert control.identity_cancelled.is_set()
     assert wake.run_calls == 0
     assert runner.get_status()["state"] == "stopped"
+    assert asyncio.all_tasks() == initial_tasks
 
 
 @pytest.mark.asyncio
@@ -579,6 +581,7 @@ async def test_identity_fetch_external_cancellation_propagates() -> None:
     When that task is cancelled without setting the runner stop event,
     Then cancellation propagates instead of being mistaken for normal shutdown.
     """
+    initial_tasks = asyncio.all_tasks()
     control = _BlockingIdentityControlClient()
     runner = _runner(RunnerRuntime(control_client=control))
     task = asyncio.create_task(runner._fetch_identity_or_stop())
@@ -589,6 +592,7 @@ async def test_identity_fetch_external_cancellation_propagates() -> None:
         await task
 
     assert control.identity_cancelled.is_set()
+    assert asyncio.all_tasks() == initial_tasks
 
 
 @pytest.mark.asyncio

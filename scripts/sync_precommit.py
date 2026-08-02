@@ -144,7 +144,7 @@ def update_config(
     active_repo: str | None = None
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("- repo:") or stripped.startswith("repo:"):
+        if stripped.startswith(("- repo:", "repo:")):
             updated_lines.append(line)
             if "ruff-pre-commit" in stripped:
                 active_repo = "ruff"

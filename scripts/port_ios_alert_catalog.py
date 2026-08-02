@@ -48,6 +48,8 @@ XCSTRINGS_PATH: Final[Path] = REPO_ROOT / "ios/Snapper/Resources/Localization/Lo
 FRONTEND_LOCALES_DIR: Final[Path] = REPO_ROOT / "frontend/src/locales"
 
 ALERTS_PREFIX: Final[str] = "alerts."
+ALERTS_FILENAME: Final[str] = "alerts.json"
+COMMON_FILENAME: Final[str] = "common.json"
 
 NAV_LABEL_KEY: Final[str] = "alerts.navTitle"
 """Source xcstrings key whose value becomes ``common.nav.alerts``.
@@ -378,13 +380,13 @@ def generate(locales_dir: Path | None = None) -> None:
                 f"(mapped to {frontend_dir_name!r}): {target_dir}"
             )
         payload = build_locale_payload(raw, keys, ios_locale)
-        alerts_path = target_dir / "alerts.json"
+        alerts_path = target_dir / ALERTS_FILENAME
         merged = _merge_preserving_frontend_keys(alerts_path, payload)
         rendered = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
         alerts_path.write_text(rendered, encoding="utf-8")
         nav_label_raw = extract_value(raw, NAV_LABEL_KEY, ios_locale)
         nav_label = rewrite_placeholders(nav_label_raw)
-        upsert_nav_alerts(target_dir / "common.json", nav_label)
+        upsert_nav_alerts(target_dir / COMMON_FILENAME, nav_label)
         written.append(alerts_path)
     print(
         f"Wrote {len(written)} alerts.json + {len(written)} common.json nav.alerts updates "
@@ -452,8 +454,8 @@ def check_drift() -> int:
         for locale_dir in sorted(scratch.iterdir()):
             if not locale_dir.is_dir():
                 continue
-            committed_alerts = committed_dir / locale_dir.name / "alerts.json"
-            regenerated_alerts = locale_dir / "alerts.json"
+            committed_alerts = committed_dir / locale_dir.name / ALERTS_FILENAME
+            regenerated_alerts = locale_dir / ALERTS_FILENAME
             if _read(committed_alerts) != _read(regenerated_alerts):
                 if not committed_alerts.exists():
                     diffs.append(f"  MISSING: {locale_dir.name}/alerts.json — re-run port script")
@@ -463,8 +465,8 @@ def check_drift() -> int:
                     )
             diffs.extend(
                 _check_nav_alerts_drift(
-                    committed_dir / locale_dir.name / "common.json",
-                    locale_dir / "common.json",
+                    committed_dir / locale_dir.name / COMMON_FILENAME,
+                    locale_dir / COMMON_FILENAME,
                     f"{locale_dir.name}/common.json",
                 )
             )

@@ -41,6 +41,7 @@ _BASELINE_SCHEMA_VERSION: Final[int] = 1
 _RUFF_SOURCE_BATCH_SIZE: Final[int] = 64
 _VALUE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\((\d+) > (\d+)\)$")
 _GLOB_CHARACTERS: Final[frozenset[str]] = frozenset("*?[")
+_RUFF_LINT_LABEL: Final[str] = "tool.ruff.lint"
 
 
 class RatchetError(RuntimeError):
@@ -258,6 +259,19 @@ def _active_scan_paths(root: Path) -> tuple[tuple[Path, ...], tuple[str, ...]]:
     return tuple(paths), tuple(names)
 
 
+def _validated_python_source(repository: Path, descendant: Path) -> Path | None:
+    """Validate one scanned descendant and return it when it is Python source."""
+    if descendant.is_symlink():
+        raise RatchetError(f"scan roots must not contain symlinks: {descendant}")
+    if not descendant.is_file() or descendant.suffix != ".py":
+        return None
+    try:
+        descendant.resolve(strict=True).relative_to(repository)
+    except (OSError, ValueError) as exc:
+        raise RatchetError(f"Python source escapes the repository: {descendant}") from exc
+    return descendant
+
+
 def _explicit_python_sources(root: Path, scan_paths: tuple[Path, ...]) -> tuple[Path, ...]:
     """List every in-repository Python source without ignore-file filtering."""
     repository = root.resolve()
@@ -269,15 +283,9 @@ def _explicit_python_sources(root: Path, scan_paths: tuple[Path, ...]) -> tuple[
         except (OSError, ValueError) as exc:
             raise RatchetError(f"cannot enumerate scan root {scan_path}: {exc}") from exc
         for descendant in descendants:
-            if descendant.is_symlink():
-                raise RatchetError(f"scan roots must not contain symlinks: {descendant}")
-            if not descendant.is_file() or descendant.suffix != ".py":
-                continue
-            try:
-                descendant.resolve(strict=True).relative_to(repository)
-            except (OSError, ValueError) as exc:
-                raise RatchetError(f"Python source escapes the repository: {descendant}") from exc
-            sources.append(descendant)
+            source = _validated_python_source(repository, descendant)
+            if source is not None:
+                sources.append(source)
     if not sources:
         raise RatchetError("configured scan roots contain no Python sources")
     return tuple(sources)
@@ -436,8 +444,8 @@ def _load_toml(path: Path) -> dict[str, object]:
 
 def _configured_limits(lint: dict[str, object]) -> dict[str, int]:
     """Extract complexity thresholds from Ruff's plugin tables."""
-    mccabe = _table_field(lint, "mccabe", "tool.ruff.lint")
-    pylint = _table_field(lint, "pylint", "tool.ruff.lint")
+    mccabe = _table_field(lint, "mccabe", _RUFF_LINT_LABEL)
+    pylint = _table_field(lint, "pylint", _RUFF_LINT_LABEL)
     return {
         "C901": _integer(mccabe.get("max-complexity"), "lint.mccabe.max-complexity"),
         "PLR0912": _integer(pylint.get("max-branches"), "lint.pylint.max-branches"),
@@ -478,8 +486,8 @@ def _ignored_complexity_pairs(
     lint: dict[str, object],
 ) -> tuple[frozenset[tuple[str, str]], list[str]]:
     """Extract exact per-file complexity ignores and report blanket selectors."""
-    primary_ignores = _table_field(lint, "per-file-ignores", "tool.ruff.lint")
-    raw_ignores = _table_field(lint, "extend-per-file-ignores", "tool.ruff.lint")
+    primary_ignores = _table_field(lint, "per-file-ignores", _RUFF_LINT_LABEL)
+    raw_ignores = _table_field(lint, "extend-per-file-ignores", _RUFF_LINT_LABEL)
     pairs: set[tuple[str, str]] = set()
     problems: list[str] = []
     for raw_path, raw_codes in primary_ignores.items():

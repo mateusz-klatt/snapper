@@ -227,10 +227,7 @@ class ReviewInbox:
     async def _release_after(self, plan: _ReleasePlan) -> None:
         """Move one held version to ready state when its fanout time arrives."""
         delay = max(0.0, (plan.release_at - self._clock()).total_seconds())
-        try:
-            await self._sleeper(delay)
-        except asyncio.CancelledError:
-            return
+        await self._sleeper(delay)
         async with self._condition:
             entry = self._matching_held_entry(plan)
             if self._closed or entry is None:

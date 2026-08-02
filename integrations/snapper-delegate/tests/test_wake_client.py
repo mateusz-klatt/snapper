@@ -928,6 +928,7 @@ async def test_run_rejects_concurrent_invocation_and_restores_state() -> None:
     When: A second run invocation is attempted and the first is closed,
     Then: The duplicate raises and the running state is restored afterward.
     """
+    initial_tasks = asyncio.all_tasks()
     credentials = _BlockingCredentials()
     client = _client(credentials, _FakeConnector([ConnectionError("unused")]))
     task = asyncio.create_task(client.run(_CallbackRecorder().bundle()))
@@ -940,6 +941,8 @@ async def test_run_rejects_concurrent_invocation_and_restores_state() -> None:
     await task
 
     assert client._running is False
+    assert client._session_task is None
+    assert asyncio.all_tasks() == initial_tasks
 
 
 @pytest.mark.asyncio
@@ -950,6 +953,7 @@ async def test_run_propagates_external_session_cancellation() -> None:
     When: The reconnect supervisor observes that cancellation,
     Then: It propagates cancellation and clears its running state.
     """
+    initial_tasks = asyncio.all_tasks()
     credentials = _BlockingCredentials()
     client = _client(credentials, _FakeConnector([]))
     task = asyncio.create_task(client.run(_CallbackRecorder().bundle()))
@@ -961,6 +965,8 @@ async def test_run_propagates_external_session_cancellation() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert client._running is False
+    assert client._session_task is None
+    assert asyncio.all_tasks() == initial_tasks
 
 
 @pytest.mark.asyncio

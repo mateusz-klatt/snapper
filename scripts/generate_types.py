@@ -652,6 +652,90 @@ def json_type_to_swift(
     return f"AnyCodable{suffix}"
 
 
+SwiftPropertySpec = tuple[str, str, str, bool]
+
+
+def _swift_struct_property_specs(
+    schema: dict[str, Any], definitions: dict[str, Any]
+) -> list[SwiftPropertySpec]:
+    """Resolve Swift names and types for every schema property.
+
+    Args:
+        schema: JSON Schema definition for the struct.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Ordered property specifications for Swift rendering.
+    """
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    specs: list[SwiftPropertySpec] = []
+    for property_name, property_schema in properties.items():
+        swift_name = to_camel_case(property_name)
+        is_required = property_name in required
+        swift_type = json_type_to_swift(
+            property_schema,
+            definitions,
+            optional=not is_required,
+        )
+        specs.append((property_name, swift_name, swift_type, is_required))
+    return specs
+
+
+def _swift_struct_field_lines(properties: list[SwiftPropertySpec]) -> list[str]:
+    """Render stored properties for a generated Swift struct.
+
+    Args:
+        properties: Ordered Swift property specifications.
+
+    Returns:
+        Swift stored-property declarations.
+    """
+    return [f"    let {swift_name}: {swift_type}" for _, swift_name, swift_type, _ in properties]
+
+
+def _swift_struct_initializer_lines(properties: list[SwiftPropertySpec]) -> list[str]:
+    """Render the memberwise initializer for a generated Swift struct.
+
+    Args:
+        properties: Ordered Swift property specifications.
+
+    Returns:
+        Swift initializer lines with optional defaults.
+    """
+    lines = ["    init("]
+    last_index = len(properties) - 1
+    for index, (_, swift_name, swift_type, is_required) in enumerate(properties):
+        default = "" if is_required else " = nil"
+        comma = "," if index < last_index else ""
+        lines.append(f"        {swift_name}: {swift_type}{default}{comma}")
+    lines.append("    ) {")
+    lines.extend(f"        self.{swift_name} = {swift_name}" for _, swift_name, _, _ in properties)
+    lines.append("    }")
+    return lines
+
+
+def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[str]:
+    """Render coding keys when a property name changes during camel-casing.
+
+    Args:
+        properties: Ordered Swift property specifications.
+
+    Returns:
+        CodingKeys declaration lines, or an empty list when unnecessary.
+    """
+    if all(swift_name == property_name for property_name, swift_name, _, _ in properties):
+        return []
+    lines = ["", "    enum CodingKeys: String, CodingKey {"]
+    for property_name, swift_name, _, _ in properties:
+        if swift_name == property_name:
+            lines.append(f"        case {swift_name}")
+        else:
+            lines.append(f'        case {swift_name} = "{property_name}"')
+    lines.append("    }")
+    return lines
+
+
 def generate_swift_struct(
     name: str, schema: dict[str, Any], definitions: dict[str, Any]
 ) -> list[str]:
@@ -665,51 +749,12 @@ def generate_swift_struct(
     Returns:
         List of Swift code lines for the struct.
     """
-    lines: list[str] = []
-    lines.append(f"struct {name}: Codable, Sendable {{")
-
-    properties = schema.get("properties", {})
-    required = set(schema.get("required", []))
-    coding_keys: list[tuple[str, str]] = []
-
-    for prop_name, prop_schema in properties.items():
-        swift_name = to_camel_case(prop_name)
-        is_required = prop_name in required
-        swift_type = json_type_to_swift(prop_schema, definitions, optional=not is_required)
-        lines.append(f"    let {swift_name}: {swift_type}")
-
-        if swift_name != prop_name:
-            coding_keys.append((swift_name, prop_name))
-
-    prop_names = list(properties)
+    properties = _swift_struct_property_specs(schema, definitions)
+    lines = [f"struct {name}: Codable, Sendable {{"]
+    lines.extend(_swift_struct_field_lines(properties))
     lines.append("")
-    lines.append("    init(")
-    for index, prop_name in enumerate(prop_names):
-        swift_name = to_camel_case(prop_name)
-        is_required = prop_name in required
-        swift_type = json_type_to_swift(
-            properties[prop_name], definitions, optional=not is_required
-        )
-        default = "" if is_required else " = nil"
-        comma = "," if index < len(prop_names) - 1 else ""
-        lines.append(f"        {swift_name}: {swift_type}{default}{comma}")
-    lines.append("    ) {")
-    for prop_name in prop_names:
-        swift_name = to_camel_case(prop_name)
-        lines.append(f"        self.{swift_name} = {swift_name}")
-    lines.append("    }")
-
-    if coding_keys:
-        lines.append("")
-        lines.append("    enum CodingKeys: String, CodingKey {")
-        for prop_name in properties:
-            swift_name = to_camel_case(prop_name)
-            if swift_name != prop_name:
-                lines.append(f'        case {swift_name} = "{prop_name}"')
-            else:
-                lines.append(f"        case {swift_name}")
-        lines.append("    }")
-
+    lines.extend(_swift_struct_initializer_lines(properties))
+    lines.extend(_swift_struct_coding_key_lines(properties))
     lines.append("}")
     return lines
 
@@ -2386,9 +2431,37 @@ def postprocess_openapi_typescript_file(
         file_path.write_text(updated, encoding="utf-8")
 
 
-_OPTIONAL_NULLABLE_PATTERN = re.compile(r"(?P<prefix>\?:\s*[^;\n]*?\|\s*null)(?P<suffix>;)")
-_SCHEMA_BLOCK_OPEN = re.compile(r"^\s+(?P<name>[A-Za-z][A-Za-z0-9_]*):\s*\{\s*$")
+_SCHEMA_BLOCK_OPEN = re.compile(r"^\s+(?P<name>[A-Za-z](?a:\w*)):\s*\{\s*$")
 _OPENAPI_REF_PATTERN = re.compile(r"#/components/schemas/(\w+)")
+
+
+def _widen_optional_nullable_segment(segment: str) -> str:
+    """Widen one semicolon-delimited optional nullable type segment.
+
+    Args:
+        segment: TypeScript source before a semicolon.
+
+    Returns:
+        Segment with undefined appended when it ends in an optional null union.
+    """
+    if "?:" not in segment or not segment.endswith("null"):
+        return segment
+    before_null = segment[: -len("null")]
+    if not before_null.rstrip().endswith("|"):
+        return segment
+    return f"{segment} | undefined"
+
+
+def _widen_optional_nullable_line(line: str) -> str:
+    """Widen every optional nullable property on one TypeScript line.
+
+    Args:
+        line: One generated TypeScript source line.
+
+    Returns:
+        Line with qualifying semicolon-delimited segments widened.
+    """
+    return ";".join(_widen_optional_nullable_segment(part) for part in line.split(";"))
 
 
 def _widen_optional_nullable_to_undefined(
@@ -2450,13 +2523,57 @@ def _widen_optional_nullable_to_undefined(
             out_lines.append(line)
             continue
 
-        out_lines.append(_OPTIONAL_NULLABLE_PATTERN.sub(_widen_optional_nullable_replace, line))
+        out_lines.append(_widen_optional_nullable_line(line))
 
     return "".join(out_lines)
 
 
-def _widen_optional_nullable_replace(match: re.Match[str]) -> str:
-    return f"{match.group('prefix')} | undefined{match.group('suffix')}"
+def _request_schema_roots(paths: dict[str, Any]) -> set[str]:
+    """Collect schema references used directly by request bodies.
+
+    Args:
+        paths: OpenAPI paths object.
+
+    Returns:
+        Names referenced from request-body definitions.
+    """
+    roots: set[str] = set()
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            request_body = operation.get("requestBody")
+            if isinstance(request_body, dict):
+                _collect_refs(request_body, roots)
+    return roots
+
+
+def _transitive_schema_refs(request_roots: set[str], schemas: dict[str, Any]) -> frozenset[str]:
+    """Close request schema names over component-schema references.
+
+    Args:
+        request_roots: Schema names referenced directly by request bodies.
+        schemas: OpenAPI component schemas object.
+
+    Returns:
+        Direct and transitively referenced request schema names.
+    """
+    seen: set[str] = set()
+    pending = set(request_roots)
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        schema = schemas.get(name)
+        if schema is None:
+            continue
+        sub_refs: set[str] = set()
+        _collect_refs(schema, sub_refs)
+        pending |= sub_refs - seen
+    return frozenset(seen)
 
 
 def _request_schema_names_from_openapi(openapi_spec_path: Path) -> frozenset[str]:
@@ -2476,33 +2593,8 @@ def _request_schema_names_from_openapi(openapi_spec_path: Path) -> frozenset[str
     """
     spec = json.loads(openapi_spec_path.read_text(encoding="utf-8"))
     schemas = spec.get("components", {}).get("schemas", {})
-
-    request_roots: set[str] = set()
-    for path_item in spec.get("paths", {}).values():
-        if not isinstance(path_item, dict):
-            continue
-        for operation in path_item.values():
-            if not isinstance(operation, dict):
-                continue
-            request_body = operation.get("requestBody")
-            if isinstance(request_body, dict):
-                _collect_refs(request_body, request_roots)
-
-    seen: set[str] = set()
-    pending = set(request_roots)
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        schema = schemas.get(name)
-        if schema is None:
-            continue
-        sub_refs: set[str] = set()
-        _collect_refs(schema, sub_refs)
-        pending |= sub_refs - seen
-
-    return frozenset(seen)
+    request_roots = _request_schema_roots(spec.get("paths", {}))
+    return _transitive_schema_refs(request_roots, schemas)
 
 
 def _collect_refs(node: object, refs: set[str]) -> None:

@@ -633,13 +633,12 @@ def scan_directory(
         )
 
 
-def print_results(result: ScanResult, root: Path, verbose: bool = False) -> None:
+def print_results(result: ScanResult, root: Path) -> None:
     """Print scan results to stdout.
 
     Args:
         result: The scan result to print.
         root: Root directory for relative path display.
-        verbose: Compatibility flag accepted by callers; output is unchanged.
     """
     print("=" * 70)
     print("Docstring Compliance Scanner")
@@ -679,7 +678,6 @@ def main() -> int:
         Exit code (0 for success, 1 for issues in strict mode).
     """
     strict_mode = "--strict" in sys.argv
-    verbose = "--verbose" in sys.argv
     enforce_bdd = "--enforce-bdd" in sys.argv
     enforce_google_sections = "--enforce-google-sections" in sys.argv
 
@@ -733,7 +731,7 @@ def main() -> int:
             enforce_google_sections=enforce_google_sections,
         )
 
-    print_results(result, root, verbose)
+    print_results(result, root)
 
     print("=" * 70)
     print("SUMMARY")

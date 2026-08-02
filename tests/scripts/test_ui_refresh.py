@@ -648,6 +648,10 @@ class TestVersionSortKey:
         assert _version_sort_key("1.2.3") == (1, 2, 3)
         assert _version_sort_key("~2.0.5") == (2, 0, 5)
 
+    def test_parses_version_after_a_non_numeric_prefix(self) -> None:
+        """A concrete triple after a package alias remains comparable."""
+        assert _version_sort_key("npm:example@12.34.56") == (12, 34, 56)
+
     def test_returns_none_for_prerelease(self) -> None:
         """A prerelease pin is treated as not safely comparable."""
         assert _version_sort_key("^8.62.0-rc.1") is None
@@ -656,6 +660,7 @@ class TestVersionSortKey:
         """Specs without a stable triple are not comparable."""
         assert _version_sort_key("workspace:*") is None
         assert _version_sort_key("1.2.x") is None
+        assert _version_sort_key("9" * 10_000) is None
 
 
 class TestCollectDependencySpecs:

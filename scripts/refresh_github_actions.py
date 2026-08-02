@@ -47,7 +47,6 @@ SHA_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 TAG_REF_RE: Final = re.compile(r"^v\d+(\.\d+)*$")
 MAJOR_TAG_RE: Final = re.compile(r"^v\d+$")
 EXTRACT_MAJOR_RE: Final = re.compile(r"^v(\d+)")
-SHA_VERSION_COMMENT_RE: Final = re.compile(r"^(?P<spaces>\s*)#\s*v?\S+(?P<rest>.*)$")
 
 
 def _gh_api(path: str) -> JsonValue:
@@ -197,10 +196,19 @@ def update_trailer_for_sha(trailer: str, latest_tag: str) -> str:
         Trailer with the version comment refreshed; original trailer if no
         recognisable ``# vX`` style comment was present.
     """
-    match = SHA_VERSION_COMMENT_RE.match(trailer)
-    if match is None:
+    stripped = trailer.lstrip()
+    leading_whitespace = trailer[: len(trailer) - len(stripped)]
+    if not stripped.startswith("#"):
         return trailer
-    return f"{match.group('spaces')}# {latest_tag}{match.group('rest')}"
+    tag_and_rest = stripped[1:].lstrip()
+    if not tag_and_rest:
+        return trailer
+    token_end = next(
+        (index for index, character in enumerate(tag_and_rest) if character.isspace()),
+        len(tag_and_rest),
+    )
+    rest = tag_and_rest[token_end:]
+    return f"{leading_whitespace}# {latest_tag}{rest}"
 
 
 def process_line(line: str) -> tuple[str, bool]:

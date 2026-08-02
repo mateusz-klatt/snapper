@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.check_type_drift import FileBackup
 from scripts.check_type_drift import backup_files
 from scripts.check_type_drift import check_drift
 from scripts.check_type_drift import get_files_to_check
@@ -101,8 +102,9 @@ class TestBackupFiles:
         backups = backup_files([source_file], backup_dir)
 
         assert source_file in backups
-        assert backups[source_file].exists()
-        assert backups[source_file].read_text() == "content"
+        assert backups[source_file].path.exists()
+        assert backups[source_file].path.read_text() == "content"
+        assert backups[source_file].mode == source_file.stat().st_mode & 0o777
 
     def test_skips_nonexistent_files(self, tmp_path: Path) -> None:
         """Verify skips nonexistent files.
@@ -149,7 +151,7 @@ class TestRestoreFiles:
         original.write_text("modified")
         backup.write_text("original content")
 
-        restore_files({original: backup})
+        restore_files({original: FileBackup(path=backup, mode=original.stat().st_mode & 0o777)})
 
         assert original.read_text() == "original content"
 
@@ -161,6 +163,25 @@ class TestRestoreFiles:
         Then: Completes without raising any exception.
         """
         restore_files({})
+
+    def test_restores_original_file_permissions(self, tmp_path: Path) -> None:
+        """Verify restore copies content without importing backup permissions.
+
+        Given: A generated file and a backup on a filesystem with different modes,
+        When: Restoring the generated file,
+        Then: Its original permissions survive while its content is restored.
+        """
+        original = tmp_path / "original.txt"
+        backup = tmp_path / "backup.txt"
+        original.write_text("modified")
+        backup.write_text("original content")
+        original.unlink()
+
+        with patch.object(Path, "chmod", autospec=True) as chmod:
+            restore_files({original: FileBackup(path=backup, mode=0o640)})
+
+        assert original.read_text() == "original content"
+        chmod.assert_called_once_with(original, 0o640)
 
 
 class TestRegenerateTypes:
@@ -217,7 +238,10 @@ class TestCheckDrift:
         original.write_text("modified content")
         backup.write_text("original content")
 
-        drifted = check_drift({original: backup}, tmp_path)
+        drifted = check_drift(
+            {original: FileBackup(path=backup, mode=original.stat().st_mode & 0o777)},
+            tmp_path,
+        )
 
         assert original in drifted
         captured = capsys.readouterr()
@@ -235,7 +259,10 @@ class TestCheckDrift:
         original.write_text("same content")
         backup.write_text("same content")
 
-        drifted = check_drift({original: backup}, tmp_path)
+        drifted = check_drift(
+            {original: FileBackup(path=backup, mode=original.stat().st_mode & 0o777)},
+            tmp_path,
+        )
 
         assert drifted == []
 
@@ -339,7 +366,9 @@ class TestMain:
             patch("scripts.check_type_drift.regenerate_types") as mock_regen,
             patch("scripts.check_type_drift.restore_files") as mock_restore,
         ):
-            mock_backup.return_value = {test_file: tmp_path / "backup.txt"}
+            mock_backup.return_value = {
+                test_file: FileBackup(path=tmp_path / "backup.txt", mode=0o644)
+            }
             mock_regen.return_value = subprocess.CompletedProcess([], 1, stderr="error")
 
             main()

@@ -116,7 +116,6 @@ def build_allowed_origins(settings: AppSettings, server_port: int = 8000) -> set
                 allowed_origins.add(session_domain.rstrip("/"))
             else:
                 allowed_origins.add(f"https://{session_domain}".rstrip("/"))
-                allowed_origins.add(f"http://{session_domain}".rstrip("/"))
     except RuntimeError:
         pass
     return {origin.rstrip("/") for origin in allowed_origins if origin}

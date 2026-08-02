@@ -303,7 +303,7 @@ class _TradeWriterBlockedError(RuntimeError):
     """Trade statement failure that must retain and retry the whole batch."""
 
 
-def _is_disconnect_error(exc: BaseException) -> bool:
+def _is_disconnect_error(exc: Exception) -> bool:
     """Return ``True`` when ``exc`` indicates a lost DB connection.
 
     Combines SQLAlchemy's :attr:`DBAPIError.connection_invalidated`
@@ -326,7 +326,7 @@ def _is_disconnect_error(exc: BaseException) -> bool:
     return any(hint in msg for hint in _DISCONNECT_HINTS)
 
 
-def _database_sqlstate(exc: BaseException) -> str | None:
+def _database_sqlstate(exc: Exception) -> str | None:
     """Extract a structured SQLSTATE from SQLAlchemy or driver exceptions.
 
     Args:
@@ -350,7 +350,7 @@ def _database_sqlstate(exc: BaseException) -> str | None:
     return None
 
 
-def _is_transient_trade_write_error(exc: BaseException) -> bool:
+def _is_transient_trade_write_error(exc: Exception) -> bool:
     """Return whether a trade write should use the writer retry/backoff path.
 
     Args:

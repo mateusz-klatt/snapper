@@ -21,7 +21,7 @@ from typing import cast
 IS_WINDOWS = sys.platform == "win32"
 COREPACK_PACKAGE = "corepack"
 PNPM_PACKAGE = "pnpm"
-_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
+_VERSION_RE = re.compile(r"(\d++)\.(\d++)\.(\d++)(?:-([0-9A-Za-z.-]++))?")
 
 os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
 
@@ -261,6 +261,27 @@ def upgrade_package_manager(ui_dir: Path) -> None:
         write_package_json(package_json, package_data)
 
 
+def _next_decimal_run(spec: str, search_from: int) -> tuple[int, int] | None:
+    """Find the next contiguous run of decimal digits.
+
+    Args:
+        spec: Version spec to search.
+        search_from: Offset where scanning begins.
+
+    Returns:
+        Start and exclusive end offsets, or None when no run remains.
+    """
+    run_start = search_from
+    while run_start < len(spec) and not spec[run_start].isdecimal():
+        run_start += 1
+    if run_start == len(spec):
+        return None
+    run_end = run_start + 1
+    while run_end < len(spec) and spec[run_end].isdecimal():
+        run_end += 1
+    return run_start, run_end
+
+
 def _version_sort_key(spec: str) -> tuple[int, int, int] | None:
     """Return a comparable (major, minor, patch) key for a stable version spec.
 
@@ -276,10 +297,16 @@ def _version_sort_key(spec: str) -> tuple[int, int, int] | None:
     Returns:
         The (major, minor, patch) tuple, or None when not safely comparable.
     """
-    match = _VERSION_RE.search(spec)
-    if match is None or match.group(4) is not None:
-        return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    search_from = 0
+    while decimal_run := _next_decimal_run(spec, search_from):
+        run_start, run_end = decimal_run
+        match = _VERSION_RE.match(spec, run_start)
+        if match is not None:
+            if match.group(4) is not None:
+                return None
+            return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        search_from = run_end
+    return None
 
 
 def collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[str, str]]:

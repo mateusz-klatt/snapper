@@ -159,8 +159,7 @@ def _collect_import_statements(
             import_statements.append(stmt.rstrip() + "\n")
             start = node.lineno - 1
             end = node.end_lineno or node.lineno
-            for i in range(start, end):
-                import_lines_to_remove.add(i)
+            import_lines_to_remove.update(range(start, end))
     return import_statements, import_lines_to_remove
 
 

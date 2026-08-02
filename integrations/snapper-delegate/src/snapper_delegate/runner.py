@@ -320,29 +320,24 @@ class DelegateRunner:
         return None
 
     async def _fetch_identity_or_stop(self) -> str | None:
-        """Fetch one identity while making the stop event cancellation-authoritative."""
+        """Fetch one identity while making the stop event authoritative."""
         identity_task = asyncio.create_task(self._required_control().fetch_delegate_identity())
-        stop_task = asyncio.create_task(self._cancel_identity_on_stop(identity_task))
+        stop_task = asyncio.create_task(self._stop_event.wait())
         try:
-            try:
-                identity = await identity_task
-            except ControlPlaneError:
-                return ""
-            except asyncio.CancelledError:
-                if self._stop_event.is_set():
-                    return None
-                raise
+            await asyncio.wait(
+                (identity_task, stop_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
             if self._stop_event.is_set():
                 return None
-            return identity
+            try:
+                return await identity_task
+            except ControlPlaneError:
+                return ""
         finally:
+            identity_task.cancel()
             stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
-
-    async def _cancel_identity_on_stop(self, identity_task: asyncio.Task[str]) -> None:
-        """Cancel one in-flight identity request when lifecycle shutdown begins."""
-        await self._stop_event.wait()
-        identity_task.cancel()
+            await asyncio.gather(identity_task, stop_task, return_exceptions=True)
 
     async def _run_wake_until_stopped(self, callbacks: WakeCallbacks) -> None:
         """Keep an unexpectedly returning wake boundary alive until shutdown."""
@@ -450,6 +445,7 @@ class DelegateRunner:
         self._ws_connected = connected
         if self._running and not self._quota_degraded:
             self._state = RunnerState.CONNECTING
+        await asyncio.sleep(0)
 
     async def _on_subscribed(self) -> None:
         """Mark a healthy subscription and catch up after every reconnect."""
@@ -460,6 +456,7 @@ class DelegateRunner:
     async def _on_heartbeat(self) -> None:
         """Count one successfully sent application liveness ping."""
         self._heartbeat_count += 1
+        await asyncio.sleep(0)
 
     async def _on_wake_frame(self, frame: WakeFrame) -> None:
         """Route request wakes and decision acknowledgements through the inbox."""
@@ -591,7 +588,7 @@ class DelegateRunner:
         for stop_signal in (signal.SIGTERM,):
             try:
                 loop.add_signal_handler(stop_signal, self._request_signal_stop)
-            except (NotImplementedError, RuntimeError):
+            except RuntimeError:
                 continue
             installed.append(stop_signal)
         return tuple(installed)
@@ -662,5 +659,5 @@ def _safe_signal_size(context: ReviewConsultContext) -> int | None:
     """Return a log-safe signal size even for malformed Unicode or JSON values."""
     try:
         return _signal_size(context)
-    except (TypeError, UnicodeError, ValueError):
+    except (TypeError, ValueError):
         return None

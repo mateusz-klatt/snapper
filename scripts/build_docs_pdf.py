@@ -90,6 +90,8 @@ CODE_LANGUAGE_HINTS = {
     "powershell",
     "cmd",
 }
+MERMAID_FENCE = "```"
+MERMAID_OPENING = "```mermaid"
 
 
 class MermaidRenderingError(RuntimeError):
@@ -552,21 +554,54 @@ class MarkdownToPdf:
         return result
 
     def _replace_mermaid_blocks(self, text: str, source: DocumentSource) -> str:
-        pattern = re.compile(r"```mermaid\s*\n(.*?)```", flags=re.DOTALL)
+        rendered_parts: list[str] = []
+        consumed_until = 0
+        search_from = 0
+        while True:
+            block_start = text.find(MERMAID_OPENING, search_from)
+            if block_start < 0:
+                rendered_parts.append(text[consumed_until:])
+                return "".join(rendered_parts)
+            content_start = self._mermaid_content_start(text, block_start)
+            if content_start is None:
+                search_from = block_start + len(MERMAID_OPENING)
+                continue
+            block_end = text.find(MERMAID_FENCE, content_start)
+            if block_end < 0:
+                rendered_parts.append(text[consumed_until:])
+                return "".join(rendered_parts)
+            rendered_parts.append(text[consumed_until:block_start])
+            code = text[content_start:block_end].strip()
+            if code:
+                image_path = self._mermaid_renderer.render(code, source.slug)
+                img_src = image_path.resolve().as_uri()
+                rendered_parts.append(
+                    '<figure class="diagram">'
+                    f'<img src="{img_src}" alt="Diagram Mermaid" />'
+                    "</figure>"
+                )
+            consumed_until = block_end + len(MERMAID_FENCE)
+            search_from = consumed_until
 
-        def render_block(match: re.Match[str]) -> str:
-            code = match.group(1).strip()
-            if not code:
-                return ""
-            image_path = self._mermaid_renderer.render(code, source.slug)
-            img_src = image_path.resolve().as_uri()
-            return (
-                '<figure class="diagram">'
-                f'<img src="{img_src}" alt="Diagram Mermaid" />'
-                "</figure>"
-            )
+    @staticmethod
+    def _mermaid_content_start(text: str, block_start: int) -> int | None:
+        """Find the content offset of a syntactically valid Mermaid fence.
 
-        return pattern.sub(render_block, text)
+        Args:
+            text: Markdown source containing the opening marker.
+            block_start: Offset of the opening Mermaid marker.
+
+        Returns:
+            Content offset after opening whitespace, or None without a newline.
+        """
+        whitespace_start = block_start + len(MERMAID_OPENING)
+        content_start = whitespace_start
+        while content_start < len(text) and text[content_start].isspace():
+            content_start += 1
+        opening_whitespace = text[whitespace_start:content_start]
+        if "\n" not in opening_whitespace:
+            return None
+        return content_start
 
     def _rewrite_document_links(self, text: str) -> str:
         pattern = re.compile(r"\[([^\]]+)\]\(((?!https?://|mailto:)[^\)#]+\.md(?:#[^\)]*)?)\)")
@@ -733,7 +768,7 @@ class MarkdownToPdf:
             level = match.group(1)
             attrs = match.group(2)
             content = match.group(3)
-            attrs_without_id = re.sub(r"\s*id=\"[^\"]*\"", "", attrs)
+            attrs_without_id = self._strip_heading_id_attributes(attrs)
             text_content = re.sub(r"<[^>]+>", "", content)
             base_slug = self._slugify_fragment(text_content) or f"section-{level}"
             final_slug = self._resolve_heading_slug(source.slug, base_slug)
@@ -744,6 +779,30 @@ class MarkdownToPdf:
             return f'{alias_tags}<h{level}{attrs_without_id} id="{final_id}">{content}</h{level}>'
 
         return pattern.sub(repl, html)
+
+    @staticmethod
+    def _strip_heading_id_attributes(attrs: str) -> str:
+        """Remove complete ID attributes and their leading whitespace.
+
+        Args:
+            attrs: Raw heading attributes captured from rendered HTML.
+
+        Returns:
+            Attributes without complete double-quoted ID assignments.
+        """
+        parts: list[str] = []
+        consumed_until = 0
+        while True:
+            attribute_start = attrs.find('id="', consumed_until)
+            if attribute_start < 0:
+                parts.append(attrs[consumed_until:])
+                return "".join(parts)
+            attribute_end = attrs.find('"', attribute_start + len('id="'))
+            if attribute_end < 0:
+                parts.append(attrs[consumed_until:])
+                return "".join(parts)
+            parts.append(attrs[consumed_until:attribute_start].rstrip())
+            consumed_until = attribute_end + 1
 
     @staticmethod
     def _heading_anchor_aliases(anchor: str) -> set[str]:

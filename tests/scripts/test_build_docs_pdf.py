@@ -825,6 +825,40 @@ class TestMarkdownToPdf:
         builder.build_html()
         mock_mermaid_renderer.render.assert_not_called()
 
+    def test_invalid_and_unterminated_mermaid_fences_are_preserved(
+        self,
+        tmp_path: Path,
+        mock_mermaid_renderer: MagicMock,
+        config: RenderConfig,
+        sample_source: DocumentSource,
+    ) -> None:
+        """Leave invalid or unterminated Mermaid markers untouched.
+
+        Given: One marker without an opening newline and one without a closing fence,
+        When: Mermaid blocks are replaced,
+        Then: The original Markdown remains and no renderer is invoked.
+        """
+        builder = MarkdownToPdf(
+            font_path=None,
+            config=config,
+            mermaid_renderer=mock_mermaid_renderer,
+            sources=[sample_source],
+            repo_root=tmp_path,
+        )
+        markdown = "before ```mermaid inline\nafter ```mermaid\ngraph TD; A-->B;"
+
+        assert builder._replace_mermaid_blocks(markdown, sample_source) == markdown
+        mock_mermaid_renderer.render.assert_not_called()
+
+    def test_strip_heading_id_attributes_preserves_incomplete_attribute(self) -> None:
+        """Remove complete heading IDs while retaining an incomplete assignment."""
+        attrs = ' class="title" id="old" data-kind="main"'
+
+        assert MarkdownToPdf._strip_heading_id_attributes(attrs) == (
+            ' class="title" data-kind="main"'
+        )
+        assert MarkdownToPdf._strip_heading_id_attributes(' id="unfinished') == ' id="unfinished'
+
     def test_rewrite_document_links(
         self,
         tmp_path: Path,

@@ -165,18 +165,20 @@ def _has_responses_with_model(call: ast.Call) -> bool:
         True when at least one entry in ``responses`` carries a
         ``"model"`` key.
     """
-    for keyword in call.keywords:
-        if keyword.arg != "responses":
-            continue
-        if not isinstance(keyword.value, ast.Dict):
-            return False
-        for value in keyword.value.values:
-            if isinstance(value, ast.Dict):
-                for inner_key in value.keys:
-                    if isinstance(inner_key, ast.Constant) and inner_key.value == "model":
-                        return True
+    responses = next(
+        (keyword.value for keyword in call.keywords if keyword.arg == "responses"),
+        None,
+    )
+    if not isinstance(responses, ast.Dict):
         return False
-    return False
+    return any(_dictionary_has_model_key(value) for value in responses.values)
+
+
+def _dictionary_has_model_key(node: ast.expr) -> bool:
+    """Return whether one literal dictionary contains a ``model`` key."""
+    return isinstance(node, ast.Dict) and any(
+        isinstance(key, ast.Constant) and key.value == "model" for key in node.keys
+    )
 
 
 def _response_model_is_none(call: ast.Call) -> bool:

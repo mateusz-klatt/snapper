@@ -333,9 +333,7 @@ class TestCheckpointRecovery:
             strategy_tag=None,
             wallet_public_id="",
         )
-        allowed = await coord._checkpoint_version_allows_restore(
-            context, checkpoint, datetime.now(UTC)
-        )
+        allowed = await coord._checkpoint_version_allows_restore(context, checkpoint)
         assert allowed is False
         assert checkpoint["shard_key"] not in coord._checkpoint_recovered_shard_wallets
         assert coord._recovery_certification_failed is True

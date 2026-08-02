@@ -405,6 +405,48 @@ def fetch_quality_gate(token: str) -> QualityGateReport:
     }
 
 
+def _issue_components(issues: list[dict[str, Any]]) -> set[str]:
+    """Collect non-empty primary and flow component keys from issues."""
+    components: set[str] = set()
+    for issue in issues:
+        component = issue.get("component")
+        if component:
+            components.add(str(component))
+        for flow in issue.get("flows", []):
+            components.update(
+                str(flow_component)
+                for location in flow.get("locations", [])
+                if (flow_component := location.get("component"))
+            )
+    return components
+
+
+def _fetch_source_lines(token: str, component: str) -> tuple[list[SourceLine] | None, int]:
+    """Fetch and normalize one component, returning its HTTP status."""
+    response = httpx.get(
+        f"{BASE_URL}/sources/lines",
+        params={"key": component},
+        auth=(token, ""),
+        timeout=30,
+    )
+    if response.status_code >= 500:
+        return None, response.status_code
+    response.raise_for_status()
+    payload: dict[str, Any] = response.json()
+    return (
+        [
+            {
+                "line": int(source_line.get("line", 0)),
+                "code": _strip_code_markup(str(source_line.get("code", ""))),
+                "duplicated": bool(source_line.get("duplicated", False)),
+                "is_new": bool(source_line.get("isNew", False)),
+            }
+            for source_line in payload.get("sources", [])
+        ],
+        response.status_code,
+    )
+
+
 def fetch_source_cache(token: str, issues: list[dict[str, Any]]) -> dict[str, list[SourceLine]]:
     """Fetch source lines for every file referenced by current issues.
 
@@ -415,43 +457,17 @@ def fetch_source_cache(token: str, issues: list[dict[str, Any]]) -> dict[str, li
     Returns:
         Mapping of component key to normalized source lines.
     """
-    components: set[str] = set()
-    for issue in issues:
-        component = issue.get("component")
-        if component:
-            components.add(str(component))
-        for flow in issue.get("flows", []):
-            for location in flow.get("locations", []):
-                flow_component = location.get("component")
-                if flow_component:
-                    components.add(str(flow_component))
+    components = _issue_components(issues)
     source_cache: dict[str, list[SourceLine]] = {}
     total = len(components)
     for index, component in enumerate(sorted(components), start=1):
-        resp = httpx.get(
-            f"{BASE_URL}/sources/lines",
-            params={"key": component},
-            auth=(token, ""),
-            timeout=30,
-        )
-        if resp.status_code >= 500:
+        lines, status_code = _fetch_source_lines(token, component)
+        if lines is None:
             print(
                 f"  source {index}/{total}: {_component_path(component)}"
-                f" SKIPPED (SonarCloud {resp.status_code} - issue context unavailable)"
+                f" SKIPPED (SonarCloud {status_code} - issue context unavailable)"
             )
             continue
-        resp.raise_for_status()
-        payload: dict[str, Any] = resp.json()
-        lines: list[SourceLine] = []
-        for source_line in payload.get("sources", []):
-            lines.append(
-                {
-                    "line": int(source_line.get("line", 0)),
-                    "code": _strip_code_markup(str(source_line.get("code", ""))),
-                    "duplicated": bool(source_line.get("duplicated", False)),
-                    "is_new": bool(source_line.get("isNew", False)),
-                }
-            )
         source_cache[component] = lines
         print(f"  source {index}/{total}: {_component_path(component)}")
     return source_cache

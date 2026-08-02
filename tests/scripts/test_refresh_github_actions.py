@@ -293,6 +293,14 @@ class TestUpdateTrailerForSha:
         """Verify update_trailer_for_sha preserves the original spacing before the comment."""
         assert update_trailer_for_sha("  # v8.0.0", "v8.1.0") == "  # v8.1.0"
 
+    def test_preserves_text_after_version_token(self) -> None:
+        """Verify text following the replaced version token remains byte-for-byte stable."""
+        assert update_trailer_for_sha(" # v6.0.2  pinned", "v6.0.3") == " # v6.0.3  pinned"
+
+    def test_returns_marker_only_comment_unchanged(self) -> None:
+        """Verify a comment without a version token is not synthesized."""
+        assert update_trailer_for_sha("  #   ", "v6.0.3") == "  #   "
+
     def test_returns_unchanged_trailer_without_comment(self) -> None:
         """Verify update_trailer_for_sha is a no-op for trailers without a version comment."""
         assert update_trailer_for_sha("", "v6.0.3") == ""

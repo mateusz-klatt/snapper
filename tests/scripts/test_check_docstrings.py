@@ -457,7 +457,7 @@ def test_print_results_renders_issue_groups(capsys: pytest.CaptureFixture[str]) 
         classes_checked=0,
         functions_checked=0,
     )
-    check_docstrings.print_results(result, Path("."), verbose=False)
+    check_docstrings.print_results(result, Path("."))
     output = capsys.readouterr().out
     assert "MISSING MODULE DOCSTRING" in output
     assert "x.py:1" in output

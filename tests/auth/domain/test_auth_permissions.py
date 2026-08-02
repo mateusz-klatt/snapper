@@ -164,6 +164,20 @@ class TestDispatcherReauthFailure:
 class TestHelpersSessionDomainHttp:
     """Tests for session domain helpers with HTTP/HTTPS prefixes."""
 
+    def test_bare_session_domain_defaults_to_https(self) -> None:
+        """Verify a bare session domain enables only the secure origin.
+
+        Given: Settings with a session domain that has no URL scheme,
+        When: build_allowed_origins is called,
+        Then: The HTTPS origin is included without an implicit HTTP origin.
+        """
+        mock_settings = MagicMock()
+        mock_settings.ui_origin = None
+        mock_settings.session_domain = "example.com"
+        origins = build_allowed_origins(mock_settings, server_port=8000)
+        assert "https://example.com" in origins
+        assert "http://example.com" not in origins
+
     def test_session_domain_with_http_prefix(self) -> None:
         """Verify HTTP session domain is included in allowed origins.
 

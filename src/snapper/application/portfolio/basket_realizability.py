@@ -270,7 +270,12 @@ def _excluded_balance(
     """Apply P1, P2, P8 and P9 to one resolved balance leg."""
     exchange, currency = key
     threshold = resolution.threshold
-    if not quantity > 0.0 or currency == "USD" or threshold is None or not quantity < threshold:
+    if (
+        not is_positive_finite(quantity)
+        or currency == "USD"
+        or threshold is None
+        or quantity >= threshold
+    ):
         return None
     return ExcludedBalance(
         exchange=exchange,
@@ -330,7 +335,7 @@ def partition_realizable_balances(
     resolved_legs = 0
     unresolved_legs = 0
     for key, quantity in retained.items():
-        if quantity == 0.0:
+        if not quantity:
             continue
         resolution = resolutions.get(key)
         if not _usable_resolution(resolution):
@@ -350,8 +355,8 @@ def partition_realizable_balances(
         )
     for excluded in proposed:
         retained.pop((excluded.exchange, excluded.currency))
-    had_non_zero = any(quantity != 0.0 for quantity in observed_balances.values())
-    leaves_non_zero = any(quantity != 0.0 for quantity in retained.values())
+    had_non_zero = any(observed_balances.values())
+    leaves_non_zero = any(retained.values())
     if had_non_zero and not leaves_non_zero:
         return _withheld_basket(
             observed_balances,

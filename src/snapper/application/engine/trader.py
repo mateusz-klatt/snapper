@@ -1013,9 +1013,9 @@ class TraderCoordinator(RegisterableProcess):
         try:
             checkpoints = await self.repository.get_all_checkpoints(as_of=now)
         except Exception as e:
-            if isinstance(e, OSError | DBAPIError) and (
-                self.repository._is_transient_db_connection_error(e)
-            ):
+            if isinstance(
+                e, OSError | DBAPIError
+            ) and self.repository._is_transient_db_connection_error(e):
                 raise
             logger.error(f"ZMQTrader: Failed to query checkpoints for recovery: {e}")
             self._recovery_certification_failed = True
@@ -1124,7 +1124,7 @@ class TraderCoordinator(RegisterableProcess):
         context = await self._checkpoint_recovery_context(checkpoint, now)
         if context is None:
             return None
-        if not await self._checkpoint_version_allows_restore(context, checkpoint, now):
+        if not await self._checkpoint_version_allows_restore(context, checkpoint):
             return None
         delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
         if delta_events is None:
@@ -1165,7 +1165,6 @@ class TraderCoordinator(RegisterableProcess):
         self,
         context: CheckpointRecoveryContext,
         checkpoint: TradeProjectionCheckpointRow,
-        now: datetime,
     ) -> bool:
         """Apply the checkpoint calculation-version recovery policy."""
         version = checkpoint["projection_calc_version"]
@@ -2083,9 +2082,9 @@ class TraderCoordinator(RegisterableProcess):
         try:
             shard_keys = await self.repository.get_shard_keys_with_fills()
         except Exception as e:
-            if isinstance(e, OSError | DBAPIError) and (
-                self.repository._is_transient_db_connection_error(e)
-            ):
+            if isinstance(
+                e, OSError | DBAPIError
+            ) and self.repository._is_transient_db_connection_error(e):
                 raise
             logger.error(f"ZMQTrader: Failed to query shards with fills for gap recovery: {e}")
             self._recovery_certification_failed = True
@@ -2733,9 +2732,9 @@ class TraderCoordinator(RegisterableProcess):
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=None)
         except Exception as e:
-            if isinstance(e, OSError | DBAPIError) and (
-                self.repository._is_transient_db_connection_error(e)
-            ):
+            if isinstance(
+                e, OSError | DBAPIError
+            ) and self.repository._is_transient_db_connection_error(e):
                 raise
             logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
             self._recovery_certification_failed = True
@@ -3371,9 +3370,9 @@ class TraderCoordinator(RegisterableProcess):
                 as_of=now,
             )
         except Exception as e:
-            if isinstance(e, OSError | DBAPIError) and (
-                self.repository._is_transient_db_connection_error(e)
-            ):
+            if isinstance(
+                e, OSError | DBAPIError
+            ) and self.repository._is_transient_db_connection_error(e):
                 raise
             logger.error(
                 f"ZMQTrader: Failed to query active orders: {e} — failing the "

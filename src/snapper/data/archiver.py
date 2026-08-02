@@ -1630,7 +1630,7 @@ def _build_column_parsers(
     return [_parser_for_column(table_cols[name].type) for name in header]
 
 
-def _restore_headers_for_table(table: str) -> tuple[tuple[str, ...], ...]:
+def _restore_headers_for_table(table: str) -> list[tuple[str, ...]]:
     """Return every explicitly supported complete header for one table.
 
     The production trade exporter has a versioned full-row header that
@@ -1647,15 +1647,15 @@ def _restore_headers_for_table(table: str) -> tuple[tuple[str, ...], ...]:
         ValueError: If no restore header is defined for the table.
     """
     if table == "trades":
-        return (_TRADE_PRODUCTION_ARCHIVE_COLUMNS, EVENT_TABLES[table].columns)
+        return [_TRADE_PRODUCTION_ARCHIVE_COLUMNS, EVENT_TABLES[table].columns]
     event_spec = EVENT_TABLES.get(table)
     if event_spec is not None:
-        return (event_spec.columns,)
+        return [event_spec.columns]
     if table == "candles":
-        return (_CANDLE_AUDIT_COLUMNS,)
+        return [_CANDLE_AUDIT_COLUMNS]
     state_spec = STATE_TABLES.get(table)
     if state_spec is not None:
-        return (_get_model_archive_columns(state_spec.model),)
+        return [_get_model_archive_columns(state_spec.model)]
     raise ValueError(f"No archive header is defined for restore table: {table}")
 
 
@@ -1859,7 +1859,7 @@ class ArchiveRestorer:
         self,
         model: type[Any],
         path: Path,
-        expected_headers: tuple[tuple[str, ...], ...],
+        expected_headers: Sequence[tuple[str, ...]],
     ) -> tuple[int, int]:
         """Stream one validated archive file into bounded database batches.
 

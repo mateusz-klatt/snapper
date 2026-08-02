@@ -103,6 +103,22 @@ def _first_party_modules(node: ast.Import | ast.ImportFrom) -> list[str]:
     return []
 
 
+def _import_violations(
+    node: ast.Import | ast.ImportFrom,
+    allowlist: frozenset[str],
+) -> list[str]:
+    """Return forbidden or non-allowlisted modules imported by one node."""
+    violations = [
+        candidate for candidate in _forbidden_candidates(node) if _is_forbidden(candidate)
+    ]
+    violations.extend(
+        module
+        for module in _first_party_modules(node)
+        if not _is_forbidden(module) and module not in allowlist
+    )
+    return violations
+
+
 def check_delegate_boundary(filepath: Path, allowlist: frozenset[str]) -> list[tuple[int, str]]:
     """Check one agent-plane file for boundary violations.
 
@@ -127,14 +143,7 @@ def check_delegate_boundary(filepath: Path, allowlist: frozenset[str]) -> list[t
     for node in ast.walk(tree):
         if not isinstance(node, ast.Import | ast.ImportFrom):
             continue
-        for candidate in _forbidden_candidates(node):
-            if _is_forbidden(candidate):
-                violations.append((node.lineno, candidate))
-        for module in _first_party_modules(node):
-            if _is_forbidden(module):
-                continue
-            if module not in allowlist:
-                violations.append((node.lineno, module))
+        violations.extend((node.lineno, module) for module in _import_violations(node, allowlist))
     return violations
 
 

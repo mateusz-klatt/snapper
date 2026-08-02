@@ -386,6 +386,7 @@ class TestPostprocessOpenapiTypescriptFile:
                 "    OrderBody: {",
                 '      side?: "buy" | "sell" | null;',
                 "      note?: string;",
+                "      only?: null;",
                 "      already?: string | null | undefined;",
                 "    };",
                 "    OrderResponse: {",
@@ -403,6 +404,7 @@ class TestPostprocessOpenapiTypescriptFile:
                 "    OrderBody: {",
                 '      side?: "buy" | "sell" | null | undefined;',
                 "      note?: string;",
+                "      only?: null;",
                 "      already?: string | null | undefined;",
                 "    };",
                 "    OrderResponse: {",
@@ -417,6 +419,15 @@ class TestPostprocessOpenapiTypescriptFile:
         updated = _widen_optional_nullable_to_undefined(ts_source, frozenset())
         assert updated == expected
         assert _widen_optional_nullable_to_undefined(updated, frozenset()) == updated
+
+    def test_widens_multiple_optional_nullable_segments_on_one_line(self) -> None:
+        """Widen every qualifying segment without crossing semicolons."""
+        source = "first?: string | null; second?: number | null; required: string | null;"
+
+        assert _widen_optional_nullable_to_undefined(source, frozenset()) == (
+            "first?: string | null | undefined;"
+            " second?: number | null | undefined; required: string | null;"
+        )
 
     def test_widening_skips_request_schema_blocks(self) -> None:
         """Leaves request-side schema blocks unchanged."""
