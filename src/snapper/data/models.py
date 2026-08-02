@@ -37,6 +37,7 @@ from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
+from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
 from snapper.data.ledger_triggers import (
     install_execution_annulment_visibility_immutability_triggers,
@@ -1640,14 +1641,15 @@ class FxConversionElection(TemporalMixin, Base):
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "requested_knowledge_at",
             "resolved_knowledge_at",
             unique=True,
             sqlite_where=text(
-                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair'"
+                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair' "
+                "AND completeness_state IN ('complete', 'partial')"
             ),
             postgresql_where=text(
-                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair'"
+                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair' "
+                "AND completeness_state IN ('complete', 'partial')"
             ),
         ),
         Index(
@@ -1660,14 +1662,15 @@ class FxConversionElection(TemporalMixin, Base):
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "requested_knowledge_at",
             "resolved_knowledge_at",
             unique=True,
             sqlite_where=text(
-                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned'"
+                "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned' "
+                "AND completeness_state IN ('complete', 'partial')"
             ),
             postgresql_where=text(
-                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned'"
+                "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned' "
+                "AND completeness_state IN ('complete', 'partial')"
             ),
         ),
         Index(
@@ -1687,15 +1690,18 @@ class FxConversionElection(TemporalMixin, Base):
             name="ck_fx_elections_scope_owner",
         ),
         CheckConstraint(
-            "completeness_state IN ('successful', 'refused')",
+            "completeness_state IN ('complete', 'partial', 'refused')",
             name="ck_fx_elections_completeness",
         ),
         CheckConstraint(
-            "(completeness_state = 'successful' AND refusal_reason_json IS NULL AND "
+            "(completeness_state IN ('complete', 'partial') AND refusal_reason_json IS NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
-            "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL)",
+            "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL AND "
+            "selected_source_exchange IS NULL AND selected_source_instrument_public_id IS NULL "
+            "AND selected_native_symbol IS NULL AND selected_base IS NULL "
+            "AND selected_quote IS NULL AND selected_orientation IS NULL)",
             name="ck_fx_elections_outcome",
         ),
         CheckConstraint(
@@ -1733,6 +1739,9 @@ class FxConversionProof(TemporalMixin, Base):
     floating or fixed-scale numeric columns. Writers accept ``Decimal`` and
     persist its canonical fixed-point spelling, preserving every supplied digit
     on SQLite and PostgreSQL without a float round-trip or inverse-rate rounding.
+    ``candle_known_to`` records knowledge-at-pin-time provenance and is never a
+    candle-version join key. F2 must extend its candle loader to supply the
+    non-null candle session, sequence, and known-to provenance fields.
     """
 
     __tablename__ = "fx_conversion_proofs"
@@ -1754,9 +1763,13 @@ class FxConversionProof(TemporalMixin, Base):
         ),
         CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),
         CheckConstraint(
-            "conversion_minute = candle_open_minute",
+            "datetime(conversion_minute) = datetime(candle_open_minute, '+1 minute')",
             name="ck_fx_proofs_exact_minute",
-        ),
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "conversion_minute = candle_open_minute + INTERVAL '1 minute'",
+            name="ck_fx_proofs_exact_minute",
+        ).ddl_if(dialect="postgresql"),
     )
     election_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     conversion_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
@@ -1772,6 +1785,14 @@ class FxConversionProof(TemporalMixin, Base):
     conversion_rate_decimal: Mapped[str] = mapped_column(Text, nullable=False)
     source_instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     proof_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+@event.listens_for(FxConversionProof.__table__, "after_create")
+def _install_fx_conversion_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install both append-only FX artifact trigger families after creation."""
+    install_fx_conversion_immutability_triggers(connection)
 
 
 class VenueAccountObservation(TemporalMixin, Base):

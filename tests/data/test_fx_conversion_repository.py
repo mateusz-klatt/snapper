@@ -3,24 +3,34 @@
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.expression import Executable
 
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_proof_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
+from snapper.data.fx_conversion_triggers import drop_fx_conversion_immutability_triggers
+from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
 from snapper.data.repository import FxConversionArtifactConflictError
+from snapper.data.repository import FxConversionArtifactValueError
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
-from snapper.data.repository_types import FxConversionArtifactRow
 from snapper.data.repository_types import FxConversionElectionInsertRow
 from snapper.data.repository_types import FxConversionOperation
 from snapper.data.repository_types import FxConversionProofInsertRow
 from snapper.data.repository_types import FxConversionScopeKind
+from snapper.data.repository_types import FxConversionSuccessfulQuery
 
 _MINUTE = datetime(2026, 7, 26, 14, 52, tzinfo=UTC)
 _HORIZON = datetime(2026, 8, 2, 9, 0, tzinfo=UTC)
@@ -32,22 +42,20 @@ _CANDLE = "00000000-0000-7000-8000-000000000003"
 def _election(
     public_id: str,
     scope_kind: FxConversionScopeKind = "shared_pair",
-    decision_digest: str = "a" * 64,
+    operation: FxConversionOperation = "direct",
 ) -> FxConversionElectionInsertRow:
-    """Build one successful election input."""
+    """Build one complete election input whose digests are repository-derived."""
     return {
         "public_id": public_id,
         "session_id": _SESSION,
         "sequence_id": 1,
         "timestamp": _HORIZON,
         "scope_kind": scope_kind,
-        "consumer_instrument_public_id": (
-            _INSTRUMENT if scope_kind == "instrument_owned" else None
-        ),
+        "consumer_instrument_public_id": _INSTRUMENT if scope_kind == "instrument_owned" else None,
         "source_currency": "EUR",
         "target_currency": "USD",
         "unordered_pair": "EUR-USD",
-        "requirement_manifest_digest": build_requirement_manifest_digest([_MINUTE]),
+        "required_minutes": (_MINUTE,),
         "requested_knowledge_at": _HORIZON,
         "resolved_knowledge_at": _HORIZON,
         "election_policy_version": "fx-election-v1",
@@ -57,9 +65,8 @@ def _election(
         "selected_native_symbol": "EUR/USD",
         "selected_base": "EUR",
         "selected_quote": "USD",
-        "selected_orientation": "direct",
-        "decision_inputs_digest": decision_digest,
-        "completeness_state": "successful",
+        "selected_orientation": operation,
+        "completeness_state": "complete",
         "refusal_reason_json": None,
     }
 
@@ -71,7 +78,7 @@ def _proof(
     conversion_rate: Decimal = Decimal("1.123456789012345678901234567890"),
     operation: FxConversionOperation = "direct",
 ) -> FxConversionProofInsertRow:
-    """Build one exact-minute proof input."""
+    """Build one proof using the production M-minus-one candle relation."""
     return {
         "public_id": public_id,
         "session_id": _SESSION,
@@ -79,23 +86,36 @@ def _proof(
         "timestamp": _HORIZON,
         "election_public_id": election_public_id,
         "conversion_minute": _MINUTE,
-        "candle_open_minute": _MINUTE,
+        "candle_open_minute": _MINUTE - timedelta(minutes=1),
         "candle_id": 42,
         "candle_public_id": _CANDLE,
         "candle_session_id": _SESSION,
         "candle_sequence_id": 7,
-        "candle_timestamp": _MINUTE,
+        "candle_timestamp": _MINUTE - timedelta(minutes=1),
         "candle_known_to": _HORIZON,
         "raw_close": raw_close,
         "operation": operation,
         "conversion_rate": conversion_rate,
         "source_instrument_public_id": _INSTRUMENT,
-        "proof_digest": "b" * 64,
+    }
+
+
+def _query(election: FxConversionElectionInsertRow) -> FxConversionSuccessfulQuery:
+    """Project one insert request into the successful lookup coordinates."""
+    return {
+        "scope_kind": election["scope_kind"],
+        "consumer_instrument_public_id": election["consumer_instrument_public_id"],
+        "source_currency": election["source_currency"],
+        "target_currency": election["target_currency"],
+        "unordered_pair": election["unordered_pair"],
+        "required_minutes": election["required_minutes"],
+        "election_policy_version": election["election_policy_version"],
+        "calculation_version": election["calculation_version"],
     }
 
 
 async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
-    """Create one isolated repository with the complete model schema."""
+    """Create one isolated repository with the model-produced schema."""
     repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'fx.db'}")
     await repository.create_all()
     return repository
@@ -110,22 +130,18 @@ async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
             Decimal("1.123456789012345678901234567890"),
             Decimal("1.123456789012345678901234567890"),
         ),
-        (
-            "inverse",
-            Decimal("3.000000000000000000000000000001"),
-            Decimal("0.333333333333333333333333333222"),
-        ),
+        ("inverse", Decimal("3"), Decimal(1) / Decimal(3)),
     ],
 )
-async def test_proof_decimals_round_trip_exactly(
+async def test_direct_and_inverse_decimals_round_trip_exactly(
     tmp_path: Path,
     operation: FxConversionOperation,
     raw_close: Decimal,
     conversion_rate: Decimal,
 ) -> None:
-    """Direct and inverse proof values retain every supplied decimal digit."""
+    """Direct and reciprocal inverse values retain every Decimal digit."""
     repository = await _repository(tmp_path)
-    election = _election("00000000-0000-7000-8000-000000000010")
+    election = _election("00000000-0000-7000-8000-000000000010", operation=operation)
     proof = _proof(
         election["public_id"],
         "00000000-0000-7000-8000-000000000011",
@@ -140,28 +156,19 @@ async def test_proof_decimals_round_trip_exactly(
 
 
 @pytest.mark.asyncio
-async def test_shared_and_instrument_owned_scopes_are_isolated(tmp_path: Path) -> None:
-    """The same manifest can persist independently in both approved scopes."""
+async def test_scopes_refusals_partial_and_successful_lookup_are_isolated(tmp_path: Path) -> None:
+    """Only complete or partial artifacts become reusable conversion authority."""
     repository = await _repository(tmp_path)
     shared = _election("00000000-0000-7000-8000-000000000020")
     owned = _election("00000000-0000-7000-8000-000000000021", "instrument_owned")
-    shared_result = await repository.pin_fx_conversion_artifact(
+    await repository.pin_fx_conversion_artifact(
         shared, [_proof(shared["public_id"], "00000000-0000-7000-8000-000000000022")]
     )
-    owned_result = await repository.pin_fx_conversion_artifact(
+    await repository.pin_fx_conversion_artifact(
         owned, [_proof(owned["public_id"], "00000000-0000-7000-8000-000000000023")]
     )
-    assert shared_result["election"]["public_id"] == shared["public_id"]
-    assert owned_result["election"]["public_id"] == owned["public_id"]
-    await repository.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_absent_and_refused_artifacts_have_no_proofs(tmp_path: Path) -> None:
-    """An absent identity returns None and an auditable refusal has no children."""
-    repository = await _repository(tmp_path)
     refusal = _election("00000000-0000-7000-8000-000000000024")
-    refusal["requirement_manifest_digest"] = build_requirement_manifest_digest([])
+    refusal["required_minutes"] = (_MINUTE.replace(minute=54),)
     refusal["completeness_state"] = "refused"
     refusal["refusal_reason_json"] = '{"reason":"fx_conversion_unproven"}'
     refusal["selected_source_exchange"] = None
@@ -170,141 +177,241 @@ async def test_absent_and_refused_artifacts_have_no_proofs(tmp_path: Path) -> No
     refusal["selected_base"] = None
     refusal["selected_quote"] = None
     refusal["selected_orientation"] = None
-    assert await repository.get_fx_conversion_artifact(refusal) is None
-    artifact = await repository.pin_fx_conversion_artifact(refusal, [])
-    assert artifact["proofs"] == ()
-    assert await repository.get_fx_conversion_artifact(refusal) == artifact
+    refused = await repository.pin_fx_conversion_artifact(refusal, [])
+    assert refused["election"]["requirement_manifest_digest"] == build_requirement_manifest_digest(
+        refusal["required_minutes"]
+    )
+    assert (
+        await repository.get_latest_visible_fx_conversion_artifact(_query(refusal), _HORIZON)
+        is None
+    )
+    shared_visible = await repository.get_latest_visible_fx_conversion_artifact(
+        _query(shared), _HORIZON
+    )
+    owned_visible = await repository.get_latest_visible_fx_conversion_artifact(
+        _query(owned), _HORIZON
+    )
+    assert shared_visible is not None
+    assert owned_visible is not None
+    assert shared_visible["election"]["public_id"] == shared["public_id"]
+    assert owned_visible["election"]["public_id"] == owned["public_id"]
+    assert await repository.get_fx_conversion_artifact(owned) is not None
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_partial_pins_nonempty_proper_subset(tmp_path: Path) -> None:
+    """A partial artifact keeps its full manifest while pinning positive coverage."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000025")
+    election["required_minutes"] = (_MINUTE, _MINUTE.replace(minute=54))
+    election["completeness_state"] = "partial"
+    artifact = await repository.pin_fx_conversion_artifact(
+        election, [_proof(election["public_id"], "00000000-0000-7000-8000-000000000026")]
+    )
+    assert artifact["election"]["completeness_state"] == "partial"
+    assert artifact["election"]["requirement_manifest_digest"] == build_requirement_manifest_digest(
+        election["required_minutes"]
+    )
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_identical_writers_converge_but_canonical_value_conflicts(tmp_path: Path) -> None:
+    """Opaque caller values cannot disguise a different plane or close."""
+    first = await _repository(tmp_path)
+    second = SQLAlchemyRepository(first.db_url)
+    election_a = _election("00000000-0000-7000-8000-000000000030")
+    election_b = _election("00000000-0000-7000-8000-000000000031")
+    proof_a = _proof(election_a["public_id"], "00000000-0000-7000-8000-000000000032")
+    proof_b = _proof(election_b["public_id"], "00000000-0000-7000-8000-000000000033")
+    results = await asyncio.gather(
+        first.pin_fx_conversion_artifact(election_a, [proof_a]),
+        second.pin_fx_conversion_artifact(election_b, [proof_b]),
+    )
+    assert results[0]["election"]["public_id"] == results[1]["election"]["public_id"]
+    conflict = _election("00000000-0000-7000-8000-000000000034")
+    conflict["selected_source_exchange"] = "walutomat"
+    conflicting_proof = _proof(
+        conflict["public_id"],
+        "00000000-0000-7000-8000-000000000035",
+        Decimal("9.99"),
+        Decimal("9.99"),
+    )
+    with pytest.raises(FxConversionArtifactConflictError):
+        await second.pin_fx_conversion_artifact(conflict, [conflicting_proof])
+    await first.engine.dispose()
+    await second.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["raw_close", "conversion_rate"])
+async def test_non_decimal_runtime_values_are_typed_errors(tmp_path: Path, field: str) -> None:
+    """A float cannot cross the exact-decimal repository boundary."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000040")
+    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000041")
+    if field == "raw_close":
+        proof["raw_close"] = cast(Decimal, 1.123456789012345)
+    else:
+        proof["conversion_rate"] = cast(Decimal, 1.123456789012345)
+    with pytest.raises(FxConversionArtifactValueError):
+        await repository.pin_fx_conversion_artifact(election, [proof])
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_operation_and_completeness_validation_fail_closed(tmp_path: Path) -> None:
+    """Orientation mismatch and invalid complete or partial coverage are refused."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000042")
+    inverse = _proof(
+        election["public_id"], "00000000-0000-7000-8000-000000000043", operation="inverse"
+    )
+    with pytest.raises(ValueError, match="operation"):
+        await repository.pin_fx_conversion_artifact(election, [inverse])
+    election["completeness_state"] = "partial"
+    with pytest.raises(ValueError, match="proper"):
+        await repository.pin_fx_conversion_artifact(election, [])
     await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "violation",
-    ["duplicate_minute", "manifest", "missing_proofs", "parent", "plane"],
+    ["duplicate", "complete", "refused", "parent", "plane"],
 )
-async def test_pin_validates_complete_atomic_payload(tmp_path: Path, violation: str) -> None:
-    """Malformed parent-child bundles are refused before database writes."""
+async def test_parent_child_validation_rejects_every_incoherence(
+    tmp_path: Path, violation: str
+) -> None:
+    """Coverage, parent, plane, and unique-minute invariants fail before writes."""
     repository = await _repository(tmp_path)
-    election = _election("00000000-0000-7000-8000-000000000025")
-    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000026")
+    election = _election("00000000-0000-7000-8000-000000000044")
+    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000045")
     proofs = [proof]
-    if violation == "duplicate_minute":
-        proofs.append({**proof, "public_id": "00000000-0000-7000-8000-000000000027"})
-    elif violation == "manifest":
-        election["requirement_manifest_digest"] = "0" * 64
-    elif violation == "missing_proofs":
+    if violation == "duplicate":
+        proofs.append({**proof, "public_id": "00000000-0000-7000-8000-000000000046"})
+    elif violation == "complete":
         proofs = []
-        election["requirement_manifest_digest"] = build_requirement_manifest_digest([])
+    elif violation == "refused":
+        election["completeness_state"] = "refused"
     elif violation == "parent":
-        proof["election_public_id"] = "00000000-0000-7000-8000-000000000028"
+        proof["election_public_id"] = "00000000-0000-7000-8000-000000000047"
     else:
-        proof["source_instrument_public_id"] = "00000000-0000-7000-8000-000000000029"
+        proof["source_instrument_public_id"] = "00000000-0000-7000-8000-000000000048"
     with pytest.raises(ValueError):
         await repository.pin_fx_conversion_artifact(election, proofs)
-    assert await repository.get_fx_conversion_artifact(election) is None
     await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_identical_writers_converge(tmp_path: Path) -> None:
-    """Two canonical writers observe one committed artifact identity."""
-    first = await _repository(tmp_path)
-    second = SQLAlchemyRepository(first.db_url)
-    election_a = _election("00000000-0000-7000-8000-000000000030")
-    election_b = _election("00000000-0000-7000-8000-000000000031")
-    results = await asyncio.gather(
-        first.pin_fx_conversion_artifact(
-            election_a, [_proof(election_a["public_id"], "00000000-0000-7000-8000-000000000032")]
-        ),
-        second.pin_fx_conversion_artifact(
-            election_b, [_proof(election_b["public_id"], "00000000-0000-7000-8000-000000000033")]
-        ),
+async def test_absent_reads_and_impossible_post_commit_disappearance_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """Absent authority is None and a vanished committed row is an operational error."""
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000052")
+    assert await repository.get_fx_conversion_artifact(election) is None
+    async with repository.session() as session:
+        assert (
+            await repository._read_fx_conversion_artifact_by_public_id(
+                session, "00000000-0000-7000-8000-000000000099"
+            )
+            is None
+        )
+    assert (
+        await repository.get_latest_visible_fx_conversion_artifact(
+            _query(election), _HORIZON - timedelta(seconds=1)
+        )
+        is None
     )
-    assert results[0]["election"]["public_id"] == results[1]["election"]["public_id"]
-    await first.engine.dispose()
-    await second.engine.dispose()
+    with (
+        patch.object(
+            repository,
+            "_read_fx_conversion_artifact_by_public_id",
+            AsyncMock(return_value=None),
+        ),
+        pytest.raises(RuntimeError, match="could not be read back"),
+    ):
+        await repository.pin_fx_conversion_artifact(
+            election,
+            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000053")],
+        )
+    await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_conflicting_writers_fail_closed(tmp_path: Path) -> None:
-    """A different canonical decision at one identity raises the typed conflict."""
-    first = await _repository(tmp_path)
-    second = SQLAlchemyRepository(first.db_url)
-    election_a = _election("00000000-0000-7000-8000-000000000040")
-    election_b = _election("00000000-0000-7000-8000-000000000041", decision_digest="c" * 64)
-    results = await asyncio.gather(
-        first.pin_fx_conversion_artifact(
-            election_a, [_proof(election_a["public_id"], "00000000-0000-7000-8000-000000000042")]
-        ),
-        second.pin_fx_conversion_artifact(
-            election_b, [_proof(election_b["public_id"], "00000000-0000-7000-8000-000000000043")]
-        ),
-        return_exceptions=True,
-    )
-    assert sum(isinstance(result, FxConversionArtifactConflictError) for result in results) == 1
-    await first.engine.dispose()
-    await second.engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_unrelated_integrity_collision_is_not_misclassified(tmp_path: Path) -> None:
+async def test_unrelated_integrity_collision_is_not_reclassified(tmp_path: Path) -> None:
     """A proof-public-id collision without an election winner remains an integrity error."""
     repository = await _repository(tmp_path)
-    first = _election("00000000-0000-7000-8000-000000000050")
-    proof_id = "00000000-0000-7000-8000-000000000051"
+    first = _election("00000000-0000-7000-8000-000000000060")
+    proof_id = "00000000-0000-7000-8000-000000000061"
     await repository.pin_fx_conversion_artifact(first, [_proof(first["public_id"], proof_id)])
-    second = _election("00000000-0000-7000-8000-000000000052")
-    second["resolved_knowledge_at"] = _HORIZON.replace(minute=1)
+    second = _election("00000000-0000-7000-8000-000000000062")
+    second["resolved_knowledge_at"] = _HORIZON + timedelta(minutes=1)
     with pytest.raises(IntegrityError):
         await repository.pin_fx_conversion_artifact(second, [_proof(second["public_id"], proof_id)])
     await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_committed_artifact_must_be_readable(tmp_path: Path) -> None:
-    """The writer fails closed if its committed canonical read unexpectedly disappears."""
-    repository = await _repository(tmp_path)
-    election = _election("00000000-0000-7000-8000-000000000053")
-    with (
-        patch.object(repository, "_read_fx_conversion_artifact", AsyncMock(return_value=None)),
-        pytest.raises(RuntimeError, match="could not be read back"),
-    ):
-        await repository.pin_fx_conversion_artifact(
-            election,
-            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000054")],
-        )
-    await repository.engine.dispose()
+async def test_repository_base_fx_methods_are_explicitly_unimplemented() -> None:
+    """Repository implementers receive an explicit failure for every new contract method."""
+    repository = cast(Repository, object())
+    election = _election("00000000-0000-7000-8000-000000000054")
+    query = _query(election)
+    with pytest.raises(NotImplementedError):
+        await Repository.pin_fx_conversion_artifact(repository, election, [])
+    with pytest.raises(NotImplementedError):
+        await Repository.get_fx_conversion_artifact(repository, election)
+    with pytest.raises(NotImplementedError):
+        await Repository.get_latest_visible_fx_conversion_artifact(repository, query, _HORIZON)
 
 
-def test_artifact_equivalence_checks_every_canonical_digest() -> None:
-    """Completeness, refusal, decision, and ordered proof digests all participate."""
-    election = _election("00000000-0000-7000-8000-000000000055")
-    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000056")
-    winner: FxConversionArtifactRow = {
-        "election": {**election, "known_to": _HORIZON.replace(year=9999)},
-        "proofs": ({**proof, "known_to": _HORIZON.replace(year=9999)},),
-    }
-    assert SQLAlchemyRepository._fx_artifacts_equivalent(winner, election, [proof])
-    for key, value in [
-        ("decision_inputs_digest", "c" * 64),
-        ("completeness_state", "refused"),
-        ("refusal_reason_json", "{}"),
-    ]:
-        changed = {**election, key: value}
-        assert not SQLAlchemyRepository._fx_artifacts_equivalent(winner, changed, [proof])
-    changed_proof: FxConversionProofInsertRow = {**proof, "proof_digest": "d" * 64}
-    assert not SQLAlchemyRepository._fx_artifacts_equivalent(winner, election, [changed_proof])
-
-
-def test_canonical_digests_ignore_input_ordering() -> None:
-    """Minute, decision-record, and object-key order cannot alter digests."""
-    later = _MINUTE.replace(minute=54)
-    assert build_requirement_manifest_digest(
-        [later, _MINUTE, later]
-    ) == build_requirement_manifest_digest([_MINUTE, later])
-    first = [{"exchange": "kraken", "score": 1}, {"exchange": "coinbase", "score": 2}]
-    second = [{"score": 2, "exchange": "coinbase"}, {"score": 1, "exchange": "kraken"}]
-    assert build_decision_inputs_digest(first) == build_decision_inputs_digest(second)
-    assert build_proof_digest({"close": "1.25", "id": 4}) == build_proof_digest(
-        {"id": 4, "close": "1.25"}
+def test_digest_canonicalization_normalizes_instants_and_rejects_bad_minutes() -> None:
+    """Equivalent zones hash equally while naive and off-grid minutes are refused."""
+    plus_two = _MINUTE.astimezone(timezone(timedelta(hours=2)))
+    assert build_requirement_manifest_digest([plus_two]) == build_requirement_manifest_digest(
+        [_MINUTE]
     )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_requirement_manifest_digest([_MINUTE.replace(tzinfo=None)])
+    with pytest.raises(ValueError, match="minute-aligned"):
+        build_requirement_manifest_digest([_MINUTE.replace(second=37)])
+    election = _election("00000000-0000-7000-8000-000000000050")
+    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000051")
+    shifted: FxConversionProofInsertRow = {
+        **proof,
+        "conversion_minute": plus_two,
+        "candle_open_minute": plus_two - timedelta(minutes=1),
+    }
+    assert build_proof_digest(proof) == build_proof_digest(shifted)
+    assert build_decision_inputs_digest(election, [proof]) == build_decision_inputs_digest(
+        election, [shifted]
+    )
+    invalid: FxConversionProofInsertRow = {
+        **proof,
+        "raw_close": cast(Decimal, 1.25),
+    }
+    with pytest.raises(TypeError, match="must be Decimal"):
+        build_proof_digest(invalid)
+
+
+def test_postgresql_trigger_ddl_covers_install_and_drop_shapes() -> None:
+    """The production dialect emits row, truncate, ALWAYS, and drop statements."""
+    statements: list[str] = []
+
+    class _Recorder:
+        dialect = SimpleNamespace(name="postgresql")
+
+        def execute(self, statement: Executable) -> object:
+            statements.append(str(statement))
+            return object()
+
+    connection = cast(Connection, _Recorder())
+    install_fx_conversion_immutability_triggers(connection)
+    assert len(statements) == 14
+    assert sum("ENABLE ALWAYS" in statement for statement in statements) == 4
+    statements.clear()
+    drop_fx_conversion_immutability_triggers(connection)
+    assert len(statements) == 6

@@ -193,6 +193,8 @@ from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
+from snapper.data.fx_conversion_digests import build_decision_inputs_digest
+from snapper.data.fx_conversion_digests import build_proof_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
@@ -328,6 +330,7 @@ from snapper.data.repository_types import FxConversionOperation
 from snapper.data.repository_types import FxConversionProofInsertRow
 from snapper.data.repository_types import FxConversionProofRow
 from snapper.data.repository_types import FxConversionScopeKind
+from snapper.data.repository_types import FxConversionSuccessfulQuery
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentDetailRow
 from snapper.data.repository_types import InstrumentFeedHealthRow
@@ -452,6 +455,7 @@ __all__ = [
     "ExecutionAnnulmentWitnessedError",
     "ExecutionAnnulmentConflictError",
     "FxConversionArtifactConflictError",
+    "FxConversionArtifactValueError",
     "DerivedProjectionRetirementError",
     "WalletConflictError",
     "WalletUserReadGrantConflictError",
@@ -1125,6 +1129,10 @@ class FxConversionArtifactConflictError(RuntimeError):
             f"election_public_id={winner['election']['public_id']}"
         )
         self.winner = winner
+
+
+class FxConversionArtifactValueError(TypeError):
+    """Raised when an FX proof supplies a non-exact runtime value type."""
 
 
 class ScopeGrantConflictError(Exception):
@@ -3221,6 +3229,28 @@ class Repository(ABC):
     async def create_all(self) -> None:
         """Create all database tables from model metadata."""
         ...
+
+    async def pin_fx_conversion_artifact(
+        self,
+        election: FxConversionElectionInsertRow,
+        proofs: Sequence[FxConversionProofInsertRow],
+    ) -> FxConversionArtifactRow:
+        """Atomically persist or converge on one canonical FX artifact."""
+        raise NotImplementedError
+
+    async def get_fx_conversion_artifact(
+        self, identity: FxConversionElectionInsertRow
+    ) -> FxConversionArtifactRow | None:
+        """Read the exact canonical winner for one writer identity."""
+        raise NotImplementedError
+
+    async def get_latest_visible_fx_conversion_artifact(
+        self,
+        query: FxConversionSuccessfulQuery,
+        as_of: datetime,
+    ) -> FxConversionArtifactRow | None:
+        """Read the latest successful election visible at one horizon."""
+        raise NotImplementedError
 
     @property
     @abstractmethod
@@ -9159,18 +9189,18 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _fx_election_identity_filters(
         row: FxConversionElectionInsertRow,
+        manifest_digest: str,
     ) -> list[ColumnElement[bool]]:
         """Build the complete reusable-election identity predicate."""
         filters = [
             FxConversionElection.known_to == KNOWN_TO_MAX,
-            FxConversionElection.requirement_manifest_digest == row["requirement_manifest_digest"],
+            FxConversionElection.requirement_manifest_digest == manifest_digest,
             FxConversionElection.election_policy_version == row["election_policy_version"],
             FxConversionElection.calculation_version == row["calculation_version"],
             FxConversionElection.scope_kind == row["scope_kind"],
             FxConversionElection.source_currency == row["source_currency"],
             FxConversionElection.target_currency == row["target_currency"],
             FxConversionElection.unordered_pair == row["unordered_pair"],
-            FxConversionElection.requested_knowledge_at == row["requested_knowledge_at"],
             FxConversionElection.resolved_knowledge_at == row["resolved_knowledge_at"],
         ]
         if row["scope_kind"] == "instrument_owned":
@@ -9243,11 +9273,51 @@ class SQLAlchemyRepository(Repository):
         identity: FxConversionElectionInsertRow,
     ) -> FxConversionArtifactRow | None:
         """Read the active canonical artifact for one complete identity."""
+        manifest_digest = build_requirement_manifest_digest(identity["required_minutes"])
+        election = (
+            (
+                await session.execute(
+                    select(FxConversionElection)
+                    .where(*self._fx_election_identity_filters(identity, manifest_digest))
+                    .order_by(FxConversionElection.timestamp.desc(), FxConversionElection.id.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if election is None:
+            return None
+        proofs = (
+            (
+                await session.execute(
+                    select(FxConversionProof)
+                    .where(
+                        FxConversionProof.election_public_id == election.public_id,
+                        FxConversionProof.known_to == KNOWN_TO_MAX,
+                    )
+                    .order_by(FxConversionProof.conversion_minute)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "election": self._fx_election_to_row(election),
+            "proofs": tuple(self._fx_proof_to_row(proof) for proof in proofs),
+        }
+
+    async def _read_fx_conversion_artifact_by_public_id(
+        self,
+        session: AsyncSession,
+        public_id: str,
+    ) -> FxConversionArtifactRow | None:
+        """Read one active artifact by its committed election identity."""
         election = (
             (
                 await session.execute(
                     select(FxConversionElection).where(
-                        *self._fx_election_identity_filters(identity)
+                        FxConversionElection.public_id == public_id,
+                        FxConversionElection.known_to == KNOWN_TO_MAX,
                     )
                 )
             )
@@ -9282,41 +9352,139 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as session:
             return await self._read_fx_conversion_artifact(session, identity)
 
+    async def get_latest_visible_fx_conversion_artifact(
+        self,
+        query: FxConversionSuccessfulQuery,
+        as_of: datetime,
+    ) -> FxConversionArtifactRow | None:
+        """Return the newest successful election resolved and visible by ``as_of``."""
+        manifest_digest = build_requirement_manifest_digest(query["required_minutes"])
+        filters = [
+            FxConversionElection.timestamp <= as_of,
+            FxConversionElection.known_to > as_of,
+            FxConversionElection.resolved_knowledge_at <= as_of,
+            FxConversionElection.completeness_state.in_(("complete", "partial")),
+            FxConversionElection.scope_kind == query["scope_kind"],
+            FxConversionElection.source_currency == query["source_currency"],
+            FxConversionElection.target_currency == query["target_currency"],
+            FxConversionElection.unordered_pair == query["unordered_pair"],
+            FxConversionElection.requirement_manifest_digest == manifest_digest,
+            FxConversionElection.election_policy_version == query["election_policy_version"],
+            FxConversionElection.calculation_version == query["calculation_version"],
+        ]
+        if query["scope_kind"] == "instrument_owned":
+            filters.append(
+                FxConversionElection.consumer_instrument_public_id
+                == query["consumer_instrument_public_id"]
+            )
+        else:
+            filters.append(FxConversionElection.consumer_instrument_public_id.is_(None))
+        async with self.session() as session:
+            election = (
+                (
+                    await session.execute(
+                        select(FxConversionElection)
+                        .where(*filters)
+                        .order_by(
+                            FxConversionElection.resolved_knowledge_at.desc(),
+                            FxConversionElection.timestamp.desc(),
+                            FxConversionElection.id.desc(),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if election is None:
+                return None
+            return await self._read_fx_conversion_artifact_by_public_id(session, election.public_id)
+
     @staticmethod
     def _fx_artifacts_equivalent(
         winner: FxConversionArtifactRow,
         election: FxConversionElectionInsertRow,
         proofs: Sequence[FxConversionProofInsertRow],
     ) -> bool:
-        """Compare canonical evidence while ignoring writer-generated identities."""
-        winner_digests = tuple(proof["proof_digest"] for proof in winner["proofs"])
-        requested_digests = tuple(
-            proof["proof_digest"]
+        """Compare canonical stored columns while ignoring generated identities."""
+        winner_election = winner["election"]
+        winner_plane = (
+            winner_election["selected_source_exchange"],
+            winner_election["selected_source_instrument_public_id"],
+            winner_election["selected_native_symbol"],
+            winner_election["selected_base"],
+            winner_election["selected_quote"],
+            winner_election["selected_orientation"],
+            winner_election["completeness_state"],
+            winner_election["refusal_reason_json"],
+        )
+        requested_plane = (
+            election["selected_source_exchange"],
+            election["selected_source_instrument_public_id"],
+            election["selected_native_symbol"],
+            election["selected_base"],
+            election["selected_quote"],
+            election["selected_orientation"],
+            election["completeness_state"],
+            election["refusal_reason_json"],
+        )
+        if winner_plane != requested_plane:
+            return False
+        winner_proofs = tuple(
+            (
+                proof["conversion_minute"],
+                proof["candle_open_minute"],
+                proof["candle_id"],
+                proof["candle_public_id"],
+                proof["candle_session_id"],
+                proof["candle_sequence_id"],
+                proof["candle_timestamp"],
+                proof["candle_known_to"],
+                proof["raw_close"],
+                proof["operation"],
+                proof["conversion_rate"],
+                proof["source_instrument_public_id"],
+            )
+            for proof in winner["proofs"]
+        )
+        requested_proofs = tuple(
+            (
+                proof["conversion_minute"],
+                proof["candle_open_minute"],
+                proof["candle_id"],
+                proof["candle_public_id"],
+                proof["candle_session_id"],
+                proof["candle_sequence_id"],
+                proof["candle_timestamp"],
+                proof["candle_known_to"],
+                proof["raw_close"],
+                proof["operation"],
+                proof["conversion_rate"],
+                proof["source_instrument_public_id"],
+            )
             for proof in sorted(proofs, key=lambda row: row["conversion_minute"])
         )
-        return (
-            winner["election"]["decision_inputs_digest"] == election["decision_inputs_digest"]
-            and winner["election"]["completeness_state"] == election["completeness_state"]
-            and winner["election"]["refusal_reason_json"] == election["refusal_reason_json"]
-            and winner_digests == requested_digests
-        )
+        return winner_proofs == requested_proofs
 
     @staticmethod
-    def _validate_fx_conversion_artifact(
+    def _validate_fx_completeness(
+        state: FxConversionCompleteness,
+        required_minutes: set[datetime],
+        proof_minutes: set[datetime],
+    ) -> None:
+        """Enforce complete, partial, and refused proof-set semantics."""
+        if state == "complete" and proof_minutes != required_minutes:
+            raise ValueError("complete FX elections require the whole manifest")
+        if state == "partial" and not (proof_minutes and proof_minutes < required_minutes):
+            raise ValueError("partial FX elections require a nonempty proper manifest subset")
+        if state == "refused" and proof_minutes:
+            raise ValueError("refused FX elections must not carry proofs")
+
+    @staticmethod
+    def _validate_fx_proof_rows(
         election: FxConversionElectionInsertRow,
         proofs: Sequence[FxConversionProofInsertRow],
     ) -> None:
-        """Refuse incomplete or internally inconsistent parent-child payloads."""
-        proof_minutes = [proof["conversion_minute"] for proof in proofs]
-        if len(set(proof_minutes)) != len(proof_minutes):
-            raise ValueError("FX conversion artifact must not repeat a proof minute")
-        if (
-            build_requirement_manifest_digest(proof_minutes)
-            != election["requirement_manifest_digest"]
-        ):
-            raise ValueError("FX proof minutes must match the election requirement manifest")
-        if (election["completeness_state"] == "successful") != bool(proofs):
-            raise ValueError("successful FX elections require proofs and refusals forbid them")
+        """Enforce proof parent, plane, orientation, and Decimal boundaries."""
         if any(proof["election_public_id"] != election["public_id"] for proof in proofs):
             raise ValueError("FX proof election identity must match its parent")
         if any(
@@ -9324,6 +9492,34 @@ class SQLAlchemyRepository(Repository):
             for proof in proofs
         ):
             raise ValueError("FX proof source plane must match its election")
+        if any(proof["operation"] != election["selected_orientation"] for proof in proofs):
+            raise ValueError("FX proof operation must match its election orientation")
+        for proof in proofs:
+            if not isinstance(proof["raw_close"], Decimal):
+                raise FxConversionArtifactValueError("FX proof raw_close must be Decimal")
+            if not isinstance(proof["conversion_rate"], Decimal):
+                raise FxConversionArtifactValueError("FX proof conversion_rate must be Decimal")
+
+    @classmethod
+    def _validate_fx_conversion_artifact(
+        cls,
+        election: FxConversionElectionInsertRow,
+        proofs: Sequence[FxConversionProofInsertRow],
+    ) -> tuple[str, str, tuple[str, ...]]:
+        """Refuse incomplete or internally inconsistent parent-child payloads."""
+        required_digest = build_requirement_manifest_digest(election["required_minutes"])
+        build_requirement_manifest_digest([proof["conversion_minute"] for proof in proofs])
+        required_minutes = {minute.astimezone(UTC) for minute in election["required_minutes"]}
+        proof_minutes = {proof["conversion_minute"].astimezone(UTC) for proof in proofs}
+        if len(proof_minutes) != len(proofs):
+            raise ValueError("FX conversion artifact must not repeat a proof minute")
+        cls._validate_fx_completeness(
+            election["completeness_state"], required_minutes, proof_minutes
+        )
+        cls._validate_fx_proof_rows(election, proofs)
+        proof_digests = tuple(build_proof_digest(proof) for proof in proofs)
+        decision_digest = build_decision_inputs_digest(election, proofs)
+        return required_digest, decision_digest, proof_digests
 
     async def pin_fx_conversion_artifact(
         self,
@@ -9337,14 +9533,21 @@ class SQLAlchemyRepository(Repository):
         After an integrity rollback the committed winner is read back: identical
         canonical evidence converges, while a mismatch raises a typed conflict.
         """
-        self._validate_fx_conversion_artifact(election, proofs)
+        manifest_digest, decision_digest, proof_digests = self._validate_fx_conversion_artifact(
+            election, proofs
+        )
         async with self.session() as session:
             try:
-                session.add(FxConversionElection(**election, known_to=KNOWN_TO_MAX))
-                for proof in proofs:
+                election_values = dict(election)
+                election_values.pop("required_minutes")
+                election_values["requirement_manifest_digest"] = manifest_digest
+                election_values["decision_inputs_digest"] = decision_digest
+                session.add(FxConversionElection(**election_values, known_to=KNOWN_TO_MAX))
+                for proof, proof_digest in zip(proofs, proof_digests, strict=True):
                     values = dict(proof)
                     values["raw_close_decimal"] = format(values.pop("raw_close"), "f")
                     values["conversion_rate_decimal"] = format(values.pop("conversion_rate"), "f")
+                    values["proof_digest"] = proof_digest
                     session.add(FxConversionProof(**values, known_to=KNOWN_TO_MAX))
                 await session.commit()
             except IntegrityError:
@@ -9355,7 +9558,9 @@ class SQLAlchemyRepository(Repository):
                 if winner is not None:
                     raise FxConversionArtifactConflictError(winner) from None
                 raise
-            winner = await self._read_fx_conversion_artifact(session, election)
+            winner = await self._read_fx_conversion_artifact_by_public_id(
+                session, election["public_id"]
+            )
             if winner is None:
                 raise RuntimeError("committed FX conversion artifact could not be read back")
             return winner

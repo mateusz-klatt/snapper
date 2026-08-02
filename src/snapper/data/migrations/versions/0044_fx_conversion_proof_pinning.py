@@ -7,6 +7,9 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from snapper.data.fx_conversion_triggers import drop_fx_conversion_immutability_triggers
+from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
+
 revision: str = "0044"
 down_revision: str | None = "0043"
 branch_labels: str | Sequence[str] | None = None
@@ -71,15 +74,18 @@ def upgrade() -> None:
             name="ck_fx_elections_scope_owner",
         ),
         sa.CheckConstraint(
-            "completeness_state IN ('successful', 'refused')",
+            "completeness_state IN ('complete', 'partial', 'refused')",
             name="ck_fx_elections_completeness",
         ),
         sa.CheckConstraint(
-            "(completeness_state = 'successful' AND refusal_reason_json IS NULL AND "
+            "(completeness_state IN ('complete', 'partial') AND refusal_reason_json IS NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "
             "AND selected_quote IS NOT NULL AND selected_orientation IS NOT NULL) OR "
-            "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL)",
+            "(completeness_state = 'refused' AND refusal_reason_json IS NOT NULL AND "
+            "selected_source_exchange IS NULL AND selected_source_instrument_public_id IS NULL "
+            "AND selected_native_symbol IS NULL AND selected_base IS NULL "
+            "AND selected_quote IS NULL AND selected_orientation IS NULL)",
             name="ck_fx_elections_outcome",
         ),
         sa.CheckConstraint(
@@ -98,15 +104,16 @@ def upgrade() -> None:
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "requested_knowledge_at",
             "resolved_knowledge_at",
         ],
         unique=True,
         sqlite_where=sa.text(
-            "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair'"
+            "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair' "
+            "AND completeness_state IN ('complete', 'partial')"
         ),
         postgresql_where=sa.text(
-            "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair'"
+            "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair' "
+            "AND completeness_state IN ('complete', 'partial')"
         ),
     )
     op.create_index(
@@ -121,15 +128,16 @@ def upgrade() -> None:
             "source_currency",
             "target_currency",
             "unordered_pair",
-            "requested_knowledge_at",
             "resolved_knowledge_at",
         ],
         unique=True,
         sqlite_where=sa.text(
-            "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned'"
+            "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned' "
+            "AND completeness_state IN ('complete', 'partial')"
         ),
         postgresql_where=sa.text(
-            "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned'"
+            "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned' "
+            "AND completeness_state IN ('complete', 'partial')"
         ),
     )
     op.create_index(
@@ -139,6 +147,11 @@ def upgrade() -> None:
         unique=True,
         sqlite_where=_ACTIVE_SQLITE,
         postgresql_where=_ACTIVE_PG,
+    )
+    exact_minute_sql = (
+        "datetime(conversion_minute) = datetime(candle_open_minute, '+1 minute')"
+        if op.get_bind().dialect.name == "sqlite"
+        else "conversion_minute = candle_open_minute + INTERVAL '1 minute'"
     )
     op.create_table(
         "fx_conversion_proofs",
@@ -159,7 +172,7 @@ def upgrade() -> None:
         sa.Column("proof_digest", sa.String(64), nullable=False),
         sa.CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),
         sa.CheckConstraint(
-            "conversion_minute = candle_open_minute",
+            exact_minute_sql,
             name="ck_fx_proofs_exact_minute",
         ),
     )
@@ -179,9 +192,11 @@ def upgrade() -> None:
         sqlite_where=_ACTIVE_SQLITE,
         postgresql_where=_ACTIVE_PG,
     )
+    install_fx_conversion_immutability_triggers(op.get_bind())
 
 
 def downgrade() -> None:
     """Drop the proof artifacts in child-first order."""
+    drop_fx_conversion_immutability_triggers(op.get_bind())
     op.drop_table("fx_conversion_proofs")
     op.drop_table("fx_conversion_elections")

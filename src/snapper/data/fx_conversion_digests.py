@@ -1,11 +1,14 @@
-"""Canonical SHA-256 builders for durable FX conversion elections."""
+"""Canonical SHA-256 builders for durable FX conversion artifacts."""
 
 import hashlib
 import json
 from collections.abc import Sequence
+from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 
-from snapper.core.json_types import JsonObject
+from snapper.data.repository_types import FxConversionElectionInsertRow
+from snapper.data.repository_types import FxConversionProofInsertRow
 
 
 def _canonical_json(payload: object) -> str:
@@ -18,18 +21,65 @@ def _sha256(payload: object) -> str:
     return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
 
 
+def _canonical_instant(value: datetime) -> str:
+    """Return one aware instant in the canonical UTC spelling."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("FX digest datetimes must be timezone-aware")
+    return value.astimezone(UTC).isoformat()
+
+
+def _canonical_minute(value: datetime) -> str:
+    """Return one aware, minute-aligned instant in canonical UTC spelling."""
+    normalized = _canonical_instant(value)
+    if value.second != 0 or value.microsecond != 0:
+        raise ValueError("FX requirement datetimes must be minute-aligned")
+    return normalized
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    """Return an exact non-exponent decimal spelling."""
+    if not isinstance(value, Decimal):
+        raise TypeError("FX proof decimal values must be Decimal")
+    return format(value, "f")
+
+
 def build_requirement_manifest_digest(exact_minutes: Sequence[datetime]) -> str:
-    """Digest the sorted, duplicate-free exact-minute requirement set."""
-    normalized = sorted({minute.isoformat() for minute in exact_minutes})
+    """Digest the sorted, duplicate-free normalized requirement minute set."""
+    normalized = sorted({_canonical_minute(minute) for minute in exact_minutes})
     return _sha256({"exact_minutes": normalized})
 
 
-def build_decision_inputs_digest(decision_inputs: Sequence[JsonObject]) -> str:
-    """Digest decision records independently of record and key ordering."""
-    normalized = sorted(_canonical_json(item) for item in decision_inputs)
-    return _sha256({"decision_inputs": normalized})
+def build_proof_digest(proof: FxConversionProofInsertRow) -> str:
+    """Derive one proof digest from its canonical evidence columns."""
+    payload = {
+        "conversion_minute": _canonical_minute(proof["conversion_minute"]),
+        "candle_open_minute": _canonical_minute(proof["candle_open_minute"]),
+        "candle_id": proof["candle_id"],
+        "candle_public_id": proof["candle_public_id"],
+        "candle_session_id": proof["candle_session_id"],
+        "candle_sequence_id": proof["candle_sequence_id"],
+        "candle_timestamp": _canonical_instant(proof["candle_timestamp"]),
+        "candle_known_to": _canonical_instant(proof["candle_known_to"]),
+        "raw_close": _canonical_decimal(proof["raw_close"]),
+        "operation": proof["operation"],
+        "conversion_rate": _canonical_decimal(proof["conversion_rate"]),
+        "source_instrument_public_id": proof["source_instrument_public_id"],
+    }
+    return _sha256({"proof": payload})
 
 
-def build_proof_digest(proof_inputs: JsonObject) -> str:
-    """Digest one proof projection independently of input key ordering."""
-    return _sha256({"proof": proof_inputs})
+def build_decision_inputs_digest(
+    election: FxConversionElectionInsertRow,
+    proofs: Sequence[FxConversionProofInsertRow],
+) -> str:
+    """Derive the decision digest from the selected plane and ordered proofs."""
+    payload = {
+        "source_exchange": election["selected_source_exchange"],
+        "source_instrument_public_id": election["selected_source_instrument_public_id"],
+        "native_symbol": election["selected_native_symbol"],
+        "base": election["selected_base"],
+        "quote": election["selected_quote"],
+        "orientation": election["selected_orientation"],
+        "proof_digests": sorted(build_proof_digest(proof) for proof in proofs),
+    }
+    return _sha256({"decision_inputs": payload})
