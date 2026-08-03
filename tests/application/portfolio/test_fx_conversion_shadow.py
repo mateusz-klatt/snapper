@@ -26,6 +26,7 @@ from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_p
 from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.models import FxConversionElection
 from snapper.data.models import FxConversionProof
 from snapper.data.repository import FxConversionArtifactUpgradeRequiredError
@@ -152,7 +153,7 @@ async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
         },
     )
     await shadow_pin_fx_evaluations(repository, [conflict], "5A.13")
-    missing = _MINUTE + timedelta(minutes=2)
+    missing = _MINUTE + timedelta(minutes=MAX_CARRIED_MINUTES + 2)
     invalid_row: PnlFxRateRow = {**_row(missing), "close": math.nan}
     await shadow_pin_fx_evaluations(
         repository,
@@ -212,7 +213,7 @@ async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
     assert proof_count == 3
     assert (
         refusal_reason
-        == '{"reason":"fx_conversion_unproven","unproven_minutes":["2026-08-02T12:02:00+00:00"]}'
+        == '{"reason":"fx_conversion_unproven","unproven_minutes":["' + missing.isoformat() + '"]}'
     )
     await repository.engine.dispose()
 
