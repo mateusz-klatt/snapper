@@ -234,6 +234,63 @@ class TestGetPnlFxRateExchanges:
         assert ("EUR", "USD", "kraken_futures") not in planes
 
 
+class TestGetPnlFxRateCandlesAt:
+    """Cover the exact-minute variant a sparse consumer must use."""
+
+    async def test_matches_only_the_requested_opens(self, repository: SQLAlchemyRepository) -> None:
+        """Return the stored open and nothing for the absent one.
+
+        Given a store holding a candle at one minute
+        When exactly that open is requested alongside an unrelated one
+        Then the read returns the stored row and nothing for the absent minute.
+        """
+        rows = await repository.get_pnl_fx_rate_candles_at(
+            [("EUR", "USD", "kraken")],
+            [_M, _M + timedelta(minutes=5)],
+            _NOW + timedelta(days=1),
+        )
+        assert [(row["open_at"], row["close"]) for row in rows] == [(_M, 1.25)]
+
+    async def test_skips_a_minute_the_caller_never_asked_for(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A minute outside the requested set is never returned, even if stored."""
+        rows = await repository.get_pnl_fx_rate_candles_at(
+            [("EUR", "USD", "kraken")],
+            [_M + timedelta(minutes=5)],
+            _NOW + timedelta(days=1),
+        )
+        assert rows == []
+
+    async def test_empty_inputs_skip_the_query(self, repository: SQLAlchemyRepository) -> None:
+        """Neither an empty plane list nor an empty minute list touches the store."""
+        horizon = _NOW + timedelta(days=1)
+        assert await repository.get_pnl_fx_rate_candles_at([], [_M], horizon) == []
+        assert (
+            await repository.get_pnl_fx_rate_candles_at([("EUR", "USD", "kraken")], [], horizon)
+            == []
+        )
+
+    async def test_batches_a_minute_list_beyond_one_bind_group(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Issue every batch without losing or duplicating a row.
+
+        Given more minutes than one bound-parameter batch carries
+        When the exact-minute read runs
+        Then every batch is issued and the stored row is still returned once.
+        """
+        minutes = [_M + timedelta(minutes=offset) for offset in range(900)]
+        rows = await repository.get_pnl_fx_rate_candles_at(
+            [("EUR", "USD", "kraken")], minutes, _NOW + timedelta(days=1)
+        )
+        opens = [row["open_at"] for row in rows]
+        assert set(opens) <= set(minutes)
+        assert len(opens) == len(set(opens))
+        assert (_M, 1.25) in [(row["open_at"], row["close"]) for row in rows]
+        assert opens == sorted(opens)
+
+
 class TestGetPnlFxRateCandles:
     """Cover the pinned FX rate candle read."""
 

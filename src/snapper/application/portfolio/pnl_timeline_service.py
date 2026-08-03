@@ -39,6 +39,7 @@ dropped.
 
 import json
 import math
+from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -4177,12 +4178,22 @@ async def _load_overlay_conversion(
     """Elect the USD-to-target plane over exactly the overlay's sample minutes.
 
     The overlay converts a sparse set of endpoint minutes rather than a dense
-    grid, so the requirement is the exact minute set: a daily-granularity window
-    would otherwise request every minute it spans. The election primitives are
-    the ones the curve already uses, so a converted overlay minute is priced off
-    the same finalized plane, with the same exact-minute discipline, as every
-    other number in the response. Shadow pinning is deliberately not collected
-    here: this path serves a read, and reads never mint durable proofs.
+    grid, so both the requirement AND the candle read name the exact minutes: a
+    daily window would otherwise read every minute of the span it covers.
+
+    The election runs under the REQUESTED valuation currency, the same
+    orientation preference the curve's own election uses, so one pair resolves
+    to one oriented plane across the whole response. Electing under USD instead
+    would be defensible in isolation — the samples are USD — but it lets the
+    tie-break pick the opposite orientation from the curve's, and two
+    independently collected candle series for one pair-minute disagree in the
+    last basis points.
+
+    The electorate still differs from the curve's by construction (sample
+    minutes versus event and mark minutes), so a venue can differ where
+    coverage differs; that is disclosed rather than hidden. Shadow pinning is
+    deliberately not collected here: this path serves a read, and reads never
+    mint durable proofs.
 
     Args:
         repo: Repository providing plane discovery and candle reads.
@@ -4198,8 +4209,46 @@ async def _load_overlay_conversion(
     }
     candidates = await _discover_fx_candidates(repo, requirements, as_of)
     candidate_planes = _candidate_planes(candidates, {})
-    rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
-    return build_fx_rates(rows), _resolve_fx_planes(requirements, candidate_planes, rows, "USD")
+    planes = sorted(candidate_planes.get(currency_pair_key(valuation_ccy, "USD"), set()))
+    rows = await repo.get_pnl_fx_rate_candles_at(planes, sorted(_rate_minute_opens(minutes)), as_of)
+    return build_fx_rates(rows), _resolve_fx_planes(
+        requirements, candidate_planes, rows, valuation_ccy
+    )
+
+
+def _oriented_plane_label(plane: PnlFxRatePlane) -> str:
+    """Name the elected plane the way the rest of the envelope names planes.
+
+    A bare venue string cannot be checked against anything: the same venue
+    quotes both orientations of a pair, and the orientation is what decides
+    whether a close is multiplied or divided. The label therefore carries the
+    oriented pair as well, matching the identity the envelope's FX rate sources
+    disclose for every other converted number.
+
+    Args:
+        plane: The elected ``(base, quote, exchange)`` plane.
+
+    Returns:
+        The oriented plane label.
+    """
+    base, quote, exchange = plane
+    return f"{base}/{quote}@{exchange}"
+
+
+def _rate_minute_opens(minutes: Iterable[datetime]) -> set[datetime]:
+    """Return the candle opens whose closes price these conversion minutes.
+
+    The rate for minute ``M`` is the close of the bar that OPENED at ``M − 1m``,
+    so a consumer asking for exact minutes must ask the store for exactly those
+    opens.
+
+    Args:
+        minutes: Conversion minutes needing a proven close.
+
+    Returns:
+        The candle-open minutes backing them.
+    """
+    return {minute - timedelta(minutes=1) for minute in minutes}
 
 
 def _converted_point_overlay(
@@ -4211,12 +4260,17 @@ def _converted_point_overlay(
 ) -> PnlPointEquityOverlay | None:
     """Restate one minute's stocks in the target currency, or refuse the minute.
 
-    Every stock converts at that minute's single proven close, so the partition
-    ``cash = equity - position_value`` survives the restatement exactly. The
-    drawdown fraction is deliberately dropped rather than carried: its running
-    peak was established in USD, and a fraction of a USD peak is not the
+    Only the two independent stocks convert; equity is recomposed from them
+    exactly as the USD path composes it from the persisted floats. Converting
+    equity separately would divide a sum where the sum of divisions is served,
+    and IEEE division does not distribute over addition — the partition would
+    disagree with itself in the last bits. Composing instead keeps
+    ``equity == cash + position_value`` literally true in both bases.
+
+    The drawdown fraction is deliberately dropped rather than carried: its
+    running peak was established in USD, and a fraction of a USD peak is not the
     target-currency drawdown. A leg that cannot be priced, or that overflows,
-    refuses the whole minute instead of serving a partly converted trio.
+    refuses the whole minute instead of serving a partly converted pair.
 
     Args:
         overlay: The USD-denominated stocks of one qualified sample minute.
@@ -4229,17 +4283,21 @@ def _converted_point_overlay(
         The restated overlay, or ``None`` when the minute cannot be proven.
     """
     converted: list[float] = []
-    for amount in (overlay.equity, overlay.cash, overlay.position_value):
+    for amount in (overlay.cash, overlay.position_value):
         if amount is None:
             return None
         value = convert_amount(amount, "USD", valuation_ccy, minute, rates, venues)
         if value is None or not math.isfinite(value):
             return None
         converted.append(value)
+    cash, position_value = converted
+    equity = cash + position_value
+    if not math.isfinite(equity):
+        return None
     return PnlPointEquityOverlay(
-        equity=converted[0],
-        cash=converted[1],
-        position_value=converted[2],
+        equity=equity,
+        cash=cash,
+        position_value=position_value,
         drawdown=None,
     )
 
@@ -4293,7 +4351,7 @@ def _convert_equity_overlay(
         last_minute=max(converted),
         valuation_basis=valuation_ccy,
         converted_from="USD",
-        conversion_rate_source=None if plane is None else plane[2],
+        conversion_rate_source=None if plane is None else _oriented_plane_label(plane),
         conversion_withheld_minutes=withheld,
         drawdown_withheld_reason="currency_basis_unsupported",
     )

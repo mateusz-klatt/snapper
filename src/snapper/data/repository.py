@@ -1503,6 +1503,10 @@ def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
     return model.timestamp <= at, model.known_to > at
 
 
+_PNL_FX_MINUTE_BATCH: Final[int] = 400
+"""Exact-minute batch size, kept well under the strictest driver parameter cap."""
+
+
 def _pnl_fx_symbol_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
     """Prove one FX symbol's denomination and spot classification at a horizon.
 
@@ -4747,6 +4751,30 @@ class Repository(ABC):
             Distinct ``(base, quote, exchange)`` planes in lexical order.
         """
         ...
+
+    @abstractmethod
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load finalized closes for pinned spot-FX planes at exact minutes.
+
+        Same proof and ownership rules as the range-bounded sibling; the only
+        difference is which minutes are asked for. A sparse consumer — one whose
+        required minutes are scattered across a long span rather than filling it
+        — must use this, because a range read would return every minute the span
+        covers and hand the caller orders of magnitude more rows than it needs.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` planes to load.
+            open_ats: Exact candle-open minutes to match.
+            as_of: Snapshot time threading the temporal predicates.
+
+        Returns:
+            Rows ordered by ``(open_at, base, quote, exchange)``.
+        """
 
     @abstractmethod
     async def get_pnl_fx_rate_candles(
@@ -19561,6 +19589,40 @@ class SQLAlchemyRepository(Repository):
             )
             return [(base, quote, exchange) for base, quote, exchange in result.all()]
 
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load finalized closes for pinned FX planes at exactly these minutes.
+
+        The range-bounded sibling is right for a dense grid, where the span and
+        the requirement are the same set. A sparse requirement — a daily overlay
+        needing ninety endpoint minutes across ninety days — would make that
+        range read every minute it spans, so this variant matches the exact
+        opens instead. Minutes are batched because a bound-parameter list is
+        capped by the driver, and the batches are one logical read: they share
+        the caller's knowledge horizon and are re-sorted into one ordering.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` planes to load.
+            open_ats: Exact candle-open minutes to match.
+            as_of: Snapshot time threading the temporal predicates.
+
+        Returns:
+            Rows ordered by ``(open_at, base, quote, exchange)``.
+        """
+        if not planes or not open_ats:
+            return []
+        wanted = sorted(set(open_ats))
+        rows: list[PnlFxRateRow] = []
+        for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
+            batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
+            rows.extend(await self._pnl_fx_rate_candles(planes, as_of, Candle.open_at.in_(batch)))
+        rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+        return rows
+
     async def get_pnl_fx_rate_candles(
         self,
         planes: Sequence[PnlFxRatePlane],
@@ -19585,6 +19647,28 @@ class SQLAlchemyRepository(Repository):
         """
         if not planes:
             return []
+        rows = await self._pnl_fx_rate_candles(
+            planes, as_of, and_(Candle.open_at >= start, Candle.open_at <= end)
+        )
+        rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+        return rows
+
+    async def _pnl_fx_rate_candles(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        as_of: datetime,
+        minute_filter: ColumnElement[bool],
+    ) -> list[PnlFxRateRow]:
+        """Run the shared FX-plane candle read under one minute predicate.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` planes to load.
+            as_of: Snapshot time threading the temporal predicates.
+            minute_filter: Predicate selecting the candle opens to return.
+
+        Returns:
+            Unsorted rows for the caller to order.
+        """
         async with self.session() as s:
             result = await s.execute(
                 select(
@@ -19625,8 +19709,7 @@ class SQLAlchemyRepository(Repository):
                     ),
                     *_pnl_fx_symbol_proof_filters(as_of),
                     Candle.timeframe == "1m",
-                    Candle.open_at >= start,
-                    Candle.open_at <= end,
+                    minute_filter,
                     Candle.complete.is_(True),
                     *where_active(Candle, as_of),
                 )
@@ -19663,7 +19746,6 @@ class SQLAlchemyRepository(Repository):
                     candle_known_to,
                 ) in result.all()
             ]
-            rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
             return rows
 
     async def get_pnl_crypto_usd_plane_candles(

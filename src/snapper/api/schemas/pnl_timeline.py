@@ -20,9 +20,11 @@ where it can never be silently dropped.
 """
 
 from datetime import datetime
+from typing import Final
 from typing import Literal
 from typing import Self
 
+from pydantic import Field
 from pydantic import model_validator
 
 from snapper.api.schemas.base import PayloadResponse
@@ -132,15 +134,28 @@ class PnlTimelinePointData(StrictBody):
 
     ``equity`` / ``cash`` / ``position_value`` / ``drawdown`` are the Phase-5B
     observed-equity overlay (decision D13/R4). They are populated ONLY for a
-    current-truth USD request from a persisted ``complete`` sample of the current
-    anchor epoch whose ``point_time`` equals this point's minute — ``equity`` is
-    ``cash_usd + position_value_usd`` taken from the SAME persisted floats, never
-    an independent recompute. They are all ``None`` together whenever the minute
-    has no qualifying sample, the request is historical or non-USD, or the overlay
-    was withheld fail-closed. For a downsampled series the value is the one at the
-    bucket's endpoint minute (endpoint-selection); these stocks are never summed
-    or averaged across a bucket. The 5A P&L fields above are unaffected by the
-    overlay and always come from the live recompute.
+    current-truth request from a persisted ``complete`` sample of the current
+    anchor epoch whose ``point_time`` equals this point's minute. ``equity`` is
+    always ``cash + position_value`` composed from the stocks served alongside
+    it, never an independent recompute.
+
+    Samples persist in USD alone. A USD request therefore serves the persisted
+    floats unchanged. A request in another currency serves the same stocks
+    restated at that minute's proven fiat close, so the trio is denominated in
+    the requested currency — read ``equity_coverage.valuation_basis`` to know
+    which, and ``converted_from`` to know whether a restatement was applied.
+    ``drawdown`` is the one field a restatement drops: its running peak was
+    established in USD and a fraction of a USD peak is not the target-currency
+    drawdown, so a converted response serves it ``None`` with
+    ``equity_coverage.drawdown_withheld_reason`` set while the other three stay
+    populated.
+
+    The trio is ``None`` together whenever the minute has no qualifying sample,
+    the request is historical, the minute's conversion could not be proven, or
+    the overlay was withheld fail-closed. For a downsampled series the value is
+    the one at the bucket's endpoint minute (endpoint-selection); these stocks
+    are never summed or averaged across a bucket. The 5A P&L fields above are
+    unaffected by the overlay and always come from the live recompute.
     """
 
     point_time: datetime
@@ -234,14 +249,33 @@ type PnlTimelineMarkerData = PnlFillMarkerData | PnlSignalMarkerData | PnlAiDeci
 """Strict marker union distinguished by each model's literal ``kind`` field."""
 
 
+_PERSISTED_SAMPLE_BASIS: Final[str] = "USD"
+"""The only currency Phase-5B samples persist in; every other basis is restated."""
+
+
 class PnlEquityCoverageData(StrictBody):
     """Envelope disclosure of the Phase-5B observed-equity overlay (D13/R10/R11).
 
-    ``sampled`` is ``True`` only when the request was current-truth and USD and at
-    least one ``complete`` sample of the current anchor epoch backs the requested
-    window; every other scope (historical ``as_of``, non-USD, no anchor, no
-    sample, or a fail-closed withholding) reports ``sampled=False`` with the
-    remaining fields null or zero. ``venue_scope`` is the v1 spot-only equity
+    ``sampled`` is ``True`` only when the request was current-truth, at least one
+    ``complete`` sample of the current anchor epoch backs the requested window,
+    and at least one of those minutes survived valuation into the requested
+    currency; every other scope (historical ``as_of``, no anchor, no sample, a
+    currency whose conversion cannot be proven for any sampled minute, or a
+    fail-closed withholding) reports ``sampled=False``.
+
+    ``valuation_basis`` names the currency the served stocks are denominated in
+    and ``converted_from`` names the persisted basis whenever a restatement was
+    applied, so a converted number can never be mistaken for a natively sampled
+    one. ``conversion_rate_source`` identifies the elected oriented plane as
+    ``base/quote@venue`` — the orientation matters, because it decides whether
+    the close was multiplied or divided. ``conversion_withheld_minutes`` counts
+    the sampled minutes dropped for want of a proven close at that exact minute;
+    it is the honest companion to ``complete_minutes``, which counts only the
+    minutes actually served. An unsampled result still carries
+    ``valuation_basis`` and this count when a conversion was attempted, which is
+    how a consumer tells "never sampled" apart from "sampled but unconvertible".
+    ``drawdown_withheld_reason`` is set exactly when a served overlay was
+    restated out of its persisted basis. ``venue_scope`` is the v1 spot-only equity
     denominator (futures venues are excluded from the basket and the completeness
     denominator, R11). ``external_flows_adjusted`` is ``False`` in v1: deposits and
     withdrawals are NOT rebased out of the observed-equity and drawdown curves
@@ -263,7 +297,7 @@ class PnlEquityCoverageData(StrictBody):
     valuation_basis: str | None
     converted_from: str | None
     conversion_rate_source: str | None
-    conversion_withheld_minutes: int
+    conversion_withheld_minutes: int = Field(ge=0)
     drawdown_withheld_reason: Literal["currency_basis_unsupported"] | None
 
     @model_validator(mode="after")
@@ -295,22 +329,41 @@ class PnlEquityCoverageData(StrictBody):
     def _require_consistent_conversion(self) -> None:
         """Refuse a conversion disclosure that contradicts its own basis.
 
-        A converted overlay must name what it converted from and must withhold
-        the USD-basis drawdown; a natively sampled overlay must claim neither.
+        Samples persist in one basis, so a restatement can only ever come FROM
+        that basis, must name a different target, and must both name the plane
+        it priced with and withhold the source-basis drawdown once it serves
+        anything. A natively sampled overlay claims none of that. These are
+        transport invariants rather than a restatement of today's service: a
+        consumer validating a payload cannot see which writer produced it.
 
         Raises:
             ValueError: When the conversion fields contradict each other.
         """
         converted = self.converted_from is not None
-        if converted and self.valuation_basis == self.converted_from:
+        if not converted:
+            if self.sampled and self.valuation_basis != _PERSISTED_SAMPLE_BASIS:
+                raise ValueError("an unconverted sampled coverage must carry the persisted basis")
+            if (
+                self.conversion_rate_source is not None
+                or self.conversion_withheld_minutes != 0
+                or self.drawdown_withheld_reason is not None
+            ):
+                raise ValueError("an unconverted coverage must not disclose conversion state")
+            return
+        if self.converted_from != _PERSISTED_SAMPLE_BASIS:
+            raise ValueError(
+                f"a converted coverage must come from {_PERSISTED_SAMPLE_BASIS}, "
+                "the only basis samples persist in"
+            )
+        if self.valuation_basis == self.converted_from:
             raise ValueError("a converted coverage must not restate its own basis")
-        if not converted and (
-            self.conversion_rate_source is not None
-            or self.conversion_withheld_minutes != 0
-            or self.drawdown_withheld_reason is not None
-        ):
-            raise ValueError("an unconverted coverage must not disclose conversion state")
-        if converted and self.sampled and self.drawdown_withheld_reason is None:
+        if not self.sampled:
+            if self.conversion_rate_source is not None:
+                raise ValueError("an unsampled coverage cannot name a rate source it never used")
+            return
+        if self.conversion_rate_source is None:
+            raise ValueError("a served converted coverage must name the plane it priced with")
+        if self.drawdown_withheld_reason is None:
             raise ValueError("a converted sampled coverage must withhold its drawdown basis")
 
 

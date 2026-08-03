@@ -587,6 +587,7 @@ class FakeRepo:
         self._lineage = list(lineage)
         self._has_fill_gap = has_fill_gap
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
+        self.fx_exact_minute_calls: list[tuple[list[PnlFxRatePlane], list[datetime]]] = []
         self._fx_repository = fx_repository
         self._has_anchor = has_anchor
         self._anchor = anchor
@@ -918,6 +919,24 @@ class FakeRepo:
                 if (row["base"], row["quote"]) in requested and start <= row["open_at"] <= end
             }
         )
+
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Return canned candles for exactly the requested opens."""
+        plane_list = list(planes)
+        self.fx_exact_minute_calls.append((plane_list, list(open_ats)))
+        requested = set(plane_list)
+        wanted = set(open_ats)
+        return [
+            row
+            for row in self._fx_rows
+            if (row["base"], row["quote"], row["exchange"]) in requested
+            and row["open_at"] in wanted
+        ]
 
     async def get_pnl_fx_rate_candles(
         self,
@@ -6500,6 +6519,7 @@ def _overlay_request(
     current_truth: bool = True,
     valuation_ccy: str = "USD",
     epoch_public_id: str = "",
+    to_time: datetime | None = None,
 ) -> _EquityOverlayRequest:
     """Build one equity-overlay request over the ``[_T0, _m(2)]`` grid window."""
     return _EquityOverlayRequest(
@@ -6508,9 +6528,9 @@ def _overlay_request(
         valuation_ccy=valuation_ccy,
         epoch_public_id=epoch_public_id or _default_epoch(),
         from_time=_T0,
-        to_time=_m(2),
+        to_time=to_time or _m(2),
         current_truth=current_truth,
-        as_of=_m(2),
+        as_of=to_time or _m(2),
         points=tuple(points),
     )
 
@@ -6754,7 +6774,7 @@ class TestConvertEquityOverlay:
         assert result.coverage.sampled is True
         assert result.coverage.valuation_basis == "EUR"
         assert result.coverage.converted_from == "USD"
-        assert result.coverage.conversion_rate_source == "kraken"
+        assert result.coverage.conversion_rate_source == "EUR/USD@kraken"
 
     async def test_drawdown_is_withheld_on_a_converted_basis(self) -> None:
         """Withhold the drawdown whenever the basis changed.
@@ -6805,6 +6825,41 @@ class TestConvertEquityOverlay:
         assert result.coverage.conversion_withheld_minutes == 0
         assert repo.fx_plane_calls == []
 
+    async def test_each_minute_uses_its_own_close(self) -> None:
+        """Price every minute at its own rate.
+
+        Given two sampled minutes whose planes close at different rates
+        When the overlay is restated
+        Then each minute divides by its own close, never a cached first rate.
+        """
+        repo = FakeRepo(fx_rows=[_fx_row("EUR", "USD", 1, 1.25), _fx_row("EUR", "USD", 2, 2.0)])
+        repo.load_samples([_sample_row(_m(1)), _sample_row(_m(2))])
+        result = await _resolve_equity_overlay(
+            repo,
+            _overlay_request([_grid_point(_m(1)), _grid_point(_m(2))], valuation_ccy="EUR"),
+        )
+        first, second = result.overlay[_m(1)], result.overlay[_m(2)]
+        assert first.equity == pytest.approx(1000.0 / 1.25)
+        assert second.equity == pytest.approx(1000.0 / 2.0)
+
+    async def test_the_partition_is_exact_under_an_awkward_rate(self) -> None:
+        """Keep the partition literally exact, not merely close.
+
+        Given a close whose division does not terminate in binary
+        When the stocks are restated
+        Then equity equals cash plus position value bit for bit, because equity
+        is composed from them rather than divided independently.
+        """
+        repo = FakeRepo(fx_rows=[_fx_row("EUR", "USD", 1, 1.132799)])
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(1))], valuation_ccy="EUR")
+        )
+        overlay = result.overlay[_m(1)]
+        equity, cash, position_value = overlay.equity, overlay.cash, overlay.position_value
+        assert equity is not None and cash is not None and position_value is not None
+        assert equity == cash + position_value
+
     def test_a_null_stock_refuses_its_whole_minute(self) -> None:
         """Refuse a minute whose stocks are incomplete.
 
@@ -6829,19 +6884,50 @@ class TestConvertEquityOverlay:
         assert converted.overlay == {}
         assert converted.coverage.conversion_withheld_minutes == 1
 
-    async def test_conversion_requests_only_the_overlay_minutes(self) -> None:
-        """Bound the plane read by the overlay minutes.
+    def test_an_overflowing_sum_refuses_its_minute(self) -> None:
+        """Refuse a minute whose restated stocks cannot be summed.
 
-        Given a sparse overlay
-        When its conversion evidence is elected
-        Then the plane read is bounded by the overlay minutes, not the grid span.
+        Given two stocks that convert finitely but whose sum overflows
+        When equity is composed from them
+        Then the minute is refused rather than served as an infinity.
         """
-        repo = self._eur_repo([2])
-        repo.load_samples([_sample_row(_m(2))])
-        await _resolve_equity_overlay(
-            repo, _overlay_request([_grid_point(_m(2))], valuation_ccy="EUR")
+        huge = 9.0e307
+        result = _EquityOverlayResult(
+            overlay={
+                _m(1): PnlPointEquityOverlay(
+                    equity=huge, cash=huge, position_value=huge, drawdown=None
+                )
+            },
+            coverage=_UNSAMPLED_EQUITY_COVERAGE,
         )
-        assert repo.fx_candidate_range_calls[-1] == (_m(1), _m(2))
+        converted = _convert_equity_overlay(
+            result,
+            "EUR",
+            {("EUR", "USD", "kraken", _m(1)): 1.0},
+            {("EUR", "USD"): ("EUR", "USD", "kraken")},
+        )
+        assert converted.overlay == {}
+        assert converted.coverage.conversion_withheld_minutes == 1
+
+    async def test_conversion_requests_only_the_overlay_minutes(self) -> None:
+        """Ask the store for the overlay's exact opens, never the span.
+
+        Given a sparse overlay whose minutes are scattered across a wide span
+        When its conversion evidence is loaded
+        Then the candle read names exactly those opens, so a daily window can
+        never pull every minute it covers.
+        """
+        repo = self._eur_repo([2, 500])
+        repo.load_samples([_sample_row(_m(2)), _sample_row(_m(500))])
+        await _resolve_equity_overlay(
+            repo,
+            _overlay_request(
+                [_grid_point(_m(2)), _grid_point(_m(500))],
+                valuation_ccy="EUR",
+                to_time=_m(500),
+            ),
+        )
+        assert repo.fx_exact_minute_calls[-1][1] == [_m(1), _m(499)]
 
 
 class TestResolveEquityOverlay:

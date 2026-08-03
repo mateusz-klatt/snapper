@@ -161,7 +161,7 @@ def _converted_coverage() -> PnlEquityCoverageData:
         sample_calc_version="5B.2",
         valuation_basis="EUR",
         converted_from="USD",
-        conversion_rate_source="kraken",
+        conversion_rate_source="EUR/USD@kraken",
         conversion_withheld_minutes=1,
         drawdown_withheld_reason="currency_basis_unsupported",
     )
@@ -571,7 +571,7 @@ class TestEquityCoverageContract:
         restored = PnlEquityCoverageData.model_validate(payload)
         assert restored.valuation_basis == "EUR"
         assert restored.converted_from == "USD"
-        assert restored.conversion_rate_source == "kraken"
+        assert restored.conversion_rate_source == "EUR/USD@kraken"
         assert restored.conversion_withheld_minutes == 1
         assert restored.drawdown_withheld_reason == "currency_basis_unsupported"
 
@@ -593,6 +593,51 @@ class TestEquityCoverageContract:
             payload[field] = value
             with pytest.raises(ValidationError):
                 PnlEquityCoverageData.model_validate(payload)
+
+    def test_converted_coverage_rejects_a_foreign_source_basis(self) -> None:
+        """Samples persist in one basis, so a restatement can only come from it."""
+        payload = _converted_coverage().model_dump()
+        payload["converted_from"] = "GBP"
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
+
+    def test_served_converted_coverage_requires_its_plane(self) -> None:
+        """A served converted overlay must name the plane it priced with."""
+        payload = _converted_coverage().model_dump()
+        payload["conversion_rate_source"] = None
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
+
+    def test_unsampled_converted_coverage_rejects_a_rate_source(self) -> None:
+        """An unsampled attempt priced nothing, so it may not name a source."""
+        payload = _converted_coverage().model_dump()
+        payload.update(
+            sampled=False,
+            venue_scope=None,
+            external_flows_adjusted=None,
+            complete_minutes=0,
+            first_minute=None,
+            last_minute=None,
+            sample_calc_version=None,
+            drawdown_withheld_reason=None,
+        )
+        PnlEquityCoverageData.model_validate({**payload, "conversion_rate_source": None})
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
+
+    def test_native_sampled_coverage_must_carry_the_persisted_basis(self) -> None:
+        """A natively sampled overlay cannot claim a basis it never converted to."""
+        payload = _sampled_coverage().model_dump()
+        payload["valuation_basis"] = "EUR"
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
+
+    def test_withheld_minute_count_cannot_be_negative(self) -> None:
+        """A withheld count is a tally, never a negative number."""
+        payload = _converted_coverage().model_dump()
+        payload["conversion_withheld_minutes"] = -1
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
 
     def test_converted_sampled_coverage_must_withhold_its_drawdown(self) -> None:
         """A served converted overlay may not carry a USD-basis drawdown fraction."""
