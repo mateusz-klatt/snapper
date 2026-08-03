@@ -58,7 +58,7 @@ SYNC_MEMORY_DB_URL = "sqlite:///:memory:"
 ASYNC_MEMORY_DB_URL = "sqlite+aiosqlite:///:memory:"
 
 
-@pytest.fixture()
+@pytest.fixture
 def cli_runner() -> CliRunner:
     """Provide a Typer CliRunner instance for CLI testing."""
     return CliRunner()
@@ -2506,7 +2506,7 @@ class TestPolygonBackfillSuccess:
             )
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_settings() -> SimpleNamespace:
     """Provide mock settings with database and server configuration."""
     return SimpleNamespace(
@@ -3099,7 +3099,7 @@ def test_update_polygon_symbols_runs_updater(
     assert captured["insert_new"] is True
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_user_service() -> MagicMock:
     """Provide a mock UserService with async methods."""
     service = MagicMock()
@@ -3110,7 +3110,7 @@ def mock_user_service() -> MagicMock:
     return service
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_user() -> MagicMock:
     """Provide a mock user with admin role."""
     user = MagicMock()
@@ -3264,7 +3264,7 @@ def test_reset_password_handles_generic_exception(
     assert "Failed to reset password: db down" in result.stdout
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_bootstrap_settings() -> MagicMock:
     """Provide mock bootstrap settings for encryption rotation tests."""
     mock = MagicMock()
@@ -3273,7 +3273,7 @@ def mock_bootstrap_settings() -> MagicMock:
     return mock
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_setting() -> MagicMock:
     """Provide a mock encrypted setting instance."""
     setting = MagicMock()
@@ -3283,7 +3283,7 @@ def mock_setting() -> MagicMock:
     return setting
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_engine() -> AsyncMock:
     """Provide a mock async database engine."""
     engine = AsyncMock()
@@ -3291,7 +3291,7 @@ def mock_engine() -> AsyncMock:
     return engine
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_session() -> AsyncMock:
     """Provide a mock async database session with context manager."""
     session = AsyncMock()
@@ -3303,7 +3303,7 @@ def mock_session() -> AsyncMock:
     return session
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_session_factory(mock_session: AsyncMock) -> MagicMock:
     """Provide a mock session factory that returns mock_session."""
     factory = MagicMock()

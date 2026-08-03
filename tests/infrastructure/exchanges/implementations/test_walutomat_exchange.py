@@ -164,7 +164,7 @@ def stub_symbol_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_connect_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify successful connection fetches market data.
 
@@ -194,7 +194,7 @@ async def test_connect_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stub_client.closed is True
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_connect_failure_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify connection failure closes HTTP client.
 
@@ -301,7 +301,7 @@ def test_get_auth_headers_with_signature(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "X-API-Signature" in headers
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_market_data_requires_connection() -> None:
     """Verify fetch_market_data requires connection.
 
@@ -314,7 +314,7 @@ async def test_fetch_market_data_requires_connection() -> None:
         await client._fetch_market_data()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_success() -> None:
     """Verify get_ticker marks on the top-of-book mid, not on forex_now.
 
@@ -343,7 +343,7 @@ async def test_get_ticker_success() -> None:
     assert ticker.bid < ticker.last < ticker.ask
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_missing_symbol() -> None:
     """Verify get_ticker raises for missing symbol.
 
@@ -402,7 +402,7 @@ def test_get_supported_pairs_returns_symbols() -> None:
     assert pairs == ["EUR-PLN", "USD-PLN"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_yields_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_instruments yields instrument metadata.
 
@@ -453,7 +453,7 @@ def test_polling_loop_backoff_error_does_not_stop_running() -> None:
     assert client._backoff_until > 0.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order raises for missing order.
 
@@ -470,7 +470,7 @@ async def test_get_order_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
         await client.get_order("abc")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_filters_and_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders applies filters and limit.
 
@@ -515,7 +515,7 @@ async def test_get_orders_filters_and_limit(monkeypatch: pytest.MonkeyPatch) -> 
     assert orders[0].symbol == "EUR-PLN"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_balance filters by currency.
 
@@ -564,7 +564,7 @@ def test_read_native_balances_capabilities() -> None:
     assert WalutomatExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_reads_multi_currency() -> None:
     """Verify read_native_balances faithfully reads every currency row.
 
@@ -610,7 +610,7 @@ async def test_read_native_balances_reads_multi_currency() -> None:
     assert entries[1].numeric_provenance == "venue_raw"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_empty_returns_empty_list() -> None:
     """Verify read_native_balances returns an empty list for no balances.
 
@@ -625,7 +625,7 @@ async def test_read_native_balances_empty_returns_empty_list() -> None:
     assert entries == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_non_success_envelope_raises() -> None:
     """Verify read_native_balances raises on a non-success envelope.
 
@@ -640,7 +640,7 @@ async def test_read_native_balances_non_success_envelope_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_non_finite_amount_raises() -> None:
     """Verify read_native_balances rejects a non-finite amount.
 
@@ -667,7 +667,7 @@ async def test_read_native_balances_non_finite_amount_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_missing_amount_raises() -> None:
     """Verify read_native_balances rejects a row missing an amount.
 
@@ -693,7 +693,7 @@ async def test_read_native_balances_missing_amount_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_missing_currency_raises() -> None:
     """Verify read_native_balances rejects a row missing its currency.
 
@@ -719,7 +719,7 @@ async def test_read_native_balances_missing_currency_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_requires_credentials() -> None:
     """Verify read_native_balances requires API credentials.
 
@@ -733,7 +733,7 @@ async def test_read_native_balances_requires_credentials() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_truthy_non_true_success_raises() -> None:
     """Verify a truthy-but-non-True success envelope still raises.
 
@@ -749,7 +749,7 @@ async def test_read_native_balances_truthy_non_true_success_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_missing_success_raises() -> None:
     """Verify a missing success key raises.
 
@@ -764,7 +764,7 @@ async def test_read_native_balances_missing_success_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_result_not_a_list_raises() -> None:
     """Verify a non-list result raises.
 
@@ -779,7 +779,7 @@ async def test_read_native_balances_result_not_a_list_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_missing_result_raises() -> None:
     """Verify a missing result key raises.
 
@@ -794,7 +794,7 @@ async def test_read_native_balances_missing_result_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_non_dict_row_raises() -> None:
     """Verify a non-dict row raises.
 
@@ -809,7 +809,7 @@ async def test_read_native_balances_non_dict_row_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_null_currency_raises() -> None:
     """Verify a null currency raises.
 
@@ -836,7 +836,7 @@ async def test_read_native_balances_null_currency_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_empty_currency_raises() -> None:
     """Verify an empty-string currency raises.
 
@@ -863,7 +863,7 @@ async def test_read_native_balances_empty_currency_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_non_string_currency_raises() -> None:
     """Verify a non-string currency raises.
 
@@ -890,7 +890,7 @@ async def test_read_native_balances_non_string_currency_raises() -> None:
         await client.read_native_balances()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ohlcv_returns_empty_list() -> None:
     """Verify get_ohlcv returns empty list.
 
@@ -903,7 +903,7 @@ async def test_get_ohlcv_returns_empty_list() -> None:
     assert result == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_requires_running() -> None:
     """Verify subscribe_instruments requires running state.
 
@@ -917,7 +917,7 @@ async def test_subscribe_instruments_requires_running() -> None:
         await generator.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_yields_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_instruments yields symbol metadata.
 
@@ -942,7 +942,7 @@ async def test_subscribe_instruments_yields_metadata(monkeypatch: pytest.MonkeyP
     assert {entry["native_symbol"] for entry in results} == {"EUR-PLN", "USD-PLN"}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_requires_running() -> None:
     """Verify subscribe_ticks requires running state.
 
@@ -956,7 +956,7 @@ async def test_subscribe_ticks_requires_running() -> None:
         await generator.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_yields_queue_data() -> None:
     """Verify subscribe_ticks yields from queue.
 
@@ -990,7 +990,7 @@ async def test_subscribe_ticks_yields_queue_data() -> None:
         await generator.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify polling loop enqueues tick updates buffered at the mid.
 
@@ -1024,7 +1024,7 @@ async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatc
     await asyncio.wait_for(task, timeout=0.1)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_builder_loop_emits_candles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify candle builder emits candles from tick buffer.
 
@@ -1075,7 +1075,7 @@ async def test_candle_builder_loop_emits_candles(monkeypatch: pytest.MonkeyPatch
     assert client._tick_buffers["EUR-PLN"] == [(75.0, 4.50)]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_builder_loop_handles_empty_minute(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify candle builder handles empty tick window.
 
@@ -1113,7 +1113,7 @@ async def test_candle_builder_loop_handles_empty_minute(monkeypatch: pytest.Monk
     assert client._tick_buffers["EUR-PLN"] == [(120.0, 4.00)]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_builder_loop_exits_when_not_running() -> None:
     """Verify candle builder exits when not running.
 
@@ -1126,7 +1126,7 @@ async def test_candle_builder_loop_exits_when_not_running() -> None:
     await client._candle_builder_loop()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_wildcard_starts_polling_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1180,7 +1180,7 @@ async def test_subscribe_ticks_wildcard_starts_polling_queue(
         await asyncio.wait_for(client._polling_task, timeout=0.1)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_not_connected() -> None:
     """Verify subscribe_candles requires connection.
 
@@ -1194,7 +1194,7 @@ async def test_subscribe_candles_not_connected() -> None:
         await generator.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_unsupported_timeframe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_candles rejects unsupported timeframes.
 
@@ -1227,7 +1227,7 @@ async def test_subscribe_candles_unsupported_timeframe(monkeypatch: pytest.Monke
         await client.disconnect()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_trades_not_supported() -> None:
     """Verify subscribe_trades is not supported.
 
@@ -1268,7 +1268,7 @@ def _make_order_snapshot(
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_returns_active_match() -> None:
     """Active Walutomat submitId match resolves as venue-confirmed found.
 
@@ -1298,7 +1298,7 @@ async def test_find_order_by_client_id_returns_active_match() -> None:
     assert calls == [("EUR-PLN", None, None)]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_miss_is_not_authoritative() -> None:
     """Active Walutomat submitId miss keeps UNKNOWN rather than returning None.
 
@@ -1326,7 +1326,7 @@ async def test_find_order_by_client_id_miss_is_not_authoritative() -> None:
         await client.find_order_by_client_id("cid-missing", "EUR-PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_resolves_positive_history_fill() -> None:
     """History proves an order exists and has traded, but not completeness.
 
@@ -1379,7 +1379,7 @@ async def test_find_order_by_client_id_resolves_positive_history_fill() -> None:
     assert found.counter_filled == 43.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_excludes_foreign_submit_id_legs() -> None:
     """Every aggregated history leg must carry the requested submit id.
 
@@ -1425,7 +1425,7 @@ async def test_find_order_by_client_id_excludes_foreign_submit_id_legs() -> None
         await client.find_order_by_client_id("cid-requested", "EUR-PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_multiple_order_ids_stay_unknown() -> None:
     """Multiple venue orders for one submit id are ambiguous and must park.
 
@@ -1466,7 +1466,7 @@ async def test_find_order_by_client_id_multiple_order_ids_stay_unknown() -> None
         await client.find_order_by_client_id("cid-duplicate", "EUR-PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_zero_fill_history_stays_unknown() -> None:
     """A submit-id history row without fill legs cannot prove placement outcome.
 
@@ -1500,7 +1500,7 @@ async def test_find_order_by_client_id_zero_fill_history_stays_unknown() -> None
         await client.find_order_by_client_id("cid-cancelled", "EUR-PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_same_signed_legs_prove_no_fill() -> None:
     """Same-signed MARKET_FX legs are not an exchange and cannot prove a fill.
 
@@ -1548,7 +1548,7 @@ async def test_find_order_by_client_id_same_signed_legs_prove_no_fill() -> None:
         await client.find_order_by_client_id("cid-same-sign", "EUR-PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_without_symbol_never_reads_history() -> None:
     """An unsymbolled verification cannot name the legs, so it must not guess.
 
@@ -1569,7 +1569,7 @@ async def test_find_order_by_client_id_without_symbol_never_reads_history() -> N
     history_tip.assert_not_awaited()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_query_failure_propagates() -> None:
     """Walutomat active-order query failure remains could-not-verify.
 
@@ -1661,7 +1661,7 @@ def test_active_execution_helpers_detect_fill_progress() -> None:
     assert _active_execution_status(order) == ExchangeOrderStatusEnum.PARTIALLY_FILLED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_httpx_error_logs_warning_not_exception(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1708,7 +1708,7 @@ async def test_subscribe_executions_httpx_error_logs_warning_not_exception(
     ), f"httpx errors must not log ERROR+TB, got {[r.message for r in error_records]}"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_first_poll_seeds_without_yield() -> None:
     """Verify first poll populates tracking but yields nothing.
 
@@ -1740,7 +1740,7 @@ async def test_subscribe_executions_first_poll_seeds_without_yield() -> None:
     assert results == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_yields_fill_on_filled_increase() -> None:
     """Verify fill update is yielded when filled quantity increases.
 
@@ -1779,7 +1779,7 @@ async def test_subscribe_executions_yields_fill_on_filled_increase() -> None:
     assert results[0].cl_ord_id == "sub-1"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_yields_filled_when_complete() -> None:
     """Verify CLOSED status when order is fully filled.
 
@@ -1816,7 +1816,7 @@ async def test_subscribe_executions_yields_filled_when_complete() -> None:
     assert results[0].exec_type == "trade"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_no_yield_when_no_change() -> None:
     """Verify no update when filled quantity does not change.
 
@@ -1848,7 +1848,7 @@ async def test_subscribe_executions_no_yield_when_no_change() -> None:
     assert results == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
     """Verify CLOSED event when fully filled order disappears.
 
@@ -1895,7 +1895,7 @@ async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
     assert results[0].cum_qty == 100.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
     """Verify CANCELED event when partially filled order disappears.
 
@@ -1941,7 +1941,7 @@ async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
     assert results[0].cum_qty == 30.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None:
     """Verify CANCELED event when unfilled order disappears.
 
@@ -1987,7 +1987,7 @@ async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None
     assert results[0].cum_qty == 0.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_handles_api_error() -> None:
     """Verify polling continues after API error.
 
@@ -2024,7 +2024,7 @@ async def test_subscribe_executions_handles_api_error() -> None:
     assert results[0].cum_qty == 50.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_respects_poll_interval() -> None:
     """Verify asyncio.sleep is called with execution_poll_interval.
 
@@ -2066,7 +2066,7 @@ async def test_subscribe_executions_respects_poll_interval() -> None:
     assert 7.5 in sleep_values
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_uses_correct_field_names() -> None:
     """Verify ExecutionUpdate uses order_id, cl_ord_id, cum_qty field names.
 
@@ -2108,7 +2108,7 @@ async def test_subscribe_executions_uses_correct_field_names() -> None:
     assert update.average_price == 4.50
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_fails_when_not_connected() -> None:
     """Verify RuntimeError when client is not connected.
 
@@ -2122,7 +2122,7 @@ async def test_subscribe_executions_fails_when_not_connected() -> None:
             pass
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_fails_when_no_credentials() -> None:
     """Verify RuntimeError when credentials are missing.
 
@@ -2137,7 +2137,7 @@ async def test_subscribe_executions_fails_when_no_credentials() -> None:
             pass
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_new_order_no_yield_after_first_poll() -> None:
     """Verify new order appearing after first poll with filled=0 does not yield.
 
@@ -2171,7 +2171,7 @@ async def test_subscribe_executions_new_order_no_yield_after_first_poll() -> Non
     assert results == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_new_order_with_prefilled_yields() -> None:
     """Verify new order appearing with filled>0 yields ExecutionUpdate.
 
@@ -2208,7 +2208,7 @@ async def test_subscribe_executions_new_order_with_prefilled_yields() -> None:
     assert results[0].order_status == ExchangeOrderStatusEnum.OPEN
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_first_poll_failure_still_seeds_next() -> None:
     """Verify first poll failure resets first_poll flag.
 
@@ -2245,7 +2245,7 @@ async def test_subscribe_executions_first_poll_failure_still_seeds_next() -> Non
     assert results[0].cum_qty == 50.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_idles_when_no_tracked_orders() -> None:
     """Verify polling continues when no orders are tracked.
 
@@ -2275,7 +2275,7 @@ async def test_subscribe_executions_idles_when_no_tracked_orders() -> None:
     assert poll_count >= 2
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_wake_event_interrupts_idle() -> None:
     """Verify wake event interrupts idle sleep immediately.
 
@@ -2316,7 +2316,7 @@ async def test_subscribe_executions_wake_event_interrupts_idle() -> None:
     assert poll_count >= 2
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_executions_active_interval_when_tracked() -> None:
     """Verify polling uses active interval when orders are tracked.
 
@@ -2360,7 +2360,7 @@ async def test_subscribe_executions_active_interval_when_tracked() -> None:
     assert 60.0 not in sleep_values
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_sets_wake_event() -> None:
     """Verify create_order sets the wake event to interrupt idle polling.
 
@@ -2401,7 +2401,7 @@ async def test_create_order_sets_wake_event() -> None:
         monkeypatch_obj.undo()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_skips_unrequested_symbol() -> None:
     """Verify subscribe_candles filters by requested symbols.
 
@@ -2443,7 +2443,7 @@ async def test_subscribe_candles_skips_unrequested_symbol() -> None:
         await generator.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_requires_connection() -> None:
     """Verify create_order requires connection.
 
@@ -2467,7 +2467,7 @@ async def test_create_order_requires_connection() -> None:
         await client.create_order(request)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_without_price_does_not_send_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2503,7 +2503,7 @@ async def test_create_order_without_price_does_not_send_limit(
     assert "limitPrice" not in encoded_body
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_requires_authentication() -> None:
     """Verify create_order requires full authentication.
 
@@ -2526,7 +2526,7 @@ async def test_create_order_requires_authentication() -> None:
         await client.create_order(request)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify create_order returns order snapshot on success.
 
@@ -2565,7 +2565,7 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_fetches_latest(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cancel_order returns parsed order from close endpoint.
 
@@ -2609,7 +2609,7 @@ async def test_cancel_order_fetches_latest(monkeypatch: pytest.MonkeyPatch) -> N
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders/close")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_requires_authentication() -> None:
     """Verify cancel_order requires authentication.
 
@@ -2623,7 +2623,7 @@ async def test_cancel_order_requires_authentication() -> None:
         await client.cancel_order("abc123")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_returns_matched_order(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order returns parsed order from findOrders endpoint.
 
@@ -2662,7 +2662,7 @@ async def test_get_order_returns_matched_order(monkeypatch: pytest.MonkeyPatch) 
     assert result.status == ExchangeOrderStatusEnum.OPEN
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order raises for empty API result.
 
@@ -2682,7 +2682,7 @@ async def test_get_order_raises_when_missing(monkeypatch: pytest.MonkeyPatch) ->
         await client.get_order("missing")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_raises_when_api_returns_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order raises when API returns success=false.
 
@@ -2702,7 +2702,7 @@ async def test_get_order_raises_when_api_returns_failure(monkeypatch: pytest.Mon
         await client.get_order("missing")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders returns order snapshots.
 
@@ -2852,7 +2852,7 @@ def test_parse_order_closed_partial_status() -> None:
     assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_uses_find_orders_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order calls the findOrders endpoint with orderId query param.
 
@@ -2874,7 +2874,7 @@ async def test_get_order_uses_find_orders_endpoint(monkeypatch: pytest.MonkeyPat
     assert "/market_fx/orders?orderId=ord-42" in stub_client.get_calls[0][0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_signs_endpoint_with_query_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2904,7 +2904,7 @@ async def test_get_order_signs_endpoint_with_query_string(
     assert any("?orderId=ord-99" in ep for ep in captured_endpoints)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_returns_completed_order(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order returns a fully completed order.
 
@@ -2934,7 +2934,7 @@ async def test_get_order_returns_completed_order(monkeypatch: pytest.MonkeyPatch
     assert math.isclose(result.filled, 100.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_uses_close_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cancel_order POSTs to /market_fx/orders/close.
 
@@ -2956,7 +2956,7 @@ async def test_cancel_order_uses_close_endpoint(monkeypatch: pytest.MonkeyPatch)
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders/close")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_sends_order_id_in_body(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cancel_order sends orderId in form body.
 
@@ -2979,7 +2979,7 @@ async def test_cancel_order_sends_order_id_in_body(monkeypatch: pytest.MonkeyPat
     assert "orderId=ord-77" in posted_body
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_returns_canceled_status(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cancel_order returns CANCELED for CLOSED+completion=0.
 
@@ -3001,7 +3001,7 @@ async def test_cancel_order_returns_canceled_status(monkeypatch: pytest.MonkeyPa
     assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_queries_find_orders() -> None:
     """Verify _resolve_disappeared calls get_order for final state.
 
@@ -3039,7 +3039,7 @@ async def test_disappeared_order_queries_find_orders() -> None:
     assert "ord-1" in called_with
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_uses_api_response() -> None:
     """Verify _resolve_disappeared uses API response for event data.
 
@@ -3075,7 +3075,7 @@ async def test_disappeared_order_uses_api_response() -> None:
     assert events[0].cum_qty == 100.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_query_failure_never_guesses() -> None:
     """A failed final-state query yields NOTHING — no fabricated terminal.
 
@@ -3124,7 +3124,7 @@ async def test_disappeared_order_query_failure_never_guesses() -> None:
     assert "ord-1" not in client._disappeared_retry_counts
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
     """Verify partial fill + cancel emits two events when new fill exists.
 
@@ -3165,7 +3165,7 @@ async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
     assert events[1].order_status == ExchangeOrderStatusEnum.CANCELED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
     """Verify cancel without new fill emits only one canceled event.
 
@@ -3203,7 +3203,7 @@ async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
     assert events[0].order_status == ExchangeOrderStatusEnum.CANCELED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_fully_filled_emits_single_trade() -> None:
     """Verify fully filled disappeared order emits single trade event.
 
@@ -3242,7 +3242,7 @@ async def test_disappeared_fully_filled_emits_single_trade() -> None:
     assert events[0].cum_qty == 100.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_still_open_skips_terminal() -> None:
     """Verify no terminal event when API reports order still OPEN.
 
@@ -3279,7 +3279,7 @@ async def test_disappeared_order_still_open_skips_terminal() -> None:
     assert events == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_unexpected_status_no_event() -> None:
     """Verify no terminal event for unexpected status from API.
 
@@ -3316,7 +3316,7 @@ async def test_disappeared_order_unexpected_status_no_event() -> None:
     assert events == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_transiently_omitted_open_order_stays_tracked() -> None:
     """Verify transient OPEN omission does not create a bogus reappearance fill.
 
@@ -3364,7 +3364,7 @@ async def test_transiently_omitted_open_order_stays_tracked() -> None:
     assert results == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_active_fill_event_has_fees() -> None:
     """Verify active fill event includes fee breakdown.
 
@@ -3407,7 +3407,7 @@ async def test_active_fill_event_has_fees() -> None:
     assert results[0].exec_id == "wal-ord-1-c3000000000"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_fees_populated() -> None:
     """Verify disappearance fill event includes fees from API response.
 
@@ -3450,7 +3450,7 @@ async def test_disappeared_order_fees_populated() -> None:
     assert events[0].exec_id == "wal-ord-1-c10000000000-t"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
     """Verify disappearance fee breakdown does not set fee_usd_equiv.
 
@@ -3493,7 +3493,7 @@ async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
     assert events[0].fee_usd_equiv is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_requires_connection() -> None:
     """Verify get_orders requires connection.
 
@@ -3506,7 +3506,7 @@ async def test_get_orders_requires_connection() -> None:
         await client.get_orders()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_requires_authentication() -> None:
     """Verify get_orders requires authentication.
 
@@ -3520,7 +3520,7 @@ async def test_get_orders_requires_authentication() -> None:
         await client.get_orders()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_filters_by_status(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders filters by status.
 
@@ -3559,7 +3559,7 @@ async def test_get_orders_filters_by_status(monkeypatch: pytest.MonkeyPatch) -> 
     assert orders == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_requires_connection() -> None:
     """Verify get_balance requires connection.
 
@@ -3572,7 +3572,7 @@ async def test_get_balance_requires_connection() -> None:
         await client.get_balance()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_balance returns account balances.
 
@@ -3610,7 +3610,7 @@ async def test_get_balance_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert math.isclose(balances["USD"].total, 55.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_filters_currency(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_balance filters by currency.
 
@@ -3648,7 +3648,7 @@ async def test_get_balance_filters_currency(monkeypatch: pytest.MonkeyPatch) -> 
     assert math.isclose(balances["EUR"].used, 10.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_requires_api_key_when_connected() -> None:
     """Verify get_balance requires API key when connected.
 
@@ -3662,7 +3662,7 @@ async def test_get_balance_requires_api_key_when_connected() -> None:
         await client.get_balance()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_connect_cancellation_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify a cancelled connect closes the HTTP client unwrapped.
 
@@ -3692,7 +3692,7 @@ async def test_connect_cancellation_closes_client(monkeypatch: pytest.MonkeyPatc
     assert client._http_client is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disconnect_closes_http_client_when_not_running() -> None:
     """Verify disconnect releases the HTTP client even when not running.
 
@@ -3710,7 +3710,7 @@ async def test_disconnect_closes_http_client_when_not_running() -> None:
     assert client._http_client is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disconnect_without_running() -> None:
     """Verify disconnect is no-op when not running.
 
@@ -3722,7 +3722,7 @@ async def test_disconnect_without_running() -> None:
     await client.disconnect()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disconnect_running_without_http_client() -> None:
     """Verify disconnect handles missing HTTP client.
 
@@ -3735,7 +3735,7 @@ async def test_disconnect_running_without_http_client() -> None:
     await client.disconnect()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_not_connected() -> None:
     """Verify subscribe_ticks requires connection.
 
@@ -3749,7 +3749,7 @@ async def test_subscribe_ticks_not_connected() -> None:
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_wildcard_starts_polling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify wildcard subscription reuses existing polling task.
 
@@ -3790,7 +3790,7 @@ async def test_subscribe_ticks_wildcard_starts_polling(monkeypatch: pytest.Monke
         await pending
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify wildcard candle subscription works.
 
@@ -3835,7 +3835,7 @@ async def test_subscribe_candles_wildcard(monkeypatch: pytest.MonkeyPatch) -> No
         await pending_candle
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_bad_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_instruments skips malformed symbols.
 
@@ -3851,7 +3851,7 @@ async def test_subscribe_instruments_bad_symbol(monkeypatch: pytest.MonkeyPatch)
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_connect_noop_when_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify connect is no-op when already running.
 
@@ -3866,7 +3866,7 @@ async def test_connect_noop_when_running(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client._http_client is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disconnect_cancels_tasks_and_closes() -> None:
     """Verify disconnect cancels tasks and closes client.
 
@@ -3893,7 +3893,7 @@ async def test_disconnect_cancels_tasks_and_closes() -> None:
     assert client._http_client is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_skips_missing_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify polling loop handles missing requested symbols.
 
@@ -3947,7 +3947,7 @@ def test_handle_http_error_threshold_sets_backoff_without_stopping() -> None:
     assert client._backoff_until > 0.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_logs_generic_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify polling loop handles generic errors.
 
@@ -3971,7 +3971,7 @@ async def test_polling_loop_logs_generic_error(monkeypatch: pytest.MonkeyPatch) 
     assert client._running is False
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_builder_loop_emits_from_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify candle builder emits from buffer and clears it.
 
@@ -4004,7 +4004,7 @@ async def test_candle_builder_loop_emits_from_buffer(monkeypatch: pytest.MonkeyP
     assert client._tick_buffers["EUR-PLN"] == []
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_ticks_timeout_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_ticks handles timeout gracefully.
 
@@ -4025,7 +4025,7 @@ async def test_subscribe_ticks_timeout_exits(monkeypatch: pytest.MonkeyPatch) ->
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_handles_timeout_and_cancel() -> None:
     """Verify subscribe_candles handles timeout and cancel.
 
@@ -4043,7 +4043,7 @@ async def test_subscribe_candles_handles_timeout_and_cancel() -> None:
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_starts_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify subscribe_candles starts polling and builder tasks.
 
@@ -4094,7 +4094,7 @@ async def test_subscribe_candles_starts_tasks(monkeypatch: pytest.MonkeyPatch) -
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_propagates_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4112,7 +4112,7 @@ async def test_subscribe_instruments_propagates_error(
         await gen.__anext__()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify create_order raises on API failure.
 
@@ -4139,7 +4139,7 @@ async def test_create_order_failure_raises(monkeypatch: pytest.MonkeyPatch) -> N
         await client.create_order(request)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_not_connected() -> None:
     """Verify cancel_order requires connection.
 
@@ -4152,7 +4152,7 @@ async def test_cancel_order_not_connected() -> None:
         await client.cancel_order("abc")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_failure_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cancel_order raises on API failure.
 
@@ -4171,7 +4171,7 @@ async def test_cancel_order_failure_response(monkeypatch: pytest.MonkeyPatch) ->
         await client.cancel_order("abc")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_requires_auth() -> None:
     """Verify get_order requires authentication.
 
@@ -4185,7 +4185,7 @@ async def test_get_order_requires_auth() -> None:
         await client.get_order("abc")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_filters_and_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders filters by symbol and status.
 
@@ -4230,7 +4230,7 @@ async def test_get_orders_filters_and_requires_auth(monkeypatch: pytest.MonkeyPa
     assert orders[0].symbol == "EUR-PLN"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_failure_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders raises on API failure.
 
@@ -4246,7 +4246,7 @@ async def test_get_orders_failure_response(monkeypatch: pytest.MonkeyPatch) -> N
         await client.get_orders()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_balance_requires_connection_and_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4267,7 +4267,7 @@ async def test_get_balance_requires_connection_and_failure(
         await client.get_balance()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_requires_connection() -> None:
     """Verify get_ticker requires connection.
 
@@ -4280,7 +4280,7 @@ async def test_get_ticker_requires_connection() -> None:
         await client.get_ticker("EUR/PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_disconnect_cancels_candle_builder_task() -> None:
     """Verify disconnect cancels candle builder task.
 
@@ -4307,7 +4307,7 @@ async def test_disconnect_cancels_candle_builder_task() -> None:
     assert cancelled or client._candle_builder_task is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_adds_to_new_tick_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify polling loop creates tick buffer for new symbols.
 
@@ -4412,7 +4412,7 @@ def test_handle_http_error_below_threshold_sets_no_backoff() -> None:
     assert client._backoff_until == pytest.approx(0.0)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_http_error_at_threshold_sets_backoff_60s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4483,7 +4483,7 @@ def test_handle_http_error_keeps_running_control_on_client_state() -> None:
     assert client._backoff_attempts == 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_wakeup_event_breaks_sleep_early() -> None:
     """The polling loop can be woken while in HTTP backoff.
 
@@ -4520,7 +4520,7 @@ async def test_polling_loop_wakeup_event_breaks_sleep_early() -> None:
     assert ticker.symbol == "EUR-PLN"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_sleeps_during_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """The polling loop honors scheduled backoff before polling.
 
@@ -4556,7 +4556,7 @@ async def test_polling_loop_sleeps_during_backoff(monkeypatch: pytest.MonkeyPatc
     assert client._consecutive_error_count == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_cancellation_during_backoff_does_not_leak_tasks() -> None:
     """Backoff child tasks are cancelled when the polling loop is cancelled.
 
@@ -4576,7 +4576,7 @@ async def test_polling_loop_cancellation_during_backoff_does_not_leak_tasks() ->
     assert task.done()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_successful_poll_after_backoff_resets_consecutive_and_attempt_counters() -> None:
     """Successful polling clears error and backoff counters.
 
@@ -4605,7 +4605,7 @@ async def test_successful_poll_after_backoff_resets_consecutive_and_attempt_coun
     assert client._backoff_attempts == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polling_loop_handles_http_error_without_breaking() -> None:
     """HTTP errors are handled without breaking the polling loop.
 
@@ -4638,7 +4638,7 @@ async def test_polling_loop_handles_http_error_without_breaking() -> None:
     assert client._consecutive_error_count == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_builder_loop_no_ticks_in_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4669,7 +4669,7 @@ async def test_candle_builder_loop_no_ticks_in_window(
     assert client._candle_queue.empty()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_candles_restarts_done_builder_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4715,7 +4715,7 @@ async def test_subscribe_candles_restarts_done_builder_task(
     assert task_created
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_place_order_with_limit_price(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify create_order includes limitPrice in request.
 
@@ -4761,7 +4761,7 @@ async def test_place_order_with_limit_price(monkeypatch: pytest.MonkeyPatch) -> 
     assert "limitPrice=4.5000" in captured_body
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cancel_order_requires_connection() -> None:
     """Verify cancel_order requires connection.
 
@@ -4775,7 +4775,7 @@ async def test_cancel_order_requires_connection() -> None:
         await client.cancel_order("ord-123", "EUR/PLN")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_requires_connection() -> None:
     """Verify get_order requires connection.
 
@@ -4789,7 +4789,7 @@ async def test_get_order_requires_connection() -> None:
         await client.get_order("ord-123")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_order_requires_api_key() -> None:
     """Verify get_order requires API key.
 
@@ -4803,7 +4803,7 @@ async def test_get_order_requires_api_key() -> None:
         await client.get_order("ord-123")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_filters_by_symbol_and_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4848,7 +4848,7 @@ async def test_get_orders_filters_by_symbol_and_status(
     assert orders[0].symbol == "EUR-PLN"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_orders_applies_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_orders applies limit parameter.
 
@@ -5604,7 +5604,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             client_order_id="amb-w1",
         )
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_connect_error_is_not_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A connection-refused failure keeps its native type.
 
@@ -5616,7 +5616,7 @@ class TestWalutomatAmbiguousSubmitClassification:
         with pytest.raises(httpx.ConnectError):
             await client.create_order(self._request())
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_read_timeout_is_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A post-send read timeout wraps as ambiguous.
 
@@ -5633,7 +5633,7 @@ class TestWalutomatAmbiguousSubmitClassification:
         assert exc_info.value.client_order_id == "amb-w1"
         assert exc_info.value.instrument == "EUR-PLN"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_gateway_5xx_is_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A 5xx response wraps as ambiguous.
 
@@ -5648,7 +5648,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             await client.create_order(self._request())
         assert exc_info.value.client_order_id == "amb-w1"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_client_4xx_is_not_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A 4xx response keeps its native HTTPStatusError type.
 
@@ -5660,7 +5660,7 @@ class TestWalutomatAmbiguousSubmitClassification:
         with pytest.raises(httpx.HTTPStatusError):
             await client.create_order(self._request())
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_unparseable_success_body_is_wrapped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5677,7 +5677,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             await client.create_order(self._request())
         assert exc_info.value.client_order_id == "amb-w1"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_success_without_order_id_is_wrapped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5695,7 +5695,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             await client.create_order(self._request())
         assert exc_info.value.client_order_id == "amb-w1"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_success_with_empty_order_id_is_wrapped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5712,7 +5712,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             await client.create_order(self._request())
         assert exc_info.value.client_order_id == "amb-w1"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_success_with_null_order_id_is_wrapped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5724,7 +5724,7 @@ class TestWalutomatAmbiguousSubmitClassification:
             await client.create_order(self._request())
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_order_rejects_stop_types_before_any_send() -> None:
     """Stop orders are honestly refused pre-send — Walutomat has none (#156).
 
@@ -5761,7 +5761,7 @@ def test_account_history_capability_supported() -> None:
     assert WalutomatExchangeClient.account_history_capability is CapabilityStatus.SUPPORTED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_returns_descending_page_and_tip() -> None:
     """Given: A connected, authenticated client returning an ascending page.
 
@@ -5811,7 +5811,7 @@ async def test_read_account_history_tip_returns_descending_page_and_tip() -> Non
     assert "itemLimit=200" in stub.get_calls[0][0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_empty_history_returns_none() -> None:
     """Given: An account with no history rows.
 
@@ -5824,7 +5824,7 @@ async def test_read_account_history_tip_empty_history_returns_none() -> None:
     assert await client.read_account_history_tip(200) is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_non_success_raises() -> None:
     """Given: A non-success account/history envelope.
 
@@ -5838,7 +5838,7 @@ async def test_read_account_history_tip_non_success_raises() -> None:
         await client.read_account_history_tip(200)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_non_list_result_raises() -> None:
     """Given: An account/history result that is not a list.
 
@@ -5852,7 +5852,7 @@ async def test_read_account_history_tip_non_list_result_raises() -> None:
         await client.read_account_history_tip(200)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_order_fill_legs_parses_both_legs() -> None:
     """Given: A filled order with distinct bought/sold/commission legs.
 
@@ -5891,7 +5891,7 @@ async def test_read_order_fill_legs_parses_both_legs() -> None:
     assert legs.buy_sell == "BUY"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_order_fill_legs_unknown_order_returns_none() -> None:
     """Given: An order id the venue does not know (empty result list).
 
@@ -5904,7 +5904,7 @@ async def test_read_order_fill_legs_unknown_order_returns_none() -> None:
     assert await client.read_order_fill_legs("missing") is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_order_fill_legs_non_success_raises() -> None:
     """Given: A non-success market_fx/orders envelope.
 
@@ -6140,7 +6140,7 @@ def test_recon_and_streamed_ids_decode_to_identical_witness_components() -> None
     assert decode_execution_cumulative(2004000000) == Decimal("20.04")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_full_page_is_not_genesis() -> None:
     """Given: A page exactly at the requested limit.
 
@@ -6427,7 +6427,7 @@ def test_active_execution_update_falls_back_to_limit_price_with_warning() -> Non
     assert update.counter_amount_decimal is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_resolve_disappeared_closed_with_counter_prices_effectively() -> None:
     """Given: A disappeared order with counter data and a new fill delta.
 
@@ -6467,7 +6467,7 @@ async def test_resolve_disappeared_closed_with_counter_prices_effectively() -> N
     assert events[0].counter_amount_decimal == "20.40"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_resolve_disappeared_canceled_partial_carries_counter() -> None:
     """Given: A disappeared order that canceled after a new partial fill delta.
 
@@ -6561,7 +6561,7 @@ def _history_row(item_id: int) -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_multi_page_walk_concatenates_pages() -> None:
     """Given: A range whose rows span one full page and one short page.
 
@@ -6584,7 +6584,7 @@ async def test_read_account_history_range_multi_page_walk_concatenates_pages() -
     assert "continueFrom=102&itemLimit=2&sortOrder=ASC" in stub.get_calls[1][0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_row_above_upto_ends_walk_excluded() -> None:
     """Given: A page whose last row lies above the inclusive upper bound.
 
@@ -6609,7 +6609,7 @@ async def test_read_account_history_range_row_above_upto_ends_walk_excluded() ->
     assert len(stub.get_calls) == 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_id_not_advancing_returns_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -6636,7 +6636,7 @@ async def test_read_account_history_range_id_not_advancing_returns_none(
     ), f"expected refusal WARNING, got {[r.message for r in warning_records]}"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_non_success_envelope_raises() -> None:
     """Given: A non-success account/history envelope on the first page.
 
@@ -6650,7 +6650,7 @@ async def test_read_account_history_range_non_success_envelope_raises() -> None:
         await client.read_account_history_range(100, 1000)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_non_list_result_raises() -> None:
     """Given: An account/history result that is not a list.
 
@@ -6664,7 +6664,7 @@ async def test_read_account_history_range_non_list_result_raises() -> None:
         await client.read_account_history_range(100, 1000)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_page_cap_returns_partial_walk() -> None:
     """Given: A full below-bound page and an exhausted one-page cap.
 
@@ -6725,7 +6725,7 @@ def _market_pair(offer: WalutomatBestOffer, pair: str = "EUR_PLN") -> WalutomatM
     return WalutomatMarketPair(pair=pair, bestOffers=offer)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_production_shape_marks_the_same_mid_at_all_three_sites() -> None:
     """Given: The production quote shape measured on 2026-07-25 15:58.
 
@@ -6760,7 +6760,7 @@ async def test_production_shape_marks_the_same_mid_at_all_three_sites() -> None:
     assert not math.isclose(snapshot.last, 4.3166, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_mark_moves_when_the_book_moves_and_forex_now_is_frozen() -> None:
     """Given: Four polls whose bid/ask move while forex_now never changes.
 
@@ -6780,7 +6780,7 @@ async def test_mark_moves_when_the_book_moves_and_forex_now_is_frozen() -> None:
     assert all(not math.isclose(mark, 4.3166, rel_tol=1e-9) for mark in marks)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_mark_is_frozen_when_the_book_is_frozen_and_forex_now_moves() -> None:
     """Given: Four polls whose bid/ask never change while forex_now varies.
 
@@ -6815,7 +6815,7 @@ def test_from_api_response_drops_a_one_sided_pair() -> None:
     assert [pair.pair for pair in response.pairs] == ["USD_PLN"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_one_sided_book_below_the_upstream_filter_emits_nothing() -> None:
     """Given: A market pair built DIRECTLY with a null bid, bypassing the filter.
 
@@ -6910,7 +6910,7 @@ def test_quote_refusal_reason_agrees_with_the_quote_decision(
     assert (walutomat_quote(offer) is None) is (walutomat_quote_refusal(offer) is not None)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_refusal_logs_once_on_entry_and_once_on_recovery(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -6941,7 +6941,7 @@ async def test_refusal_logs_once_on_entry_and_once_on_recovery(
     assert client._refused_marks == set()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_refuses_an_unusable_quote_with_a_distinct_message() -> None:
     """Given: A connected client whose only pair carries a crossed book.
 
@@ -6983,7 +6983,7 @@ def test_ticker_reports_honest_zeros_for_unreported_fields() -> None:
     assert ticker.change_pct == 0.0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_candle_from_moving_mids_is_not_flat_and_reports_no_trades() -> None:
     """Given: A tick buffer holding four distinct mids inside one minute.
 
@@ -7086,7 +7086,7 @@ def test_refusal_report_escalates_only_after_the_warning_duration(
     assert above.seconds == {"TRY-PLN": int(walutomat_mod.WALUTOMAT_REFUSAL_WARNING_SECONDS)}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_refusal_report_is_empty_on_a_healthy_poll() -> None:
     """Given: A client that has only ever seen a usable book.
 
@@ -7124,7 +7124,7 @@ def _freeze_walutomat_clock(monkeypatch: pytest.MonkeyPatch, clock: list[float])
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_a_pair_absent_from_the_payload_is_latched_as_refused(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -7153,7 +7153,7 @@ async def test_a_pair_absent_from_the_payload_is_latched_as_refused(
     assert absences[0].levelname == "WARNING"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_a_persistently_absent_pair_logs_once_and_keeps_counting(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

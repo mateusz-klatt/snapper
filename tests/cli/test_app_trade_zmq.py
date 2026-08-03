@@ -59,13 +59,13 @@ def _reset_cli_environment(
     get_settings.cache_clear()
 
 
-@pytest.fixture()
+@pytest.fixture
 def cli_runner() -> CliRunner:
     """Provide a Typer :class:`CliRunner` for CLI invocation."""
     return CliRunner()
 
 
-@pytest.fixture()
+@pytest.fixture
 def _stub_trade_zmq_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub out validate/alembic/runner so ``trade-zmq`` short-circuits.
 

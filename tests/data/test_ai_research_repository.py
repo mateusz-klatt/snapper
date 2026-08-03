@@ -28,7 +28,7 @@ from snapper.data.repository_types import MarketViewSourceInsertRow
 _T0 = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create and dispose one isolated SQLite repository."""
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'ai-research.db'}")

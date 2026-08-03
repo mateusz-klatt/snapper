@@ -29,7 +29,7 @@ from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=UTC)
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create one isolated repository containing only the evidence table."""
     db_path = tmp_path / "precision-async.db"

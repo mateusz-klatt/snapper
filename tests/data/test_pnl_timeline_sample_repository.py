@@ -274,7 +274,7 @@ def _observation(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def bare_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository with the tables but no activation anchor."""
     db_path = tmp_path / "pnl-sample.db"
@@ -289,7 +289,7 @@ async def bare_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]
         await repo.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(
     bare_repository: SQLAlchemyRepository,
 ) -> AsyncIterator[SQLAlchemyRepository]:

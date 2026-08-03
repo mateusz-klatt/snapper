@@ -28,7 +28,7 @@ from snapper.data.repository import is_effective_unit_certified
 from snapper.data.repository_types import InstrumentSpecRow
 
 
-@pytest.fixture()
+@pytest.fixture
 def db_session() -> Session:
     """Create an in-memory SQLite database with all tables."""
     engine = create_engine("sqlite://", echo=False)
@@ -37,7 +37,7 @@ def db_session() -> Session:
         yield session
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repo() -> SQLAlchemyRepository:
     """Create an in-memory async SQLite repository with tables."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
@@ -448,7 +448,7 @@ class TestReviseInstrumentSpecWithExpiry:
         assert id2 != id1
 
 
-@pytest.fixture()
+@pytest.fixture
 def sync_repo() -> tuple[DatabaseRepository, str]:
     """Create a sync DatabaseRepository with tables and a seeded instrument.
 

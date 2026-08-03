@@ -3141,7 +3141,7 @@ class _RunsRepository:
         return self.last_session
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_process_mode_filters_parameters() -> None:
     """Verify process mode spawns via ProcessSpawner with filtered parameters.
 
@@ -3178,7 +3178,7 @@ async def test_start_process_process_mode_filters_parameters() -> None:
     assert factory.active_runs["os_process"] == "test-run-id"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_async_method_creates_task() -> None:
     """Verify async method creates tracked asyncio task.
 
@@ -3211,7 +3211,7 @@ async def test_start_process_async_method_creates_task() -> None:
         await task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_sync_method_uses_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3251,7 +3251,7 @@ async def test_start_process_sync_method_uses_executor(
     assert "sync_proc" not in factory.active_runs
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_async_failure_cleans_up() -> None:
     """Verify async process failure triggers cleanup of all tracking.
 
@@ -3287,7 +3287,7 @@ async def test_start_process_async_failure_cleans_up() -> None:
     assert "failing_proc" not in factory.active_runs
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_handles_missing_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3308,7 +3308,7 @@ async def test_start_process_by_name_handles_missing_setting(
     assert "not found" in result.message
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_when_already_running() -> None:
     """Verify already_running status when process exists in started_processes.
 
@@ -3323,7 +3323,7 @@ async def test_start_process_by_name_when_already_running() -> None:
     assert result.status == "already_running"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_reports_start_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3373,7 +3373,7 @@ async def test_start_process_by_name_reports_start_error(
     assert "Failed to start process 'worker'" in result.message
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_one_shot_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3409,7 +3409,7 @@ async def test_start_process_by_name_one_shot_message(
     cast(mock.AsyncMock, factory.start_process).assert_awaited_once()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_updates_config_and_persists_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3470,7 +3470,7 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
     assert call_config.parameters == {"x": 1}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_keeps_tags_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3511,7 +3511,7 @@ async def test_start_process_by_name_keeps_tags_when_present(
     assert call_config.tags == ("keep",)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_preserves_restart_nonce(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3554,7 +3554,7 @@ async def test_start_process_by_name_preserves_restart_nonce(
     assert call_config.restart_nonce == "op-restart-777"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_not_running() -> None:
     """Verify not_running status for process not in started_processes.
 
@@ -3568,7 +3568,7 @@ async def test_stop_process_by_name_not_running() -> None:
     assert result.status == "not_running"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_async_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3598,7 +3598,7 @@ async def test_stop_process_by_name_async_stop(
     assert "worker" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_with_coroutine_stop_and_no_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3634,7 +3634,7 @@ async def test_stop_process_by_name_with_coroutine_stop_and_no_setting(
     assert "worker" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_when_instance_is_none_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3654,7 +3654,7 @@ async def test_stop_process_by_name_when_instance_is_none_cleans_up(
     assert "ghost" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_when_stop_handler_removes_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3692,7 +3692,7 @@ async def test_stop_process_by_name_when_stop_handler_removes_instance(
     assert "selfrem" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_unexpected_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3718,7 +3718,7 @@ async def test_handle_task_completion_unexpected_success(
     assert "job" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_skips_finalize_on_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3749,7 +3749,7 @@ async def test_handle_task_completion_skips_finalize_on_generator_exit(
     assert "job" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_cancelled_finalizes_run_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3786,7 +3786,7 @@ async def test_handle_task_completion_cancelled_finalizes_run_record(
     assert "job" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_failure_records_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3817,7 +3817,7 @@ async def test_handle_task_completion_failure_records_error(
     assert "job" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_logs_finalize_error_and_keeps_other_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3843,7 +3843,7 @@ async def test_handle_task_completion_logs_finalize_error_and_keeps_other_task(
     assert factory.process_tasks.get("job") is other_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_task_completion_suppresses_cancelled_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3909,7 +3909,7 @@ def test_import_class_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         factory.import_class("no.such.module.Missing")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_monitor_native_processes_exits_when_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3930,7 +3930,7 @@ async def test_monitor_native_processes_exits_when_empty(
     sleep_mock.assert_awaited()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_monitor_native_processes_skips_running_and_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3968,7 +3968,7 @@ async def test_monitor_native_processes_skips_running_and_exits(
     assert sleep_calls[0] == 5
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_expected_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4003,7 +4003,7 @@ async def test_handle_process_completion_expected_failure(
     spawner_mock.cleanup.assert_called_once_with("native")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_unexpected_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4040,7 +4040,7 @@ async def test_handle_process_completion_unexpected_failure(
     spawner_mock.cleanup.assert_called_once_with("native")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_logs_finalize_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4072,7 +4072,7 @@ async def test_handle_process_completion_logs_finalize_error(
     spawner_mock.cleanup.assert_called_once_with("native")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_all_processes_continues_on_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4122,7 +4122,7 @@ async def test_start_all_processes_continues_on_errors(
     cast(mock.Mock, factory._start_native_process_monitoring).assert_called_once()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_all_processes_cancels_tasks_and_processes() -> None:
     """Verify stop_all_processes cancels tasks and terminates native processes.
 
@@ -4158,7 +4158,7 @@ async def test_stop_all_processes_cancels_tasks_and_processes() -> None:
     spawner_mock.cleanup.assert_called_with("native")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_all_processes_handles_done_tasks_and_cleanup_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4192,7 +4192,7 @@ async def test_stop_all_processes_handles_done_tasks_and_cleanup_errors(
     assert factory.process_tasks == {}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_all_processes_when_nothing_tracked() -> None:
     """Verify stop_all_processes handles empty tracking gracefully.
 
@@ -4211,7 +4211,7 @@ async def test_stop_all_processes_when_nothing_tracked() -> None:
     assert factory.process_tasks == {}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_process_configs_uses_metadata_parameters_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4256,7 +4256,7 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
     assert configs[0].parameters_schema == {"field": "value"}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_process_configs_preserves_existing_parameters_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4301,7 +4301,7 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
     assert configs[0].parameters_schema == {"own": True}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_process_mode_with_note(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify start_process in process mode spawns subprocess correctly.
 
@@ -4336,7 +4336,7 @@ async def test_start_process_process_mode_with_note(monkeypatch: pytest.MonkeyPa
     assert factory.started_processes["proc"].pid == 99
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_immediate_async_failure_raises() -> None:
     """Verify immediate async failure raises exception and clears run.
 
@@ -4362,7 +4362,7 @@ async def test_start_process_immediate_async_failure_raises() -> None:
     assert tracker == ["fail"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_rejects_invalid_mode() -> None:
     """Verify start_process raises ValueError for invalid mode.
 
@@ -4385,7 +4385,7 @@ async def test_start_process_rejects_invalid_mode() -> None:
         await factory.start_process(config)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_register_task_completion_handles_returned_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4418,7 +4418,7 @@ async def test_register_task_completion_handles_returned_task(
     assert completion_mock.await_count >= 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_register_task_completion_handles_returned_coroutine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4451,7 +4451,7 @@ async def test_register_task_completion_handles_returned_coroutine(
     assert completion_mock.await_count >= 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_monitor_native_processes_handles_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify monitor exits cleanly on CancelledError.
 
@@ -4482,7 +4482,7 @@ async def test_monitor_native_processes_handles_cancelled(monkeypatch: pytest.Mo
     assert "_native_monitor" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_monitor_native_processes_logs_error_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4523,7 +4523,7 @@ async def test_monitor_native_processes_logs_error_and_recovers(
     assert 10 in sleep_calls
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_warns_for_long_running_non_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4557,7 +4557,7 @@ async def test_handle_process_completion_warns_for_long_running_non_native(
     assert "job" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4596,7 +4596,7 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
     assert call_config.parameters_schema == {"p": 1}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_skips_persisting_schema_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4632,7 +4632,7 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
     assert call_config.parameters_schema is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_removes_stale_tags_without_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4672,7 +4672,7 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
     assert call_config.tags == ()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4727,7 +4727,7 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
     assert call_config.tags == ()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_cancels_task_and_terminates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4770,7 +4770,7 @@ async def test_stop_process_by_name_cancels_task_and_terminates(
     assert "native" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_process_status_handles_get_status_error() -> None:
     """Verify get_process_status handles get_status method errors gracefully.
 
@@ -4794,7 +4794,7 @@ async def test_get_process_status_handles_get_status_error() -> None:
     assert status.active_public_id == "run-id"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_recent_runs_with_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_recent_runs filters by process name.
 
@@ -4838,7 +4838,7 @@ class _RegistryClass:
         return {"default": True}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify sync creates config for registry entry missing from database.
 
@@ -4995,7 +4995,7 @@ def test_seeded_identity_params_for_registry_name(monkeypatch: pytest.MonkeyPatc
     assert _seeded_identity_params_for_registry_name("unknown") == ()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_mints_seeded_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Sync mints an empty scoped-strategy seeded id at config creation.
 
@@ -5050,7 +5050,7 @@ class _RegistryClassFailingKwargs:
         raise RuntimeError("nope")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_creates_missing_configs_even_when_parameters_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5097,7 +5097,7 @@ class _RegistryNoKwargs:
     pass
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify sync does not commit when config matches registry.
 
@@ -5158,7 +5158,7 @@ class _RegistryClassNoKwargs:
         return {"filled": True}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify sync updates existing config with registry metadata.
 
@@ -5216,7 +5216,7 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
     assert updated["parameters_schema"] == {"shape": "x"}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_adds_tags_and_schema_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5298,7 +5298,7 @@ class _TwoPhaseRepository:
         return self.second_session
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_update_handles_default_parameters_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5355,7 +5355,7 @@ async def test_sync_registry_update_handles_default_parameters_failure(
     assert repo.last_session is not None and repo.last_session.commit_called is False
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5410,7 +5410,7 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     assert repo.second_session is not None and repo.second_session.commit_called is True
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify sync skips config with invalid JSON value.
 
@@ -5453,7 +5453,7 @@ class _RegistryWithTagsAlready:
     pass
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_skips_tag_update_when_already_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5511,7 +5511,7 @@ async def test_sync_registry_skips_tag_update_when_already_present(
     assert repo.last_session is not None and repo.last_session.commit_called is False
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_sync_registry_adds_missing_tags_from_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5568,7 +5568,7 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
     assert persisted["tags"] == ["new"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_process_config_in_db_includes_tags_and_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5624,7 +5624,7 @@ async def test_create_process_config_in_db_includes_tags_and_schema(
     assert json.loads(added.value)["parameters_schema"] == {"p": True}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_process_config_persists_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5683,7 +5683,7 @@ async def test_create_process_config_persists_template(
     assert json.loads(added.value)["template"] == "strategy_heartbeat_consult_btc_1h"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_process_config_in_db_omits_absent_optional_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5735,7 +5735,7 @@ async def test_create_process_config_in_db_omits_absent_optional_fields(
     assert "parameters_schema" not in saved
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_process_config_raises_if_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify create_process_config raises ValueError for duplicate name.
 
@@ -6057,7 +6057,7 @@ class TestProcessFactoryDatabasePersistence:
         mock_repo.session.assert_not_called()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch("snapper.application.process_manager.launcher.get_registered_processes")
 @patch("snapper.application.process_manager.launcher.get_repository")
 async def test_start_process_by_name_clears_tags_when_schema_missing(
@@ -6118,7 +6118,7 @@ async def test_start_process_by_name_clears_tags_when_schema_missing(
     assert call_config.role == ProcessRoleEnum.CORE
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch("snapper.application.process_manager.registry_syncer.get_registered_processes")
 @patch("snapper.application.process_manager.registry_syncer.get_repository")
 async def test_sync_registry_to_database_adds_missing_tags(
@@ -6928,7 +6928,7 @@ class TestProcessFactoryRegistrySync:
         await factory.sync_registry_to_database()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_all_processes_core_failure_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6958,7 +6958,7 @@ async def test_start_all_processes_core_failure_raises(
     assert "zmq_broker" in exc_info.value.failed_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_all_processes_non_core_failure_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6985,7 +6985,7 @@ async def test_start_all_processes_non_core_failure_continues(
     await factory.start_all_processes()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_all_processes_one_shot_core_failure_does_not_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7013,7 +7013,7 @@ async def test_start_all_processes_one_shot_core_failure_does_not_raise(
     await factory.start_all_processes()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_all_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify healthy when all enabled long-running CORE running.
 
@@ -7038,7 +7038,7 @@ async def test_get_core_health_all_running(monkeypatch: pytest.MonkeyPatch) -> N
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_core_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify error when enabled long-running CORE is missing.
 
@@ -7062,7 +7062,7 @@ async def test_get_core_health_core_missing(monkeypatch: pytest.MonkeyPatch) -> 
     assert await factory.get_core_health() == "error"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_terminal_clean_core_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7092,7 +7092,7 @@ async def test_get_core_health_terminal_clean_core_accepted(
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_stale_generation_tombstone_still_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7122,7 +7122,7 @@ async def test_get_core_health_stale_generation_tombstone_still_error(
     assert await factory.get_core_health() == "error"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_never_policy_tombstone_still_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7152,7 +7152,7 @@ async def test_get_core_health_never_policy_tombstone_still_error(
     assert await factory.get_core_health() == "error"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_parked_beats_terminal_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7181,7 +7181,7 @@ async def test_get_core_health_parked_beats_terminal_marker(
     assert await factory.get_core_health() == "error"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_disabled_core_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify disabled CORE does not cause error.
 
@@ -7205,7 +7205,7 @@ async def test_get_core_health_disabled_core_ignored(monkeypatch: pytest.MonkeyP
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_no_core_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify healthy when no CORE processes exist.
 
@@ -7228,7 +7228,7 @@ async def test_get_core_health_no_core_configured(monkeypatch: pytest.MonkeyPatc
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_one_shot_completed_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify one-shot CORE is not treated as missing.
 
@@ -7252,7 +7252,7 @@ async def test_get_core_health_one_shot_completed_ignored(monkeypatch: pytest.Mo
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_skips_executor_templates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7284,7 +7284,7 @@ async def test_get_core_health_skips_executor_templates(
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_non_executor_core_still_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7313,7 +7313,7 @@ async def test_get_core_health_non_executor_core_still_checked(
     assert await factory.get_core_health() == "error"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_api_only_returns_healthy() -> None:
     """Verify healthy in API-only mode.
 
@@ -7328,7 +7328,7 @@ async def test_get_core_health_api_only_returns_healthy() -> None:
     assert await factory.get_core_health() == "healthy"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_caches_result_within_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7350,7 +7350,7 @@ async def test_get_core_health_caches_result_within_ttl(
     assert configs_mock.await_count == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_refreshes_after_ttl_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9725,7 +9725,7 @@ class TestReconcileProfileFilter:
         stop_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_core_health_profile_filtered_publisher_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11472,7 +11472,7 @@ class TestWatchdogConcurrencyRegressions:
     stop-during-backoff, and terminal-state leak on non-native paths.
     """
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix1_pending_restart_blocks_second_schedule(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11512,7 +11512,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await first
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix2_failed_respawn_rearms_so_next_attempt_proceeds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11551,7 +11551,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" in factory.started_processes
         assert not factory._feed_failure_event.is_set()
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix3_clear_preserves_lock_identity_for_waiter(self) -> None:
         """clear_watchdog_state keeps the lock so a waiter is not split.
 
@@ -11584,7 +11584,7 @@ class TestWatchdogConcurrencyRegressions:
         assert order == ["holder-in", "holder-out", "waiter-in"]
         assert factory._restart_lock_for("pub") is lock
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix4_manual_start_rechecks_running_inside_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11640,7 +11640,7 @@ class TestWatchdogConcurrencyRegressions:
         assert cancelled.is_set()
         assert "zmq_broker" not in factory._restart_tasks
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix4_per_wallet_start_rechecks_running_inside_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11702,7 +11702,7 @@ class TestWatchdogConcurrencyRegressions:
         assert started == []
         assert factory.instance_configs[name] is prior
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix4_per_wallet_in_lock_recheck_without_prior_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11763,7 +11763,7 @@ class TestWatchdogConcurrencyRegressions:
         assert started == []
         assert factory.instance_configs[name] is instance_config
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix5_stop_wins_when_process_already_gone(self) -> None:
         """A stop cancels a pending respawn even with no live process.
 
@@ -11792,7 +11792,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory._desired_state
         assert "pub" not in factory._restart_configs
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix6_one_shot_completion_clears_watchdog_state(self) -> None:
         """A completed non-native ONE_SHOT clears its watchdog state.
 
@@ -11817,7 +11817,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "updater" not in factory._restart_configs
         assert "updater" not in factory._restart_uptime_start
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix6_task_completion_drives_watchdog_restart(self) -> None:
         """A died asyncio-task process is respawned by the watchdog.
 
@@ -11847,7 +11847,7 @@ class TestWatchdogConcurrencyRegressions:
         schedule_spy.assert_called_once()
         assert factory._desired_state.get("job") is _DesiredState.RUNNING
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix6_task_restart_runs_before_tracking_cleanup(self) -> None:
         """The restart decision consumes expected_terminations pre-cleanup.
 
@@ -11879,7 +11879,7 @@ class TestWatchdogConcurrencyRegressions:
         schedule_spy.assert_not_called()
         assert "job" not in factory.expected_terminations
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix6_failed_task_restarts_via_start_process(self) -> None:
         """A FAILED task death flows through to a fresh start_process.
 
@@ -11911,7 +11911,7 @@ class TestWatchdogConcurrencyRegressions:
         assert start_spy.await_args is not None
         assert start_spy.await_args.args[0] is config
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_fix6_cancelled_deliberate_stop_never_restarts(self) -> None:
         """A deliberate stop's cancellation schedules no restart.
 
@@ -11944,7 +11944,7 @@ class TestWatchdogConcurrencyRegressions:
         schedule_spy.assert_not_called()
         assert factory._desired_state.get("job") is _DesiredState.STOPPED
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_1_failed_respawn_does_not_resurrect_a_stopped_process(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11978,7 +11978,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.started_processes
         assert not factory._feed_failure_event.is_set()
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_1_cancel_pending_restart_cancels_successor_task(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12026,7 +12026,7 @@ class TestWatchdogConcurrencyRegressions:
         assert first.cancelled()
         assert successor_cancelled.is_set()
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_2_duplicate_completion_while_pending_is_noop(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12065,7 +12065,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await first
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_3_cancel_mid_start_finalizes_run_record(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12114,7 +12114,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.active_runs
         assert finalized == [ProcessRunStatusEnum.FAILED]
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_4_failed_manual_start_keeps_managed_name_recoverable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12169,7 +12169,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await rearmed
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_4_failed_manual_start_of_new_name_clears_markers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12211,7 +12211,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "zmq_broker" not in factory._restart_configs
         assert "zmq_broker" not in factory._restart_uptime_start
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r2_4_failed_per_wallet_start_keeps_managed_instance_recoverable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12285,7 +12285,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await rearmed
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r3_1_failed_manual_start_rearms_recovery_for_managed_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12341,7 +12341,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await rearmed
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r3_1_failed_manual_start_of_new_name_does_not_rearm(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12382,7 +12382,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "zmq_broker" not in factory._restart_configs
         assert "zmq_broker" not in factory._restart_tasks
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r3_1_rearm_does_not_stack_when_task_already_live(self) -> None:
         """Re-arm is a no-op when a live restart task is already pending.
 
@@ -12410,7 +12410,7 @@ class TestWatchdogConcurrencyRegressions:
         with contextlib.suppress(asyncio.CancelledError):
             await live
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r3_2_cancel_during_create_run_record_finalizes_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12458,7 +12458,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.active_runs
         assert finalized == [ProcessRunStatusEnum.FAILED]
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r3_2_normal_exception_failure_does_not_double_finalize(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12507,7 +12507,7 @@ class TestWatchdogConcurrencyRegressions:
         assert finalize_calls == []
         assert update_calls == [ProcessRunStatusEnum.FAILED]
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_handle_manual_start_stop_race_returns_none_when_running(self) -> None:
         """The post-spawn re-check is a no-op when desired stays RUNNING.
 
@@ -12526,7 +12526,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" in factory.started_processes
         assert factory._desired_state.get("pub") is _DesiredState.RUNNING
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_manual_start_post_spawn_recheck_tears_down(self) -> None:
         """A manual start whose post-spawn re-check sees STOPPED tears down.
 
@@ -12553,7 +12553,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.started_processes
         assert factory._desired_state.get("pub") is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_bare_start_post_spawn_stopped_tears_down(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12594,7 +12594,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.started_processes
         assert factory._desired_state.get("pub") is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_per_wallet_start_post_spawn_stopped_tears_down(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12657,7 +12657,7 @@ class TestWatchdogConcurrencyRegressions:
         assert name not in factory.instance_configs
         assert factory._desired_state.get(name) is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_rearm_gated_when_stop_set_desired_stopped(self) -> None:
         """The recovery re-arm is suppressed when a stop set desired=STOPPED.
 
@@ -12675,7 +12675,7 @@ class TestWatchdogConcurrencyRegressions:
         factory._rearm_recovery_after_manual_start_failure("pub")
         assert factory._restart_tasks.get("pub") is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_stop_racing_inflight_manual_start_wins_via_lock(self) -> None:
         """Stop racing an in-flight manual start wins and leaves no orphan.
 
@@ -12727,7 +12727,7 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory._restart_configs
         assert factory._restart_tasks.get("pub") is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r4_1_stop_takes_lock_no_self_deadlock(self) -> None:
         """Stop takes the lock for its decision without self-deadlock.
 
@@ -12755,7 +12755,7 @@ class TestWatchdogConcurrencyRegressions:
         assert factory._desired_state.get("pub") is None
         assert factory._restart_tasks.get("pub") is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r5_1_stop_recancels_task_created_in_prelock_window(self) -> None:
         """Stop kills a restart task armed during its pre-lock window.
 
@@ -12810,7 +12810,7 @@ class TestWatchdogConcurrencyRegressions:
         await asyncio.sleep(0)
         assert respawns == []
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r5_1_start_process_does_not_arm_desired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12834,7 +12834,7 @@ class TestWatchdogConcurrencyRegressions:
         assert factory._desired_state.get("pub") is _DesiredState.STOPPED
         assert factory._restart_configs["pub"] is config
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_r5_1_in_lock_recancel_terminates_no_deadlock(self) -> None:
         """In-lock re-cancel of a window task terminates without deadlock.
 

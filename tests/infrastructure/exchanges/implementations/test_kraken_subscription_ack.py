@@ -34,7 +34,7 @@ def _ws_mock(client: KrakenExchangeClient) -> AsyncMock:
 class TestKrakenSpotSubscriptionAck:
     """Tests for Spot subscribe ACK routing."""
 
-    @pytest.fixture()
+    @pytest.fixture
     def client(self) -> KrakenExchangeClient:
         """Create a Spot client with tracker spy."""
         client = KrakenExchangeClient(api_key="k", api_secret="s")
@@ -307,7 +307,7 @@ class TestKrakenSpotSubscriptionAck:
 class TestKrakenSpotSubscriptionRetry:
     """Tests for Spot one-symbol retry subscribes."""
 
-    @pytest.fixture()
+    @pytest.fixture
     def client(self) -> KrakenExchangeClient:
         """Create a Spot client with mocked websocket."""
         client = KrakenExchangeClient(api_key="k", api_secret="s")

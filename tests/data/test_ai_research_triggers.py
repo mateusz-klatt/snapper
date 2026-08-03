@@ -37,7 +37,7 @@ class _RecordingConnection:
         self.statements.append(" ".join(str(clause).split()))
 
 
-@pytest.fixture()
+@pytest.fixture
 def sqlite_artifact_connection() -> Iterator[Connection]:
     """Create both artifact tables through their ORM DDL event path."""
     engine = create_engine("sqlite://")

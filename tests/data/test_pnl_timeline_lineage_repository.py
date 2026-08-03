@@ -171,7 +171,7 @@ def _signal(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository containing lineage candidates."""
     db_path = tmp_path / "pnl-timeline-lineage.db"

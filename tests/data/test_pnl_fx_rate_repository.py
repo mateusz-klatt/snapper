@@ -100,7 +100,7 @@ def _candle(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository seeded with FX pairs on two venues."""
     db_path = tmp_path / "pnl-fx.db"

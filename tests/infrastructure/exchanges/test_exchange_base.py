@@ -202,7 +202,7 @@ class DummyExchangeClient(ExchangeClientBase):
         yield {"symbol": "BTC-USD", "base": "BTC", "quote": "USD"}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_context_manager_calls_connect_and_disconnect() -> None:
     """Context manager handles connection lifecycle.
 
@@ -241,7 +241,7 @@ class _FailingCleanupClient(_FailingConnectClient):
         raise ValueError("cleanup also failed")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_aenter_failed_connect_triggers_disconnect() -> None:
     """A failed connect inside ``async with`` still cleans up the client.
 
@@ -258,7 +258,7 @@ async def test_aenter_failed_connect_triggers_disconnect() -> None:
     assert client.disconnected
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_aenter_cancelled_connect_triggers_disconnect() -> None:
     """A cancelled connect cleans up exactly like a failed one.
 
@@ -274,7 +274,7 @@ async def test_aenter_cancelled_connect_triggers_disconnect() -> None:
     assert client.disconnected
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_aenter_cleanup_error_does_not_mask_connect_failure() -> None:
     """The ORIGINAL connect failure propagates even when cleanup fails.
 
@@ -288,7 +288,7 @@ async def test_aenter_cleanup_error_does_not_mask_connect_failure() -> None:
             pytest.fail("context body must not run")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_blocking_runs_on_named_pool_thread() -> None:
     """Blocking dispatch leaves the event loop and uses the client's pool.
 
@@ -316,7 +316,7 @@ async def test_dispatch_blocking_runs_on_named_pool_thread() -> None:
     assert client._rest_pool is first_pool
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_blocking_passes_kwargs() -> None:
     """Keyword arguments reach the dispatched callable via partial.
 
@@ -334,7 +334,7 @@ async def test_dispatch_blocking_passes_kwargs() -> None:
     assert result == "a:b"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_shutdown_rest_pool_idempotent_and_blocks_dispatch() -> None:
     """Shutdown closes the pool, clears the slot, and stays idempotent.
 
@@ -355,7 +355,7 @@ async def test_shutdown_rest_pool_idempotent_and_blocks_dispatch() -> None:
         await client._dispatch_blocking(lambda: "ok")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_spawn_failure_raises_ambiguous_dispatch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,7 +385,7 @@ async def test_dispatch_spawn_failure_raises_ambiguous_dispatch_error(
     client._shutdown_rest_pool()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_shutdown_race_keeps_plain_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -411,7 +411,7 @@ async def test_dispatch_shutdown_race_keeps_plain_runtime_error(
     client._shutdown_rest_pool()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_worker_raised_runtime_error_stays_plain() -> None:
     """A RuntimeError raised INSIDE the worker keeps its native type.
 
@@ -437,7 +437,7 @@ async def test_worker_raised_runtime_error_stays_plain() -> None:
     client._shutdown_rest_pool()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_blocking_propagates_log_context_var() -> None:
     """ContextVars set by the caller are visible in the worker.
 
@@ -472,7 +472,7 @@ def test_shutdown_rest_pool_without_pool_is_noop() -> None:
     assert client._rest_pool_closed
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reopen_rest_pool_builds_fresh_pool_after_shutdown() -> None:
     """Reopen restores dispatch with a brand-new pool.
 
@@ -492,7 +492,7 @@ async def test_reopen_rest_pool_builds_fresh_pool_after_shutdown() -> None:
     client._shutdown_rest_pool()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_order_to_db_returns_none_when_no_repository() -> None:
     """Log order returns None without repository.
 
@@ -526,7 +526,7 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
     assert result is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -571,7 +571,7 @@ async def test_log_order_to_db_never_raises(mock_resolve: AsyncMock) -> None:
     mock_resolve.assert_awaited_once()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -625,7 +625,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     assert insert_kwargs["reduce_only"] is False
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -678,7 +678,7 @@ async def test_log_order_to_db_propagates_leverage_and_reduce_only(
     assert insert_kwargs["reduce_only"] is True
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -726,7 +726,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     mock_repo.insert_order.assert_not_awaited()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -776,7 +776,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     assert call_kwargs["sequence_id"] >= 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -818,7 +818,7 @@ async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> No
     assert result is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_order_update_to_db_returns_none_when_no_repository() -> None:
     """Log order update returns None without repository.
 
@@ -835,7 +835,7 @@ async def test_log_order_update_to_db_returns_none_when_no_repository() -> None:
     assert result is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_order_update_to_db_returns_new_order_id() -> None:
     """Log order update returns new order version id.
 
@@ -862,7 +862,7 @@ async def test_log_order_update_to_db_returns_new_order_id() -> None:
     assert call_args["error"] is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_order_update_to_db_stamps_provenance_from_tracker() -> None:
     """Log order update passes provenance from injected SequenceTracker.
 
@@ -885,7 +885,7 @@ async def test_log_order_update_to_db_stamps_provenance_from_tracker() -> None:
     assert call_kwargs["sequence_id"] == 1
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_order_update_to_db_handles_exception() -> None:
     """Log order update handles database errors gracefully.
 
@@ -904,7 +904,7 @@ async def test_log_order_update_to_db_handles_exception() -> None:
     assert result is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
     """Log execution returns early without repository.
 
@@ -931,7 +931,7 @@ async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_logs_successfully() -> None:
     """Log execution persists fill data.
 
@@ -983,7 +983,7 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["numeric_provenance"] == "venue_raw"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_counter_only_row_is_venue_raw() -> None:
     """A fill carrying only the exact counter amount still stamps venue_raw.
 
@@ -1064,7 +1064,7 @@ async def test_log_execution_to_db_drops_counter_when_a_gap_is_absorbed() -> Non
     assert call_args["numeric_provenance"] == "legacy_float"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_uses_fallback_values() -> None:
     """Log execution uses fallback for missing fields.
 
@@ -1110,7 +1110,7 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     assert call_args["fee_decimal"] == "0.0"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_partial_fill_status() -> None:
     """Log execution stores partial status for open orders with fills.
 
@@ -1154,7 +1154,7 @@ async def test_log_execution_to_db_partial_fill_status() -> None:
     assert call_args["fee_decimal"] == "5.000000000000000005"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_uses_cumulative_decimal_for_ambiguous_fees() -> None:
     """Log execution falls back when multiple raw fees match.
 
@@ -1200,7 +1200,7 @@ async def test_log_execution_to_db_uses_cumulative_decimal_for_ambiguous_fees() 
     assert call_args["fee_decimal"] == "5.000000000000000007"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_handles_exception() -> None:
     """Log execution handles database errors gracefully.
 
@@ -1228,7 +1228,7 @@ async def test_log_execution_to_db_handles_exception() -> None:
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_log_execution_to_db_swallows_scope_resolution_refusal() -> None:
     """A fail-closed scope refusal is logged loudly and never crashes the pipeline.
 
@@ -1266,7 +1266,7 @@ async def test_log_execution_to_db_swallows_scope_resolution_refusal() -> None:
     assert "dangling_execution_order_lineage" in error_log.call_args.args[0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -1383,7 +1383,7 @@ async def test_health_loop_logs_stale_before_retry_passes() -> None:
     assert order == ["log", "overdue", "failed", "dark"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_find_order_by_client_id_default_raises() -> None:
     """The base lookup refuses rather than guessing absence.
 
@@ -1422,7 +1422,7 @@ def test_account_history_capability_defaults_unsupported() -> None:
     assert ExchangeClientBase.account_history_capability is CapabilityStatus.UNSUPPORTED
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_positions_base_default_fails_loudly() -> None:
     """The exact inherited base reader rejects unsupported position observation.
 
@@ -1444,7 +1444,7 @@ async def test_read_native_positions_base_default_fails_loudly() -> None:
     assert exc_info.value.args == (_NATIVE_POSITIONS_UNSUPPORTED_MSG,)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_tip_default_raises() -> None:
     """The base account-history tip read fail-closes rather than fabricate a tip.
 
@@ -1457,7 +1457,7 @@ async def test_read_account_history_tip_default_raises() -> None:
         await client.read_account_history_tip(200)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_account_history_range_default_raises() -> None:
     """The base account-history range read fail-closes rather than fabricate rows.
 
@@ -1471,7 +1471,7 @@ async def test_read_account_history_range_default_raises() -> None:
         await client.read_account_history_range(0, 100)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_order_fill_legs_default_raises() -> None:
     """The base order-fill-legs read fail-closes on an unsupported venue.
 
@@ -1484,7 +1484,7 @@ async def test_read_order_fill_legs_default_raises() -> None:
         await client.read_order_fill_legs("ex-1")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -1534,7 +1534,7 @@ async def test_log_order_to_db_normalizes_wire_order_type_to_core(
     assert insert_kwargs["order_type"] == "stop"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -1586,7 +1586,7 @@ async def test_log_order_to_db_persists_request_type_over_snapshot_type(
     assert insert_kwargs["order_type"] == "stop_limit"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
@@ -1637,7 +1637,7 @@ async def test_log_order_to_db_labels_paper_exchange_as_paper_mode(
     assert insert_kwargs["mode"] == "paper"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,

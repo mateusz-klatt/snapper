@@ -143,7 +143,7 @@ class _ScopeIdentity:
     session_id: str
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create one repository engine against the live PostgreSQL database."""
     result = SQLAlchemyRepository(os.environ["DB_URL"])
@@ -153,7 +153,7 @@ async def repository() -> AsyncIterator[SQLAlchemyRepository]:
         await result.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def peer_repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create a second independent engine modeling the peer executor generation."""
     result = SQLAlchemyRepository(os.environ["DB_URL"])
@@ -163,7 +163,7 @@ async def peer_repository() -> AsyncIterator[SQLAlchemyRepository]:
         await result.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def inherited_repeatable_read_repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create a repository whose connections DEFAULT to REPEATABLE READ.
 
@@ -210,7 +210,7 @@ async def _wait_until_fence_blocked(repository: SQLAlchemyRepository) -> None:
     raise TimeoutError("no backend reached the advisory fence wait in time")
 
 
-@pytest.fixture()
+@pytest.fixture
 async def scope(repository: SQLAlchemyRepository) -> AsyncIterator[_ScopeIdentity]:
     """Seed one active Order -> Instrument lineage and reap the mutable rows.
 
@@ -650,7 +650,7 @@ async def _admin_connection(base_url: object) -> asyncpg.Connection:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def migration_scratch_db() -> AsyncIterator[tuple[str, Config]]:
     """Create a throwaway database migrated to revision 0028 and reap it.
 

@@ -698,7 +698,7 @@ class ExposedPolygonSymbolUpdater(PolygonSymbolUpdaterService):
         return super()._determine_polygon_asset_type(ticker)
 
 
-@pytest.fixture()
+@pytest.fixture
 def polygon_updater(
     tmp_path: Path,
 ) -> Iterator[tuple[ExposedPolygonSymbolUpdater, DatabaseRepository]]:
@@ -712,7 +712,7 @@ def polygon_updater(
     repository.engine.dispose()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_existing_symbols_when_insert_disabled(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -775,7 +775,7 @@ async def test_update_existing_symbols_when_insert_disabled(
     assert eur_catalog is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_existing_alias_exchange_symbol(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -847,7 +847,7 @@ async def test_update_existing_alias_exchange_symbol(
     assert btc_alias.timestamp.replace(tzinfo=None) > original_timestamp.replace(tzinfo=None)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_existing_alias_unchanged_when_same_symbol(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -918,7 +918,7 @@ async def test_existing_alias_unchanged_when_same_symbol(
     assert btc_alias.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_insert_new_symbols_when_enabled(tmp_path: Path) -> None:
     """Verify updater inserts new symbols when insert_new enabled.
 
@@ -1026,7 +1026,7 @@ def test_get_setting_key() -> None:
     assert updater._get_setting_key() == "polygon_symbols_last_update"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_skips_entries_without_ticker(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -1051,7 +1051,7 @@ async def test_update_database_skips_entries_without_ticker(
     assert len(alias_count) == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_skips_unmatchable_symbols(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -1075,7 +1075,7 @@ async def test_update_database_skips_unmatchable_symbols(
 
 
 @pytest.mark.xdist_group(name="database")
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     """Verify update_database commits large datasets in batches.
 
@@ -1102,7 +1102,7 @@ async def test_update_database_commits_in_batches(tmp_path: Path) -> None:
     repository.engine.dispose()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_handles_exception(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -1121,7 +1121,7 @@ async def test_update_database_handles_exception(
         await updater.update_database_public(symbols)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_logs_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify update_database logs error and re-raises on failure.
 
@@ -1227,7 +1227,7 @@ def test_determine_polygon_asset_type(ticker: str, expected_asset_type: str) -> 
     assert updater.determine_asset_type_public(ticker) == expected_asset_type
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_creates_capability_rows(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -1283,7 +1283,7 @@ async def test_update_database_creates_capability_rows(
         assert cap.reason is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_polygon_update_database_closes_deactivated_aliases(
     polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
 ) -> None:

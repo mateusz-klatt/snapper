@@ -32,7 +32,7 @@ _T0 = datetime(2026, 7, 22, 8, 0, tzinfo=UTC)
 _T1 = datetime(2026, 7, 22, 8, 30, tzinfo=UTC)
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create and dispose one isolated SQLite repository."""
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'trigger.db'}")

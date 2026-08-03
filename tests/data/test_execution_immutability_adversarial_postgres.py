@@ -83,7 +83,7 @@ async def _admin_connection(base_url: object) -> asyncpg.Connection:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def migration_repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Yield a repository over the migration-built session database.
 
@@ -98,7 +98,7 @@ async def migration_repository() -> AsyncIterator[SQLAlchemyRepository]:
         await repository.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def create_all_repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create a throwaway PostgreSQL database via ``create_all`` and reap it.
 

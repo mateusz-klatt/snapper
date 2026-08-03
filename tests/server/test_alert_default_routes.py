@@ -207,7 +207,7 @@ class TestEnvelopeWireFormatRegression:
     strings, so the route MUST validate via ``json_body()``.
     """
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_update_alert_default_accepts_iso8601_z_timestamp_via_json_body(self) -> None:
         """``json_body(UpdateUserAlertDefaultCommand)`` accepts a ``Z``-suffixed timestamp."""
         raw = (

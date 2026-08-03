@@ -106,7 +106,7 @@ def _position(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository seeded with proven and unproven positions."""
     db_path = tmp_path / "pnl-positions.db"

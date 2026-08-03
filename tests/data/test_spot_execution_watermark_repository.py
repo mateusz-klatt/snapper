@@ -50,7 +50,7 @@ _OTHER_WALLET_ORDER = "00000000-0000-7000-8000-000000000604"
 _FENCE_STATEMENT_MARKERS = ("pg_advisory_xact_lock", "lock_timeout", "pg_sequence")
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create one isolated repository containing only the scope-plane tables."""
     db_path = tmp_path / "watermark-async.db"

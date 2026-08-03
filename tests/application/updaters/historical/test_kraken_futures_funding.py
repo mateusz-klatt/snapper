@@ -18,7 +18,7 @@ from snapper.config.settings import AppSettings
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 
 
-@pytest.fixture()
+@pytest.fixture
 def service() -> KrakenFuturesFundingBackfillService:
     """Create a funding backfill service with default parameters."""
     return KrakenFuturesFundingBackfillService(

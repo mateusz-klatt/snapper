@@ -42,7 +42,7 @@ from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
 
-@pytest.fixture()
+@pytest.fixture
 def client() -> KrakenEquitiesExchangeClient:
     """Create a KrakenEquitiesExchangeClient instance for testing."""
     return KrakenEquitiesExchangeClient()

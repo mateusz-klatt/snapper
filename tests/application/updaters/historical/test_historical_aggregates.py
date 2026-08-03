@@ -1765,7 +1765,7 @@ class _DummyLoader:
         return False
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start uses fetched symbols when all_mapped enabled.
 
@@ -1836,7 +1836,7 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
     assert processed[0].polygon_symbol == "X:BTCUSD"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Process symbol caps timestamp to max timestamp.
 

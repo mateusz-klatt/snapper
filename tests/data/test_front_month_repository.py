@@ -13,7 +13,7 @@ from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repo() -> SQLAlchemyRepository:
     """Create an in-memory SQLite repository with tables."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")

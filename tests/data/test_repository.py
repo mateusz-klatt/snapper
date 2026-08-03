@@ -2964,7 +2964,7 @@ class TestSQLAlchemyRepositoryDialects:
         assert mock_postgres_repo.dialect_name == "postgresql"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispose_repositories_awaits_coroutine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

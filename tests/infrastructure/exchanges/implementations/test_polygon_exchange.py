@@ -114,7 +114,7 @@ def test_polygon_retry_sleep_invokes_super(monkeypatch: pytest.MonkeyPatch) -> N
     assert called["response"] == "test-response"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_wait_for_rate_limit_no_prior_requests(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -147,7 +147,7 @@ async def test_wait_for_rate_limit_no_prior_requests(
     assert math.isclose(timestamps[-1], 100.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_wait_for_rate_limit_enforces_spacing(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -186,7 +186,7 @@ async def test_wait_for_rate_limit_enforces_spacing(
     assert math.isclose(timestamps[-1], 170.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_make_request_with_retry_handles_429(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -227,7 +227,7 @@ async def test_make_request_with_retry_handles_429(
     assert attempts == ["wait", "wait"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_make_request_with_retry_non_429_error(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -252,7 +252,7 @@ async def test_make_request_with_retry_non_429_error(
         await make_request(request_func)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_make_request_with_retry_exhausts_attempts(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -287,7 +287,7 @@ async def test_make_request_with_retry_exhausts_attempts(
     assert sleep_durations == [1.0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_last_quote_invalid_symbol(stubbed_client: PolygonExchangeClient) -> None:
     """Verify get_last_quote rejects invalid symbol format.
 
@@ -299,7 +299,7 @@ async def test_get_last_quote_invalid_symbol(stubbed_client: PolygonExchangeClie
         await stubbed_client.get_last_quote("EURUSD")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_last_quote_no_data(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -320,7 +320,7 @@ async def test_get_last_quote_no_data(
     assert ticker.symbol == "C:EURUSD"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_last_quote_with_data(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,7 +343,7 @@ async def test_get_last_quote_with_data(
     assert math.isclose(ticker.timestamp, 1_650_000_000.0, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_without_agg_data(
     stubbed_client: PolygonExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,7 +367,7 @@ async def test_get_ticker_without_agg_data(
     assert data.high == data.low == pytest.approx(0.0)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_get_ticker_with_data(
     stubbed_client: PolygonExchangeClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -520,7 +520,7 @@ def test_save_symbols_to_cache(
     assert loaded[0]["market"] == "crypto"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_uses_cache(
     stubbed_client: PolygonExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -545,7 +545,7 @@ async def test_subscribe_instruments_uses_cache(
     assert results == cached
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_subscribe_instruments_downloads_when_stale(
     stubbed_client: PolygonExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -598,7 +598,7 @@ async def test_subscribe_instruments_downloads_when_stale(
     assert saved["symbols"][0]["ticker"] == "X:BTCUSD"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_poll_tickers_handles_keyboard_interrupt(
     stubbed_client: PolygonExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -639,7 +639,7 @@ async def test_poll_tickers_handles_keyboard_interrupt(
     assert calls == ["C:EURUSD"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_wait_for_rate_limit_waits_when_limit_exceeded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -680,7 +680,7 @@ async def test_wait_for_rate_limit_waits_when_limit_exceeded(
     assert sleep_calls[0] > 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_read_native_balances_default_raises(
     stubbed_client: PolygonExchangeClient,
 ) -> None:

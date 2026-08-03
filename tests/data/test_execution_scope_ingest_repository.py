@@ -66,7 +66,7 @@ _MISSING_ORDER = "00000000-0000-7000-8000-000000000605"
 _ORPHAN_INSTRUMENT_ORDER = "00000000-0000-7000-8000-000000000606"
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create one isolated repository containing only the scope-plane tables."""
     db_path = tmp_path / "scope-ingest.db"
@@ -82,7 +82,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         await result.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def peer_repository(
     tmp_path: Path, repository: SQLAlchemyRepository
 ) -> AsyncIterator[SQLAlchemyRepository]:

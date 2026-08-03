@@ -430,7 +430,7 @@ async def _build_repository(
     return repo
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create a repository holding the measured production certification lineage."""
     repo = await _build_repository(tmp_path / "annulment-certification.db", _production_lineage())
@@ -440,7 +440,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         await repo.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def uncorrupted_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create the counterfactual repository whose ledger never held the phantom."""
     repo = await _build_repository(tmp_path / "annulment-counterfactual.db", _uncorrupted_lineage())

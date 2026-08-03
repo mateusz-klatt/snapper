@@ -545,7 +545,7 @@ class TestEnvelopeWireFormatRegression:
     the live backend until ``Depends(json_body(...))`` was wired in.
     """
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_register_device_accepts_iso8601_z_timestamp_via_json_body(self) -> None:
         """``json_body(RegisterDeviceCommand)`` accepts a ``Z``-suffixed timestamp."""
         raw = (

@@ -125,6 +125,8 @@ select = [
     "PLC",
     "A",
     "TID",
+    "PT001",
+    "PT023",
     "D",
     "C901",
     "PLR0912",
@@ -149,6 +151,10 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

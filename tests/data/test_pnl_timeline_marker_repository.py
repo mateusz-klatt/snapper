@@ -347,7 +347,7 @@ async def _seed(repository: SQLAlchemyRepository) -> None:
         await session.commit()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated real-SQLite repository with marker fixtures."""
     db_path = tmp_path / "pnl-timeline-markers.db"

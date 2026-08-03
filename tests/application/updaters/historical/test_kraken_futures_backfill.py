@@ -18,7 +18,7 @@ from snapper.config.settings import AppSettings
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 
 
-@pytest.fixture()
+@pytest.fixture
 def service() -> KrakenFuturesAggregatesBackfillService:
     """Create a backfill service with default parameters."""
     return KrakenFuturesAggregatesBackfillService(

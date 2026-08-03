@@ -18,7 +18,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 
 
-@pytest.fixture()
+@pytest.fixture
 def service() -> KrakenEquitiesAggregatesBackfillService:
     """Create a backfill service with default parameters."""
     return KrakenEquitiesAggregatesBackfillService(

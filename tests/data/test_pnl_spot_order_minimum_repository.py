@@ -211,7 +211,7 @@ def test_interval_projectors_ignore_disjoint_evidence() -> None:
     assert missing_symbol_rows == []
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated schema containing only the four read-side tables."""
     db_path = tmp_path / "pnl-order-minimum.db"

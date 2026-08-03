@@ -119,7 +119,7 @@ def _accrual(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository seeded with the P&L timeline read fixtures."""
     db_path = tmp_path / "pnl-timeline.db"

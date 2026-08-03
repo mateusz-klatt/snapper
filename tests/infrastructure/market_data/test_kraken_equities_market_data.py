@@ -78,7 +78,7 @@ class StubKrakenEquitiesClient:
             yield ticker
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_load_all_symbols_returns_mapper_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Load symbols from symbol mapper function.
 
@@ -103,7 +103,7 @@ async def test_load_all_symbols_returns_mapper_data(monkeypatch: pytest.MonkeyPa
     assert result == symbols
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_creates_entries() -> None:
     """Collect snapshots from ticker stream.
 
@@ -139,7 +139,7 @@ async def test_collect_snapshots_loop_creates_entries() -> None:
     assert abs((snapshot.spread or 0.0) - 1.0) < 1e-9
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_resolve_native_symbol_returns_unchanged() -> None:
     """Resolve native symbol returns the symbol unchanged.
 
@@ -154,7 +154,7 @@ async def test_resolve_native_symbol_returns_unchanged() -> None:
     assert service._resolve_native_symbol("CLM6-NYMEX") == "CLM6-NYMEX"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_with_timeout_returns_partial_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,7 +193,7 @@ async def test_collect_snapshots_with_timeout_returns_partial_results(
     assert result == {}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_persists_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,7 +246,7 @@ async def test_update_market_snapshots_persists_results(
     assert snapshot.instrument_public_id == "inst-cl-123"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_propagates_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,7 +269,7 @@ async def test_update_market_snapshots_propagates_errors(
         await service.update_market_snapshots(timeout_seconds=3)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_async_update_snapshots_manages_lifecycle() -> None:
     """Manage client connection lifecycle.
 
@@ -577,7 +577,7 @@ async def test_collect_snapshots_loop_stamps_provenance() -> None:
     assert sequence_ids == [1, 2]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_skips_unresolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -313,7 +313,7 @@ def _reason_rows(point: PnlTimelinePoint) -> list[tuple[str, str, str, str | Non
     ]
 
 
-@pytest.fixture()
+@pytest.fixture
 async def conflicting_fx_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create one pre-revision GBP-PLN rate whose later quote conflicts."""
     db_path = tmp_path / "pnl-service-fx.db"

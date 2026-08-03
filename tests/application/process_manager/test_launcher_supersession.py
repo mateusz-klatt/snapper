@@ -98,7 +98,7 @@ async def _cancelled_task() -> asyncio.Task[None]:
     return task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stale_task_completion_leaves_successor_tracking_untouched() -> None:
     """A completed task that lost its slot must not evict the successor.
 
@@ -138,7 +138,7 @@ async def test_stale_task_completion_leaves_successor_tracking_untouched() -> No
         await successor_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stale_completion_detected_via_started_processes_after_mode_switch() -> None:
     """A task completion with no task slot but a live instance is superseded.
 
@@ -167,7 +167,7 @@ async def test_stale_completion_detected_via_started_processes_after_mode_switch
     assert factory.started_processes.get("m") is successor_instance
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_finalize_superseded_run_is_idempotent_and_skips_none() -> None:
     """The per-run finalizer no-ops on None ids and already-closed rows.
 
@@ -191,7 +191,7 @@ async def test_finalize_superseded_run_is_idempotent_and_skips_none() -> None:
     assert "run-y" in factory._finalized_run_ids
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_finalize_process_run_marks_run_id_finalized() -> None:
     """The by-name finalizer records the popped run id as finalized.
 
@@ -225,7 +225,7 @@ def test_mark_run_finalized_evicts_oldest_past_cap(monkeypatch: pytest.MonkeyPat
     assert list(factory._finalized_run_ids) == ["run-2", "run-3", "run-4"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_reaps_live_predecessor_before_tracking() -> None:
     """A start with a live predecessor reaps it instead of overwriting.
 
@@ -266,7 +266,7 @@ async def test_start_process_reaps_live_predecessor_before_tracking() -> None:
     await asyncio.sleep(0.05)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_refuses_when_predecessor_survives_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,7 +302,7 @@ async def test_start_process_refuses_when_predecessor_survives_cancel(
     await stubborn_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_restores_task_slot_when_reap_itself_is_cancelled() -> None:
     """An outer cancellation of the reap await re-attaches the predecessor.
 
@@ -338,7 +338,7 @@ async def test_reap_restores_task_slot_when_reap_itself_is_cancelled() -> None:
     await stubborn_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_restores_instance_when_stop_is_cancelled() -> None:
     """An outer cancellation during instance.stop() re-attaches the instance.
 
@@ -360,7 +360,7 @@ async def test_reap_restores_instance_when_stop_is_cancelled() -> None:
     assert factory.started_processes.get("ic") is instance
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_process_refuses_when_predecessor_stop_fails() -> None:
     """A predecessor instance whose stop() raises blocks the successor.
 
@@ -376,7 +376,7 @@ async def test_start_process_refuses_when_predecessor_stop_fails() -> None:
     assert factory.started_processes.get("b") is broken
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_delayed_restart_noops_when_instance_already_live() -> None:
     """A stale watchdog respawn must not double-start a live name.
 
@@ -404,7 +404,7 @@ async def test_delayed_restart_noops_when_instance_already_live() -> None:
         await live_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stop_process_by_name_stops_task_only_survivor() -> None:
     """A live task without a started_processes entry is still stoppable.
 
@@ -426,7 +426,7 @@ async def test_stop_process_by_name_stops_task_only_survivor() -> None:
     finalize_mock.assert_awaited_once()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_try_chain_result_discards_stale_task_and_coroutine() -> None:
     """Stale chained results are discarded, never re-tracked.
 
@@ -454,7 +454,7 @@ async def test_try_chain_result_discards_stale_task_and_coroutine() -> None:
         await successor
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_superseded_finalizes_own_run_only() -> None:
     """A superseded native completion never touches the successor.
 
@@ -485,7 +485,7 @@ async def test_handle_process_completion_superseded_finalizes_own_run_only() -> 
     assert factory.started_processes.get("n") is successor_info
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_handle_process_completion_finally_guard_spares_replacer() -> None:
     """The completion's final pops skip a successor registered mid-await.
 
@@ -537,7 +537,7 @@ def _make_instance_info(spawner: object) -> ProcessInstanceInfo:
     )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_instance_stop_skips_spawner_when_successor_registered() -> None:
     """A stale info must not terminate a successor's re-registered child.
 
@@ -553,7 +553,7 @@ async def test_instance_stop_skips_spawner_when_successor_registered() -> None:
     spawner.cleanup.assert_not_called()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_instance_stop_terminates_when_it_owns_the_registration() -> None:
     """The registered owner's stop terminates and cleans exactly once.
 
@@ -570,7 +570,7 @@ async def test_instance_stop_terminates_when_it_owns_the_registration() -> None:
     spawner.cleanup.assert_called_once_with("x")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_instance_stop_proceeds_when_registry_entry_absent() -> None:
     """An already-cleaned registration still allows the harmless stop.
 
@@ -586,7 +586,7 @@ async def test_instance_stop_proceeds_when_registry_entry_absent() -> None:
     spawner.cleanup.assert_called_once_with("x")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_handles_task_only_predecessor() -> None:
     """A live task without an instance object is reaped cleanly.
 
@@ -607,7 +607,7 @@ async def test_reap_handles_task_only_predecessor() -> None:
     await asyncio.sleep(0.05)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_tolerates_completion_racing_the_instance_stop() -> None:
     """A completion popping the task slot mid-reap does not double-pop.
 
@@ -631,7 +631,7 @@ async def test_reap_tolerates_completion_racing_the_instance_stop() -> None:
     assert "r2" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cleanup_task_tracking_returns_early_on_foreign_task() -> None:
     """Cleanup with a foreign stored task must not pop the successor.
 
@@ -658,7 +658,7 @@ async def test_cleanup_task_tracking_returns_early_on_foreign_task() -> None:
         await successor
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_superseded_generator_exit_skips_even_own_run_finalize() -> None:
     """A superseded GeneratorExit completion finalizes nothing.
 
@@ -693,7 +693,7 @@ async def test_superseded_generator_exit_skips_even_own_run_finalize() -> None:
         await successor
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_current_strategy_task_completion_emits_strategy_list() -> None:
     """An owned STRATEGY task completion refreshes the strategy list.
 
@@ -718,7 +718,7 @@ async def test_current_strategy_task_completion_emits_strategy_list() -> None:
     assert "st" not in factory.process_tasks
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_current_completion_logs_unexpected_handler_error() -> None:
     """An exception inside the owned completion path is logged, not raised.
 
@@ -744,7 +744,7 @@ async def test_current_completion_logs_unexpected_handler_error() -> None:
     assert factory.process_tasks.get("x") is task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_try_chain_result_refuses_when_active_run_belongs_to_successor() -> None:
     """Run identity blocks chaining even while the old task owns the slot.
 
@@ -767,7 +767,7 @@ async def test_try_chain_result_refuses_when_active_run_belongs_to_successor() -
     assert factory.process_tasks.get("cw") is old
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_detaches_done_tracked_slot_without_instance() -> None:
     """A done-but-tracked slot is detached even with no instance present.
 
@@ -787,7 +787,7 @@ async def test_reap_detaches_done_tracked_slot_without_instance() -> None:
     assert "run-D" in factory._finalized_run_ids
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_reap_clears_done_but_tracked_task_alongside_instance() -> None:
     """A done-but-still-tracked task is cleared by the tail pops.
 
@@ -804,7 +804,7 @@ async def test_reap_clears_done_but_tracked_task_alongside_instance() -> None:
     assert "dt" not in factory.started_processes
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_maybe_schedule_restart_drops_stale_decision_for_live_successor() -> None:
     """A stale death decision is dropped when a successor owns the name.
 
@@ -849,7 +849,7 @@ async def test_maybe_schedule_restart_drops_stale_decision_for_live_successor() 
         await successor
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_done_tracked_task_callback_in_successor_record_window_is_superseded() -> None:
     """Run identity outranks slot identity in supersession detection.
 
@@ -881,7 +881,7 @@ async def test_done_tracked_task_callback_in_successor_record_window_is_supersed
     assert factory.process_tasks.get("w2") is old_task
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_record_failed_predecessor_callback_cannot_finalize_successor_run() -> None:
     """A lineage with no persisted run is superseded by any populated run.
 
@@ -907,7 +907,7 @@ async def test_record_failed_predecessor_callback_cannot_finalize_successor_run(
     assert factory.active_runs.get("w3") == "run-B"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stale_generation_cannot_tombstone_failed_successor_config() -> None:
     """A reaped lineage's late completion cannot outlive a newer launch.
 
@@ -932,7 +932,7 @@ async def test_stale_generation_cannot_tombstone_failed_successor_config() -> No
     assert "fg" in factory._terminal_no_restart_generation
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_launch_generation_increments_per_start_and_stamps_lineage() -> None:
     """Every start attempt bumps the per-name generation and stamps it.
 
@@ -954,7 +954,7 @@ async def test_launch_generation_increments_per_start_and_stamps_lineage() -> No
     await asyncio.sleep(0.05)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_stale_generation_skips_cleanup_sparing_native_successor() -> None:
     """A generation gone stale mid-finalize cannot evict a native successor.
 
@@ -991,7 +991,7 @@ async def test_stale_generation_skips_cleanup_sparing_native_successor() -> None
     assert factory.started_processes.get("nv") is successor_instance
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_finalize_process_run_skips_already_finalized_id() -> None:
     """The by-name finalizer no-ops on a row another path already closed.
 
@@ -1009,7 +1009,7 @@ async def test_finalize_process_run_skips_already_finalized_id() -> None:
     recorder.update_run_record.assert_not_awaited()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_finalizers_unmark_run_id_when_update_fails() -> None:
     """A failed durable update releases the finalized-id claim.
 
@@ -1030,7 +1030,7 @@ async def test_finalizers_unmark_run_id_when_update_fails() -> None:
     assert "run-b" not in factory._finalized_run_ids
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_rapid_bounce_keeps_exactly_one_reachable_instance() -> None:
     """End-to-end bounce regression for the 2026-07-08 zombie incident.
 

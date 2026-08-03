@@ -37,7 +37,7 @@ def _ws_mock(client: KrakenEquitiesExchangeClient) -> AsyncMock:
 class TestKrakenEquitiesSubscriptionAck:
     """Tests for Equities subscribe ACK routing."""
 
-    @pytest.fixture()
+    @pytest.fixture
     def client(self) -> KrakenEquitiesExchangeClient:
         """Create an Equities client with tracker spy."""
         client = KrakenEquitiesExchangeClient()
@@ -237,7 +237,7 @@ class TestKrakenEquitiesSubscriptionAck:
 class TestKrakenEquitiesSubscriptionRetry:
     """Tests for Equities one-symbol retry subscribes."""
 
-    @pytest.fixture()
+    @pytest.fixture
     def client(self) -> KrakenEquitiesExchangeClient:
         """Create an Equities client with mocked websocket."""
         client = KrakenEquitiesExchangeClient()

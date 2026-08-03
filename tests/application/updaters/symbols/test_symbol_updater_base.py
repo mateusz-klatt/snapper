@@ -160,7 +160,7 @@ class StubContext:
         self.terminated = True
 
 
-@pytest.fixture()
+@pytest.fixture
 def updater_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Callable[[int, bool], DummySymbolUpdater]:
@@ -337,7 +337,7 @@ def test_should_update_returns_true_when_never_updated(
     assert updater.should_update() is True
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_symbols_collects_async_generator(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
@@ -358,7 +358,7 @@ async def test_fetch_symbols_collects_async_generator(
     assert symbols == [{"symbol": "BTC-USD"}, {"symbol": "ETH-USD"}]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_setup_and_cleanup_zmq_manage_resources(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -394,7 +394,7 @@ async def test_setup_and_cleanup_zmq_manage_resources(
     assert updater.context is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_broadcast_cache_invalidation_uses_socket(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -423,7 +423,7 @@ async def test_broadcast_cache_invalidation_uses_socket(
     assert called_data.timestamp is not None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -454,7 +454,7 @@ async def test_broadcast_cache_invalidation_skips_setup_when_publisher_exists(
     assert called_data.event == "symbol_aliases_updated"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_broadcast_cache_invalidation_stamped_envelope(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
@@ -486,7 +486,7 @@ async def test_broadcast_cache_invalidation_stamped_envelope(
     assert isinstance(stamped, SymbolAliasUpdateData)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_cleanup_safe_when_no_resources(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:
@@ -502,7 +502,7 @@ async def test_cleanup_safe_when_no_resources(
     assert updater.msg_publisher is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_skips_update_when_not_needed(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -539,7 +539,7 @@ async def test_start_skips_update_when_not_needed(
     assert len(updater.updated_payloads) == 0
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_performs_full_update_workflow(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -616,7 +616,7 @@ async def test_start_performs_full_update_workflow(
     assert (datetime.now(UTC) - last_update).total_seconds() < 5
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_cleans_up_on_exception(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -674,7 +674,7 @@ async def test_start_cleans_up_on_exception(
     assert client_disconnected, "Client disconnect should be called even on exception"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_start_handles_repository_initialization_failure(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -715,7 +715,7 @@ async def test_start_handles_repository_initialization_failure(
     assert updater.repository is None
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_setup_zmq_skips_when_already_setup(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -745,7 +745,7 @@ async def test_setup_zmq_skips_when_already_setup(
     assert factory.call_count == 1, "Context should not be created again"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_broadcast_cache_invalidation_handles_missing_publisher(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
@@ -765,7 +765,7 @@ async def test_broadcast_cache_invalidation_handles_missing_publisher(
     await updater.broadcast_cache_invalidation()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_set_last_update_timestamp_updates_existing(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
 ) -> None:

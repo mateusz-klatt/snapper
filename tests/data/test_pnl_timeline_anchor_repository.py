@@ -321,7 +321,7 @@ def _source_fill() -> VenueEvent:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository with anchor and prefix-source tables."""
     db_path = tmp_path / "pnl-anchor.db"
@@ -355,7 +355,7 @@ def _create_postgresql_anchor_fence_tables(connection: Connection) -> None:
         table.create(connection)
 
 
-@pytest.fixture()
+@pytest.fixture
 async def postgresql_repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create and later drop one randomized schema on the validated local PG16."""
     database_url = _configured_local_postgresql_url()

@@ -321,7 +321,7 @@ class StubWalutomatClient:
             yield ticker
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_load_all_symbols_returns_sorted_pairs() -> None:
     """Return supported pairs sorted alphabetically.
 
@@ -345,7 +345,7 @@ async def test_load_all_symbols_returns_sorted_pairs() -> None:
     assert symbols == ["CHF-PLN", "EUR-PLN", "USD-PLN"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_creates_market_snapshots() -> None:
     """Create MarketSnapshot with calculated spread.
 
@@ -381,7 +381,7 @@ async def test_collect_snapshots_loop_creates_market_snapshots() -> None:
     assert math.isclose(snapshot.spread_pct or 0.0, (0.2 / 4.4) * 100, rel_tol=1e-9)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -418,7 +418,7 @@ async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
     assert snapshots == {}
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_persists_via_scd2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,7 +479,7 @@ async def test_update_market_snapshots_persists_via_scd2(
     assert persisted[0][0].instrument_public_id == "inst-eur-456"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_propagates_exceptions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -503,7 +503,7 @@ async def test_update_market_snapshots_propagates_exceptions(
         await service.update_market_snapshots(timeout_seconds=5)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_async_update_snapshots_manages_lifecycle() -> None:
     """Manage client connection lifecycle.
 
@@ -578,7 +578,7 @@ class _TimeoutUpdater(WalutomatSnapshotUpdaterService):
         return self.exchange_client.get_supported_pairs()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return empty dict on timeout.
 
@@ -642,7 +642,7 @@ class _FaultyUpdater(WalutomatSnapshotUpdaterService):
         return self.exchange_client.get_supported_pairs()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_handles_processing_errors() -> None:
     """Skip tickers with processing errors.
 
@@ -696,7 +696,7 @@ class _HappyUpdater(WalutomatSnapshotUpdaterService):
         return self.exchange_client.get_supported_pairs()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_stops_after_all_symbols() -> None:
     """Stop loop after all symbols received.
 
@@ -757,7 +757,7 @@ class _MultiUpdater(WalutomatSnapshotUpdaterService):
         return self.exchange_client.get_supported_pairs()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_logs_progress_and_continues() -> None:
     """Process all symbols in large batch.
 
@@ -772,7 +772,7 @@ async def test_collect_snapshots_loop_logs_progress_and_continues() -> None:
     assert set(snapshots) == set(symbols)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_collect_snapshots_loop_stamps_provenance() -> None:
     """Snapshot collection stamps session_id and sequence_id on each snapshot.
 
@@ -793,7 +793,7 @@ async def test_collect_snapshots_loop_stamps_provenance() -> None:
     assert sequence_ids == [1, 2]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_market_snapshots_skips_unresolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -74,7 +74,7 @@ class DummyTokenService:
     pass
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_messages_handles_unknown_type() -> None:
     """Verify unknown message type returns error response.
 
@@ -111,7 +111,7 @@ class DisconnectingWebSocket:
         raise AssertionError("No messages should be sent on disconnect")
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_messages_handles_disconnect() -> None:
     """Verify WebSocketDisconnect is handled gracefully.
 
@@ -148,7 +148,7 @@ class ErroringWebSocket:
         self.sent.append(data)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_messages_handles_unexpected_exception() -> None:
     """Verify unexpected exceptions send error message.
 
@@ -208,7 +208,7 @@ class MockConnectionManager:
         return self._subscriptions.get(websocket, set())
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_dispatch_messages_loop_continues_after_ping() -> None:
     """Verify message loop continues after processing ping.
 

@@ -71,7 +71,7 @@ class DummyFinder(MetaPathFinder):
         return spec
 
 
-@pytest.fixture()
+@pytest.fixture
 def temp_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, DummyModule]:
     """Provide mocked module entries for autoload testing."""
     base = "autoload_pkg"

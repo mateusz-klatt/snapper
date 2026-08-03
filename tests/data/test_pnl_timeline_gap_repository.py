@@ -246,7 +246,7 @@ def _empty_anchor(point_time: datetime) -> PortfolioPnlAnchorRow:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create a repository containing the complete gap-proof lineage."""
     db_path = tmp_path / "pnl-timeline-gap.db"

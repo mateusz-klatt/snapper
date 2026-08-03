@@ -17,7 +17,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def client() -> Generator[KrakenFuturesExchangeClient]:
     """Create a Futures client with external SDKs patched."""
     with patch("snapper.infrastructure.exchanges.implementations.kraken_futures.ccxt") as ccxt_mod:

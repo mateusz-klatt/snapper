@@ -35,7 +35,7 @@ class _StubRequest:
 class TestJsonBody:
     """Verify json_body dependency validates via Pydantic JSON mode."""
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_valid_json_returns_model(self) -> None:
         """Validate correct JSON body is parsed into model.
 
@@ -55,7 +55,7 @@ class TestJsonBody:
         assert result.ts == datetime(2024, 1, 1, tzinfo=UTC)
         assert result.name == "test"
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_invalid_json_raises_validation_error(self) -> None:
         """Validate malformed body raises RequestValidationError.
 
@@ -73,7 +73,7 @@ class TestJsonBody:
         with pytest.raises(RequestValidationError):
             await dep(req)
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_json_mode_accepts_str_datetime_that_python_mode_rejects(self) -> None:
         """Demonstrate JSON mode allows str->datetime that Python mode rejects.
 
@@ -98,7 +98,7 @@ class TestJsonBody:
 class TestOptionalJsonBody:
     """Cover optional_json_body sentinel + validation paths."""
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_empty_body_returns_none(self) -> None:
         """Empty body returns sentinel ``None`` (the optional-body contract).
 
@@ -115,7 +115,7 @@ class TestOptionalJsonBody:
         req = _StubRequest(b"")
         assert await dep(req) is None
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_populated_body_validates_like_json_body(self) -> None:
         """Non-empty body validates exactly like ``json_body``.
 
@@ -134,7 +134,7 @@ class TestOptionalJsonBody:
         assert result is not None
         assert result.x == 42
 
-    @pytest.mark.asyncio()
+    @pytest.mark.asyncio
     async def test_malformed_json_raises_request_validation_error(self) -> None:
         """Malformed body still raises (NOT silently skipped).
 

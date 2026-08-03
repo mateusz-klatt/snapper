@@ -64,7 +64,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository() -> AsyncIterator[SQLAlchemyRepository]:
     """Create one repository engine against the live PostgreSQL database."""
     result = SQLAlchemyRepository(os.environ["DB_URL"])

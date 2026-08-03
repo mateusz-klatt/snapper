@@ -486,7 +486,7 @@ async def test_fetch_grouped_daily_creates_csv(
     assert rows_data[2][0] == "Z-PAIR"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_aggregates_without_resume_or_csv(tmp_path: Path) -> None:
     """Fetch aggregates without filtering or CSV output.
 
@@ -515,7 +515,7 @@ async def test_fetch_aggregates_without_resume_or_csv(tmp_path: Path) -> None:
     assert not any(tmp_path.iterdir())
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_aggregates_skips_none_timestamp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -615,7 +615,7 @@ async def test_fetch_grouped_daily_creates_empty_marker(
     ]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_aggregates_skips_existing_empty_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -657,7 +657,7 @@ async def test_fetch_aggregates_skips_existing_empty_marker(
     assert sleep_calls == [0.0]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_fetch_grouped_daily_skips_csv_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

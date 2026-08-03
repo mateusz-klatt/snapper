@@ -281,7 +281,7 @@ def _production_lineage() -> list[Order | Execution | User | VenueEvent]:
     ]
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create a repository holding the measured production annulment lineage."""
     db_path = tmp_path / "execution-annulments.db"

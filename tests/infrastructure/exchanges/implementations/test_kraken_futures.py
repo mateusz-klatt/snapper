@@ -49,13 +49,13 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import _tra
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 
 
-@pytest.fixture()
+@pytest.fixture
 def client() -> KrakenFuturesExchangeClient:
     """Create a KrakenFuturesExchangeClient instance for testing."""
     return KrakenFuturesExchangeClient(sandbox=True)
 
 
-@pytest.fixture()
+@pytest.fixture
 def auth_client() -> KrakenFuturesExchangeClient:
     """Create an authenticated KrakenFuturesExchangeClient for testing."""
     return KrakenFuturesExchangeClient(sandbox=True, api_key="test-key", api_secret="test-secret")

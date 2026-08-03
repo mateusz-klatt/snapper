@@ -223,7 +223,7 @@ async def _seed_certified_twins(repository: SQLAlchemyRepository) -> None:
         await session.commit()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository seeded with eligible and ineligible planes."""
     db_path = tmp_path / "pnl-crypto.db"

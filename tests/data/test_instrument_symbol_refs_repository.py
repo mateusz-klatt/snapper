@@ -131,7 +131,7 @@ def _venue_event(
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository seeded with symbols and instruments."""
     db_path = tmp_path / "instrument-refs.db"

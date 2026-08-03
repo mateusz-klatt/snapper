@@ -111,7 +111,7 @@ def _archive_candidate() -> dict[str, object]:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 async def async_repo(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an async repository over the scope-plane tables with lineage.
 

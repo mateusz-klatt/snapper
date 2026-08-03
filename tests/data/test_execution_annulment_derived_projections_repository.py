@@ -192,7 +192,7 @@ def _plan_checkpoint() -> ExecutionPlanCheckpoint:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def unobserved_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create a repository whose correction is durable but NOT yet observed.
 
@@ -229,7 +229,7 @@ async def unobserved_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepos
         await repo.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(
     unobserved_repository: SQLAlchemyRepository,
 ) -> SQLAlchemyRepository:

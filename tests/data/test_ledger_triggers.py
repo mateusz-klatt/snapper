@@ -62,7 +62,7 @@ class _RecordingConnection:
         self.statements.append(" ".join(str(clause).split()))
 
 
-@pytest.fixture()
+@pytest.fixture
 def sqlite_executions_connection() -> Iterator[Connection]:
     """Create the ``executions`` table on a real in-memory SQLite connection.
 
@@ -208,7 +208,7 @@ def test_event_and_migration_share_one_install_authority() -> None:
     assert migration.drop_execution_immutability_triggers is drop_execution_immutability_triggers
 
 
-@pytest.fixture()
+@pytest.fixture
 def sqlite_annulment_connection() -> Iterator[Connection]:
     """Create ``execution_annulments`` on a real in-memory SQLite connection.
 

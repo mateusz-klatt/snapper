@@ -13,7 +13,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import UnderlyingAssetRow
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repo() -> SQLAlchemyRepository:
     """Create an in-memory SQLite repository with tables."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")

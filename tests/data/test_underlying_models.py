@@ -15,7 +15,7 @@ from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import UnderlyingAsset
 
 
-@pytest.fixture()
+@pytest.fixture
 def db_session() -> Session:
     """Create an in-memory SQLite database with all tables."""
     engine = create_engine("sqlite://", echo=False)

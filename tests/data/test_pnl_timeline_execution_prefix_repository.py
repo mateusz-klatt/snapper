@@ -474,7 +474,7 @@ def _certified_prefix(
     return executions
 
 
-@pytest.fixture()
+@pytest.fixture
 async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Create an isolated repository containing the exact replay lineage tables."""
     db_path = tmp_path / "pnl-execution-prefix.db"

@@ -41,7 +41,7 @@ class ExposedWalutomatSymbolUpdater(WalutomatSymbolUpdaterService):
         return super()._get_setting_key()
 
 
-@pytest.fixture()
+@pytest.fixture
 def updater_with_repository(
     tmp_path: Path,
 ) -> Iterator[tuple[ExposedWalutomatSymbolUpdater, DatabaseRepository]]:
@@ -55,7 +55,7 @@ def updater_with_repository(
     repository.engine.dispose()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_creates_and_updates_mappings(
     updater_with_repository: tuple[ExposedWalutomatSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -266,7 +266,7 @@ async def test_update_database_creates_and_updates_mappings(
         )
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_skips_when_mapping_unchanged(
     updater_with_repository: tuple[ExposedWalutomatSymbolUpdater, DatabaseRepository],
 ) -> None:
@@ -407,7 +407,7 @@ def test_get_setting_key_returns_expected_value() -> None:
     assert updater.get_setting_key_public() == "walutomat_symbols_last_update"
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_update_database_creates_capability_rows(
     updater_with_repository: tuple[ExposedWalutomatSymbolUpdater, DatabaseRepository],
 ) -> None:

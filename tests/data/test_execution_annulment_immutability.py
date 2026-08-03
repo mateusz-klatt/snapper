@@ -66,7 +66,7 @@ _SQLITE_TRIGGER_QUERY = (
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 async def create_all_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Build a repository whose schema comes from ``Base.metadata.create_all``.
 
@@ -82,7 +82,7 @@ async def create_all_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepos
         await repository.engine.dispose()
 
 
-@pytest.fixture()
+@pytest.fixture
 async def migration_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     """Build a repository whose schema comes from Alembic migrations to head.
 

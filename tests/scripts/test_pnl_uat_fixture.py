@@ -110,7 +110,7 @@ def oss_seeded_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return template_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def oss_seeded_db_url(
     tmp_path: Path,
     oss_seeded_template: Path,
