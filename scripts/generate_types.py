@@ -1509,7 +1509,16 @@ def json_type_to_ts_entity(
 
 
 _ENTITY_UNION_THRESHOLD = 3
-_UNION_LINE_RE = re.compile(r"^(\s+\w+\??:\s+)((?:'[\w]+' \| )*'[\w]+')\s*$")
+_UNION_LINE_RE = re.compile(r"^(\s+\w+\??:\s+)((?:'[\w]+' \| )*'[\w]+')(?:\s*\|\s*null)?\s*$")
+"""Match a field whose type is an inline string-literal union.
+
+The optional trailing ``| null`` is tolerated but deliberately excluded from
+group 2: a nullable field carries the same semantic union as its non-null
+siblings, so both must count toward the extraction threshold and share one
+alias. Replacement substitutes only the captured union, leaving ``| null`` in
+place. Without this an entire nullable family stays inline and Sonar flags the
+duplication, which is how the hand-edited alias got into the generated file.
+"""
 
 _KNOWN_UNION_ALIASES: dict[str, str] = {
     "'kraken' | 'walutomat' | 'polygon'": "MarketDataExchange",
@@ -2362,6 +2371,82 @@ def _strip_jsdoc_blocks(content: str, keep_first: bool = True) -> str:
     return "".join(result)
 
 
+_OPENAPI_UNION_LINE_RE = re.compile(r'^(\s+\w+\??:\s+)("[\w]+"(?: \| "[\w]+")+)(;?)\s*$')
+"""Match an openapi-typescript field typed as an inline string-literal union."""
+
+_OPENAPI_UNION_THRESHOLD = 3
+"""Occurrences of one union before it is worth naming.
+
+Below this a shared alias costs more indirection than the duplication it
+removes; at or above it Sonar reports the repetition, which is what previously
+forced a hand-edited alias into a generated file.
+"""
+
+_KNOWN_OPENAPI_UNION_ALIASES: dict[str, str] = {
+    '"kraken" | "kraken_futures" | "kraken_equities" | "walutomat" | "polygon"': (
+        "MarketDataExchange"
+    ),
+}
+"""Semantic names for unions whose generated field name would read poorly."""
+
+
+def _hoist_openapi_literal_unions(content: str) -> str:
+    """Name every literal union repeated often enough to be worth an alias.
+
+    openapi-typescript inlines an enum at each use site, so one backend Literal
+    becomes many identical unions and static analysis reports the duplication.
+    Naming them here keeps the generated file the single source of truth: an
+    alias added by hand survives only until the next regeneration.
+
+    Args:
+        content: Post-rename openapi-typescript output.
+
+    Returns:
+        The same file with repeated unions replaced by declared aliases.
+    """
+    lines = content.split("\n")
+    occurrences: dict[str, list[int]] = {}
+    names: dict[str, str] = {}
+    for index, line in enumerate(lines):
+        match = _OPENAPI_UNION_LINE_RE.match(line)
+        if match is None:
+            continue
+        union = match.group(2)
+        occurrences.setdefault(union, []).append(index)
+        names.setdefault(union, match.group(1).strip().split(":")[0].rstrip("?").strip())
+    repeated = {
+        union: indexes
+        for union, indexes in occurrences.items()
+        if len(indexes) >= _OPENAPI_UNION_THRESHOLD
+    }
+    if not repeated:
+        return content
+    aliases: dict[str, str] = {}
+    used: set[str] = set()
+    for union in sorted(repeated):
+        known = _KNOWN_OPENAPI_UNION_ALIASES.get(union)
+        if known is not None:
+            alias = known
+        else:
+            camel = snake_to_camel(names[union])
+            base = camel[0].upper() + camel[1:]
+            alias = base
+            suffix = 2
+            while alias in used:
+                alias = f"{base}{suffix}"
+                suffix += 1
+        aliases[union] = alias
+        used.add(alias)
+        for index in repeated[union]:
+            lines[index] = lines[index].replace(union, alias)
+    declarations = [f"type {aliases[union]} = {union};" for union in sorted(repeated)]
+    insert_at = next(
+        (index for index, line in enumerate(lines) if line.startswith("export ")),
+        len(lines),
+    )
+    return "\n".join(lines[:insert_at] + declarations + [""] + lines[insert_at:])
+
+
 def postprocess_openapi_typescript_file(
     file_path: Path, *, openapi_spec_path: Path | None = None
 ) -> None:
@@ -2416,6 +2501,7 @@ def postprocess_openapi_typescript_file(
         request_schema_names = frozenset()
     updated = _widen_optional_nullable_to_undefined(updated, request_schema_names)
     updated = _strip_jsdoc_blocks(updated)
+    updated = _hoist_openapi_literal_unions(updated)
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")

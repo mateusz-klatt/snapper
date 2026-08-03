@@ -2987,3 +2987,67 @@ class TestStripJsdocBlocks:
 
         assert "Header" not in result
         assert "export type T = string" in result
+
+
+def test_openapi_literal_unions_below_the_threshold_stay_inline() -> None:
+    """A union used twice is not worth the indirection of an alias.
+
+    Given: An openapi-typescript body repeating one union twice
+    When: Literal unions are hoisted
+    Then: The body is returned unchanged
+    """
+    body = 'export type Paths = {\n    a: "x" | "y";\n    b: "x" | "y";\n}'
+
+    assert generate_types._hoist_openapi_literal_unions(body) == body
+
+
+def test_openapi_literal_unions_are_named_once_repeated() -> None:
+    """A union at the threshold is declared once and referenced everywhere.
+
+    Given: An openapi-typescript body repeating one union three times
+    When: Literal unions are hoisted
+    Then: One alias is declared before the exports and every use site refers to it
+    """
+    body = 'export type Paths = {\n    mode: "live" | "paper";\n    b: "live" | "paper";\n    c: "live" | "paper";\n}'
+
+    hoisted = generate_types._hoist_openapi_literal_unions(body)
+
+    assert hoisted.startswith('type Mode = "live" | "paper";\n\nexport type Paths')
+    assert '"live" | "paper";' not in hoisted.split("export type Paths", 1)[1]
+    assert hoisted.count("Mode;") == 3
+
+
+def test_openapi_literal_unions_prefer_the_semantic_name() -> None:
+    """A union with a known meaning is named for the domain, not the field.
+
+    Given: The market-data exchange union repeated at the threshold
+    When: Literal unions are hoisted
+    Then: It is declared as MarketDataExchange rather than after its field
+    """
+    union = '"kraken" | "kraken_futures" | "kraken_equities" | "walutomat" | "polygon"'
+    body = f"export type Paths = {{\n    venue: {union};\n    b: {union};\n    c: {union};\n}}"
+
+    hoisted = generate_types._hoist_openapi_literal_unions(body)
+
+    assert hoisted.startswith(f"type MarketDataExchange = {union};")
+    assert hoisted.count("MarketDataExchange;") == 3
+
+
+def test_openapi_literal_union_alias_names_never_collide() -> None:
+    """Two unions sharing a field name still get distinct aliases.
+
+    Given: Two different unions both first seen on a field named ``mode``
+    When: Literal unions are hoisted
+    Then: The second gains a numeric suffix rather than overwriting the first
+    """
+    body = (
+        "export type Paths = {\n"
+        + "".join('    mode: "live" | "paper";\n' for _ in range(3))
+        + "".join('    mode: "thread" | "process";\n' for _ in range(3))
+        + "}"
+    )
+
+    hoisted = generate_types._hoist_openapi_literal_unions(body)
+
+    assert 'type Mode = "live" | "paper";' in hoisted
+    assert 'type Mode2 = "thread" | "process";' in hoisted
