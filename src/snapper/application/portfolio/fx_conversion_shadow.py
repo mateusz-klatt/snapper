@@ -19,6 +19,7 @@ from loguru import logger
 
 from snapper.application.portfolio.fx_rates import FxRateKey
 from snapper.core.numeric import is_positive_finite
+from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.fx_conversion_digests import canonical_fx_refusal_reason
@@ -284,7 +285,66 @@ def _selected_rows(
         closes = {row["close"] for row in minute_rows}
         if len(closes) == 1 and is_positive_finite(minute_rows[0]["close"]):
             resolved[minute] = max(minute_rows, key=lambda row: row["candle_id"])
+    _carry_into_gaps(evaluation, rows, resolved)
     return resolved
+
+
+def _carry_into_gaps(
+    evaluation: FxShadowEvaluation,
+    rows: Sequence[PnlFxRateRow],
+    resolved: dict[datetime, PnlFxRateRow],
+) -> None:
+    """Fill each unresolved required minute from the nearest earlier mark.
+
+    A venue that publishes only on change leaves whole minutes with no candle,
+    so a conversion landing in such a gap has no exact evidence. The last mark
+    observed before the gap is the venue's own standing quote for it; carrying
+    it forward is a bounded, recorded substitution, never an invented rate. The
+    proof stores both minutes, so the distance stays auditable, and anything
+    older than :data:`MAX_CARRIED_MINUTES` is left unresolved so the election
+    refuses rather than valuing a trade on a stale rate.
+
+    Args:
+        evaluation: Raw election result naming the selected plane and minutes.
+        rows: Every loaded evidence row for the pair.
+        resolved: Exact-minute resolutions, extended in place with carries.
+    """
+    selected = evaluation.selected_plane
+    missing = sorted(set(evaluation.required_minutes) - set(resolved))
+    if selected is None or not missing:
+        return
+    usable: dict[datetime, PnlFxRateRow] = {}
+    for row in rows:
+        if (row["base"], row["quote"], row["exchange"]) != selected:
+            continue
+        if not is_positive_finite(row["close"]):
+            continue
+        minute = row["open_at"] + timedelta(minutes=1)
+        candidate = usable.get(minute)
+        if candidate is None or row["candle_id"] > candidate["candle_id"]:
+            usable[minute] = row
+    for gap in missing:
+        earliest = gap - timedelta(minutes=MAX_CARRIED_MINUTES)
+        available = [minute for minute in usable if earliest <= minute < gap]
+        if available:
+            resolved[gap] = usable[max(available)]
+
+
+def carried_minutes_for(conversion_minute: datetime, row: PnlFxRateRow) -> int:
+    """Return how many whole minutes a mark was carried into its gap.
+
+    Zero means the mark was observed in the conversion minute itself, which is
+    the pre-carry rule the database CHECK still encodes as the base case.
+
+    Args:
+        conversion_minute: Minute the conversion is valued at.
+        row: Evidence row whose close supplied the rate.
+
+    Returns:
+        Whole minutes between the row's own close minute and the conversion.
+    """
+    observed = row["open_at"] + timedelta(minutes=1)
+    return int((conversion_minute - observed).total_seconds() // 60)
 
 
 def _reason(state: FxConversionCompleteness, missing: Sequence[datetime]) -> str | None:
@@ -308,11 +368,16 @@ def fx_shadow_evaluation_completeness(
         evaluation: Raw election result whose selected rows are classified.
 
     Returns:
-        Complete, partial, or refused under the F2 artifact contract.
+        Complete, carried, partial, or refused under the F2 artifact contract.
+        ``carried`` means every required minute resolved but at least one took
+        its rate from an earlier mark, so an auditor can tell a fully observed
+        conversion from a substituted one without reading the proof rows.
     """
-    proof_minutes = set(_selected_rows(evaluation, evaluation.rows))
+    selected_rows = _selected_rows(evaluation, evaluation.rows)
+    proof_minutes = set(selected_rows)
     if proof_minutes == set(evaluation.required_minutes):
-        return "complete"
+        carried = any(carried_minutes_for(minute, row) > 0 for minute, row in selected_rows.items())
+        return "carried" if carried else "complete"
     if proof_minutes:
         return "partial"
     return "refused"
@@ -394,6 +459,7 @@ def _build_artifact(
             election_public_id=election_id,
             conversion_minute=minute,
             candle_open_minute=row["open_at"],
+            carried_minutes=carried_minutes_for(minute, row),
             candle_id=row["candle_id"],
             candle_public_id=row["candle_public_id"],
             candle_session_id=row["candle_session_id"],

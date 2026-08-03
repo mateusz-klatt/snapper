@@ -103,6 +103,7 @@ def _proof(
         "election_public_id": election_public_id,
         "conversion_minute": _MINUTE,
         "candle_open_minute": _MINUTE - timedelta(minutes=1),
+        "carried_minutes": 0,
         "candle_id": 42,
         "candle_public_id": _CANDLE,
         "candle_session_id": _SESSION,
@@ -406,6 +407,7 @@ async def test_partial_reason_and_complete_upgrade_fail_closed(tmp_path: Path) -
         **_proof(complete["public_id"], "00000000-0000-7000-8000-00000000004b"),
         "conversion_minute": missing,
         "candle_open_minute": missing - timedelta(minutes=1),
+        "carried_minutes": 0,
     }
     with pytest.raises(FxConversionArtifactUpgradeRequiredError):
         await repository.pin_fx_conversion_artifact(
@@ -448,6 +450,7 @@ async def test_evidence_growth_layers_complete_over_partial(tmp_path: Path) -> N
         **_proof(complete["public_id"], "00000000-0000-7000-8000-000000000154"),
         "conversion_minute": missing,
         "candle_open_minute": missing - timedelta(minutes=1),
+        "carried_minutes": 0,
     }
     await repository.pin_fx_conversion_artifact(complete, [first_proof, second_proof])
     before_growth = await repository.get_latest_visible_fx_conversion_artifact(
@@ -753,6 +756,7 @@ def test_digest_canonicalization_normalizes_instants_and_rejects_bad_minutes() -
         **proof,
         "conversion_minute": plus_two,
         "candle_open_minute": plus_two - timedelta(minutes=1),
+        "carried_minutes": 0,
     }
     assert build_proof_digest(proof) == build_proof_digest(shifted)
     assert build_decision_inputs_digest(election, [proof]) == build_decision_inputs_digest(

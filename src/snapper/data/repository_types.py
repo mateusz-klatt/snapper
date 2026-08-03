@@ -21,7 +21,7 @@ from snapper.core.types import OrderExchange
 
 TradeIntegrityMonitor = Literal["m1", "m2"]
 FxConversionScopeKind = Literal["shared_pair", "instrument_owned"]
-FxConversionCompleteness = Literal["complete", "partial", "refused"]
+FxConversionCompleteness = Literal["complete", "carried", "partial", "refused"]
 FxConversionOperation = Literal["direct", "inverse"]
 
 
@@ -103,6 +103,7 @@ class FxConversionProofInsertRow(TypedDict):
     election_public_id: str
     conversion_minute: datetime
     candle_open_minute: datetime
+    carried_minutes: int
     candle_id: int
     candle_public_id: str
     candle_session_id: str

@@ -37,6 +37,7 @@ from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
+from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
 from snapper.data.ledger_triggers import (
@@ -1817,17 +1818,24 @@ class FxConversionProof(TemporalMixin, Base):
             name="ck_fx_proofs_operation_rate",
         ),
         CheckConstraint(
-            "datetime(conversion_minute) = datetime(candle_open_minute, '+1 minute')",
-            name="ck_fx_proofs_exact_minute",
+            "datetime(conversion_minute) = "
+            "datetime(candle_open_minute, '+' || (carried_minutes + 1) || ' minutes')",
+            name="ck_fx_proofs_carried_minute",
         ).ddl_if(dialect="sqlite"),
         CheckConstraint(
-            "conversion_minute = candle_open_minute + INTERVAL '1 minute'",
-            name="ck_fx_proofs_exact_minute",
+            "conversion_minute = candle_open_minute + INTERVAL '1 minute' "
+            "+ carried_minutes * INTERVAL '1 minute'",
+            name="ck_fx_proofs_carried_minute",
         ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            f"carried_minutes BETWEEN 0 AND {MAX_CARRIED_MINUTES}",
+            name="ck_fx_proofs_carried_bound",
+        ),
     )
     election_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     conversion_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     candle_open_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    carried_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     candle_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     candle_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     candle_session_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)

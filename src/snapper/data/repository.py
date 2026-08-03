@@ -9345,6 +9345,7 @@ class SQLAlchemyRepository(Repository):
             election_public_id=proof.election_public_id,
             conversion_minute=proof.conversion_minute,
             candle_open_minute=proof.candle_open_minute,
+            carried_minutes=proof.carried_minutes,
             candle_id=proof.candle_id,
             candle_public_id=proof.candle_public_id,
             candle_session_id=proof.candle_session_id,
@@ -9592,6 +9593,7 @@ class SQLAlchemyRepository(Repository):
             (
                 proof["conversion_minute"],
                 proof["candle_open_minute"],
+                proof["carried_minutes"],
                 proof["candle_id"],
                 proof["candle_public_id"],
                 proof["candle_session_id"],
@@ -9609,6 +9611,7 @@ class SQLAlchemyRepository(Repository):
             (
                 proof["conversion_minute"],
                 proof["candle_open_minute"],
+                proof["carried_minutes"],
                 proof["candle_id"],
                 proof["candle_public_id"],
                 proof["candle_session_id"],
