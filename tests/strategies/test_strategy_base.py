@@ -1164,14 +1164,16 @@ class TestSignalGroupNormalization:
     def test_non_signal_element_raises(self) -> None:
         """A non-StrategySignal element fails closed."""
         s = self._paper_strategy()
+        legs_with_non_signal = cast(Any, [self._signal("BTC-USD"), "nope"])
         with pytest.raises(TypeError, match="every leg"):
-            s._normalize_signal_group(cast(Any, [self._signal("BTC-USD"), "nope"]))
+            s._normalize_signal_group(legs_with_non_signal)
 
     def test_non_signal_non_list_return_raises(self) -> None:
         """A return that is neither None, signal, nor list fails closed."""
         s = self._paper_strategy()
+        unsupported_callback_return = cast(Any, 123)
         with pytest.raises(TypeError, match="callback must return"):
-            s._normalize_signal_group(cast(Any, 123))
+            s._normalize_signal_group(unsupported_callback_return)
 
     @staticmethod
     def _live_strategy() -> FakeStrategy:
@@ -1246,16 +1248,16 @@ async def test_emit_signal_auto_timestamp_and_setup_publisher(
     published_signal: SignalData = mock_msg_publisher.send.call_args[0][1]
     assert published_signal.fired_at.timestamp() == captured_time
     assert published_signal.instrument == "BTC-USD"
+    signal_outside_outputs = StrategySignal(
+        instrument="ETH-USD",
+        side="sell",
+        strength=0.2,
+        reason="invalid",
+        price=20.0,
+    )
+
     with pytest.raises(ValueError, match="not allowed"):
-        await strategy.emit_signal(
-            StrategySignal(
-                instrument="ETH-USD",
-                side="sell",
-                strength=0.2,
-                reason="invalid",
-                price=20.0,
-            )
-        )
+        await strategy.emit_signal(signal_outside_outputs)
 
 
 @pytest.mark.asyncio
@@ -3531,14 +3533,14 @@ class TestListenLoopSystemMessages:
             ]
         )
         strategy.subscriber = mock_subscriber
-        with (
-            patch("snapper.strategies.system_events._get_db_mapper") as mock_mapper,
-            pytest.raises(asyncio.CancelledError),
-        ):
+        with patch("snapper.strategies.system_events._get_db_mapper") as mock_mapper:
             mock_mapper_instance = MagicMock()
             mock_mapper.return_value = mock_mapper_instance
-            await strategy._listen_loop()
-            mock_mapper_instance.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
+            with pytest.raises(asyncio.CancelledError):
+                await strategy._listen_loop()
+                mock_mapper_instance.trigger_cache_invalidation.assert_called_once_with(
+                    fail_fast=False
+                )
 
     @pytest.mark.asyncio
     async def test_listen_loop_settings_update(self) -> None:
@@ -6622,17 +6624,13 @@ class TestPairedGroupEmission:
         """
         strategy = FakeStrategy(_strategy_config(exchange="paper", name="nopolicy"))
         publisher = _paired_mock_publisher(strategy)
+        undeclared_group = [
+            StrategySignal(instrument="BTC-USD", side="buy", strength=0.5, reason="l0", price=1.0),
+            StrategySignal(instrument="ETH-USD", side="sell", strength=0.5, reason="l1", price=2.0),
+        ]
+
         with pytest.raises(ValueError, match="PAIRED_EXECUTION_POLICY"):
-            await strategy._emit_signal_group(
-                [
-                    StrategySignal(
-                        instrument="BTC-USD", side="buy", strength=0.5, reason="l0", price=1.0
-                    ),
-                    StrategySignal(
-                        instrument="ETH-USD", side="sell", strength=0.5, reason="l1", price=2.0
-                    ),
-                ]
-            )
+            await strategy._emit_signal_group(undeclared_group)
         publisher.send.assert_not_called()
 
     def test_execution_mode_reflects_exchange(self) -> None:

@@ -485,13 +485,16 @@ class TestMessages:
             reason="test",
         )
         assert msg.strength == pytest.approx(0.5)
+        rejected_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        rejected_fired_at = datetime.now(UTC)
+
         with pytest.raises(ValueError):
             SignalData(
                 session_id="",
                 sequence_id=0,
                 public_id="test-public-id",
-                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                fired_at=datetime.now(UTC),
+                timestamp=rejected_timestamp,
+                fired_at=rejected_fired_at,
                 instrument="BTCUSD",
                 exchange="kraken",
                 side="buy",
@@ -521,12 +524,14 @@ class TestMessages:
             exchange="kraken",
         )
         assert msg.quantity == pytest.approx(0.01)
+        rejected_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+
         with pytest.raises(ValueError):
             OrderRequestData(
                 session_id="",
                 sequence_id=0,
                 public_id="test-public-id",
-                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                timestamp=rejected_timestamp,
                 strategy_id="test",
                 instrument="BTCUSD",
                 mode="paper",
@@ -956,12 +961,14 @@ class TestAlertEventDataSchema:
 
     def test_title_min_length_enforced(self) -> None:
         """Empty title is rejected by Pydantic (min_length=1)."""
+        alert_timestamp = datetime(2026, 4, 23, 12, tzinfo=UTC)
+
         with pytest.raises(ValidationError) as exc:
             AlertEventData(
                 session_id="s1",
                 sequence_id=7,
                 public_id="envelope-pid",
-                timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+                timestamp=alert_timestamp,
                 user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
                 alert_type="order_fill_full",
                 title="",
@@ -972,12 +979,14 @@ class TestAlertEventDataSchema:
 
     def test_unknown_alert_type_rejected(self) -> None:
         """Literal enforcement blocks unknown ``alert_type``."""
+        alert_timestamp = datetime(2026, 4, 23, 12, tzinfo=UTC)
+
         with pytest.raises(ValidationError):
             AlertEventData(
                 session_id="s1",
                 sequence_id=7,
                 public_id="envelope-pid",
-                timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+                timestamp=alert_timestamp,
                 user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
                 alert_type="not_a_real_alert",
                 title="Filled",

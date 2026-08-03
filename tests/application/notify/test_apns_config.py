@@ -83,15 +83,17 @@ class TestLoadApnsConfig:
 
     def test_unknown_environment_rejected(self) -> None:
         """Only sandbox / production / sandbox_and_production are allowed."""
+        staging_environment_settings = _ready_settings(apns_environment="staging")
         with pytest.raises(ValueError) as exc:
-            load_apns_config(_ready_settings(apns_environment="staging"))
+            load_apns_config(staging_environment_settings)
 
         assert "apns_environment" in str(exc.value)
 
     def test_base64_decode_failure_reported_clearly(self) -> None:
         """Non-base64 payload raises with a reason string, not a raw traceback."""
+        invalid_base64_settings = _ready_settings(apns_private_key_p8_base64="!!!-not-base64-!!!")
         with pytest.raises(ValueError) as exc:
-            load_apns_config(_ready_settings(apns_private_key_p8_base64="!!!-not-base64-!!!"))
+            load_apns_config(invalid_base64_settings)
 
         assert "base64" in str(exc.value).lower()
 
@@ -99,7 +101,8 @@ class TestLoadApnsConfig:
         """A base64-valid payload that isn't a PEM is rejected."""
         payload = base64.b64encode(b"no-pem-marker-here").decode("ascii")
 
+        non_pem_settings = _ready_settings(apns_private_key_p8_base64=payload)
         with pytest.raises(ValueError) as exc:
-            load_apns_config(_ready_settings(apns_private_key_p8_base64=payload))
+            load_apns_config(non_pem_settings)
 
         assert "BEGIN" in str(exc.value)

@@ -401,8 +401,10 @@ def test_delegate_parameter_model_caps_tool_rounds() -> None:
     When: The registered Pydantic parameter model validates the payload,
     Then: Validation fails instead of advertising a looser spawn contract.
     """
+    excessive_rounds_parameters = _replace("max_tool_rounds", 9)
+
     with pytest.raises(ValidationError):
-        DelegateProcessParameters.model_validate(_replace("max_tool_rounds", 9))
+        DelegateProcessParameters.model_validate(excessive_rounds_parameters)
 
 
 @pytest.mark.asyncio
@@ -419,6 +421,7 @@ async def test_create_persistence_rejects_delegate_values_before_writer(
     writer = AsyncMock()
     launcher._registry_syncer.create_process_config = writer
     _install_registry(monkeypatch, {_DELEGATE_NAME: _delegate_entry()})
+    inline_key_parameters = _replace("api_key_file", "sk-inline-create-secret")
 
     with pytest.raises(DelegateConfigReferenceError):
         await launcher.create_process_config(
@@ -427,7 +430,7 @@ async def test_create_persistence_rejects_delegate_values_before_writer(
             method="start",
             enabled=True,
             mode=ProcessModeEnum.PROCESS,
-            parameters=_replace("api_key_file", "sk-inline-create-secret"),
+            parameters=inline_key_parameters,
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=(),
@@ -455,6 +458,7 @@ async def test_create_writer_independently_rejects_delegate_values(
     repository_lookup = MagicMock()
     _install_registry(monkeypatch, {_DELEGATE_NAME: _delegate_entry()})
     monkeypatch.setattr(registry_syncer_module, "get_repository", repository_lookup)
+    inline_key_parameters = _replace("api_key_file", "sk-inline-writer-secret")
 
     with pytest.raises(DelegateConfigReferenceError):
         await syncer.create_process_config(
@@ -463,7 +467,7 @@ async def test_create_writer_independently_rejects_delegate_values(
             method="start",
             enabled=True,
             mode=ProcessModeEnum.PROCESS,
-            parameters=_replace("api_key_file", "sk-inline-writer-secret"),
+            parameters=inline_key_parameters,
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=(),
@@ -573,11 +577,12 @@ async def test_update_persistence_rejects_delegate_values_before_writer(
     }
     syncer, close_and_insert = _mock_update_repository(monkeypatch, stored_config)
     _install_registry(monkeypatch, {_DELEGATE_NAME: _delegate_entry()})
+    inline_token_parameters = _replace("delegate_token_file", "inline-delegate-token")
 
     with pytest.raises(DelegateConfigReferenceError):
         await syncer.update_process_config_parameters(
             name="delegate_research_primary",
-            parameters=_replace("delegate_token_file", "inline-delegate-token"),
+            parameters=inline_token_parameters,
             updated_by="operator",
         )
 
@@ -678,13 +683,14 @@ def test_argv_serialization_rejects_delegate_values_before_json(
     serializer = MagicMock()
     _install_registry(monkeypatch, {_DELEGATE_NAME: _delegate_entry()})
     monkeypatch.setattr(spawner_module.json, "dumps", serializer)
+    inline_key_parameters = _replace("api_key_file", "sk-inline-argv-secret")
 
     with pytest.raises(DelegateConfigReferenceError):
         _build_process_command(
             "delegate_research_primary",
             "tests.RegisteredProcess",
             "start",
-            _replace("api_key_file", "sk-inline-argv-secret"),
+            inline_key_parameters,
             template_name=_DELEGATE_NAME,
         )
 

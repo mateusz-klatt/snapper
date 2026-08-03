@@ -178,9 +178,10 @@ class TestMachineReadableIncompletenessReasons:
             withholding_scope="global",
             trigger_instrument_public_id=None,
         )
+        point_time = _m(0)
         with pytest.raises(ValueError, match="complete point cannot carry"):
             PnlTimelinePoint(
-                point_time=_m(0),
+                point_time=point_time,
                 realized_pnl=None,
                 fee_pnl=None,
                 accrual_pnl=None,
@@ -193,7 +194,7 @@ class TestMachineReadableIncompletenessReasons:
             )
         with pytest.raises(ValueError, match="incomplete point must carry"):
             PnlTimelinePoint(
-                point_time=_m(0),
+                point_time=point_time,
                 realized_pnl=None,
                 fee_pnl=None,
                 accrual_pnl=None,
@@ -244,9 +245,10 @@ class TestMachineReadableIncompletenessReasons:
             withholding_scope="instrument",
             trigger_instrument_public_id="I1",
         )
+        point_time = _m(0)
         with pytest.raises(ValueError, match="deduplicated and sorted"):
             PnlTimelinePoint(
-                point_time=_m(0),
+                point_time=point_time,
                 realized_pnl=None,
                 fee_pnl=None,
                 accrual_pnl=None,
@@ -387,39 +389,38 @@ class TestMachineReadableIncompletenessReasons:
 
     def test_unstamped_unavailable_basis_fails_loudly(self) -> None:
         """A future basis path cannot silently invent a fallback reason."""
-        with pytest.raises(ValueError, match="requires a stamped causal reason"):
-            _value_point(
-                _PointValuationContext(
-                    point_time=_m(0),
-                    pools={
-                        ("I1", "shard-I1"): _Pool(
-                            position_qty=1.0,
-                            entry_price=None,
-                        )
-                    },
-                    pool_index={"I1": (("I1", "shard-I1"),)},
-                    weights_by_pool={},
-                    marks={("I1", _m(0)): 100.0},
-                    seen=["I1"],
-                    attribution_seen=[],
-                    cumulatives=_PointCumulatives(
-                        realized_by_instrument={},
-                        fee_by_instrument={},
-                        accrual_by_instrument={},
-                        realized_by_attribution={},
-                        fee_by_attribution={},
-                        accrual_by_attribution={},
-                        realized_total=0.0,
-                        fee_total=0.0,
-                        accrual_total=0.0,
-                    ),
-                    activation_time=None,
-                    global_reasons=(),
-                    untrusted_reasons_by_instrument={},
-                    basis_reasons_by_pool={},
-                    mark_incompleteness_reasons={},
+        unstamped_basis_context = _PointValuationContext(
+            point_time=_m(0),
+            pools={
+                ("I1", "shard-I1"): _Pool(
+                    position_qty=1.0,
+                    entry_price=None,
                 )
-            )
+            },
+            pool_index={"I1": (("I1", "shard-I1"),)},
+            weights_by_pool={},
+            marks={("I1", _m(0)): 100.0},
+            seen=["I1"],
+            attribution_seen=[],
+            cumulatives=_PointCumulatives(
+                realized_by_instrument={},
+                fee_by_instrument={},
+                accrual_by_instrument={},
+                realized_by_attribution={},
+                fee_by_attribution={},
+                accrual_by_attribution={},
+                realized_total=0.0,
+                fee_total=0.0,
+                accrual_total=0.0,
+            ),
+            activation_time=None,
+            global_reasons=(),
+            untrusted_reasons_by_instrument={},
+            basis_reasons_by_pool={},
+            mark_incompleteness_reasons={},
+        )
+        with pytest.raises(ValueError, match="requires a stamped causal reason"):
+            _value_point(unstamped_basis_context)
 
 
 class TestAttribution:
@@ -1312,16 +1313,21 @@ class TestOpeningDerivation:
     def test_rejects_invalid_identities_and_scope_order(self) -> None:
         """Blank identities and non-increasing scope evidence refuse replay."""
         valid = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        blank_instrument = replace(valid, instrument_public_id="")
+        blank_shard = replace(valid, shard_key="")
+        blank_exchange = replace(valid, exchange="")
+        zero_scope = replace(valid, scope_sequence=0)
+        repeated_scope = replace(valid, order_public_id="order-2")
         with pytest.raises(ValueError, match="instrument identity"):
-            derive_timeline_opening((replace(valid, instrument_public_id=""),), {}, _T0)
+            derive_timeline_opening((blank_instrument,), {}, _T0)
         with pytest.raises(ValueError, match="shard identity"):
-            derive_timeline_opening((replace(valid, shard_key=""),), {}, _T0)
+            derive_timeline_opening((blank_shard,), {}, _T0)
         with pytest.raises(ValueError, match="exchange identity"):
-            derive_timeline_opening((replace(valid, exchange=""),), {}, _T0)
+            derive_timeline_opening((blank_exchange,), {}, _T0)
         with pytest.raises(ValueError, match="increasing positive"):
-            derive_timeline_opening((replace(valid, scope_sequence=0),), {}, _T0)
+            derive_timeline_opening((zero_scope,), {}, _T0)
         with pytest.raises(ValueError, match="increasing positive"):
-            derive_timeline_opening((valid, replace(valid, order_public_id="order-2")), {}, _T0)
+            derive_timeline_opening((valid, repeated_scope), {}, _T0)
 
     def test_rejects_instrument_or_shard_identity_spanning_scopes(self) -> None:
         """One durable pool identity cannot span instruments or venues."""
@@ -1366,8 +1372,9 @@ class TestOpeningDerivation:
         valid = _exec("I1", 1, 0, "buy", 1.0, 100.0)
         invalid_prices = (0.0, -1.0, float("nan"), float("inf"))
         for price in invalid_prices:
+            invalid_price_execution = replace(valid, price=price)
             with pytest.raises(ValueError, match="price must be positive"):
-                derive_timeline_opening((replace(valid, price=price),), {}, _T0)
+                derive_timeline_opening((invalid_price_execution,), {}, _T0)
         stamped = replace(valid, price_incompleteness_reason="fx_conversion_unproven")
         with pytest.raises(ValueError, match="provenance"):
             derive_timeline_opening((stamped,), {}, _T0)
@@ -1636,10 +1643,19 @@ class TestOpeningAnchor:
     def test_opening_rejects_duplicate_unstable_and_cross_scope_pools(self) -> None:
         """One stable tuple cannot duplicate or contradict durable pool identity."""
         pool = _opening_pool("I1", 1.0, 100.0, shard_key="a")
+        later_shard_pool = _opening_pool("I1", 1.0, 100.0, shard_key="b")
+        shard_sharing_pool = _opening_pool("I2", 1.0, 100.0, shard_key="a")
+        other_exchange_pool = _opening_pool(
+            "I1",
+            1.0,
+            100.0,
+            shard_key="b",
+            exchange="walutomat",
+        )
         with pytest.raises(ValueError, match="stably ordered"):
             TimelineOpening(
                 pools=(
-                    _opening_pool("I1", 1.0, 100.0, shard_key="b"),
+                    later_shard_pool,
                     pool,
                 ),
                 t0=_T0,
@@ -1650,7 +1666,7 @@ class TestOpeningAnchor:
             TimelineOpening(
                 pools=(
                     pool,
-                    _opening_pool("I2", 1.0, 100.0, shard_key="a"),
+                    shard_sharing_pool,
                 ),
                 t0=_T0,
             )
@@ -1658,13 +1674,7 @@ class TestOpeningAnchor:
             TimelineOpening(
                 pools=(
                     pool,
-                    _opening_pool(
-                        "I1",
-                        1.0,
-                        100.0,
-                        shard_key="b",
-                        exchange="walutomat",
-                    ),
+                    other_exchange_pool,
                 ),
                 t0=_T0,
             )
@@ -1708,17 +1718,19 @@ class TestOpeningAnchor:
         execution: TimelineExecution,
     ) -> None:
         """Post-anchor replay requires the same durable pool identities as its seed."""
+        anchor_window = _window(0, 0)
         with pytest.raises(ValueError, match="pool identities must be non-empty"):
-            build_pnl_timeline((execution,), (), {}, _window(0, 0))
+            build_pnl_timeline((execution,), (), {}, anchor_window)
 
     def test_builder_rejects_execution_pool_scope_collisions(self) -> None:
         """A shard or instrument cannot change its durable scope during replay."""
+        anchor_window = _window(0, 0)
         crossed_shard = (
             _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="shared"),
             _exec("I2", 2, 0, "buy", 1.0, 100.0, shard_key="shared"),
         )
         with pytest.raises(ValueError, match="shard cannot span"):
-            build_pnl_timeline(crossed_shard, (), {}, _window(0, 0))
+            build_pnl_timeline(crossed_shard, (), {}, anchor_window)
         crossed_instrument = (
             _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="kraken"),
             _exec(
@@ -1733,7 +1745,7 @@ class TestOpeningAnchor:
             ),
         )
         with pytest.raises(ValueError, match="instrument cannot span"):
-            build_pnl_timeline(crossed_instrument, (), {}, _window(0, 0))
+            build_pnl_timeline(crossed_instrument, (), {}, anchor_window)
 
 
 class TestShortSide:
@@ -2143,8 +2155,9 @@ class TestRegressionGuard:
             ),
         )
 
+        schedule_start = _m(0)
         with pytest.raises(ValueError, match="requires a triggering instrument"):
-            _regression_shadow_deltas((shadow,), _m(0), 2)
+            _regression_shadow_deltas((shadow,), schedule_start, 2)
 
     def test_thousand_distinct_future_pools_use_bounded_shadow_changes(self) -> None:
         """A 24-hour window emits one trigger without minute-instrument fan-out."""
@@ -2248,8 +2261,9 @@ class TestEdges:
 
     def test_unsupported_granularity_raises(self) -> None:
         """An unknown granularity is rejected before any work."""
+        unsupported_window = _window(0, 5, "2w")
         with pytest.raises(ValueError, match="unsupported granularity"):
-            build_pnl_timeline((), (), {}, _window(0, 5, "2w"))
+            build_pnl_timeline((), (), {}, unsupported_window)
 
     def test_result_echoes_window_metadata(self) -> None:
         """The result carries the requested granularity and valuation currency."""

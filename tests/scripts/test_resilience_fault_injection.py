@@ -123,8 +123,10 @@ class TestEnsureHelperImage:
         When: ensure_helper_image runs,
         Then: RuntimeError is raised.
         """
+        missing_image_runner = _runner(inspect=(1, ""))
+        failing_build = MagicMock(return_value=1)
         with pytest.raises(RuntimeError, match="helper image"):
-            ensure_helper_image(run=_runner(inspect=(1, "")), build=MagicMock(return_value=1))
+            ensure_helper_image(run=missing_image_runner, build=failing_build)
 
 
 class TestBuildCommands:
@@ -217,8 +219,9 @@ class TestInject:
         When: inject runs,
         Then: RuntimeError is raised so the harness never runs a no-op outage.
         """
+        failing_append_runner = _runner(inject_rc=(1, ""))
         with pytest.raises(RuntimeError, match="inject failed"):
-            inject("snapper-feed", run=_runner(inject_rc=(1, "")))
+            inject("snapper-feed", run=failing_append_runner)
 
 
 class TestRestore:
@@ -240,13 +243,15 @@ class TestRestore:
 
     def test_raises_when_recreate_fails(self) -> None:
         """Verify restore raises loudly when the recreate backstop fails."""
+        failing_recreate_runner = _runner(checks=[(0, "")], recreate=(1, "boom"))
         with pytest.raises(RuntimeError, match="recreate"):
-            restore("c", run=_runner(checks=[(0, "")], recreate=(1, "boom")))
+            restore("c", run=failing_recreate_runner)
 
     def test_raises_when_rule_present_after_recreate(self) -> None:
         """Verify restore raises if the rule is still present post-recreate."""
+        rule_survives_runner = _runner(checks=[(0, ""), (0, "")], recreate=(0, ""))
         with pytest.raises(RuntimeError, match="unproven"):
-            restore("c", run=_runner(checks=[(0, ""), (0, "")], recreate=(0, "")))
+            restore("c", run=rule_survives_runner)
 
     def test_raises_when_unproven_after_recreate(self) -> None:
         """Verify restore raises when post-recreate verification is unknown.
@@ -256,8 +261,9 @@ class TestRestore:
         When: restore runs,
         Then: It raises rather than reporting an uncertain success.
         """
+        unverifiable_recheck_runner = _runner(checks=[(0, ""), (2, "err")], recreate=(0, ""))
         with pytest.raises(RuntimeError, match="unproven"):
-            restore("c", run=_runner(checks=[(0, ""), (2, "err")], recreate=(0, "")))
+            restore("c", run=unverifiable_recheck_runner)
 
     def test_recreate_uses_distinct_service(self) -> None:
         """Verify the recreate backstop targets the compose service, not container.
@@ -269,7 +275,8 @@ class TestRestore:
         run_spy = MagicMock(side_effect=_runner(checks=[(0, ""), (1, "")], recreate=(0, "")))
         assert restore("cont", run=run_spy, service="svc") == "recreated"
         compose = [c.args[0] for c in run_spy.call_args_list if "compose" in c.args[0]]
-        assert compose and compose[0][-1] == "svc"
+        assert compose
+        assert compose[0][-1] == "svc"
 
 
 class TestPsqlConnection:
@@ -467,6 +474,7 @@ class TestRunOutageCycle:
         """
         run = _runner(inspect=(0, ""), inject_rc=(1, ""), delete=(0, ""), checks=[(1, "")])
         run_spy = MagicMock(side_effect=run)
+        sleep_mock = MagicMock()
         with pytest.raises(RuntimeError, match="inject failed"):
             run_outage_cycle(
                 container="snapper-feed",
@@ -476,7 +484,7 @@ class TestRunOutageCycle:
                 sla_s=1.0,
                 poll_s=1.0,
                 run=run_spy,
-                sleep=MagicMock(),
+                sleep=sleep_mock,
             )
         commands = [c.args[0] for c in run_spy.call_args_list]
         assert any("-D" in c for c in commands)

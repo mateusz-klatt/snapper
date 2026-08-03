@@ -812,8 +812,9 @@ async def test_set_last_update_timestamp_raises_on_repository_error(
         "snapper.application.updaters.symbols.base.get_repository",
         broken_get_repo,
     )
+    update_timestamp = datetime.now(UTC)
     with pytest.raises(ValueError, match="failed"):
-        await updater.set_last_update_timestamp_public(datetime.now(UTC))
+        await updater.set_last_update_timestamp_public(update_timestamp)
 
 
 def test_get_last_update_timestamp_returns_none_for_null_value(
@@ -890,7 +891,8 @@ def test_upsert_symbol_creates_new_entry(
             session, "BTC-USD", "BTC", "USD", "crypto", now, session_id="", sequence_id=0
         )
         session.commit()
-    assert isinstance(result, str) and len(result) == 36
+    assert isinstance(result, str)
+    assert len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         version = session.execute(
@@ -935,7 +937,8 @@ def test_upsert_symbol_updates_base_currency(
             session, "BTC-USD", "XBT", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
-    assert isinstance(result, str) and len(result) == 36
+    assert isinstance(result, str)
+    assert len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
@@ -982,7 +985,8 @@ def test_upsert_symbol_updates_quote_currency(
             session, "BTC-USD", "BTC", "USDT", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
-    assert isinstance(result, str) and len(result) == 36
+    assert isinstance(result, str)
+    assert len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
@@ -1029,7 +1033,8 @@ def test_upsert_symbol_updates_asset_type(
             session, "EUR-USD", "EUR", "USD", "forex", update_time, session_id="", sequence_id=0
         )
         session.commit()
-    assert isinstance(result, str) and len(result) == 36
+    assert isinstance(result, str)
+    assert len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(
@@ -1076,7 +1081,8 @@ def test_upsert_symbol_preserves_timestamp_when_unchanged(
             session, "BTC-USD", "BTC", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
         session.commit()
-    assert isinstance(result, str) and len(result) == 36
+    assert isinstance(result, str)
+    assert len(result) == 36
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
         active = session.execute(

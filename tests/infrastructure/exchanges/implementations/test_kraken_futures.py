@@ -2287,8 +2287,9 @@ class TestOrderMethods:
         When: create_order is called,
         Then: Raises RuntimeError.
         """
+        unauthenticated_request = MagicMock()
         with pytest.raises(RuntimeError, match="API credentials required"):
-            await client.create_order(MagicMock())
+            await client.create_order(unauthenticated_request)
 
     @pytest.mark.asyncio
     async def test_create_order_pool_dispatch_failure_is_wrapped(
@@ -2624,9 +2625,11 @@ class TestStubMethods:
         When: subscribe_executions is iterated,
         Then: Raises RuntimeError.
         """
+        iterator = client.subscribe_executions()
+        event_loop = asyncio.get_event_loop()
+        first_execution_pull = iterator.__anext__()
         with pytest.raises(RuntimeError, match="API credentials required"):
-            iterator = client.subscribe_executions()
-            asyncio.get_event_loop().run_until_complete(iterator.__anext__())
+            event_loop.run_until_complete(first_execution_pull)
 
 
 class TestSubscribeCandles:
@@ -2698,8 +2701,9 @@ class TestSubscribeCandles:
             new=fast_sleep,
         ):
             iterator = client.subscribe_candles(["BTC-USD-PERP"], "1m")
+            first_candle_pull = iterator.__anext__()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+                await asyncio.wait_for(first_candle_pull, timeout=0.2)
         assert 0.01 in sleeps
 
     @pytest.mark.asyncio

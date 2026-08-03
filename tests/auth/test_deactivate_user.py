@@ -380,11 +380,13 @@ class TestDeactivateUserRaceLoss:
     """
 
     @pytest.mark.asyncio
-    async def test_already_inactive_user_returns_false_no_revoke_no_publish(self) -> None:
+    async def test_already_inactive_user_returns_false_no_revoke_no_publish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Real-DB SELECT honours the `is_active=True` filter in deactivate_user."""
         UserService.clear_instance()
         TokenManager.clear_instance()
-        TokenManager._initialized = False
+        monkeypatch.setattr(TokenManager, "_initialized", False)
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
         seed_time = datetime(2026, 1, 1, tzinfo=UTC)
@@ -515,16 +517,20 @@ class TestDeactivateUserRoute:
         deactivate call, so neither is invoked when self-targeting.
         """
         mock_service = AsyncMock()
+        rest_request = _make_rest_request()
+        admin_principal = _make_principal("admin")
+        request_envelope = _make_request_envelope(None)
+
         with (
             patch("snapper.auth.routes.get_user_service", return_value=mock_service),
             pytest.raises(HTTPException) as exc_info,
         ):
             await deactivate_route(
-                request=_make_rest_request(),
+                request=rest_request,
                 user_id="admin",
-                current_user=_make_principal("admin"),
+                current_user=admin_principal,
                 _csrf=None,
-                body=_make_request_envelope(None),
+                body=request_envelope,
             )
         assert exc_info.value.status_code == 400
         mock_service.get_user_by_id.assert_not_called()
@@ -545,16 +551,20 @@ class TestDeactivateUserRoute:
         mock_service = AsyncMock()
         mock_service.get_user_by_id = AsyncMock(return_value=None)
         mock_service.deactivate_user = AsyncMock()
+        rest_request = _make_rest_request()
+        admin_principal = _make_principal("admin")
+        request_envelope = _make_request_envelope("audit")
+
         with (
             patch("snapper.auth.routes.get_user_service", return_value=mock_service),
             pytest.raises(HTTPException) as exc_info,
         ):
             await deactivate_route(
-                request=_make_rest_request(),
+                request=rest_request,
                 user_id="ghost",
-                current_user=_make_principal("admin"),
+                current_user=admin_principal,
                 _csrf=None,
-                body=_make_request_envelope("audit"),
+                body=request_envelope,
             )
         assert exc_info.value.status_code == 404
         mock_service.deactivate_user.assert_not_called()
@@ -581,15 +591,19 @@ class TestDeactivateUserRoute:
         mock_service = AsyncMock()
         mock_service.get_user_by_id = AsyncMock(return_value=target_profile)
         mock_service.deactivate_user = AsyncMock(return_value=False)
+        rest_request = _make_rest_request()
+        admin_principal = _make_principal("admin")
+        request_envelope = _make_request_envelope(None)
+
         with (
             patch("snapper.auth.routes.get_user_service", return_value=mock_service),
             pytest.raises(HTTPException) as exc_info,
         ):
             await deactivate_route(
-                request=_make_rest_request(),
+                request=rest_request,
                 user_id="raced",
-                current_user=_make_principal("admin"),
+                current_user=admin_principal,
                 _csrf=None,
-                body=_make_request_envelope(None),
+                body=request_envelope,
             )
         assert exc_info.value.status_code == 404

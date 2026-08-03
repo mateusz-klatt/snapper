@@ -65,62 +65,72 @@ class TestBacktestConfigValidation:
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", {})
     def test_unknown_strategy_class(self) -> None:
         """Unknown strategy_class raises ValidationError."""
+        unknown_strategy_payload = _valid_config()
         with pytest.raises(ValidationError, match="Unknown strategy class"):
-            BacktestConfig(**_valid_config())
+            BacktestConfig(**unknown_strategy_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_end_date_before_start_date(self) -> None:
         """end_date <= start_date raises ValidationError."""
+        past_end_date_payload = _valid_config(end_date=NOW - timedelta(days=1))
         with pytest.raises(ValidationError, match="end_date must be after"):
-            BacktestConfig(**_valid_config(end_date=NOW - timedelta(days=1)))
+            BacktestConfig(**past_end_date_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_end_date_equals_start_date(self) -> None:
         """end_date == start_date raises ValidationError."""
+        equal_dates_payload = _valid_config(end_date=NOW)
         with pytest.raises(ValidationError, match="end_date must be after"):
-            BacktestConfig(**_valid_config(end_date=NOW))
+            BacktestConfig(**equal_dates_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_empty_instruments(self) -> None:
         """Empty instruments dict raises ValidationError."""
+        empty_instruments_payload = _valid_config(instruments={})
         with pytest.raises(ValidationError, match="at least one exchange"):
-            BacktestConfig(**_valid_config(instruments={}))
+            BacktestConfig(**empty_instruments_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_exchange_with_empty_symbols(self) -> None:
         """Exchange with empty symbol list raises ValidationError."""
+        empty_symbols_payload = _valid_config(instruments={"kraken": []})
         with pytest.raises(ValidationError, match="at least one instrument"):
-            BacktestConfig(**_valid_config(instruments={"kraken": []}))
+            BacktestConfig(**empty_symbols_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_negative_initial_balance(self) -> None:
         """Negative initial_balance raises ValidationError."""
+        negative_balance_payload = _valid_config(initial_balance=-100)
         with pytest.raises(ValidationError, match="initial_balance must be positive"):
-            BacktestConfig(**_valid_config(initial_balance=-100))
+            BacktestConfig(**negative_balance_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_zero_initial_balance(self) -> None:
         """Zero initial_balance raises ValidationError."""
+        zero_balance_payload = _valid_config(initial_balance=0)
         with pytest.raises(ValidationError, match="initial_balance must be positive"):
-            BacktestConfig(**_valid_config(initial_balance=0))
+            BacktestConfig(**zero_balance_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_negative_slippage(self) -> None:
         """Negative slippage_bps raises ValidationError."""
+        negative_slippage_payload = _valid_config(slippage_bps=-1)
         with pytest.raises(ValidationError, match="bps fields must be in"):
-            BacktestConfig(**_valid_config(slippage_bps=-1))
+            BacktestConfig(**negative_slippage_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_negative_commission(self) -> None:
         """Negative commission_bps raises ValidationError."""
+        negative_commission_payload = _valid_config(commission_bps=-1)
         with pytest.raises(ValidationError, match="bps fields must be in"):
-            BacktestConfig(**_valid_config(commission_bps=-1))
+            BacktestConfig(**negative_commission_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_slippage_above_cap(self) -> None:
         """slippage_bps above 500 raises ValidationError."""
+        excessive_slippage_payload = _valid_config(slippage_bps=501)
         with pytest.raises(ValidationError, match="bps fields must be in"):
-            BacktestConfig(**_valid_config(slippage_bps=501))
+            BacktestConfig(**excessive_slippage_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_zmq_replay_now_accepted(self) -> None:
@@ -131,14 +141,16 @@ class TestBacktestConfigValidation:
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_cancel_poll_ms_must_be_positive(self) -> None:
         """cancel_poll_ms <= 0 raises ValidationError."""
+        zero_poll_payload = _valid_config(cancel_poll_ms=0)
         with pytest.raises(ValidationError, match="cancel_poll_ms must be in"):
-            BacktestConfig(**_valid_config(cancel_poll_ms=0))
+            BacktestConfig(**zero_poll_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_cancel_poll_ms_upper_bound(self) -> None:
         """cancel_poll_ms above 60000 raises ValidationError."""
+        excessive_poll_payload = _valid_config(cancel_poll_ms=60_001)
         with pytest.raises(ValidationError, match="cancel_poll_ms must be in"):
-            BacktestConfig(**_valid_config(cancel_poll_ms=60_001))
+            BacktestConfig(**excessive_poll_payload)
 
 
 class TestFingerprint:
@@ -223,8 +235,9 @@ class TestTargetExecutionExchange:
             is not a member of the OrderExchange Literal (paper/kraken/
             kraken_futures/walutomat).
         """
+        unknown_exchange_payload = _valid_config(target_execution_exchange="not_a_real_exchange")
         with pytest.raises(ValidationError):
-            BacktestConfig(**_valid_config(target_execution_exchange="not_a_real_exchange"))
+            BacktestConfig(**unknown_exchange_payload)
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_target_execution_exchange_rejects_market_data_only_venue(self) -> None:
@@ -235,8 +248,9 @@ class TestTargetExecutionExchange:
         Then: Pydantic raises ValidationError — OrderExchange excludes
             kraken_equities (which is feed-only, not order-capable).
         """
+        feed_only_exchange_payload = _valid_config(target_execution_exchange="kraken_equities")
         with pytest.raises(ValidationError):
-            BacktestConfig(**_valid_config(target_execution_exchange="kraken_equities"))
+            BacktestConfig(**feed_only_exchange_payload)
 
 
 class TestTargetExecutionExchangeFingerprint:

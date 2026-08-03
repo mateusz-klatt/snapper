@@ -398,13 +398,15 @@ async def test_fetch_aggregates_raises_when_save_csv_without_archive_symbol(
     monkeypatch.setattr(
         "snapper.infrastructure.historical.polygon.loader.asyncio.sleep", fake_sleep
     )
+    window_start = datetime(2024, 1, 1, 0, tzinfo=UTC)
+    window_end = datetime(2024, 1, 1, 0, tzinfo=UTC)
     with pytest.raises(ValueError, match="archive_symbol is required"):
         await loader.fetch_aggregates(
             ticker="X:BTCUSD",
             multiplier=1,
             timespan="minute",
-            from_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
-            to_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
+            from_ts=window_start,
+            to_ts=window_end,
             save_csv=True,
         )
 
@@ -1214,13 +1216,15 @@ async def test_fetch_aggregates_requires_client(tmp_path: Path) -> None:
     Then: ValueError is raised before any network access.
     """
     loader = _cache_loader(tmp_path)
+    window_start = datetime(2024, 1, 1, tzinfo=UTC)
+    window_end = datetime(2024, 1, 2, tzinfo=UTC)
     with pytest.raises(ValueError, match="cache-only loader"):
         await loader.fetch_aggregates(
             ticker="X:BTCUSD",
             multiplier=1,
             timespan="minute",
-            from_ts=datetime(2024, 1, 1, tzinfo=UTC),
-            to_ts=datetime(2024, 1, 2, tzinfo=UTC),
+            from_ts=window_start,
+            to_ts=window_end,
             archive_symbol="BTC-USD",
             save_csv=False,
         )
@@ -1235,9 +1239,10 @@ async def test_fetch_grouped_daily_requires_client(tmp_path: Path) -> None:
     Then: ValueError is raised before any network access.
     """
     loader = _cache_loader(tmp_path)
+    grouped_day = date(2024, 1, 1)
     with pytest.raises(ValueError, match="cache-only loader"):
         await loader.fetch_grouped_daily(
-            date(2024, 1, 1),
+            grouped_day,
             market_type="crypto",
             save_csv=False,
         )

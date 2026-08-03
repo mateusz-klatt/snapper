@@ -435,7 +435,8 @@ async def test_subscribe_instruments_yields_pairs(monkeypatch: pytest.MonkeyPatc
     items: list[dict[str, Any]] = []
     async for inst in client.subscribe_instruments():
         items.append(inst)
-    assert items and items[0]["native_symbol"] == "EUR-PLN"
+    assert items
+    assert items[0]["native_symbol"] == "EUR-PLN"
 
 
 def test_polling_loop_backoff_error_does_not_stop_running() -> None:
@@ -912,8 +913,8 @@ async def test_subscribe_instruments_requires_running() -> None:
     Then: RuntimeError is raised.
     """
     client = WalutomatExchangeClient()
+    generator = client.subscribe_instruments()
     with pytest.raises(RuntimeError, match="Not connected"):
-        generator = client.subscribe_instruments()
         await generator.__anext__()
 
 
@@ -951,8 +952,8 @@ async def test_subscribe_ticks_requires_running() -> None:
     Then: RuntimeError is raised.
     """
     client = WalutomatExchangeClient()
+    generator = client.subscribe_ticks(["EUR-PLN"])
     with pytest.raises(RuntimeError, match="Not connected"):
-        generator = client.subscribe_ticks(["EUR-PLN"])
         await generator.__anext__()
 
 
@@ -1189,8 +1190,8 @@ async def test_subscribe_candles_not_connected() -> None:
     Then: RuntimeError is raised.
     """
     client = WalutomatExchangeClient()
+    generator = client.subscribe_candles(["EUR-PLN"])
     with pytest.raises(RuntimeError, match="Not connected"):
-        generator = client.subscribe_candles(["EUR-PLN"])
         await generator.__anext__()
 
 
@@ -1220,8 +1221,8 @@ async def test_subscribe_candles_unsupported_timeframe(monkeypatch: pytest.Monke
     client = WalutomatExchangeClient()
     await client.connect()
     try:
+        generator = client.subscribe_candles(["EUR-PLN"], timeframe="5m")
         with pytest.raises(NotImplementedError, match="only supports 1m"):
-            generator = client.subscribe_candles(["EUR-PLN"], timeframe="5m")
             await generator.__anext__()
     finally:
         await client.disconnect()
@@ -2025,7 +2026,9 @@ async def test_subscribe_executions_handles_api_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_executions_respects_poll_interval() -> None:
+async def test_subscribe_executions_respects_poll_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify asyncio.sleep is called with execution_poll_interval.
 
     Given: A client with execution_poll_interval=7.5 and tracked orders,
@@ -2055,13 +2058,9 @@ async def test_subscribe_executions_respects_poll_interval() -> None:
 
     client.get_orders = _mock_get_orders
 
-    original_asyncio_sleep = walutomat_mod.asyncio.sleep
-    walutomat_mod.asyncio.sleep = _mock_sleep
-    try:
-        async for _update in client.subscribe_executions():
-            pass
-    finally:
-        walutomat_mod.asyncio.sleep = original_asyncio_sleep
+    monkeypatch.setattr(walutomat_mod.asyncio, "sleep", _mock_sleep)
+    async for _update in client.subscribe_executions():
+        pass
 
     assert 7.5 in sleep_values
 
@@ -2317,7 +2316,9 @@ async def test_subscribe_executions_wake_event_interrupts_idle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_executions_active_interval_when_tracked() -> None:
+async def test_subscribe_executions_active_interval_when_tracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify polling uses active interval when orders are tracked.
 
     Given: A client with a tracked order,
@@ -2348,13 +2349,9 @@ async def test_subscribe_executions_active_interval_when_tracked() -> None:
 
     client.get_orders = _mock_get_orders
 
-    original_asyncio_sleep = walutomat_mod.asyncio.sleep
-    walutomat_mod.asyncio.sleep = _mock_sleep
-    try:
-        async for _update in client.subscribe_executions():
-            pass
-    finally:
-        walutomat_mod.asyncio.sleep = original_asyncio_sleep
+    monkeypatch.setattr(walutomat_mod.asyncio, "sleep", _mock_sleep)
+    async for _update in client.subscribe_executions():
+        pass
 
     assert 0.0 in sleep_values
     assert 60.0 not in sleep_values
@@ -3744,8 +3741,8 @@ async def test_subscribe_ticks_not_connected() -> None:
     Then: RuntimeError is raised.
     """
     client = WalutomatExchangeClient()
+    gen = client.subscribe_ticks(["EUR-PLN"])
     with pytest.raises(RuntimeError, match="Not connected"):
-        gen = client.subscribe_ticks(["EUR-PLN"])
         await gen.__anext__()
 
 
@@ -4107,8 +4104,8 @@ async def test_subscribe_instruments_propagates_error(
     client = WalutomatExchangeClient()
     client._running = True
     monkeypatch.setattr(client, "_fetch_market_data", AsyncMock(side_effect=ValueError("boom")))
+    gen = client.subscribe_instruments()
     with pytest.raises(ValueError):
-        gen = client.subscribe_instruments()
         await gen.__anext__()
 
 
@@ -5613,8 +5610,9 @@ class TestWalutomatAmbiguousSubmitClassification:
         Then: The plain ConnectError propagates (safe to reject).
         """
         client = self._client(monkeypatch, [httpx.ConnectError("refused")])
+        submit_request = self._request()
         with pytest.raises(httpx.ConnectError):
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
 
     @pytest.mark.asyncio
     async def test_read_timeout_is_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5627,8 +5625,9 @@ class TestWalutomatAmbiguousSubmitClassification:
             error chained and the submit identity attached.
         """
         client = self._client(monkeypatch, [httpx.ReadTimeout("read timed out")])
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
         assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
         assert exc_info.value.client_order_id == "amb-w1"
         assert exc_info.value.instrument == "EUR-PLN"
@@ -5644,8 +5643,9 @@ class TestWalutomatAmbiguousSubmitClassification:
             correlation id, never a fabricated or empty one.
         """
         client = self._client(monkeypatch, [cast(Any, _StatusErrorResponse(502))])
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
         assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio
@@ -5657,8 +5657,9 @@ class TestWalutomatAmbiguousSubmitClassification:
         Then: The plain HTTPStatusError propagates (safe to reject).
         """
         client = self._client(monkeypatch, [cast(Any, _StatusErrorResponse(400))])
+        submit_request = self._request()
         with pytest.raises(httpx.HTTPStatusError):
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
 
     @pytest.mark.asyncio
     async def test_unparseable_success_body_is_wrapped(
@@ -5673,8 +5674,9 @@ class TestWalutomatAmbiguousSubmitClassification:
             correlation id, never a fabricated or empty one.
         """
         client = self._client(monkeypatch, [cast(Any, _UnparseableResponse())])
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
         assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio
@@ -5691,8 +5693,9 @@ class TestWalutomatAmbiguousSubmitClassification:
             accepted and whose venue id we never learned.
         """
         client = self._client(monkeypatch, [StubResponse({"success": True, "result": {}})])
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
         assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio
@@ -5708,8 +5711,9 @@ class TestWalutomatAmbiguousSubmitClassification:
         client = self._client(
             monkeypatch, [StubResponse({"success": True, "result": {"orderId": ""}})]
         )
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
         assert exc_info.value.client_order_id == "amb-w1"
 
     @pytest.mark.asyncio
@@ -5720,8 +5724,9 @@ class TestWalutomatAmbiguousSubmitClassification:
         client = self._client(
             monkeypatch, [StubResponse({"success": True, "result": {"orderId": None}})]
         )
+        submit_request = self._request()
         with pytest.raises(AmbiguousOrderSubmitError):
-            await client.create_order(self._request())
+            await client.create_order(submit_request)
 
 
 @pytest.mark.asyncio

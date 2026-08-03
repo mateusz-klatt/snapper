@@ -41,6 +41,7 @@ from sqlalchemy import table
 from sqlalchemy import text
 from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import quoted_name
 from sqlalchemy.sql.expression import Executable
@@ -99,6 +100,18 @@ async def migration_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyReposi
         yield repository
     finally:
         await repository.engine.dispose()
+
+
+async def _execute_and_commit(session: AsyncSession, statement: Executable) -> None:
+    """Issue one raw vector and commit it on the caller's open session.
+
+    The trigger may refuse at statement execution or at commit, so both steps
+    belong to the single attack under test. Keeping them together here means the
+    surrounding ``pytest.raises`` block wraps exactly one call while the vector
+    still runs in the caller's session and its transaction, unchanged.
+    """
+    await session.execute(statement)
+    await session.commit()
 
 
 async def _seed_annulment_row(repository: SQLAlchemyRepository) -> int:
@@ -214,8 +227,7 @@ async def _assert_every_mutation_is_rejected(repository: SQLAlchemyRepository) -
     for statement in vectors.values():
         async with repository.session() as s:
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
         assert await _surviving_row(repository) == (1, row_id, "unwitnessed_phantom")
 
 
@@ -313,8 +325,7 @@ async def test_executions_ledger_immutability_is_not_weakened_by_the_manifest(
     ):
         async with create_all_repository.session() as s:
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
     async with create_all_repository.session() as s:
         assert (await s.execute(select(Execution.fee))).scalar_one() == 0.5
 
@@ -396,8 +407,7 @@ async def test_create_all_visibility_rejects_every_raw_mutation_vector(
     statement = _visibility_mutation_vectors(row_id)[vector]
     async with create_all_repository.session() as s:
         with pytest.raises(DBAPIError, match="append-only"):
-            await s.execute(statement)
-            await s.commit()
+            await _execute_and_commit(s, statement)
     async with create_all_repository.session() as s:
         assert (
             await s.execute(select(ExecutionAnnulmentVisibility.observed_at))
@@ -422,8 +432,7 @@ async def test_migrated_visibility_rejects_every_raw_mutation_vector(
     statement = _visibility_mutation_vectors(row_id)[vector]
     async with migration_repository.session() as s:
         with pytest.raises(DBAPIError, match="append-only"):
-            await s.execute(statement)
-            await s.commit()
+            await _execute_and_commit(s, statement)
     async with migration_repository.session() as s:
         assert (
             await s.execute(select(ExecutionAnnulmentVisibility.observed_at))

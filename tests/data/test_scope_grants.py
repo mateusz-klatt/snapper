@@ -691,6 +691,7 @@ class TestHandoverIntegrityError:
                 object.__setattr__(s, "commit", boom)
                 yield s
 
+        handover_timestamp = datetime.now(UTC)
         with (
             patch.object(repo, "session", failing_session),
             pytest.raises(ScopeGrantConflictError) as excinfo,
@@ -702,7 +703,7 @@ class TestHandoverIntegrityError:
                 reason="concurrent race",
                 session_id="test-session",
                 sequence_id=900,
-                timestamp=datetime.now(UTC),
+                timestamp=handover_timestamp,
             )
         assert excinfo.value.conflicting_operator_public_id == ids["bob"]
 
@@ -746,19 +747,18 @@ class TestCreateScopeGrantIntegrityError:
                 object.__setattr__(s, "commit", boom)
                 yield s
 
+        racing_instrument_request = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="instrument",
+            instrument_public_id=ids["btc_perp"],
+        )
         with (
             patch.object(repo, "session", failing_session),
             pytest.raises(ScopeGrantConflictError) as excinfo,
         ):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="instrument",
-                    instrument_public_id=ids["btc_perp"],
-                )
-            )
+            await repo.create_scope_grant(racing_instrument_request)
         assert excinfo.value.wallet_public_id == ids["wallet"]
 
     @pytest.mark.asyncio
@@ -785,19 +785,18 @@ class TestCreateScopeGrantIntegrityError:
                 object.__setattr__(s, "commit", boom)
                 yield s
 
+        not_null_instrument_request = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="instrument",
+            instrument_public_id=ids["btc_perp"],
+        )
         with (
             patch.object(repo, "session", failing_session),
             pytest.raises(IntegrityError, match="NOT NULL"),
         ):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="instrument",
-                    instrument_public_id=ids["btc_perp"],
-                )
-            )
+            await repo.create_scope_grant(not_null_instrument_request)
 
 
 class TestHandoverIntegrityReraise:
@@ -838,6 +837,7 @@ class TestHandoverIntegrityReraise:
                 object.__setattr__(s, "commit", boom)
                 yield s
 
+        handover_timestamp = datetime.now(UTC)
         with (
             patch.object(repo, "session", failing_session),
             pytest.raises(IntegrityError, match="NOT NULL"),
@@ -849,7 +849,7 @@ class TestHandoverIntegrityReraise:
                 reason="non-unique integrity error test",
                 session_id="test-session",
                 sequence_id=901,
-                timestamp=datetime.now(UTC),
+                timestamp=handover_timestamp,
             )
 
 
@@ -867,7 +867,8 @@ class TestListActiveOperators:
         Then: The result is ordered by label and includes all three.
         """
         ids = await _seed_world(repo)
-        assert "alice" in ids and "bob" in ids
+        assert "alice" in ids
+        assert "bob" in ids
         operators = await repo.list_active_operators(datetime.now(UTC))
         labels = [op["label"] for op in operators]
         assert labels == sorted(labels)
@@ -1537,6 +1538,7 @@ class TestRevokeScopeGrant:
                 .values(known_to=pre_close)
             )
 
+        revoke_at = pre_close + timedelta(seconds=1)
         with (
             patch.object(repo, "_acquire_wallet_advisory_lock", side_effect=_close_under_lock),
             pytest.raises(ScopeGrantNotFoundError, match="concurrent mutation"),
@@ -1544,7 +1546,7 @@ class TestRevokeScopeGrant:
             await repo.revoke_scope_grant(
                 grant_public_id=original["public_id"],
                 revoked_by_user_public_id=ids["user_admin"],
-                revoked_at=pre_close + timedelta(seconds=1),
+                revoked_at=revoke_at,
                 reason=None,
             )
 

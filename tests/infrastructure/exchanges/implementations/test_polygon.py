@@ -65,7 +65,8 @@ def test_retry_policy_sleep_logs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("urllib3.util.retry.Retry.sleep", fake_sleep)
     policy.sleep()
-    assert slept and slept[0] >= 24.0
+    assert slept
+    assert slept[0] >= 24.0
 
 
 @pytest.mark.asyncio
@@ -797,16 +798,15 @@ async def test_not_supported_methods_raise(polygon_client: PolygonExchangeClient
     When: Calling trading methods,
     Then: Raises NotImplementedError.
     """
+    unsupported_order_request = ExchangeOrderRequest(
+        symbol="X:BTCUSD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        client_order_id="coid-not-supported-methods-raise",
+    )
     with pytest.raises(NotImplementedError):
-        await polygon_client.create_order(
-            ExchangeOrderRequest(
-                symbol="X:BTCUSD",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=1.0,
-                client_order_id="coid-not-supported-methods-raise",
-            )
-        )
+        await polygon_client.create_order(unsupported_order_request)
     with pytest.raises(NotImplementedError):
         await polygon_client.cancel_order("id")
     with pytest.raises(NotImplementedError):
@@ -884,7 +884,8 @@ async def test_subscribe_instruments_downloads_all(
         yielded.append(s)
     assert len(yielded) == 1000
     assert sleeps, "should sleep after page"
-    assert saved and len(saved[0]) == 1000
+    assert saved
+    assert len(saved[0]) == 1000
 
 
 @pytest.mark.asyncio

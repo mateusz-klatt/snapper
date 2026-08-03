@@ -216,13 +216,16 @@ async def test_repository_rejects_delegate_inactive_user_and_inactive_desk(
     Then: Every invalid target is rejected with an explicit domain error.
     """
     desk_a = "00000000-0000-7000-8000-000000000001"
+    delegate_attachment = _attach("delegate", desk_a, 1)
     with pytest.raises(DeskMembershipTargetError, match="AI delegate membership"):
-        await desk_repository.attach_viewer_to_desk(_attach("delegate", desk_a, 1))
+        await desk_repository.attach_viewer_to_desk(delegate_attachment)
     for username in ("operator", "admin"):
+        non_viewer_attachment = _attach(username, desk_a, 1)
         with pytest.raises(DeskMembershipTargetError, match="human VIEWER"):
-            await desk_repository.attach_viewer_to_desk(_attach(username, desk_a, 1))
+            await desk_repository.attach_viewer_to_desk(non_viewer_attachment)
+    inactive_user_attachment = _attach("inactive-viewer", desk_a, 2)
     with pytest.raises(DeskMembershipNotFoundError, match="user"):
-        await desk_repository.attach_viewer_to_desk(_attach("inactive-viewer", desk_a, 2))
+        await desk_repository.attach_viewer_to_desk(inactive_user_attachment)
     async with desk_repository.session() as session:
         desk = Operator(
             public_id="00000000-0000-7000-8000-000000000099",
@@ -235,10 +238,9 @@ async def test_repository_rejects_delegate_inactive_user_and_inactive_desk(
         )
         session.add(desk)
         await session.commit()
+    inactive_desk_attachment = _attach("viewer", "00000000-0000-7000-8000-000000000099", 3)
     with pytest.raises(DeskMembershipNotFoundError, match="desk"):
-        await desk_repository.attach_viewer_to_desk(
-            _attach("viewer", "00000000-0000-7000-8000-000000000099", 3)
-        )
+        await desk_repository.attach_viewer_to_desk(inactive_desk_attachment)
 
 
 @pytest.mark.asyncio
@@ -834,8 +836,9 @@ async def test_repository_revocation_failure_preserves_membership(
     async def failed_revoke(_user_public_id: str) -> None:
         raise RuntimeError("token inventory unavailable")
 
+    failing_detachment = _detach("viewer", desk_a, 2)
     with pytest.raises(RuntimeError, match="token inventory unavailable"):
-        await desk_repository.detach_viewer_from_desk(_detach("viewer", desk_a, 2), failed_revoke)
+        await desk_repository.detach_viewer_from_desk(failing_detachment, failed_revoke)
     memberships = await desk_repository.get_user_operator_memberships(
         user_public_id,
         datetime.now(UTC),
@@ -990,12 +993,13 @@ async def test_route_maps_membership_errors(
     principal = AuthPrincipal(username="operator", role=UserRole.OPERATOR)
     service = MagicMock()
     service.attach_viewer_to_desk = AsyncMock(side_effect=error)
+    attach_request = _route_request()
     with (
         patch("snapper.auth.routes.get_user_service", return_value=service),
         pytest.raises(HTTPException) as exc_info,
     ):
         await attach_viewer_to_desk(
-            request=_route_request(),
+            request=attach_request,
             operator_public_id="desk-b",
             username="viewer",
             current_user=principal,
@@ -1026,12 +1030,13 @@ async def test_list_route_maps_membership_errors(
     principal = AuthPrincipal(username="operator", role=UserRole.OPERATOR)
     service = MagicMock()
     service.list_desk_members = AsyncMock(side_effect=error)
+    list_request = _route_request()
     with (
         patch("snapper.auth.routes.get_user_service", return_value=service),
         pytest.raises(HTTPException) as exc_info,
     ):
         await list_desk_members(
-            request=_route_request(),
+            request=list_request,
             operator_public_id="desk-b",
             current_user=principal,
             as_of=None,
@@ -1062,12 +1067,13 @@ async def test_detach_route_maps_membership_errors(
     principal = AuthPrincipal(username="operator", role=UserRole.OPERATOR)
     service = MagicMock()
     service.detach_viewer_from_desk = AsyncMock(side_effect=error)
+    detach_request = _route_request()
     with (
         patch("snapper.auth.routes.get_user_service", return_value=service),
         pytest.raises(HTTPException) as exc_info,
     ):
         await detach_viewer_from_desk(
-            request=_route_request(),
+            request=detach_request,
             operator_public_id="desk-b",
             username="viewer",
             current_user=principal,

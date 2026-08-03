@@ -3780,6 +3780,8 @@ class TestBuildWalletPnlTimeline:
             has_anchor=False,
             execution_prefix_error=RuntimeError("forced marker-prefix failure"),
         )
+        as_of = _m(1)
+        historical_policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
         with pytest.raises(RuntimeError, match="marker-prefix"):
             await build_wallet_pnl_timeline(
                 repo,
@@ -3788,8 +3790,8 @@ class TestBuildWalletPnlTimeline:
                 _T0,
                 _T0,
                 "1m",
-                _m(1),
-                policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+                as_of,
+                policy=historical_policy,
             )
         assert repo.execution_calls == [(_W1, "live", _m(1))]
 
@@ -4552,13 +4554,14 @@ class TestDurableActivationAnchor:
             ]
         )
 
+        to_time = _m(1)
         with pytest.raises(PnlAnchorEvidenceError, match="cannot be proven"):
             await build_wallet_pnl_series(
                 repo,
                 _W1,
                 "live",
                 _T0,
-                _m(1),
+                to_time,
                 "1m",
                 as_of,
             )
@@ -4628,14 +4631,16 @@ class TestDurableActivationAnchor:
 
         monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix_bundle", load_bundle)
 
+        activation_time = _m(1)
+        knowledge_horizon = _m(2)
         with pytest.raises(PnlAnchorEvidenceError, match=message):
             await ensure_wallet_pnl_anchor(
                 repo,
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_time,
+                knowledge_horizon,
             )
 
         assert repo.anchor_record_calls == []
@@ -4692,6 +4697,8 @@ class TestDurableActivationAnchor:
         repo = FakeRepo(has_anchor=False)
         repo.atomic_anchor_error = PnlTimelineAnchorEvidenceMismatchError("prefix changed")
 
+        activation_time = _m(1)
+        knowledge_horizon = _m(2)
         with pytest.raises(
             PnlAnchorEvidenceError,
             match="changed before anchor persistence",
@@ -4701,8 +4708,8 @@ class TestDurableActivationAnchor:
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_time,
+                knowledge_horizon,
             )
 
         assert repo.anchor_record_calls == []
@@ -4931,14 +4938,16 @@ class TestDurableActivationAnchor:
             candles=candles,
             has_anchor=False,
         )
+        activation_time = _m(1)
+        knowledge_horizon = _m(2)
         with pytest.raises(PnlAnchorEvidenceError):
             await ensure_wallet_pnl_anchor(
                 repo,
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_time,
+                knowledge_horizon,
             )
         assert repo.anchor_record_calls == []
 
@@ -5097,6 +5106,7 @@ class TestDurableActivationAnchor:
             executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
             anchor=anchor,
         )
+        as_of = _m(1)
         with pytest.raises(PnlAnchorEvidenceError, match="regressed"):
             await build_wallet_pnl_series(
                 repo,
@@ -5105,7 +5115,7 @@ class TestDurableActivationAnchor:
                 _T0,
                 _T0,
                 "1m",
-                _m(1),
+                as_of,
             )
 
     async def test_suffix_after_window_does_not_expand_accounting_evidence(
@@ -5543,28 +5553,34 @@ class TestAnchorEvidenceDefenses:
             (failed, "cannot be proven"),
             (bad_watermark, "watermarks"),
         ):
+            activation_time = _m(1)
+            knowledge_horizon = _m(2)
             with pytest.raises(PnlAnchorEvidenceError, match=message):
                 await ensure_wallet_pnl_anchor(
                     repo,
                     _W1,
                     "live",
                     "USD",
-                    _m(1),
-                    _m(2),
+                    activation_time,
+                    knowledge_horizon,
                 )
             assert repo.anchor_record_calls == []
 
     async def test_anchor_creation_normalizes_public_input_errors(self) -> None:
         """Invalid public mode and time cuts fail before any repository write."""
         repo = FakeRepo(has_anchor=False)
+        activation_minute = _m(1)
+        horizon_minute = _m(2)
+        unaligned_activation = activation_minute + timedelta(seconds=1)
+        naive_horizon = datetime(2026, 7, 20, 10, 2)
         with pytest.raises(ValueError, match="mode"):
             await ensure_wallet_pnl_anchor(
                 repo,
                 _W1,
                 "backtest",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_minute,
+                horizon_minute,
             )
         with pytest.raises(ValueError, match="UTC minute"):
             await ensure_wallet_pnl_anchor(
@@ -5572,8 +5588,8 @@ class TestAnchorEvidenceDefenses:
                 _W1,
                 "live",
                 "USD",
-                _m(1) + timedelta(seconds=1),
-                _m(2),
+                unaligned_activation,
+                horizon_minute,
             )
         with pytest.raises(ValueError, match="knowledge_horizon"):
             await ensure_wallet_pnl_anchor(
@@ -5581,8 +5597,8 @@ class TestAnchorEvidenceDefenses:
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                datetime(2026, 7, 20, 10, 2),
+                activation_minute,
+                naive_horizon,
             )
         with pytest.raises(ValueError, match="knowledge_horizon"):
             await ensure_wallet_pnl_anchor(
@@ -5590,8 +5606,8 @@ class TestAnchorEvidenceDefenses:
                 _W1,
                 "live",
                 "USD",
-                _m(2),
-                _m(1),
+                horizon_minute,
+                activation_minute,
             )
         assert repo.anchor_calls == []
         assert repo.anchor_record_calls == []
@@ -5611,14 +5627,16 @@ class TestAnchorEvidenceDefenses:
             refuse_derivation,
         )
         repo = FakeRepo(has_anchor=False)
+        activation_time = _m(1)
+        knowledge_horizon = _m(2)
         with pytest.raises(PnlAnchorEvidenceError, match="opening replay"):
             await ensure_wallet_pnl_anchor(
                 repo,
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_time,
+                knowledge_horizon,
             )
         assert repo.anchor_record_calls == []
 
@@ -5626,28 +5644,32 @@ class TestAnchorEvidenceDefenses:
         """A repository scope leak is rejected even when the row is canonical."""
         other_wallet = "00000000-0000-7000-8000-000000000bee"
         repo = FakeRepo(anchor=_empty_anchor(other_wallet, "live", "USD"))
+        activation_time = _m(1)
+        knowledge_horizon = _m(2)
         with pytest.raises(PnlAnchorEvidenceError, match="crossed"):
             await ensure_wallet_pnl_anchor(
                 repo,
                 _W1,
                 "live",
                 "USD",
-                _m(1),
-                _m(2),
+                activation_time,
+                knowledge_horizon,
             )
 
     async def test_empty_historical_result_still_validates_granularity(self) -> None:
         """No-anchor history cannot bypass the public granularity contract."""
+        repo = FakeRepo(has_anchor=False)
+        historical_policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
         with pytest.raises(ValueError, match="Unsupported granularity"):
             await build_wallet_pnl_series(
-                FakeRepo(has_anchor=False),
+                repo,
                 _W1,
                 "live",
                 _T0,
                 _T0,
                 "30m",
                 _T0,
-                policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+                policy=historical_policy,
             )
 
     def test_opening_pool_scan_rejects_identity_scope_and_numeric_poison(
@@ -5745,9 +5767,10 @@ class TestAnchorEvidenceDefenses:
                 {},
                 t0,
             )
+        zero_close = _candle(_m(0), 0.0)
         with pytest.raises(PnlAnchorEvidenceError, match="positive and finite"):
             _opening_marks_from_candles(
-                [_candle(_m(0), 0.0)],
+                [zero_close],
                 {_I1},
                 {_I1: "USD"},
                 "USD",
@@ -6219,8 +6242,9 @@ class TestAnchorManifestDrift:
         repo = self._repo_with_two_bookings(_anchor_recording({"kraken": 1}, []))
         repo.apply_annulments([_applied_annulment()])
 
+        from_time, to_time, as_of = _m(1), _m(2), _m(3)
         with pytest.raises(ExecutionChainError, match="anchor_manifest_drift"):
-            await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
+            await build_wallet_pnl_series(repo, _W1, "live", from_time, to_time, "1m", as_of)
 
     async def test_a_correction_above_the_watermark_replays_as_today(self) -> None:
         """A repudiation in the replayed suffix needs no anchor agreement.
@@ -6275,8 +6299,9 @@ class TestAnchorManifestDrift:
         )
         repo.apply_annulments([_applied_annulment()])
 
+        from_time, to_time, as_of = _m(1), _m(2), _m(3)
         with pytest.raises(ExecutionChainError, match="anchor_manifest_drift"):
-            await build_wallet_pnl_series(repo, _W1, "live", _m(1), _m(2), "1m", _m(3))
+            await build_wallet_pnl_series(repo, _W1, "live", from_time, to_time, "1m", as_of)
 
 
 class TestSeriesReplayMetadata:
@@ -6766,7 +6791,9 @@ class TestConvertEquityOverlay:
         )
         overlay = result.overlay[_m(1)]
         equity, cash, position_value = overlay.equity, overlay.cash, overlay.position_value
-        assert equity is not None and cash is not None and position_value is not None
+        assert equity is not None
+        assert cash is not None
+        assert position_value is not None
         assert equity == pytest.approx(1000.0 / 1.25)
         assert cash == pytest.approx(400.0 / 1.25)
         assert position_value == pytest.approx(600.0 / 1.25)
@@ -6857,7 +6884,9 @@ class TestConvertEquityOverlay:
         )
         overlay = result.overlay[_m(1)]
         equity, cash, position_value = overlay.equity, overlay.cash, overlay.position_value
-        assert equity is not None and cash is not None and position_value is not None
+        assert equity is not None
+        assert cash is not None
+        assert position_value is not None
         assert equity == cash + position_value
 
     def test_a_null_stock_refuses_its_whole_minute(self) -> None:

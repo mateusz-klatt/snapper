@@ -487,6 +487,7 @@ def test_trade_u3_preflight_refuses_an_index_that_is_not_ready() -> None:
         ),
         ready=False,
     )
+    trades_spec = lifecycle._spec("trades")
     with (
         patch.object(lifecycle, "_index_shape", return_value=unsafe),
         pytest.raises(
@@ -496,7 +497,7 @@ def test_trade_u3_preflight_refuses_an_index_that_is_not_ready() -> None:
     ):
         lifecycle._trade_u3_statement(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
         )
 
 
@@ -531,6 +532,7 @@ def test_trade_u3_preflight_refuses_nondefault_index_storage(
     Then: It refuses before the index could be considered adoptable.
     """
     connection = _connection_double()
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "_index_shape", return_value=unsafe),
@@ -541,7 +543,7 @@ def test_trade_u3_preflight_refuses_nondefault_index_storage(
     ):
         lifecycle._trade_u3_statement(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
         )
 
 
@@ -558,6 +560,7 @@ def test_cutover_verification_failure_rolls_back_before_commit() -> None:
     connection.begin.return_value = transaction
     failure = lifecycle.DailyPartitionError("malformed final topology")
     statement = "ALTER TABLE ticks RENAME TO ticks_legacy"
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_verify_prepared_ordinary_schema") as preflight,
@@ -566,7 +569,7 @@ def test_cutover_verification_failure_rolls_back_before_commit() -> None:
     ):
         lifecycle._execute_cutover(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             _ANCHOR,
             (statement,),
         )
@@ -601,6 +604,7 @@ def test_cutover_revalidates_the_locked_source_before_first_ddl() -> None:
     connection.begin.return_value = transaction
     failure = lifecycle.DailyPartitionError("ordinary index drifted")
     statement = "ALTER TABLE ticks RENAME TO ticks_legacy"
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(
@@ -613,7 +617,7 @@ def test_cutover_revalidates_the_locked_source_before_first_ddl() -> None:
     ):
         lifecycle._execute_cutover(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             _ANCHOR,
             (statement,),
         )
@@ -645,6 +649,8 @@ def test_partitioned_noop_refuses_a_malformed_legacy_primary_key() -> None:
         constraint_backed=True,
     )
 
+    ticks_spec = lifecycle._spec("ticks")
+
     with (
         patch.object(lifecycle, "_index_shape", return_value=malformed),
         pytest.raises(
@@ -654,7 +660,7 @@ def test_partitioned_noop_refuses_a_malformed_legacy_primary_key() -> None:
     ):
         lifecycle._verify_legacy_local_objects(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             "ticks_legacy",
         )
 
@@ -742,6 +748,8 @@ def test_partitioned_noop_refuses_a_malformed_legacy_active_partial() -> None:
         predicate="known_to IS NULL",
     )
 
+    candles_spec = lifecycle._spec("candles")
+
     with (
         patch.object(lifecycle, "_index_shape", side_effect=(primary, malformed)),
         pytest.raises(
@@ -751,7 +759,7 @@ def test_partitioned_noop_refuses_a_malformed_legacy_active_partial() -> None:
     ):
         lifecycle._verify_legacy_local_objects(
             connection,
-            lifecycle._spec("candles"),
+            candles_spec,
             "candles_legacy",
         )
 
@@ -781,6 +789,8 @@ def test_partitioned_noop_refuses_a_malformed_legacy_trade_u2() -> None:
         constraint_backed=True,
     )
 
+    trades_spec = lifecycle._spec("trades")
+
     with (
         patch.object(
             lifecycle,
@@ -794,7 +804,7 @@ def test_partitioned_noop_refuses_a_malformed_legacy_trade_u2() -> None:
     ):
         lifecycle._verify_legacy_local_objects(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             "trades_legacy",
         )
 
@@ -917,6 +927,7 @@ def test_ensure_rechecks_default_attachment_under_the_parent_lock() -> None:
     """
     connection = _connection_double()
     statement = "CREATE TABLE trades_d20260801 PARTITION OF trades"
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "_direct_partitions", return_value=()),
@@ -928,7 +939,7 @@ def test_ensure_rechecks_default_attachment_under_the_parent_lock() -> None:
     ):
         lifecycle._execute_ensure(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             (statement,),
         )
 

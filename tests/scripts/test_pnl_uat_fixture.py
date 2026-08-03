@@ -393,27 +393,30 @@ def test_manifest_is_stable_and_contains_no_credential_material() -> None:
     assert first.version == 2
     assert first.mode == "paper"
     assert first.times.window_from == _ANCHOR - timedelta(hours=24)
-    assert (
+    usd_components = (
         first.expected.complete.usd.realized_pnl,
         first.expected.complete.usd.fee_pnl,
         first.expected.complete.usd.accrual_pnl,
         first.expected.complete.usd.unrealized_pnl,
         first.expected.complete.usd.net_pnl,
-    ) == _EXPECTED_COMPLETE["USD"].components()
-    assert (
+    )
+    assert usd_components == _EXPECTED_COMPLETE["USD"].components()
+    pln_components = (
         first.expected.complete.pln.realized_pnl,
         first.expected.complete.pln.fee_pnl,
         first.expected.complete.pln.accrual_pnl,
         first.expected.complete.pln.unrealized_pnl,
         first.expected.complete.pln.net_pnl,
-    ) == _EXPECTED_COMPLETE["PLN"].components()
-    assert (
+    )
+    assert pln_components == _EXPECTED_COMPLETE["PLN"].components()
+    eur_components = (
         first.expected.complete.eur.realized_pnl,
         first.expected.complete.eur.fee_pnl,
         first.expected.complete.eur.accrual_pnl,
         first.expected.complete.eur.unrealized_pnl,
         first.expected.complete.eur.net_pnl,
-    ) == _EXPECTED_COMPLETE["EUR"].components()
+    )
+    assert eur_components == _EXPECTED_COMPLETE["EUR"].components()
     assert first.expected.incomplete.incomplete_point_count == _EXPECTED_INCOMPLETE_POINT_COUNT
     assert first.expected.incomplete.reason == _EXPECTED_INCOMPLETE_REASON
     assert (
@@ -468,6 +471,7 @@ def test_write_manifest_wraps_creation_errors(
     Then: The operating-system failure becomes a credential-free refusal.
     """
     manifest_path = tmp_path / "manifest.json"
+    manifest = pnl_uat_fixture.build_manifest(_ANCHOR)
 
     def fail_open(_path: Path, *_args: object, **_kwargs: object) -> Never:
         raise OSError("forced test failure")
@@ -475,10 +479,7 @@ def test_write_manifest_wraps_creation_errors(
     monkeypatch.setattr(Path, "open", fail_open)
 
     with pytest.raises(pnl_uat_fixture.PnlUatFixtureError, match="creation failed"):
-        pnl_uat_fixture.write_manifest(
-            manifest_path,
-            pnl_uat_fixture.build_manifest(_ANCHOR),
-        )
+        pnl_uat_fixture.write_manifest(manifest_path, manifest)
 
 
 def test_write_manifest_refuses_symlink_target(
@@ -492,6 +493,7 @@ def test_write_manifest_refuses_symlink_target(
     Then: Path validation refuses the target before any file is written.
     """
     manifest_path = tmp_path / "manifest.json"
+    manifest = pnl_uat_fixture.build_manifest(_ANCHOR)
 
     def fake_is_symlink(path: Path) -> bool:
         """Report only the selected manifest as a symlink."""
@@ -499,10 +501,7 @@ def test_write_manifest_refuses_symlink_target(
 
     monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
     with pytest.raises(pnl_uat_fixture.PnlUatFixtureError, match="path is unsafe"):
-        pnl_uat_fixture.write_manifest(
-            manifest_path,
-            pnl_uat_fixture.build_manifest(_ANCHOR),
-        )
+        pnl_uat_fixture.write_manifest(manifest_path, manifest)
 
 
 @pytest.mark.asyncio
@@ -930,13 +929,14 @@ async def test_seed_normalizes_local_connection_refusal(
         raise ConnectionRefusedError("forced local refusal")
 
     monkeypatch.setattr(pnl_uat_fixture, "create_async_engine", refuse_engine)
+    never_opened_db_url = make_url("sqlite+aiosqlite:////tmp/pnl-uat-never-opened.db")
 
     with pytest.raises(
         pnl_uat_fixture.PnlUatFixtureError,
         match="no transaction committed",
     ) as error:
         await pnl_uat_fixture._seed_fixture_database_unchecked(
-            make_url("sqlite+aiosqlite:////tmp/pnl-uat-never-opened.db"),
+            never_opened_db_url,
             _ANCHOR,
         )
 
@@ -1197,11 +1197,13 @@ def test_candle_close_rejects_an_unknown_source_instrument() -> None:
     When: Its deterministic candle close is requested,
     Then: The unsupported identity is rejected.
     """
+    window_start = _ANCHOR - timedelta(hours=12)
+
     with pytest.raises(pnl_uat_fixture.PnlUatFixtureError, match="unsupported candle"):
         pnl_uat_fixture._candle_close(
             "00000000-0000-7000-8000-00000000ffff",
             _ANCHOR,
-            _ANCHOR - timedelta(hours=12),
+            window_start,
             _ANCHOR,
         )
 
@@ -1338,6 +1340,7 @@ async def test_activation_anchor_failure_requires_discard_without_credentials(
     writer = AsyncMock(side_effect=RuntimeError("sensitive backend detail"))
     monkeypatch.setattr(pnl_uat_fixture, "ensure_wallet_pnl_anchor", writer)
     db_url = make_url(f"sqlite+aiosqlite:///{tmp_path / 'post-commit.db'}")
+    fixture_manifest = pnl_uat_fixture.build_manifest(_ANCHOR)
 
     with pytest.raises(
         pnl_uat_fixture.PnlUatFixtureError,
@@ -1345,7 +1348,7 @@ async def test_activation_anchor_failure_requires_discard_without_credentials(
     ) as error:
         await pnl_uat_fixture._seed_activation_anchors(
             db_url,
-            pnl_uat_fixture.build_manifest(_ANCHOR),
+            fixture_manifest,
         )
 
     assert writer.await_count == 1

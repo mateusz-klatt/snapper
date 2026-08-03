@@ -231,7 +231,7 @@ class TestWebSocketBearerAuth:
         return ws
 
     @pytest.mark.asyncio
-    async def test_bearer_header_path_authenticates(self) -> None:
+    async def test_bearer_header_path_authenticates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Given a Bearer header on the WS upgrade, Then principal is built.
 
         Cookie is absent; the WebSocket manager resolves the token
@@ -251,7 +251,7 @@ class TestWebSocketBearerAuth:
         ws = self._make_ws(headers={"authorization": "Bearer ws.jwt"})
 
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
 
         repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
@@ -267,7 +267,9 @@ class TestWebSocketBearerAuth:
         )
 
     @pytest.mark.asyncio
-    async def test_ai_delegate_principal_carries_delegate_public_id(self) -> None:
+    async def test_ai_delegate_principal_carries_delegate_public_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """AI_DELEGATE WS upgrade -> ``AuthPrincipal.delegate_public_id`` populated.
 
         The WS auth chain MUST mirror the REST chain's ``ai_delegates``
@@ -295,7 +297,7 @@ class TestWebSocketBearerAuth:
         )
         ws = self._make_ws(headers={"authorization": "Bearer ws.jwt"})
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
         repo = Mock(
             get_ai_delegate_by_user_public_id=AsyncMock(
@@ -318,7 +320,9 @@ class TestWebSocketBearerAuth:
         repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("ai-user")
 
     @pytest.mark.asyncio
-    async def test_ai_reviewer_principal_carries_identity_and_scope_version(self) -> None:
+    async def test_ai_reviewer_principal_carries_identity_and_scope_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Resolve AI_REVIEWER through the shared WebSocket identity path.
 
         Given: A v2 AI_REVIEWER bearer token with an operational delegate row,
@@ -340,7 +344,7 @@ class TestWebSocketBearerAuth:
         )
         ws = self._make_ws(headers={"authorization": "Bearer reviewer.jwt"})
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
         repo = Mock(
             get_ai_delegate_by_user_public_id=AsyncMock(
@@ -367,7 +371,9 @@ class TestWebSocketBearerAuth:
         repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("reviewer-user")
 
     @pytest.mark.asyncio
-    async def test_non_ai_delegate_role_skips_delegate_lookup(self) -> None:
+    async def test_non_ai_delegate_role_skips_delegate_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """OPERATOR / VIEWER WS upgrade -> no delegate lookup; field stays None.
 
         Given an OPERATOR token (not AI_DELEGATE),
@@ -388,7 +394,7 @@ class TestWebSocketBearerAuth:
         )
         ws = self._make_ws(headers={"authorization": "Bearer ws.jwt"})
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
         repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock())
         with patch.object(manager, "token_manager") as token_manager_mock:
@@ -400,7 +406,9 @@ class TestWebSocketBearerAuth:
         repo.get_ai_delegate_by_user_public_id.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_bearer_header_takes_precedence_over_cookie(self) -> None:
+    async def test_bearer_header_takes_precedence_over_cookie(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Given both WS header and cookie, Then the header wins."""
         now = int(datetime.now(UTC).timestamp())
         claims = TokenClaims(
@@ -419,7 +427,7 @@ class TestWebSocketBearerAuth:
         )
 
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
 
         repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
@@ -432,17 +440,19 @@ class TestWebSocketBearerAuth:
         )
 
     @pytest.mark.asyncio
-    async def test_both_missing_returns_none(self) -> None:
+    async def test_both_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Given neither header nor cookie, Then ``None`` — 401 flow upstream."""
         ws = self._make_ws()
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
         repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         assert await manager.verify_session_cookie(ws, repo) is None
 
     @pytest.mark.asyncio
-    async def test_ws_bearer_non_bearer_scheme_falls_back_to_cookie(self) -> None:
+    async def test_ws_bearer_non_bearer_scheme_falls_back_to_cookie(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Given a non-Bearer scheme on WS header and a valid cookie, Then cookie wins."""
         now = int(datetime.now(UTC).timestamp())
         claims = TokenClaims(
@@ -460,7 +470,7 @@ class TestWebSocketBearerAuth:
             cookies={"access_token": "cookie.jwt"},
         )
         manager = WebSocketAuthManager()
-        WebSocketAuthManager._initialized = False
+        monkeypatch.setattr(WebSocketAuthManager, "_initialized", False)
         manager.__init__()
         repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch.object(manager, "token_manager") as token_manager_mock:

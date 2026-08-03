@@ -707,13 +707,14 @@ def test_ensure_future_leaves_executes_and_reports_fresh_topology() -> None:
 def test_detach_refuses_a_missing_expired_leaf() -> None:
     """DETACH must reject an expired name without a current attachment edge."""
     connection = _connection_double()
+    expired_day = date(2026, 6, 1)
 
     with (
         patch.object(lifecycle, "inspect", return_value=_partitioned_report("trades")),
         patch.object(lifecycle, "_require_partitioned_topology"),
         pytest.raises(lifecycle.DailyPartitionError, match="not an attached partition"),
     ):
-        lifecycle.detach(connection, "trades", date(2026, 6, 1), _ANCHOR)
+        lifecycle.detach(connection, "trades", expired_day, _ANCHOR)
 
 
 def test_detach_refuses_a_mismatched_expired_leaf_bound() -> None:
@@ -723,6 +724,7 @@ def test_detach_refuses_a_mismatched_expired_leaf_bound() -> None:
         "trades_d20260601",
         "FOR VALUES FROM ('2026-06-02 00:00:00+00') TO ('2026-06-03 00:00:00+00')",
     )
+    expired_day = date(2026, 6, 1)
 
     with (
         patch.object(
@@ -733,7 +735,7 @@ def test_detach_refuses_a_mismatched_expired_leaf_bound() -> None:
         patch.object(lifecycle, "_require_partitioned_topology"),
         pytest.raises(lifecycle.DailyPartitionError, match="unexpected partition bound"),
     ):
-        lifecycle.detach(connection, "trades", date(2026, 6, 1), _ANCHOR)
+        lifecycle.detach(connection, "trades", expired_day, _ANCHOR)
 
 
 def test_live_detach_uses_the_bounded_retry_executor() -> None:
@@ -774,16 +776,16 @@ def test_live_detach_uses_the_bounded_retry_executor() -> None:
 
 def test_private_spec_rejects_a_runtime_allowlist_escape() -> None:
     """The internal resolver must retain the public allowlist boundary."""
-    s5778_value_1 = cast(lifecycle.MarketDataTable, "orders")
+    disallowed_table = cast(lifecycle.MarketDataTable, "orders")
     with pytest.raises(ValueError, match="ticks, trades"):
-        lifecycle._spec(s5778_value_1)
+        lifecycle._spec(disallowed_table)
 
 
 def test_anchor_validation_rejects_a_naive_value() -> None:
     """Anchor validation must reject values without a usable UTC offset."""
-    s5778_value_1 = datetime(2026, 8, 1)
+    naive_anchor = datetime(2026, 8, 1)
     with pytest.raises(ValueError, match="timezone-aware UTC"):
-        lifecycle._validate_anchor(s5778_value_1)
+        lifecycle._validate_anchor(naive_anchor)
 
 
 def test_anchor_validation_rejects_nonutc_and_nonmidnight_values() -> None:
@@ -914,6 +916,7 @@ def test_ordinary_schema_verifier_rejects_a_resumed_wrong_range() -> None:
     """A named resumed range CHECK must match the requested anchor exactly."""
     connection = _connection_double()
     info = lifecycle.ConstraintInfo("CHECK (timestamp < 'wrong')", True)
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_verify_adoption_names_available"),
@@ -927,7 +930,7 @@ def test_ordinary_schema_verifier_rejects_a_resumed_wrong_range() -> None:
     ):
         lifecycle._verify_ordinary_schema(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             _ANCHOR,
         )
 
@@ -935,6 +938,7 @@ def test_ordinary_schema_verifier_rejects_a_resumed_wrong_range() -> None:
 def test_prepared_schema_refuses_a_source_that_changed_relation_state() -> None:
     """Locked cutover revalidation must still require the ordinary source state."""
     connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(
@@ -946,7 +950,7 @@ def test_prepared_schema_refuses_a_source_that_changed_relation_state() -> None:
     ):
         lifecycle._verify_prepared_ordinary_schema(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             _ANCHOR,
         )
 
@@ -964,6 +968,7 @@ def test_prepared_schema_requires_the_exact_validated_range(
 ) -> None:
     """Missing, unvalidated and mismatched range proofs must all fail cutover."""
     connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(
@@ -983,7 +988,7 @@ def test_prepared_schema_requires_the_exact_validated_range(
     ):
         lifecycle._verify_prepared_ordinary_schema(
             connection,
-            lifecycle._spec("ticks"),
+            ticks_spec,
             _ANCHOR,
         )
 
@@ -1025,6 +1030,7 @@ def test_prepared_trades_schema_requires_the_exact_u3(
     """A prepared trades source cannot cut over without its standalone U3."""
     connection = _connection_double()
     info = lifecycle.ConstraintInfo("correct", True)
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "inspect", return_value=_ordinary_report("trades")),
@@ -1037,7 +1043,7 @@ def test_prepared_trades_schema_requires_the_exact_u3(
     ):
         lifecycle._verify_prepared_ordinary_schema(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             _ANCHOR,
         )
 
@@ -1288,12 +1294,13 @@ def test_ordinary_check_verifier_rejects_ticks_drift(
 ) -> None:
     """Missing or weakened ticks CHECKs must fail independently."""
     connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_ordinary_check_constraints", return_value=checks),
         pytest.raises(lifecycle.DailyPartitionError, match=message),
     ):
-        lifecycle._verify_ordinary_checks(connection, lifecycle._spec("ticks"))
+        lifecycle._verify_ordinary_checks(connection, ticks_spec)
 
 
 def test_ordinary_check_verifier_rejects_candle_vocabulary_drift() -> None:
@@ -1305,14 +1312,16 @@ def test_ordinary_check_verifier_rejects_candle_vocabulary_drift() -> None:
         ),
         ("ck_candles_sequence_id", "CHECK (sequence_id > 0)"),
     )
+    connection = _connection_double()
+    candles_spec = lifecycle._spec("candles")
 
     with (
         patch.object(lifecycle, "_ordinary_check_constraints", return_value=checks),
         pytest.raises(lifecycle.DailyPartitionError, match="ck_candle_source"),
     ):
         lifecycle._verify_ordinary_checks(
-            _connection_double(),
-            lifecycle._spec("candles"),
+            connection,
+            candles_spec,
         )
 
 
@@ -1376,12 +1385,12 @@ def test_sequence_owner_verifier_rejects_missing_or_wrong_ownership(
     connection = _connection_double()
     connection.scalar.return_value = exact
 
-    s5778_value_1 = lifecycle._spec("ticks")
+    ticks_spec = lifecycle._spec("ticks")
     with pytest.raises(
         lifecycle.DailyPartitionError,
         match="ticks_id_seq parameters or ownership are not exact",
     ):
-        lifecycle._verify_sequence_owner(connection, s5778_value_1)
+        lifecycle._verify_sequence_owner(connection, ticks_spec)
 
 
 @pytest.mark.parametrize("table", ["ticks", "candles", "trades"])
@@ -1481,14 +1490,16 @@ def test_noncheck_constraint_verifier_rejects_manifest_drift() -> None:
         )
         if shape.name != "ticks_pkey"
     )
+    connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_noncheck_constraints", return_value=manifest),
         pytest.raises(lifecycle.DailyPartitionError, match="manifest drifted"),
     ):
         lifecycle._verify_noncheck_constraints(
-            _connection_double(),
-            lifecycle._spec("ticks"),
+            connection,
+            ticks_spec,
             "ticks",
             lifecycle.ConstraintRole.ORDINARY,
         )
@@ -1524,14 +1535,16 @@ def test_noncheck_constraint_verifier_rejects_each_shape_drift(
     shape = manifest[primary_index]
     malformed = replace(shape, **{field: value})
     manifest[primary_index] = malformed
+    connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_noncheck_constraints", return_value=tuple(manifest)),
         pytest.raises(lifecycle.DailyPartitionError, match=message),
     ):
         lifecycle._verify_noncheck_constraints(
-            _connection_double(),
-            lifecycle._spec("ticks"),
+            connection,
+            ticks_spec,
             "ticks",
             lifecycle.ConstraintRole.ORDINARY,
         )
@@ -1664,6 +1677,8 @@ def test_range_preparation_plans_only_missing_proof_steps(
 def test_range_preparation_rejects_a_named_wrong_bound() -> None:
     """A resumed named CHECK cannot be repurposed for another anchor."""
     info = lifecycle.ConstraintInfo("wrong", True)
+    connection = _connection_double()
+    ticks_spec = lifecycle._spec("ticks")
 
     with (
         patch.object(lifecycle, "_constraint_info", return_value=info),
@@ -1671,7 +1686,7 @@ def test_range_preparation_rejects_a_named_wrong_bound() -> None:
         pytest.raises(lifecycle.DailyPartitionError, match="unexpected definition"),
     ):
         lifecycle._range_preparation_statements(
-            _connection_double(),
-            lifecycle._spec("ticks"),
+            connection,
+            ticks_spec,
             _ANCHOR,
         )

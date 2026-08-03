@@ -1727,8 +1727,9 @@ async def test_listen_signals_handles_symbol_aliases_invalidation(
             invalidation_calls.append({"fail_fast": fail_fast})
 
     monkeypatch.setattr(trader_module, "SymbolMapperService", MockMapperService)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
     assert len(invalidation_calls) == 1
     assert invalidation_calls[0]["fail_fast"] is False
 
@@ -1779,8 +1780,9 @@ async def test_listen_signals_handles_settings_update(
             return value
 
     monkeypatch.setattr(trader_module, "SettingsService", MockSettingsService)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
     assert len(cache_updates) == 1
     assert cache_updates[0]["value"] == "bar"
 
@@ -1815,8 +1817,9 @@ async def test_listen_signals_routes_executor_heartbeat(
     coord.signal_subscriber = cast(Any, subscriber)
     handler = MagicMock()
     coord._handle_executor_heartbeat = handler
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
     handler.assert_called_once_with("system.heartbeats.executor.kraken", payload)
 
 
@@ -2057,8 +2060,9 @@ async def test_listen_signals_routes_execution_fill(monkeypatch: pytest.MonkeyPa
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
 
 
 @pytest.mark.asyncio
@@ -2098,8 +2102,9 @@ async def test_listen_signals_routes_order_status(monkeypatch: pytest.MonkeyPatc
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
 
 
 @pytest.mark.asyncio
@@ -2132,8 +2137,9 @@ async def test_listen_signals_handles_invalid_order_event_payload(
         )
     )
     coord.signal_subscriber = cast(Any, subscriber)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._listen_signals()
+        await coord_any._listen_signals()
 
 
 @pytest.mark.asyncio
@@ -2625,8 +2631,9 @@ async def test_signal_health_monitor_skips_debug_for_recent_signals(
     monkeypatch.setattr(time, "time", lambda: 100.0, raising=False)
     mock_logger = SimpleNamespace(debug=Mock())
     monkeypatch.setattr(trader_module, "logger", cast(Any, mock_logger), raising=False)
+    coord_any = cast(Any, coord)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._signal_health_monitor()
+        await coord_any._signal_health_monitor()
     assert mock_logger.debug.called is False
 
 
@@ -2669,7 +2676,7 @@ async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.Monkey
     monkeypatch.setattr(asyncio, "create_task", _fake_create_task, raising=False)
     monkeypatch.setattr(asyncio, "gather", _fake_gather, raising=False)
     with pytest.raises(asyncio.CancelledError):
-        await cast(Any, coord)._run_trading_loop()
+        await coord_any._run_trading_loop()
     assert [task.cancelled() for task in created_tasks] == [True, True, True]
 
 

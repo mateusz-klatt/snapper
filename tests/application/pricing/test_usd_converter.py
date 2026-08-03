@@ -140,8 +140,9 @@ async def test_non_usd_quote_raises_quote_currency_not_usd(
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="EUR")
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=47_000.0)
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "quote_currency_not_usd"
 
 
@@ -157,8 +158,9 @@ async def test_missing_instrument_raises_instrument_not_found(
         ``reason='instrument_not_found'`` is raised.
     """
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd("ghost-instrument", Decimal("1"))
+        await conv.to_usd("ghost-instrument", one_unit)
     assert exc.value.reason_code == "instrument_not_found"
 
 
@@ -176,8 +178,9 @@ async def test_missing_snapshot_raises_snapshot_missing(
     inst_id = "inst-no-snap"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "snapshot_missing"
 
 
@@ -197,8 +200,9 @@ async def test_null_last_price_raises_last_price_null(
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=None)
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "last_price_null"
 
 
@@ -219,8 +223,9 @@ async def test_stale_snapshot_fresh_load_raises_price_stale(
     old = _seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 100)
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=1.0, snapshot_time=old)
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "price_stale"
 
 
@@ -252,8 +257,9 @@ async def test_stale_snapshot_via_cache_re_check_raises(
     first = await conv.to_usd(inst_id, Decimal("2"))
     assert first == Decimal("200")
     clock["t"] = _seed_time() + timedelta(seconds=15)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "price_stale"
 
 
@@ -343,8 +349,9 @@ async def test_invalidate_single_entry_forces_db_reload(
         await s.commit()
 
     conv._invalidate(inst_a)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError):
-        await conv.to_usd(inst_a, Decimal("1"))
+        await conv.to_usd(inst_a, one_unit)
     b_result = await conv.to_usd(inst_b, Decimal("1"))
     assert b_result == Decimal("2")
 
@@ -405,8 +412,9 @@ async def test_price_unavailable_error_carries_context(
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="EUR")
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=100.0)
     conv = USDConverter(repo, now=_seed_time)
+    one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, Decimal("1"))
+        await conv.to_usd(inst_id, one_unit)
     assert exc.value.reason_code == "quote_currency_not_usd"
     assert exc.value.instrument_public_id == inst_id
     assert "EUR" in exc.value.detail

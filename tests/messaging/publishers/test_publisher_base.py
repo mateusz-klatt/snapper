@@ -6465,9 +6465,10 @@ async def test_flush_trade_batch_rolls_back_writer_session_on_error() -> None:
     upsert_trades = AsyncMock(side_effect=RuntimeError("db fail"))
     pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
     pub._trade_writer_session = writer_session
+    failing_batch = [_publisher_trade_row("tr1")]
 
     with pytest.raises(RuntimeError, match="db fail"):
-        await pub._flush_trade_batch([_publisher_trade_row("tr1")])
+        await pub._flush_trade_batch(failing_batch)
 
     commit.assert_not_awaited()
     rollback.assert_awaited_once()
@@ -9329,8 +9330,9 @@ async def test_candle_flush_loop_propagates_cancellation(
         "snapper.messaging.publishers.base.asyncio.sleep",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
+    kraken_exchange = cast(Any, "kraken")
     with pytest.raises(asyncio.CancelledError):
-        await pub._candle_flush_loop(cast(Any, "kraken"))
+        await pub._candle_flush_loop(kraken_exchange)
 
 
 def _finalized_row(
@@ -9618,8 +9620,9 @@ async def test_native_finalize_flush_loop_propagates_cancellation(
         "snapper.messaging.publishers.base.asyncio.sleep",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
+    kraken_exchange = cast(Any, "kraken")
     with pytest.raises(asyncio.CancelledError):
-        await pub._native_finalize_flush_loop(cast(Any, "kraken"))
+        await pub._native_finalize_flush_loop(kraken_exchange)
 
 
 @pytest.mark.asyncio

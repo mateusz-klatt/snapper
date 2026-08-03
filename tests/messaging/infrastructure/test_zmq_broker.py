@@ -95,15 +95,12 @@ class TestZMQBroker:
             sub_socket.connect("tcp://127.0.0.1:7805")
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "TEST")
             await asyncio.sleep(0.1)
-            try:
-                await asyncio.wait_for(
-                    pub_socket.send_multipart([b"TEST", b"hello world"]), timeout=1.0
-                )
-                topic, payload = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=2.0)
-                assert topic == b"TEST"
-                assert payload == b"hello world"
-            except TimeoutError:
-                pytest.fail("Message not forwarded through broker")
+            await asyncio.wait_for(
+                pub_socket.send_multipart([b"TEST", b"hello world"]), timeout=1.0
+            )
+            topic, payload = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=2.0)
+            assert topic == b"TEST"
+            assert payload == b"hello world"
         finally:
             if pub_socket:
                 pub_socket.close()
@@ -381,20 +378,17 @@ class TestZMQPubSub:
                 last=50000.0,
             )
             await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
-            try:
-                topic_bytes, payload_bytes = await asyncio.wait_for(
-                    sub_socket.recv_multipart(), timeout=1.0
-                )
-                topic = topic_bytes.decode("utf-8")
-                payload = payload_bytes.decode("utf-8")
-                assert topic == "BTCUSD"
-                received_msg = TickData.from_json(payload)
-                assert isinstance(received_msg, TickData)
-                assert received_msg.instrument == "BTCUSD"
-                assert received_msg.last == pytest.approx(50000.0)
-                assert received_msg.volume == pytest.approx(0.1)
-            except TimeoutError:
-                pytest.fail("Did not receive message within timeout")
+            topic_bytes, payload_bytes = await asyncio.wait_for(
+                sub_socket.recv_multipart(), timeout=1.0
+            )
+            topic = topic_bytes.decode("utf-8")
+            payload = payload_bytes.decode("utf-8")
+            assert topic == "BTCUSD"
+            received_msg = TickData.from_json(payload)
+            assert isinstance(received_msg, TickData)
+            assert received_msg.instrument == "BTCUSD"
+            assert received_msg.last == pytest.approx(50000.0)
+            assert received_msg.volume == pytest.approx(0.1)
         finally:
             pub_socket.close()
             sub_socket.close()
@@ -454,18 +448,15 @@ class TestZMQPubSub:
             await pub_socket.send_multipart([b"ETHUSD", eth_msg.to_json().encode("utf-8")])
             await pub_socket.send_multipart([b"ADAUSD", other_msg.to_json().encode("utf-8")])
             received_topics = []
-            try:
-                for _ in range(2):
-                    topic_bytes, _payload_bytes = await asyncio.wait_for(
-                        sub_socket.recv_multipart(), timeout=1.0
-                    )
-                    topic = topic_bytes.decode("utf-8")
-                    received_topics.append(topic)
-                assert "BTCUSD" in received_topics
-                assert "ETHUSD" in received_topics
-                assert len(received_topics) == 2
-            except TimeoutError:
-                pytest.fail(f"Did not receive all expected messages. Got: {received_topics}")
+            for _ in range(2):
+                topic_bytes, _payload_bytes = await asyncio.wait_for(
+                    sub_socket.recv_multipart(), timeout=1.0
+                )
+                topic = topic_bytes.decode("utf-8")
+                received_topics.append(topic)
+            assert "BTCUSD" in received_topics
+            assert "ETHUSD" in received_topics
+            assert len(received_topics) == 2
         finally:
             pub_socket.close()
             sub_socket.close()
@@ -500,8 +491,9 @@ class TestZMQPubSub:
                 last=50000.0,
             )
             await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
+            unsubscribed_receive = sub_socket.recv_multipart()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(sub_socket.recv_multipart(), timeout=0.5)
+                await asyncio.wait_for(unsubscribed_receive, timeout=0.5)
         finally:
             pub_socket.close()
             sub_socket.close()
@@ -549,17 +541,15 @@ class TestZMQPubSub:
                 last=50000.0,
             )
             await pub_socket.send_multipart([b"BTCUSD", late_msg.to_json().encode("utf-8")])
-            try:
-                _topic_bytes, payload_bytes = await asyncio.wait_for(
-                    sub_socket.recv_multipart(), timeout=1.0
-                )
-                received_msg = TickData.from_json(payload_bytes.decode("utf-8"))
-                assert isinstance(received_msg, TickData)
-                assert received_msg.last == pytest.approx(50000.0)
-                with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(sub_socket.recv_multipart(), timeout=0.5)
-            except TimeoutError:
-                pytest.fail("Did not receive expected message")
+            _topic_bytes, payload_bytes = await asyncio.wait_for(
+                sub_socket.recv_multipart(), timeout=1.0
+            )
+            received_msg = TickData.from_json(payload_bytes.decode("utf-8"))
+            assert isinstance(received_msg, TickData)
+            assert received_msg.last == pytest.approx(50000.0)
+            missed_early_receive = sub_socket.recv_multipart()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(missed_early_receive, timeout=0.5)
         finally:
             pub_socket.close()
             sub_socket.close()
@@ -679,7 +669,8 @@ def test_thread_stop_handles_alive_and_resources() -> None:
     broker.stop()
     assert not broker.running
     assert cast(Any, broker.proxy_thread).join_called
-    assert cast(Any, broker.xsub_socket).closed and cast(Any, broker.xpub_socket).closed
+    assert cast(Any, broker.xsub_socket).closed
+    assert cast(Any, broker.xpub_socket).closed
     assert cast(Any, broker.context).terminated
 
 

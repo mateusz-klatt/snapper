@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from snapper.cli import dev_pat as dev_pat_module
@@ -960,7 +961,7 @@ class TestResolveAdminCredentialsFromSeed:
             raise FileNotFoundError(f"{profile} profile missing")
 
         monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises((typer.Exit, SystemExit)) as exc_info:
             resolve_admin_credentials_from_seed()
         message = str(exc_info.value).lower() + " " + getattr(exc_info.value, "code", "").__str__()
         assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"} or "exit" in message
@@ -986,7 +987,7 @@ class TestResolveAdminCredentialsFromSeed:
             return dev_profile
 
         monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises((typer.Exit, SystemExit)) as exc_info:
             resolve_admin_credentials_from_seed()
         assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"}
         stderr = capsys.readouterr().err
@@ -1012,7 +1013,7 @@ class TestResolveAdminCredentialsFromSeed:
             "load_seed_profile",
             lambda _profile: non_admin_profile,
         )
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises((typer.Exit, SystemExit)) as exc_info:
             resolve_admin_credentials_from_seed()
         assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"}
 

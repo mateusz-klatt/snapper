@@ -141,9 +141,11 @@ async def test_guard_rejects_none_user_public_id() -> None:
         DB access — prevents silent cap bypass.
     """
     enforcer = TradingCapsEnforcer(_stub_repo(), _stub_pricing(), now=lambda: _NOW)
+    submission_without_user = _submission(user=None)
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission(user=None)):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission_without_user):
+            raise premature_yield_error
     assert exc.value.cap_type == "missing_user_public_id"
 
 
@@ -191,9 +193,11 @@ async def test_scalar_quantity_cap_rejects_over_limit() -> None:
     """
     caps = _caps(max_order_quantity_per_instrument="2")
     enforcer = TradingCapsEnforcer(_stub_repo(caps), _stub_pricing(), now=lambda: _NOW)
+    over_limit_submission = _submission(quantity=Decimal("3"))
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission(quantity=Decimal("3"))):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(over_limit_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_order_quantity_per_instrument"
 
 
@@ -223,9 +227,11 @@ async def test_per_instrument_quantity_cap_rejects_matching_key() -> None:
     """
     caps = _caps(max_order_quantity_per_instrument={"inst-btc": "1"})
     enforcer = TradingCapsEnforcer(_stub_repo(caps), _stub_pricing(), now=lambda: _NOW)
+    over_limit_submission = _submission(quantity=Decimal("2"))
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission(quantity=Decimal("2"))):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(over_limit_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_order_quantity_per_instrument"
 
 
@@ -292,9 +298,11 @@ async def test_open_orders_cap_rejects_on_overflow() -> None:
     enforcer = TradingCapsEnforcer(
         _stub_repo(caps, open_commands=3), _stub_pricing(), now=lambda: _NOW
     )
+    submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_open_orders"
 
 
@@ -339,9 +347,11 @@ async def test_notional_cap_rejects_when_sum_over_limit() -> None:
         _stub_pricing(Decimal("3000")),
         now=lambda: _NOW,
     )
+    submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_daily_notional_usd"
 
 
@@ -432,9 +442,11 @@ async def test_notional_cap_maps_price_unavailable_to_caps_violation() -> None:
         side_effect=PriceUnavailableError("price_stale", "inst-btc", "age=9999s")
     )
     enforcer = TradingCapsEnforcer(_stub_repo(caps), cast(USDConverter, pricing), now=lambda: _NOW)
+    submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "price_unavailable"
     assert exc.value.detail == "price_stale: age=9999s"
 
@@ -453,9 +465,11 @@ async def test_cancel_cap_rejects_when_exceeded() -> None:
     enforcer = TradingCapsEnforcer(
         _stub_repo(caps, rolling_cancels=5), _stub_pricing(), now=lambda: _NOW
     )
+    cancel_submission = _submission(command_type="cancel", quantity=None)
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission(command_type="cancel", quantity=None)):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(cancel_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_cancels_per_minute"
 
 
@@ -671,10 +685,11 @@ class TestCapsViolationAfterAiApprovePublish:
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        over_limit_ai_submission = _ai_review_submission(
+            review_public_id="rev-1", quantity=Decimal("100")
+        )
         with pytest.raises(CapsViolationError) as exc_info:
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
-            ):
+            async with enforcer.guard(over_limit_ai_submission):
                 pass
         assert exc_info.value.cap_type == "max_order_quantity_per_instrument"
         publisher.send.assert_awaited_once()
@@ -701,8 +716,9 @@ class TestCapsViolationAfterAiApprovePublish:
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        over_limit_submission = _submission(quantity=Decimal("100"))
         with pytest.raises(CapsViolationError):
-            async with enforcer.guard(_submission(quantity=Decimal("100"))):
+            async with enforcer.guard(over_limit_submission):
                 pass
         publisher.send.assert_not_awaited()
         repo.get_ai_review.assert_not_awaited()
@@ -719,10 +735,11 @@ class TestCapsViolationAfterAiApprovePublish:
         repo.count_user_rolling_cancels = AsyncMock(return_value=0)
         repo.get_ai_review = AsyncMock()
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        over_limit_ai_submission = _ai_review_submission(
+            review_public_id="rev-1", quantity=Decimal("100")
+        )
         with pytest.raises(CapsViolationError):
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
-            ):
+            async with enforcer.guard(over_limit_ai_submission):
                 pass
         repo.get_ai_review.assert_not_awaited()
 
@@ -745,10 +762,11 @@ class TestCapsViolationAfterAiApprovePublish:
         publisher = _publisher_with_tracker()
         publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
         enforcer.set_msg_publisher(publisher)
+        over_limit_ai_submission = _ai_review_submission(
+            review_public_id="rev-1", quantity=Decimal("100")
+        )
         with pytest.raises(CapsViolationError):
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
-            ):
+            async with enforcer.guard(over_limit_ai_submission):
                 pass
 
     @pytest.mark.asyncio
@@ -765,10 +783,11 @@ class TestCapsViolationAfterAiApprovePublish:
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        stale_review_submission = _ai_review_submission(
+            review_public_id="missing-rev", quantity=Decimal("100")
+        )
         with pytest.raises(CapsViolationError):
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="missing-rev", quantity=Decimal("100"))
-            ):
+            async with enforcer.guard(stale_review_submission):
                 pass
         publisher.send.assert_not_awaited()
 
@@ -794,10 +813,11 @@ class TestCapsViolationAfterAiApprovePublish:
         )
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        unpriceable_ai_submission = _ai_review_submission(
+            review_public_id="rev-1", quantity=Decimal("1")
+        )
         with pytest.raises(CapsViolationError) as exc_info:
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("1"))
-            ):
+            async with enforcer.guard(unpriceable_ai_submission):
                 pass
         assert exc_info.value.cap_type == "price_unavailable"
         publisher.send.assert_not_awaited()
@@ -845,10 +865,11 @@ class TestCapsViolationAfterAiApprovePublish:
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        over_limit_ai_submission = _ai_review_submission(
+            review_public_id="rev-1", quantity=Decimal("100")
+        )
         with pytest.raises(CapsViolationError) as exc_info:
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
-            ):
+            async with enforcer.guard(over_limit_ai_submission):
                 pass
         assert exc_info.value.cap_type == "max_order_quantity_per_instrument"
         publisher.send.assert_not_awaited()
@@ -890,10 +911,9 @@ class TestCapsViolationAfterAiApprovePublish:
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
         enforcer.set_msg_publisher(publisher)
+        ai_submission = _ai_review_submission(review_public_id="rev-1", quantity=Decimal("1"))
         with pytest.raises(CapsViolationError):
-            async with enforcer.guard(
-                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("1"))
-            ):
+            async with enforcer.guard(ai_submission):
                 pass
         publisher.send.assert_awaited_once()
         _, payload = publisher.send.await_args.args
@@ -1169,9 +1189,11 @@ async def test_notional_sum_prefers_stored_snapshot_over_price_product() -> None
         _stub_pricing(Decimal("3000")),
         now=lambda: _NOW,
     )
+    submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_daily_notional_usd"
 
 
@@ -1224,11 +1246,13 @@ async def test_quantity_cap_keys_by_resolved_source_identity() -> None:
         "mapped": True,
     }
     enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    over_limit_paper_submission = _submission(
+        instrument_public_id="inst-paper", quantity=Decimal("2")
+    )
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(
-            _submission(instrument_public_id="inst-paper", quantity=Decimal("2"))
-        ):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(over_limit_paper_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_order_quantity_per_instrument"
 
 
@@ -1252,11 +1276,13 @@ async def test_quantity_cap_honours_legacy_emission_key_with_warning() -> None:
         "mapped": True,
     }
     enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    over_limit_paper_submission = _submission(
+        instrument_public_id="inst-paper", quantity=Decimal("2")
+    )
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(
-            _submission(instrument_public_id="inst-paper", quantity=Decimal("2"))
-        ):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(over_limit_paper_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_order_quantity_per_instrument"
 
 
@@ -1305,11 +1331,13 @@ async def test_quantity_cap_fails_closed_for_unmapped_paper_identity() -> None:
         "mapped": False,
     }
     enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    unmapped_paper_submission = _submission(
+        instrument_public_id="inst-paper", quantity=Decimal("0.5")
+    )
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(
-            _submission(instrument_public_id="inst-paper", quantity=Decimal("0.5"))
-        ):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(unmapped_paper_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_order_quantity_per_instrument"
     assert "unresolved" in exc.value.detail
 
@@ -1337,9 +1365,11 @@ async def test_resolution_failure_fails_closed_only_with_keyed_caps() -> None:
         MagicMock, cast(MagicMock, capped_repo).resolve_source_instrument_public_id
     ).side_effect = RuntimeError("db down")
     capped = TradingCapsEnforcer(capped_repo, _stub_pricing(), now=lambda: _NOW)
+    capped_submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with capped.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with capped.guard(capped_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "price_unavailable"
 
 
@@ -1359,9 +1389,11 @@ async def test_quote_survives_unrepresentable_notional() -> None:
         _stub_pricing(huge),
         now=lambda: _NOW,
     )
+    capped_submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with capped.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with capped.guard(capped_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_daily_notional_usd"
 
     uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(huge), now=lambda: _NOW)
@@ -1384,9 +1416,11 @@ async def test_quote_rejects_non_finite_notional_with_cap() -> None:
         _stub_pricing(infinite),
         now=lambda: _NOW,
     )
+    capped_submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with capped.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with capped.guard(capped_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "price_unavailable"
 
     uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(infinite), now=lambda: _NOW)
@@ -1408,9 +1442,11 @@ async def test_quote_unquantizable_notional_still_trips_cap() -> None:
         _stub_pricing(Decimal("1e30")),
         now=lambda: _NOW,
     )
+    submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with enforcer.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with enforcer.guard(submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "max_daily_notional_usd"
 
 
@@ -1522,9 +1558,11 @@ async def test_quote_rejects_non_positive_notional_with_cap() -> None:
         _stub_pricing(negative),
         now=lambda: _NOW,
     )
+    capped_submission = _submission()
+    premature_yield_error = AssertionError("guard should have rejected before yield")
     with pytest.raises(CapsViolationError) as exc:
-        async with capped.guard(_submission()):
-            raise AssertionError("guard should have rejected before yield")
+        async with capped.guard(capped_submission):
+            raise premature_yield_error
     assert exc.value.cap_type == "price_unavailable"
 
     uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(negative), now=lambda: _NOW)

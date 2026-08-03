@@ -834,8 +834,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names the invalid parameter.
         """
         params = _consult_params(macro_contract_symbol="   ")
+        blank_macro_symbol_config = _config(params=params)
         with pytest.raises(ValueError, match="macro_contract_symbol"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(blank_macro_symbol_config)
 
     @pytest.mark.parametrize("threshold", [0.0, math.inf])
     def test_invalid_macro_stale_threshold_rejected(self, threshold: float) -> None:
@@ -846,8 +847,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names the invalid parameter.
         """
         params = _consult_params(macro_stale_after_minutes=threshold)
+        invalid_threshold_config = _config(params=params)
         with pytest.raises(ValueError, match="macro_stale_after_minutes"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(invalid_threshold_config)
 
     def test_non_paper_exchange_rejected(self) -> None:
         """Verify a live exchange is rejected.
@@ -856,8 +858,9 @@ class TestHeartbeatConsultConstruction:
         When: HeartbeatConsult is instantiated,
         Then: ValueError marks the strategy paper-only.
         """
+        live_exchange_config = _config(exchange="kraken")
         with pytest.raises(ValueError, match="paper-only"):
-            HeartbeatConsult(_config(exchange="kraken"))
+            HeartbeatConsult(live_exchange_config)
 
     def test_unscoped_config_rejected(self) -> None:
         """Verify missing wallet/operator scope is rejected.
@@ -866,8 +869,9 @@ class TestHeartbeatConsultConstruction:
         When: HeartbeatConsult is instantiated,
         Then: ValueError demands a scoped config.
         """
+        unscoped_config = _config(wallet_public_id="", operator_public_id="")
         with pytest.raises(ValueError, match="scoped config"):
-            HeartbeatConsult(_config(wallet_public_id="", operator_public_id=""))
+            HeartbeatConsult(unscoped_config)
 
     def test_non_uuid7_user_rejected(self) -> None:
         """Verify a non-UUID7 user identity is rejected.
@@ -877,8 +881,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names 'ai_review_user_public_id'.
         """
         params = _consult_params(ai_review_user_public_id="not-a-uuid")
+        invalid_user_config = _config(params=params)
         with pytest.raises(ValueError, match="ai_review_user_public_id"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(invalid_user_config)
 
     def test_non_uuid7_strategy_rejected(self) -> None:
         """Verify a non-UUID7 strategy identity is rejected.
@@ -888,8 +893,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names 'ai_review_strategy_public_id'.
         """
         params = _consult_params(ai_review_strategy_public_id="")
+        invalid_strategy_config = _config(params=params)
         with pytest.raises(ValueError, match="ai_review_strategy_public_id"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(invalid_strategy_config)
 
     def test_deadline_out_of_range_rejected(self) -> None:
         """Verify an out-of-range deadline is rejected.
@@ -899,8 +905,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names 'ai_review_deadline_seconds'.
         """
         params = _consult_params(ai_review_deadline_seconds=301)
+        out_of_range_deadline_config = _config(params=params)
         with pytest.raises(ValueError, match="ai_review_deadline_seconds"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(out_of_range_deadline_config)
 
     def test_missing_deadline_rejected(self) -> None:
         """Verify an absent deadline param is rejected.
@@ -911,8 +918,9 @@ class TestHeartbeatConsultConstruction:
         """
         params = _consult_params()
         del params["ai_review_deadline_seconds"]
+        missing_deadline_config = _config(params=params)
         with pytest.raises(ValueError, match="ai_review_deadline_seconds"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(missing_deadline_config)
 
     def test_signal_strength_out_of_range_rejected(self) -> None:
         """Verify an out-of-range signal strength is rejected.
@@ -922,8 +930,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names 'heartbeat_signal_strength'.
         """
         params = _consult_params(heartbeat_signal_strength=1.5)
+        above_cap_strength_config = _config(params=params)
         with pytest.raises(ValueError, match="heartbeat_signal_strength"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(above_cap_strength_config)
 
     def test_signal_strength_negative_rejected(self) -> None:
         """Verify a negative signal strength is rejected (not coerced to default).
@@ -934,8 +943,9 @@ class TestHeartbeatConsultConstruction:
         Then: ValueError names 'heartbeat_signal_strength'.
         """
         params = _consult_params(heartbeat_signal_strength=-0.1)
+        negative_strength_config = _config(params=params)
         with pytest.raises(ValueError, match="heartbeat_signal_strength"):
-            HeartbeatConsult(_config(params=params))
+            HeartbeatConsult(negative_strength_config)
 
     def test_signal_strength_upper_boundary_accepted(self) -> None:
         """Verify the inclusive 1.0 upper boundary constructs.

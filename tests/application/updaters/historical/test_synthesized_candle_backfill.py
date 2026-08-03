@@ -591,11 +591,14 @@ def test_constructor_validates_inputs() -> None:
     When: Services are constructed,
     Then: ValueError is raised for each invalid input.
     """
+    window_start = _dt(0)
+    window_end = _dt(1)
+
     with pytest.raises(ValueError):
         SynthesizedCandleBackfillService(
             exchange="not-real",
-            start=_dt(0),
-            end=_dt(1),
+            start=window_start,
+            end=window_end,
             symbols=["BTC"],
             timeframes=["5m"],
         )
@@ -603,31 +606,31 @@ def test_constructor_validates_inputs() -> None:
         with pytest.raises(ValueError, match="start must be before end"):
             SynthesizedCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(1),
-                end=_dt(1),
+                start=window_end,
+                end=window_end,
                 symbols=["BTC"],
                 timeframes=["5m"],
             )
         with pytest.raises(ValueError, match="pass all_symbols"):
             SynthesizedCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(0),
-                end=_dt(1),
+                start=window_start,
+                end=window_end,
                 timeframes=["5m"],
             )
         with pytest.raises(ValueError, match="cut_date is required"):
             SynthesizedCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(0),
-                end=_dt(1),
+                start=window_start,
+                end=window_end,
                 symbols=["BTC"],
                 timeframes=["1d"],
             )
         with pytest.raises(ValueError, match="unsupported synthesis timeframes"):
             SynthesizedCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(0),
-                end=_dt(1),
+                start=window_start,
+                end=window_end,
                 symbols=["BTC"],
                 timeframes=["2h"],
             )

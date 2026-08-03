@@ -230,11 +230,10 @@ class TestEgressPoolConfig:
         When constructed,
         Then ValidationError fires explaining the missing fallback.
         """
+        socks5_route = RouteConfig(id="s", kind="socks5", proxy_url="socks5h://x:1081")
+
         with pytest.raises(ValidationError, match="direct route"):
-            EgressPoolConfig(
-                enabled=True,
-                routes=[RouteConfig(id="s", kind="socks5", proxy_url="socks5h://x:1081")],
-            )
+            EgressPoolConfig(enabled=True, routes=[socks5_route])
 
     def test_enabled_requires_enabled_direct_route(self) -> None:
         """Spec — direct route with enabled=False does not count.
@@ -243,11 +242,10 @@ class TestEgressPoolConfig:
         When constructed,
         Then ValidationError fires.
         """
+        disabled_direct_route = RouteConfig(id="d", kind="direct", enabled=False)
+
         with pytest.raises(ValidationError, match="direct route"):
-            EgressPoolConfig(
-                enabled=True,
-                routes=[RouteConfig(id="d", kind="direct", enabled=False)],
-            )
+            EgressPoolConfig(enabled=True, routes=[disabled_direct_route])
 
     def test_disabled_pool_allows_no_routes(self) -> None:
         """Spec — disabled pool accepts any routes including none.
@@ -305,11 +303,13 @@ class TestEgressPoolConfig:
         When validated,
         Then ValidationError fires.
         """
+        direct_route = RouteConfig(id="d", kind="direct")
+
         with pytest.raises(ValidationError):
             EgressPoolConfig(
                 enabled=True,
                 on_all_quarantined="explode",
-                routes=[RouteConfig(id="d", kind="direct")],
+                routes=[direct_route],
             )
 
     def test_rejects_unknown_exchange_name_in_allowed_exchanges(self) -> None:
@@ -321,18 +321,18 @@ class TestEgressPoolConfig:
         any reserve() call, then fall back to direct. The validator
         surfaces this at config-load time instead.
         """
+        direct_route = RouteConfig(id="d", kind="direct", priority=100)
+        misspelled_exchange_route = RouteConfig(
+            id="bad",
+            kind="socks5",
+            proxy_url="socks5h://x:1",
+            allowed_exchanges=("krakeen",),
+        )
+
         with pytest.raises(ValidationError, match="unknown exchange"):
             EgressPoolConfig(
                 enabled=True,
-                routes=[
-                    RouteConfig(id="d", kind="direct", priority=100),
-                    RouteConfig(
-                        id="bad",
-                        kind="socks5",
-                        proxy_url="socks5h://x:1",
-                        allowed_exchanges=("krakeen",),
-                    ),
-                ],
+                routes=[direct_route, misspelled_exchange_route],
             )
 
     def test_model_validate_accepts_dict_input(self) -> None:
@@ -382,11 +382,13 @@ class TestEgressPoolConfig:
         When EgressPoolConfig is constructed,
         Then ValidationError is raised.
         """
+        direct_route = RouteConfig(id="default", kind="direct")
+
         with pytest.raises(ValidationError, match="private_fallback_route_id"):
             EgressPoolConfig(
                 enabled=True,
                 private_fallback_route_id="missing",
-                routes=[RouteConfig(id="default", kind="direct")],
+                routes=[direct_route],
             )
 
 

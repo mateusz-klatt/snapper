@@ -3512,8 +3512,10 @@ class TestNotImplementedMethods:
         When: create_order is called,
         Then: Raises NotImplementedError.
         """
+        order_request = MagicMock()
+
         with pytest.raises(NotImplementedError, match="market data only"):
-            await client.create_order(MagicMock())
+            await client.create_order(order_request)
 
     @pytest.mark.asyncio
     async def test_cancel_order_raises(self, client: KrakenEquitiesExchangeClient) -> None:
@@ -3622,8 +3624,9 @@ class TestNotImplementedMethods:
             new=fast_sleep,
         ):
             iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            next_candle = iterator.__anext__()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+                await asyncio.wait_for(next_candle, timeout=0.2)
 
     @pytest.mark.asyncio
     async def test_subscribe_candles_rejects_non_1m(
@@ -3815,8 +3818,9 @@ class TestNotImplementedMethods:
             ),
         ):
             iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            next_candle = iterator.__anext__()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(iterator.__anext__(), timeout=0.3)
+                await asyncio.wait_for(next_candle, timeout=0.3)
 
     def test_subscribe_executions_raises(self, client: KrakenEquitiesExchangeClient) -> None:
         """subscribe_executions raises NotImplementedError.
@@ -4051,14 +4055,13 @@ class TestSubscribeTicks:
         Then: RuntimeError is raised.
         """
         client._ensure_ws_connected = AsyncMock()
-        with (
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
-                return_value="CLM6.NYMEX",
-            ),
-            pytest.raises(RuntimeError, match="WebSocket client not connected"),
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+            return_value="CLM6.NYMEX",
         ):
-            await anext(aiter(client.subscribe_ticks(["CLM6-NYMEX"])))
+            tick_stream = aiter(client.subscribe_ticks(["CLM6-NYMEX"]))
+            with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+                await anext(tick_stream)
 
 
 class TestSubscribeTrades:
@@ -4225,14 +4228,13 @@ class TestSubscribeTrades:
         Then: RuntimeError is raised.
         """
         client._ensure_ws_connected = AsyncMock()
-        with (
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
-                return_value="CLM6.NYMEX",
-            ),
-            pytest.raises(RuntimeError, match="WebSocket client not connected"),
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+            return_value="CLM6.NYMEX",
         ):
-            await anext(aiter(client.subscribe_trades(["CLM6-NYMEX"])))
+            trade_stream = aiter(client.subscribe_trades(["CLM6-NYMEX"]))
+            with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+                await anext(trade_stream)
 
 
 class TestSubscribeInstruments:

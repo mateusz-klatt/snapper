@@ -1499,8 +1499,10 @@ async def test_insert_paired_compensation_command_requires_idempotency_key(
         "operator_public_id": _OPERATOR,
         "source_surface": "strategy",
     }
+    keyless_command_row = cast(Any, row)
+
     with pytest.raises(ValueError, match="non-empty idempotency_key"):
-        await _repo.insert_paired_compensation_command(cast(Any, row))
+        await _repo.insert_paired_compensation_command(keyless_command_row)
 
 
 async def test_sweep_broken_cleans_held_leg_of_compensating_group(
@@ -1926,8 +1928,10 @@ async def test_insert_paired_compensation_command_reraises_other_integrity_error
         "operator_public_id": _OPERATOR,
         "source_surface": "strategy",
     }
+    not_null_breach_command_row = cast(Any, row)
+
     with pytest.raises(IntegrityError):
-        await _repo.insert_paired_compensation_command(cast(Any, row))
+        await _repo.insert_paired_compensation_command(not_null_breach_command_row)
 
 
 async def _flatten_commands(repo: SQLAlchemyRepository, correlation_id: str) -> list[TradeCommand]:
@@ -2117,12 +2121,14 @@ async def test_claim_leg_and_insert_flatten_command_requires_idempotency_key(
         status=PairedExecutionLegStatusEnum.FILLED.value,
         filled_signed_qty=1.0,
     )
+    keyless_flatten_row = cast(Any, {"idempotency_key": None})
+
     with pytest.raises(ValueError, match="non-empty idempotency_key"):
         await _repo.claim_leg_and_insert_flatten_command(
             leg_public_id="leg-0",
             expected_status=PairedExecutionLegStatusEnum.FILLED.value,
             new_compensation_seq=1,
-            command_row=cast(Any, {"idempotency_key": None}),
+            command_row=keyless_flatten_row,
             bus_time=_T1,
             session_id=_SESSION,
             sequence_id=3,
@@ -2545,14 +2551,16 @@ async def test_claim_leg_and_insert_flatten_command_reraises_other_integrity_err
         status=PairedExecutionLegStatusEnum.FILLED.value,
         filled_signed_qty=1.0,
     )
+    not_null_breach_flatten_row = cast(
+        Any, _flatten_claim_row("paired:grp-1:leg-0:flatten:9", omit_side=True)
+    )
+
     with pytest.raises(IntegrityError):
         await _repo.claim_leg_and_insert_flatten_command(
             leg_public_id="leg-0",
             expected_status=PairedExecutionLegStatusEnum.FILLED.value,
             new_compensation_seq=1,
-            command_row=cast(
-                Any, _flatten_claim_row("paired:grp-1:leg-0:flatten:9", omit_side=True)
-            ),
+            command_row=not_null_breach_flatten_row,
             bus_time=_T1,
             session_id=_SESSION,
             sequence_id=3,

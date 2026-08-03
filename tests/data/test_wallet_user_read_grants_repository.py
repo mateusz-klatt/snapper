@@ -75,6 +75,23 @@ def _read_grant_request(
     )
 
 
+async def _insert_grant_directly(repo: SQLAlchemyRepository, grant: WalletUserReadGrant) -> None:
+    """Add one prebuilt grant row straight to a session and commit it.
+
+    Bypasses the repository's pre-check so the active partial index is what
+    decides. Keeping the session block here makes the insert a single call at
+    the call site while the commit failure still unwinds the session context
+    exactly as an inline block would.
+
+    Args:
+        repo: Repository whose schema is already materialised.
+        grant: Detached ORM row to insert.
+    """
+    async with repo.session() as s:
+        s.add(grant)
+        await s.commit()
+
+
 async def _seed_world(repo: SQLAlchemyRepository) -> dict[str, str]:
     """Insert two wallets, one operator, and one operator scope grant.
 
@@ -284,17 +301,17 @@ class TestGrantWalletUserReadAccess:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
+        conflicting_request = _read_grant_request(
+            _VIEWER_USER,
+            "00000000-0000-7000-8000-0000000000f1",
+            datetime.now(UTC),
+        )
+
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             pytest.raises(WalletUserReadGrantConflictError) as excinfo,
         ):
-            await repo.grant_wallet_user_read_access(
-                _read_grant_request(
-                    _VIEWER_USER,
-                    "00000000-0000-7000-8000-0000000000f1",
-                    datetime.now(UTC),
-                )
-            )
+            await repo.grant_wallet_user_read_access(conflicting_request)
 
         assert "concurrent writer" in excinfo.value.reason
 
@@ -322,17 +339,17 @@ class TestGrantWalletUserReadAccess:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
+        not_null_breach_request = _read_grant_request(
+            _VIEWER_USER,
+            "00000000-0000-7000-8000-0000000000f2",
+            datetime.now(UTC),
+        )
+
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             pytest.raises(IntegrityError),
         ):
-            await repo.grant_wallet_user_read_access(
-                _read_grant_request(
-                    _VIEWER_USER,
-                    "00000000-0000-7000-8000-0000000000f2",
-                    datetime.now(UTC),
-                )
-            )
+            await repo.grant_wallet_user_read_access(not_null_breach_request)
 
 
 class TestRevokeWalletUserReadGrant:
@@ -478,6 +495,8 @@ class TestRevokeWalletUserReadGrant:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
+        revoked_at = now + timedelta(seconds=1)
+
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             pytest.raises(WalletUserReadGrantNotFoundError, match="concurrent mutation"),
@@ -485,7 +504,7 @@ class TestRevokeWalletUserReadGrant:
             await repo.revoke_wallet_user_read_grant(
                 user_public_id=_VIEWER_USER,
                 wallet_public_id="00000000-0000-7000-8000-0000000000f3",
-                revoked_at=now + timedelta(seconds=1),
+                revoked_at=revoked_at,
             )
 
 
@@ -674,21 +693,19 @@ class TestListReadableWalletsForUser:
             _read_grant_request(_VIEWER_USER, ids["wallet_paper"], base_ts)
         )
 
+        second_active_row = WalletUserReadGrant(
+            user_public_id=_VIEWER_USER,
+            wallet_public_id=ids["wallet_paper"],
+            granted_by_user_public_id=_ADMIN_USER,
+            note=None,
+            session_id="test-session",
+            sequence_id=2,
+            timestamp=base_ts + timedelta(seconds=1),
+            known_to=KNOWN_TO_MAX,
+        )
+
         with pytest.raises(IntegrityError):
-            async with repo.session() as s:
-                s.add(
-                    WalletUserReadGrant(
-                        user_public_id=_VIEWER_USER,
-                        wallet_public_id=ids["wallet_paper"],
-                        granted_by_user_public_id=_ADMIN_USER,
-                        note=None,
-                        session_id="test-session",
-                        sequence_id=2,
-                        timestamp=base_ts + timedelta(seconds=1),
-                        known_to=KNOWN_TO_MAX,
-                    )
-                )
-                await s.commit()
+            await _insert_grant_directly(repo, second_active_row)
 
         await repo.revoke_wallet_user_read_grant(
             user_public_id=_VIEWER_USER,

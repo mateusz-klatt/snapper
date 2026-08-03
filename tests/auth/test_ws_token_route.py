@@ -142,7 +142,8 @@ class TestWsTokenRouteHappyPath:
         payload = body["payload"]
         assert payload["type"] == "ws_token"
         assert payload["message"] == "ws_token issued"
-        assert isinstance(payload["ws_token"], str) and payload["ws_token"]
+        assert isinstance(payload["ws_token"], str)
+        assert payload["ws_token"]
         ws_token_exp = datetime.fromisoformat(payload["ws_token_exp"])
         assert ws_token_exp > datetime.now(UTC) - timedelta(seconds=5)
         assert payload["expires_in"] >= 0
@@ -425,7 +426,7 @@ class TestWsTokenRouteStateInvariant:
 class TestWsTokenRouteRateLimit:
     """``WS_TOKEN_RATE_LIMIT`` caps per-IP minting."""
 
-    def test_burst_above_limit_returns_429(self) -> None:
+    def test_burst_above_limit_returns_429(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Hitting the route past the per-minute limit yields 429.
 
         ``WS_TOKEN_RATE_LIMIT`` is parsed at "10/minute" by default.
@@ -438,8 +439,7 @@ class TestWsTokenRouteRateLimit:
         budget, unit = WS_TOKEN_RATE_LIMIT.split("/", 1)
         assert unit.startswith("minute")
         n = int(budget)
-        was_enabled = limiter.enabled
-        limiter.enabled = True
+        monkeypatch.setattr(limiter, "enabled", True)
         limiter.reset()
         try:
             client = _create_client(principal=_principal(), claims=_claims())
@@ -451,7 +451,6 @@ class TestWsTokenRouteRateLimit:
             client.close()
         finally:
             limiter.reset()
-            limiter.enabled = was_enabled
 
 
 class TestWsTokenRouteExpiresIn:
@@ -489,14 +488,16 @@ class TestGetAuthenticatedTokenClaimsHelper:
         """Given ``request.state.token_data`` is unset, Then raise 500."""
         request = Mock()
         request.state = type("S", (), {})()
+        principal = _principal()
         with pytest.raises(HTTPException) as exc:
-            _get_authenticated_token_claims(request, _principal())
+            _get_authenticated_token_claims(request, principal)
         assert exc.value.status_code == 500
 
     def test_raises_500_when_state_wrong_type(self) -> None:
         """Given ``request.state.token_data`` is not a TokenClaims, Then 500."""
         request = Mock()
         request.state.token_data = {"sid": "spoofed"}
+        principal = _principal()
         with pytest.raises(HTTPException) as exc:
-            _get_authenticated_token_claims(request, _principal())
+            _get_authenticated_token_claims(request, principal)
         assert exc.value.status_code == 500

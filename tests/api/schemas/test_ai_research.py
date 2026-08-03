@@ -98,8 +98,9 @@ def test_submitted_market_view_rejects_artifact_cap_violations(
     When strict validation runs,
     Then validation rejects the complete submission.
     """
+    over_cap_payload = _payload(**overrides)
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(_payload(**overrides))
+        SubmittedMarketView.model_validate(over_cap_payload)
 
 
 def test_submitted_market_view_requires_sources() -> None:
@@ -129,8 +130,9 @@ def test_submitted_market_view_rejects_unknown_enums(field: str, value: str) -> 
     When strict validation runs,
     Then validation rejects the value outside the closed vocabulary.
     """
+    unknown_enum_payload = _payload(**{field: value})
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(_payload(**{field: value}))
+        SubmittedMarketView.model_validate(unknown_enum_payload)
 
 
 @pytest.mark.parametrize("field", ["as_of", "valid_until"])
@@ -141,8 +143,9 @@ def test_submitted_market_view_rejects_naive_top_level_datetimes(field: str) -> 
     When strict validation runs,
     Then validation rejects the timestamp without a timezone.
     """
+    naive_clock_payload = _payload(**{field: datetime(2026, 7, 21, 8, 0)})
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(_payload(**{field: datetime(2026, 7, 21, 8, 0)}))
+        SubmittedMarketView.model_validate(naive_clock_payload)
 
 
 def test_submitted_market_view_rejects_naive_nested_datetimes() -> None:
@@ -152,14 +155,12 @@ def test_submitted_market_view_rejects_naive_nested_datetimes() -> None:
     When each artifact is strictly validated,
     Then both nested timestamp variants are rejected.
     """
+    naive_event_payload = _payload(next_events=[_event(datetime(2026, 7, 21, 9, 0))])
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(
-            _payload(next_events=[_event(datetime(2026, 7, 21, 9, 0))])
-        )
+        SubmittedMarketView.model_validate(naive_event_payload)
+    naive_source_payload = _payload(sources=[_source(datetime(2026, 7, 21, 7, 55))])
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(
-            _payload(sources=[_source(datetime(2026, 7, 21, 7, 55))])
-        )
+        SubmittedMarketView.model_validate(naive_source_payload)
 
 
 @pytest.mark.parametrize(
@@ -185,5 +186,6 @@ def test_submitted_market_view_rejects_server_owned_fields(
     When strict extra-field validation runs,
     Then the forged metadata is rejected.
     """
+    server_owned_payload = _payload(**{field: value})
     with pytest.raises(ValidationError):
-        SubmittedMarketView.model_validate(_payload(**{field: value}))
+        SubmittedMarketView.model_validate(server_owned_payload)

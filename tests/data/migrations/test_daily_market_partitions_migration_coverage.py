@@ -123,12 +123,12 @@ def test_inferred_anchor_requires_one_utc_midnight_bound() -> None:
 
     assert migration._infer_parent_anchor(bind, ticks) == _ANCHOR
 
-    s5778_value_1 = _bind(None)
+    bind_without_upper_bound = _bind(None)
     with pytest.raises(RuntimeError, match="upper bound is unavailable"):
-        migration._infer_parent_anchor(s5778_value_1, ticks)
-    s5778_value_1 = _bind(_ANCHOR + timedelta(minutes=1))
+        migration._infer_parent_anchor(bind_without_upper_bound, ticks)
+    bind_with_offset_upper_bound = _bind(_ANCHOR + timedelta(minutes=1))
     with pytest.raises(RuntimeError, match="not UTC midnight"):
-        migration._infer_parent_anchor(s5778_value_1, ticks)
+        migration._infer_parent_anchor(bind_with_offset_upper_bound, ticks)
 
 
 def test_resolve_anchor_prefers_explicit_then_consistent_inference() -> None:
@@ -172,10 +172,10 @@ def test_relation_and_requirement_catalog_guards() -> None:
     assert migration._relation_kind(bind, "ticks") == "p:false"
     migration._require(_bind(True), MagicMock(), "unused")
 
-    s5778_value_1 = _bind(False)
-    s5778_value_2 = MagicMock()
+    drifted_bind = _bind(False)
+    drift_context = MagicMock()
     with pytest.raises(RuntimeError, match="catalog drift"):
-        migration._require(s5778_value_1, s5778_value_2, "catalog drift")
+        migration._require(drifted_bind, drift_context, "catalog drift")
 
 
 def test_column_and_constraint_contract_renderers_cover_all_roles() -> None:
@@ -363,23 +363,26 @@ def test_preflight_accepts_exact_partitioned_and_empty_ordinary_states() -> None
 def test_preflight_rejects_missing_populated_and_racing_tables() -> None:
     """Unsupported identity, existing rows, and lock races all fail closed."""
     ticks = migration._TABLES[0]
+    missing_relation_bind = _bind()
     with (
         patch.object(migration, "_relation_kind", return_value=None),
         pytest.raises(RuntimeError, match="observed missing"),
     ):
-        migration._preflight(_bind(), ticks, _ANCHOR)
+        migration._preflight(missing_relation_bind, ticks, _ANCHOR)
 
+    populated_bind = _bind(True)
     with (
         patch.object(migration, "_relation_kind", return_value="r:false"),
         pytest.raises(RuntimeError, match="is populated"),
     ):
-        migration._preflight(_bind(True), ticks, _ANCHOR)
+        migration._preflight(populated_bind, ticks, _ANCHOR)
 
+    racing_bind = _bind(False, True)
     with (
         patch.object(migration, "_relation_kind", return_value="r:false"),
         pytest.raises(RuntimeError, match="became populated"),
     ):
-        migration._preflight(_bind(False, True), ticks, _ANCHOR)
+        migration._preflight(racing_bind, ticks, _ANCHOR)
 
 
 def test_creation_helpers_emit_complete_parent_leaf_and_legacy_ddl() -> None:
@@ -430,9 +433,9 @@ def test_sqlite_tightening_refuses_nulls_and_emits_exact_batch_contract() -> Non
         unique=True,
     )
 
-    s5778_value_1 = _bind(True, dialect="sqlite")
+    sqlite_bind_with_null_rows = _bind(True, dialect="sqlite")
     with pytest.raises(RuntimeError, match="contains NULL"):
-        migration._upgrade_sqlite(s5778_value_1)
+        migration._upgrade_sqlite(sqlite_bind_with_null_rows)
 
 
 def test_public_upgrade_routes_supported_dialects_and_adopts_only_ordinary() -> None:

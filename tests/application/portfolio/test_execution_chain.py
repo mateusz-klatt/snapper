@@ -208,8 +208,9 @@ def test_canonical_datetime_is_utc_microsecond_stable() -> None:
     in_utc = _record(timestamp=datetime(2026, 7, 17, 8, 0, tzinfo=UTC))
     shifted = _record(timestamp=datetime(2026, 7, 17, 10, 0, tzinfo=timezone(timedelta(hours=2))))
     assert canonical_execution_record(in_utc) == canonical_execution_record(shifted)
+    naive_timestamp_record = _record(timestamp=datetime(2026, 7, 17, 8, 0))
     with pytest.raises(ExecutionChainError):
-        canonical_execution_record(_record(timestamp=datetime(2026, 7, 17, 8, 0)))
+        canonical_execution_record(naive_timestamp_record)
 
 
 def test_datetime_outside_the_chain_domain_is_refused() -> None:
@@ -219,12 +220,12 @@ def test_datetime_outside_the_chain_domain_is_refused() -> None:
     When each is canonically serialized,
     Then serialization fails closed.
     """
+    pre_epoch_record = _record(timestamp=datetime(1969, 1, 1, tzinfo=UTC))
     with pytest.raises(ExecutionChainError):
-        canonical_execution_record(_record(timestamp=datetime(1969, 1, 1, tzinfo=UTC)))
+        canonical_execution_record(pre_epoch_record)
+    sentinel_band_record = _record(timestamp=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC))
     with pytest.raises(ExecutionChainError):
-        canonical_execution_record(
-            _record(timestamp=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC))
-        )
+        canonical_execution_record(sentinel_band_record)
 
 
 def test_boolean_scope_sequence_is_refused() -> None:
@@ -234,8 +235,9 @@ def test_boolean_scope_sequence_is_refused() -> None:
     When it is canonically serialized,
     Then serialization fails closed.
     """
+    boolean_sequence_record = _record(scope_sequence=True)
     with pytest.raises(ExecutionChainError):
-        canonical_execution_record(_record(scope_sequence=True))
+        canonical_execution_record(boolean_sequence_record)
 
 
 def test_genesis_binds_scope() -> None:
@@ -307,8 +309,9 @@ def test_invalid_uuid_fails_closed() -> None:
     When it is canonically serialized,
     Then serialization fails closed.
     """
+    invalid_uuid_record = _record(public_id="not-a-uuid")
     with pytest.raises(ExecutionChainError):
-        canonical_execution_record(_record(public_id="not-a-uuid"))
+        canonical_execution_record(invalid_uuid_record)
 
 
 def test_extend_from_a_committed_base_matches_full_derivation() -> None:
@@ -346,12 +349,16 @@ def test_malformed_base_tip_fails_closed() -> None:
     When an extension is attempted from each,
     Then it fails closed in every case.
     """
+    short_tip_rows = [_record()]
     with pytest.raises(ExecutionChainError):
-        extend_execution_chain("deadbeef", [_record()])
+        extend_execution_chain("deadbeef", short_tip_rows)
+    non_hex_tip_rows = [_record()]
     with pytest.raises(ExecutionChainError):
-        extend_execution_chain("g" * 64, [_record()])
+        extend_execution_chain("g" * 64, non_hex_tip_rows)
+    uppercased_tip = _genesis().upper()
+    uppercased_tip_rows = [_record()]
     with pytest.raises(ExecutionChainError):
-        extend_execution_chain(_genesis().upper(), [_record()])
+        extend_execution_chain(uppercased_tip, uppercased_tip_rows)
 
 
 def _digest_field_variants() -> dict[str, object]:

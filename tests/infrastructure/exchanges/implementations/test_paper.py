@@ -109,17 +109,16 @@ async def test_create_order_requires_running() -> None:
     Then: RuntimeError is raised.
     """
     client = PaperExchangeClient()
+    market_buy_request = ExchangeOrderRequest(
+        symbol="BTC/USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.MARKET,
+        amount=1.0,
+        client_order_id="coid-create-order-requires-running",
+        price=None,
+    )
     with pytest.raises(RuntimeError):
-        await client.create_order(
-            ExchangeOrderRequest(
-                symbol="BTC/USD",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.MARKET,
-                amount=1.0,
-                client_order_id="coid-create-order-requires-running",
-                price=None,
-            )
-        )
+        await client.create_order(market_buy_request)
 
 
 @pytest.mark.asyncio
@@ -226,7 +225,8 @@ async def test_disconnect_cancels_fill_task() -> None:
     client._fill_simulator_tasks.update({task_a, task_b})
     await client.disconnect()
     assert client._fill_simulator_tasks == set()
-    assert task_a.cancelled() and task_b.cancelled()
+    assert task_a.cancelled()
+    assert task_b.cancelled()
 
 
 @pytest.mark.asyncio
@@ -519,21 +519,20 @@ async def test_create_order_cancels_when_disconnected_during_db_logging() -> Non
         await client.disconnect()
         return None
 
+    racing_order_request = ExchangeOrderRequest(
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.MARKET,
+        amount=0.01,
+        client_order_id="coid-create-order-cancels-when-disconnected-during-db-logging",
+    )
     with (
         patch.object(
             PaperExchangeClient, "_log_order_to_db", AsyncMock(side_effect=_disconnect_during_log)
         ),
         pytest.raises(RuntimeError, match="session ended"),
     ):
-        await client.create_order(
-            ExchangeOrderRequest(
-                symbol="BTC-USD",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.MARKET,
-                amount=0.01,
-                client_order_id="coid-create-order-cancels-when-disconnected-during-db-logging",
-            )
-        )
+        await client.create_order(racing_order_request)
     tracked = next(iter(client._orders.values()))
     assert tracked.status == ExchangeOrderStatusEnum.CANCELED
     assert client._fill_simulator_tasks == set()
@@ -1498,8 +1497,10 @@ async def test_subscribe_candles_and_trades_replay() -> None:
     async for trade in client.subscribe_trades(["BTC/USD"]):
         trades.append(trade)
         break
-    assert candles and isinstance(candles[0], CandleUpdate)
-    assert trades and trades[0].trade_id == "42"
+    assert candles
+    assert isinstance(candles[0], CandleUpdate)
+    assert trades
+    assert trades[0].trade_id == "42"
 
 
 @pytest.mark.asyncio
@@ -1731,7 +1732,8 @@ async def test_subscribe_ticks_alias_replays_snapshots() -> None:
     updates: list[Any] = []
     async for tick in client.subscribe_ticks(["BTC/USD"]):
         updates.append(tick)
-    assert updates and isinstance(updates[0], TickerUpdate)
+    assert updates
+    assert isinstance(updates[0], TickerUpdate)
 
 
 @pytest.mark.asyncio

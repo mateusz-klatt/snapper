@@ -161,7 +161,7 @@ class TestReplayPublisher:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
     @pytest.mark.timeout(15)
-    async def test_handshake_completes_after_retry(self) -> None:
+    async def test_handshake_completes_after_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Strategy ACKs only on round 3 — publisher completes without raising."""
         broker, endpoints = await allocate_replay_endpoints()
         try:
@@ -178,31 +178,29 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
-            rp.WARMUP_READY_TIMEOUT_S = 0.2
-            try:
-                harness = asyncio.create_task(
-                    _strategy_harness(
-                        broker,
-                        topics=["market.kraken.BTC-USD.candles.1h"],
-                        drain=drain,
-                        subscriber_ready=ready,
-                        expected_real_candles=1,
-                        ack_after_retry=3,
-                    )
+            monkeypatch.setattr(rp, "WARMUP_READY_TIMEOUT_S", 0.2)
+            harness = asyncio.create_task(
+                _strategy_harness(
+                    broker,
+                    topics=["market.kraken.BTC-USD.candles.1h"],
+                    drain=drain,
+                    subscriber_ready=ready,
+                    expected_real_candles=1,
+                    ack_after_retry=3,
                 )
-                async with asyncio.timeout(3.0):
-                    await broker.wait_for_subscription(b"market.")
-                await asyncio.wait_for(publisher.start(), timeout=10.0)
-                await asyncio.wait_for(harness, timeout=2.0)
-                assert drain.processed_count == 1
-            finally:
-                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
+            )
+            async with asyncio.timeout(3.0):
+                await broker.wait_for_subscription(b"market.")
+            await asyncio.wait_for(publisher.start(), timeout=10.0)
+            await asyncio.wait_for(harness, timeout=2.0)
+            assert drain.processed_count == 1
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
     @pytest.mark.timeout(15)
-    async def test_handshake_timeout_when_strategy_never_acks(self) -> None:
+    async def test_handshake_timeout_when_strategy_never_acks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Strategy that never ACKs forces BacktestReadinessTimeoutError."""
         broker, endpoints = await allocate_replay_endpoints()
         try:
@@ -219,28 +217,25 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
-            rp.WARMUP_READY_TIMEOUT_S = 0.1
-            try:
-                harness = asyncio.create_task(
-                    _strategy_harness(
-                        broker,
-                        topics=["market.kraken.BTC-USD.candles.1h"],
-                        drain=drain,
-                        subscriber_ready=ready,
-                        expected_real_candles=1,
-                        never_ack=True,
-                    )
+            monkeypatch.setattr(rp, "WARMUP_READY_TIMEOUT_S", 0.1)
+            harness = asyncio.create_task(
+                _strategy_harness(
+                    broker,
+                    topics=["market.kraken.BTC-USD.candles.1h"],
+                    drain=drain,
+                    subscriber_ready=ready,
+                    expected_real_candles=1,
+                    never_ack=True,
                 )
-                with pytest.raises(BacktestReadinessTimeoutError) as exc_info:
-                    await asyncio.wait_for(publisher.start(), timeout=10.0)
-                assert "5 retries" in str(exc_info.value)
-                assert "market.kraken.BTC-USD.candles.1h" in str(exc_info.value)
-                harness.cancel()
-                with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
-                    await asyncio.wait_for(harness, timeout=2.0)
-            finally:
-                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
+            )
+            handshake_attempt = publisher.start()
+            with pytest.raises(BacktestReadinessTimeoutError) as exc_info:
+                await asyncio.wait_for(handshake_attempt, timeout=10.0)
+            assert "5 retries" in str(exc_info.value)
+            assert "market.kraken.BTC-USD.candles.1h" in str(exc_info.value)
+            harness.cancel()
+            with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
+                await asyncio.wait_for(harness, timeout=2.0)
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
@@ -280,8 +275,9 @@ class TestReplayPublisher:
                         process_real=False,
                     )
                 )
+                stream_attempt = publisher.start()
                 with pytest.raises(BacktestDrainTimeoutError) as exc_info:
-                    await asyncio.wait_for(publisher.start(), timeout=10.0)
+                    await asyncio.wait_for(stream_attempt, timeout=10.0)
                 assert "published=2" in str(exc_info.value)
                 assert "processed=" in str(exc_info.value)
                 harness.cancel()
@@ -293,7 +289,9 @@ class TestReplayPublisher:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
     @pytest.mark.timeout(15)
-    async def test_socket_closed_on_handshake_failure(self) -> None:
+    async def test_socket_closed_on_handshake_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Context.term() is reached even when handshake raises."""
         broker, endpoints = await allocate_replay_endpoints()
         try:
@@ -310,23 +308,21 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
-            rp.WARMUP_READY_TIMEOUT_S = 0.1
-            try:
-                with pytest.raises(BacktestReadinessTimeoutError):
-                    await asyncio.wait_for(publisher.start(), timeout=10.0)
-                second_publisher = ReplayPublisher(
-                    local_xsub=endpoints.xsub,
-                    repository=repo,
-                    config=config,
-                    snapshot_as_of=NOW,
-                    drain=DrainCoordinator(),
-                    subscriber_ready=asyncio.Event(),
-                )
-                with pytest.raises(BacktestReadinessTimeoutError):
-                    await asyncio.wait_for(second_publisher.start(), timeout=10.0)
-            finally:
-                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
+            monkeypatch.setattr(rp, "WARMUP_READY_TIMEOUT_S", 0.1)
+            first_start_attempt = publisher.start()
+            with pytest.raises(BacktestReadinessTimeoutError):
+                await asyncio.wait_for(first_start_attempt, timeout=10.0)
+            second_publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=DrainCoordinator(),
+                subscriber_ready=asyncio.Event(),
+            )
+            second_start_attempt = second_publisher.start()
+            with pytest.raises(BacktestReadinessTimeoutError):
+                await asyncio.wait_for(second_start_attempt, timeout=10.0)
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 

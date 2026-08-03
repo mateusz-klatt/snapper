@@ -56,8 +56,9 @@ class TestBrokerXpubVerbose:
         try:
             assert broker._observed_subscriptions is None
             assert broker._observation_changed is None
+            verbose_disabled_deadline = asyncio.timeout(0.1)
             with pytest.raises(RuntimeError, match="xpub_verbose=True"):
-                async with asyncio.timeout(0.1):
+                async with verbose_disabled_deadline:
                     await broker.wait_for_subscription(b"market.")
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
@@ -103,8 +104,9 @@ class TestBrokerXpubVerbose:
             sub.setsockopt(zmq.SUBSCRIBE, b"system.x")
             async with asyncio.timeout(2.0):
                 await broker.wait_for_subscription(b"system.")
+            missing_prefix_deadline = asyncio.timeout(0.2)
             with pytest.raises(TimeoutError):
-                async with asyncio.timeout(0.2):
+                async with missing_prefix_deadline:
                     await broker.wait_for_subscription(b"missing.")
             assert broker._observed_subscriptions is not None
             assert b"system.x" in broker._observed_subscriptions
@@ -132,8 +134,9 @@ class TestBrokerXpubVerbose:
                     break
                 await asyncio.sleep(0.02)
             assert b"market.gone" not in broker._observed_subscriptions
+            unsubscribed_prefix_deadline = asyncio.timeout(0.2)
             with pytest.raises(TimeoutError):
-                async with asyncio.timeout(0.2):
+                async with unsubscribed_prefix_deadline:
                     await broker.wait_for_subscription(b"market.")
         finally:
             sub.setsockopt(zmq.LINGER, 0)

@@ -1188,8 +1188,10 @@ async def test_heartbeat_loop_fault_escapes_to_supervisor(
         zmq_broker_xpub="xpub",
     )
     ex._publish_heartbeat = AsyncMock(side_effect=RuntimeError("send fail"))
+    heartbeat_loop = ex._heartbeat_loop()
+
     with pytest.raises(RuntimeError, match="send fail"):
-        await asyncio.wait_for(ex._heartbeat_loop(), timeout=1.0)
+        await asyncio.wait_for(heartbeat_loop, timeout=1.0)
 
 
 def test_stop_closes_resources() -> None:
@@ -1217,7 +1219,9 @@ def test_stop_closes_resources() -> None:
 
     ex.context = Ctx()
     asyncio.run(ex.stop())
-    assert closed["sub"] and closed["pub"] and closed["ctx"]
+    assert closed["sub"]
+    assert closed["pub"]
+    assert closed["ctx"]
     assert sub_setsockopt == [(zmq.LINGER, 0)]
     assert pub_setsockopt == [(zmq.LINGER, 0)]
 
@@ -2686,8 +2690,10 @@ async def test_order_handler_transport_error_escapes(
             raise RuntimeError("boom")
 
     executor.subscriber = cast(Any, FailingSubscriber())
+    order_handler = executor._order_handler()
+
     with pytest.raises(RuntimeError, match="boom"):
-        await asyncio.wait_for(executor._order_handler(), timeout=0.1)
+        await asyncio.wait_for(order_handler, timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -10403,10 +10409,10 @@ class TestCoreToWireOrderRequest:
         When: translated,
         Then: a descriptive ValueError is raised pre-send.
         """
+        stop_order_without_trigger = self._order(order_type="stop")
+
         with pytest.raises(ValueError, match="without stop_price"):
-            base_module._exchange_order_request_from_core(
-                self._order(order_type="stop"), "wallet-1"
-            )
+            base_module._exchange_order_request_from_core(stop_order_without_trigger, "wallet-1")
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -10489,7 +10495,8 @@ class TestCoreToWireOrderRequest:
         await service_any._process_order(order)
         mock_exchange_client.create_order.assert_not_called()
         assert "rejected" in statuses
-        assert recorded and recorded[0]["event_type"] == "order_rejected"
+        assert recorded
+        assert recorded[0]["event_type"] == "order_rejected"
         assert "without stop_price" in recorded[0]["error"]
         assert order.client_order_id not in service_any.pending_orders
 

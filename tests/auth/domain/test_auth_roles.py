@@ -84,11 +84,12 @@ async def test_get_current_user_profile_user_deleted_returns_404() -> None:
     )
     mock_service = AsyncMock()
     mock_service.get_user_with_operators = AsyncMock(return_value=None)
+    deleted_user_request = _make_rest_request()
     with (
         patch("snapper.auth.routes.get_user_service", return_value=mock_service),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await get_current_user_profile(request=_make_rest_request(), current_user=principal)
+        await get_current_user_profile(request=deleted_user_request, current_user=principal)
     assert exc_info.value.status_code == 404
 
 
@@ -836,23 +837,26 @@ class TestUserService:
         service2 = get_user_service()
         assert service1 is service2
 
-    def test_singleton_returns_existing_instance(self) -> None:
+    def test_singleton_returns_existing_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test UserService singleton pattern returns existing instance.
 
         Given: UserService _instance is reset to None.
         When: UserService is instantiated multiple times.
         Then: The same singleton instance is returned and stored.
+
+        The singleton slot is cleared through ``monkeypatch`` so pytest
+        restores whatever instance the process held before this test,
+        leaving no cross-test residue behind.
         """
         with patch("snapper.auth.user_service.get_repository") as mock_get_repo:
             mock_repo = MagicMock()
             mock_get_repo.return_value = mock_repo
-            UserService._instance = None
+            monkeypatch.setattr(UserService, "_instance", None)
             service1 = UserService()
             assert UserService._instance is service1
             service2 = UserService()
             assert service2 is service1
             assert UserService._instance is service1
-            UserService._instance = None
 
     def test_verify_password_bcrypt(self, user_service: UserService) -> None:
         """Test bcrypt password verification succeeds with correct password.

@@ -465,13 +465,15 @@ def test_public_rest_presend_connect_error_quarantines_and_releases_route() -> N
     def sync_call() -> str:
         raise _wrapped_presend_error()
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(RuntimeError, match="sdk wrapper"):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="fetch_ticker",
             kind="public_read",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -496,13 +498,15 @@ def test_public_rest_ambiguous_error_releases_without_quarantine() -> None:
     def sync_call() -> str:
         raise requests.exceptions.ConnectionError("connection reset after send")
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(requests.exceptions.ConnectionError):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="fetch_ticker",
             kind="public_read",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -600,13 +604,15 @@ def test_private_idempotent_read_ambiguous_error_does_not_fallback() -> None:
         seen_proxies.append(_proxy_snapshot(client.session))
         raise requests.exceptions.ConnectionError("connection reset after send")
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(requests.exceptions.ConnectionError):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="fetch_balance",
             kind="private_idempotent_read",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -627,13 +633,15 @@ def test_private_idempotent_read_presend_error_without_pool_has_no_fallback() ->
         seen_proxies.append(_proxy_snapshot(client.session))
         raise _wrapped_presend_error()
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(RuntimeError, match="sdk wrapper"):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="fetch_balance",
             kind="private_idempotent_read",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -655,13 +663,15 @@ def test_private_mutation_presend_error_is_not_retried_or_rerouted() -> None:
         seen_proxies.append(_proxy_snapshot(client.session))
         raise _wrapped_presend_error()
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(RuntimeError, match="sdk wrapper"):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="create_order",
             kind="private_mutation",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -687,6 +697,8 @@ def test_private_identity_mutation_preserves_no_retry_safety() -> None:
         seen_proxies.append(_proxy_snapshot(client.session))
         raise _wrapped_presend_error()
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with (
         egress_identity(
             exchange="kraken",
@@ -700,8 +712,8 @@ def test_private_identity_mutation_preserves_no_retry_safety() -> None:
             exchange="kraken",
             operation="create_order",
             kind="private_mutation",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 
@@ -724,13 +736,15 @@ def test_private_mutation_ambiguous_connection_error_is_not_retried_or_rerouted(
         seen_proxies.append(_proxy_snapshot(client.session))
         raise requests.exceptions.ConnectionError("connection reset after send")
 
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
     with pytest.raises(requests.exceptions.ConnectionError):
         route_kraken_rest_sync_call(
             exchange="kraken",
             operation="cancel_order",
             kind="private_mutation",
-            target=ccxt_proxy_target(client),
-            proxy_lock=threading.RLock(),
+            target=proxy_target,
+            proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
 

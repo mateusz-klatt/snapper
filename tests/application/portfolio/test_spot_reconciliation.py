@@ -722,8 +722,9 @@ def test_paper_and_simulated_raise_and_inputs_are_not_mutated() -> None:
     result = _evaluate(replay=replay, boundary=_boundary(source_watermark=12))
     assert replay == original
     assert result["evaluation_status"] in ("matched", "mismatched")
+    paper_account = _account(mode="paper")
     with pytest.raises(ValueError, match="live account"):
-        _evaluate(account=_account(mode="paper"))
+        _evaluate(account=paper_account)
     with pytest.raises(ValueError, match="simulated"):
         _evaluate(capability=CapabilityStatus.SIMULATED)
 
@@ -840,8 +841,9 @@ def test_numeric_resolution_rejects_bool_malformed_nonfinite_and_conflicts(
     When: One numeric operand is resolved,
     Then: The resolver rejects it with the expected incomplete reason.
     """
+    legacy_number = cast(float, legacy)
     with pytest.raises(spot_module._IncompleteError, match=reason):
-        spot_module._resolve_number(cast(float, legacy), raw, provenance, "value")
+        spot_module._resolve_number(legacy_number, raw, provenance, "value")
 
 
 @pytest.mark.parametrize(
@@ -1736,8 +1738,9 @@ def test_missing_replay_and_unknown_capability_are_not_authoritative() -> None:
     """
     missing = _evaluate(replay=None)
     assert missing["error"] == "missing_replay"
+    forged_capability = cast(CapabilityStatus, "invented")
     with pytest.raises(ValueError, match="unknown spot position capability"):
-        _evaluate(capability=cast(CapabilityStatus, "invented"))
+        _evaluate(capability=forged_capability)
 
 
 def test_defensive_precision_parsing_handles_invalid_string_object() -> None:

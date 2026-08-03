@@ -42,16 +42,18 @@ class TestZmqReplayEngineFastFail:
         """Empty dict → ValueError, no broker consumed."""
         engine = ZmqReplayEngine(AsyncMock(), NOW)
         config = _make_config_with_instruments({})
+        collector = ResultCollector()
         with pytest.raises(ValueError, match="empty"):
-            await engine.run("run-1", config, ResultCollector())
+            await engine.run("run-1", config, collector)
 
     @pytest.mark.timeout(10)
     async def test_run_raises_for_empty_instrument_lists(self) -> None:
         """Dict with empty value lists also fast-fails."""
         engine = ZmqReplayEngine(AsyncMock(), NOW)
         config = _make_config_with_instruments({"kraken": []})
+        collector = ResultCollector()
         with pytest.raises(ValueError, match="empty"):
-            await engine.run("run-1", config, ResultCollector())
+            await engine.run("run-1", config, collector)
 
 
 @pytest.mark.asyncio
@@ -124,6 +126,7 @@ class TestZmqReplayEngineLifecycle:
         """A cancelled completed task maps to asyncio.CancelledError."""
         engine = ZmqReplayEngine(AsyncMock(), NOW)
         config = _make_config_with_instruments({"kraken": ["BTC-USD"]})
+        collector = ResultCollector()
 
         broker = AsyncMock()
         broker.wait_for_subscription = AsyncMock()
@@ -176,7 +179,7 @@ class TestZmqReplayEngineLifecycle:
             patch.object(ZmqReplayEngine, "_cleanup", AsyncMock()),
             pytest.raises(asyncio.CancelledError),
         ):
-            await engine.run("run-1", config, ResultCollector())
+            await engine.run("run-1", config, collector)
 
     @pytest.mark.timeout(10)
     async def test_run_flushes_pending_batch_before_return(self) -> None:

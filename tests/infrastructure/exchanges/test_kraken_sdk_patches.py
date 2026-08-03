@@ -297,7 +297,9 @@ class TestPatchedRunSetsContextVar:
     """The ``__run`` override stamps ``_CURRENT_CONNECTOR_ID``."""
 
     @pytest.mark.asyncio
-    async def test_context_var_set_during_run_and_reset_after(self) -> None:
+    async def test_context_var_set_during_run_and_reset_after(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — full Given/When/Then below.
 
         Given a patched ``__run`` wrapping a fake SDK run,
@@ -312,12 +314,8 @@ class TestPatchedRunSetsContextVar:
 
         connector = MagicMock()
         event = asyncio.Event()
-        original = kraken_sdk_patches._ORIGINAL_RUN
-        kraken_sdk_patches._ORIGINAL_RUN = fake_run
-        try:
-            await _patched_run(connector, event)
-        finally:
-            kraken_sdk_patches._ORIGINAL_RUN = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_RUN", fake_run)
+        await _patched_run(connector, event)
         assert observed["during"] == id(connector)
         assert _CURRENT_CONNECTOR_ID.get() is None
 
@@ -463,7 +461,7 @@ class TestConnectShim:
 class TestPublisherRegistration:
     """Publisher-to-connector mapping via ``_CURRENT_PUBLISHER`` ContextVar."""
 
-    def test_init_registers_when_publisher_set(self) -> None:
+    def test_init_registers_when_publisher_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Spec — full Given/When/Then below.
 
         Given ``_CURRENT_PUBLISHER`` set to a publisher,
@@ -479,19 +477,17 @@ class TestPublisherRegistration:
             def fake_original(self_obj: Any, *args: Any, **kwargs: Any) -> None:
                 captured["self"] = self_obj
 
-            original = kraken_sdk_patches._ORIGINAL_INIT
-            kraken_sdk_patches._ORIGINAL_INIT = fake_original
-            try:
-                _patched_init(connector)
-            finally:
-                kraken_sdk_patches._ORIGINAL_INIT = original
+            monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_INIT", fake_original)
+            _patched_init(connector)
             assert _CONNECTOR_PUBLISHERS[id(connector)] is publisher
             assert get_registered_publisher(id(connector)) is publisher
         finally:
             _CURRENT_PUBLISHER.reset(token)
             _CONNECTOR_PUBLISHERS.pop(id(connector), None)
 
-    def test_init_does_not_register_when_no_publisher(self) -> None:
+    def test_init_does_not_register_when_no_publisher(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — full Given/When/Then below.
 
         Given no ``_CURRENT_PUBLISHER`` set,
@@ -504,15 +500,11 @@ class TestPublisherRegistration:
         def fake_original(self_obj: Any, *args: Any, **kwargs: Any) -> None:
             return None
 
-        original = kraken_sdk_patches._ORIGINAL_INIT
-        kraken_sdk_patches._ORIGINAL_INIT = fake_original
-        try:
-            _patched_init(connector)
-        finally:
-            kraken_sdk_patches._ORIGINAL_INIT = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_INIT", fake_original)
+        _patched_init(connector)
         assert id(connector) not in _CONNECTOR_PUBLISHERS
 
-    def test_weakref_finalize_unregisters_on_gc(self) -> None:
+    def test_weakref_finalize_unregisters_on_gc(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Spec — full Given/When/Then below.
 
         Given a connector registered against a publisher,
@@ -529,12 +521,8 @@ class TestPublisherRegistration:
             def fake_original(self_obj: Any, *args: Any, **kwargs: Any) -> None:
                 return None
 
-            original = kraken_sdk_patches._ORIGINAL_INIT
-            kraken_sdk_patches._ORIGINAL_INIT = fake_original
-            try:
-                _patched_init(connector)
-            finally:
-                kraken_sdk_patches._ORIGINAL_INIT = original
+            monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_INIT", fake_original)
+            _patched_init(connector)
             assert connector_id_holder["id"] in _CONNECTOR_PUBLISHERS
             del connector
             gc.collect()
@@ -1013,7 +1001,9 @@ class TestPatchedRunCapturesCloseCode:
     """``_patched_run`` records the server-sent close code for the watchdog."""
 
     @pytest.mark.asyncio
-    async def test_connection_closed_with_code_stashes(self) -> None:
+    async def test_connection_closed_with_code_stashes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The wrapper records ``exc.rcvd.code`` on ConnectionClosed.
 
         Given an underlying ``__run`` that raises ``ConnectionClosed`` with a
@@ -1030,18 +1020,17 @@ class TestPatchedRunCapturesCloseCode:
         async def raising_run(self_obj: Any, event_obj: asyncio.Event) -> None:
             raise ConnectionClosedError(rcvd=close_frame, sent=None)
 
-        original = kraken_sdk_patches._ORIGINAL_RUN
-        kraken_sdk_patches._ORIGINAL_RUN = raising_run
-        try:
-            with pytest.raises(ConnectionClosedError):
-                await kraken_sdk_patches._patched_run(connector, asyncio.Event())
-        finally:
-            kraken_sdk_patches._ORIGINAL_RUN = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_RUN", raising_run)
+        closing_run_event = asyncio.Event()
+        with pytest.raises(ConnectionClosedError):
+            await kraken_sdk_patches._patched_run(connector, closing_run_event)
         assert _LAST_CLOSE_CODE.get(connector_id) == 1012
         _LAST_CLOSE_CODE.pop(connector_id, None)
 
     @pytest.mark.asyncio
-    async def test_connection_closed_without_rcvd_does_not_stash(self) -> None:
+    async def test_connection_closed_without_rcvd_does_not_stash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A ``ConnectionClosed`` with no ``rcvd`` frame is left unstashed.
 
         Given an underlying ``__run`` that raises ``ConnectionClosed`` with
@@ -1057,17 +1046,14 @@ class TestPatchedRunCapturesCloseCode:
         async def raising_run(self_obj: Any, event_obj: asyncio.Event) -> None:
             raise ConnectionClosedError(rcvd=None, sent=None)
 
-        original = kraken_sdk_patches._ORIGINAL_RUN
-        kraken_sdk_patches._ORIGINAL_RUN = raising_run
-        try:
-            with pytest.raises(ConnectionClosedError):
-                await kraken_sdk_patches._patched_run(connector, asyncio.Event())
-        finally:
-            kraken_sdk_patches._ORIGINAL_RUN = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_RUN", raising_run)
+        unstashed_run_event = asyncio.Event()
+        with pytest.raises(ConnectionClosedError):
+            await kraken_sdk_patches._patched_run(connector, unstashed_run_event)
         assert connector_id not in _LAST_CLOSE_CODE
 
     @pytest.mark.asyncio
-    async def test_normal_completion_does_not_stash(self) -> None:
+    async def test_normal_completion_does_not_stash(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A clean return from ``__run`` leaves no close-code state behind.
 
         Given an underlying ``__run`` that returns normally,
@@ -1081,12 +1067,8 @@ class TestPatchedRunCapturesCloseCode:
         async def clean_run(self_obj: Any, event_obj: asyncio.Event) -> None:
             return None
 
-        original = kraken_sdk_patches._ORIGINAL_RUN
-        kraken_sdk_patches._ORIGINAL_RUN = clean_run
-        try:
-            await kraken_sdk_patches._patched_run(connector, asyncio.Event())
-        finally:
-            kraken_sdk_patches._ORIGINAL_RUN = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_RUN", clean_run)
+        await kraken_sdk_patches._patched_run(connector, asyncio.Event())
         assert connector_id not in _LAST_CLOSE_CODE
         assert _CURRENT_CONNECTOR_ID.get() is None
 
@@ -2324,7 +2306,9 @@ class TestPhaseBPrimeGetReconnectWait:
         wait = _patched_get_reconnect_wait(connector, 1)
         assert wait == _RETRY_AFTER_MIN_SECONDS
 
-    def test_pool_empty_falls_through_to_sdk_exponential(self) -> None:
+    def test_pool_empty_falls_through_to_sdk_exponential(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — pool size==0 falls through to SDK exponential.
 
         Given an EgressPool configured with no routes (defensive — the
@@ -2334,14 +2318,10 @@ class TestPhaseBPrimeGetReconnectWait:
         Then the SDK exponential is invoked.
         """
         configure_egress_pool(EgressPoolConfig(enabled=False, routes=[]))
-        original = kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT
         captured = MagicMock(return_value=42.5)
-        kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = captured
-        try:
-            connector = MagicMock(spec=ConnectSpotWebsocketBase)
-            wait = _patched_get_reconnect_wait(connector, 3)
-        finally:
-            kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = original
+        monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_GET_RECONNECT_WAIT", captured)
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        wait = _patched_get_reconnect_wait(connector, 3)
         assert wait == 42.5
 
     def test_429_failover_in_one_second_when_healthy_route_available(self) -> None:
@@ -2509,7 +2489,9 @@ class TestPhaseBPrimeBranchCoverage:
             await shim.__aenter__()
         assert _PENDING_RETRY_AFTER_S == {}
 
-    def test_get_reconnect_wait_pool_enabled_but_no_routes(self) -> None:
+    def test_get_reconnect_wait_pool_enabled_but_no_routes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — pool enabled with size==0 falls through to SDK exponential.
 
         Given a pool object whose ``size()`` returns 0 (defensive —
@@ -2523,14 +2505,10 @@ class TestPhaseBPrimeBranchCoverage:
         empty_pool = EgressPool(EgressPoolConfig(enabled=False, routes=[]))
         _POOL_HOLDER[0] = empty_pool
         try:
-            original = kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT
             captured = MagicMock(return_value=17.5)
-            kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = captured
-            try:
-                connector = MagicMock(spec=ConnectSpotWebsocketBase)
-                wait = _patched_get_reconnect_wait(connector, 2)
-            finally:
-                kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = original
+            monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_GET_RECONNECT_WAIT", captured)
+            connector = MagicMock(spec=ConnectSpotWebsocketBase)
+            wait = _patched_get_reconnect_wait(connector, 2)
         finally:
             from snapper.infrastructure.network.egress_pool import reset_egress_pool
 

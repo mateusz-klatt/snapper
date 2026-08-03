@@ -12,6 +12,7 @@ import pytest
 from snapper.api.schemas.backtest import BacktestCreateBody
 
 NOW = datetime(2026, 4, 14, 12, 0, 0, tzinfo=UTC)
+WINDOW_END = NOW + timedelta(days=30)
 _MOCK_STRATEGIES: dict[str, Any] = {"sma_cross": MagicMock()}
 
 
@@ -26,7 +27,7 @@ class TestBacktestCreateBody:
             instrument_public_id="BTC-USD",
             exchange="kraken",
             start_date=NOW,
-            end_date=NOW + timedelta(days=30),
+            end_date=WINDOW_END,
         )
         assert body.strategy_class == "sma_cross"
 
@@ -38,7 +39,7 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
             )
 
     def test_negative_initial_cash_raises(self) -> None:
@@ -49,7 +50,7 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
                 initial_cash=-100.0,
             )
 
@@ -60,7 +61,7 @@ class TestBacktestCreateBody:
                 strategy_class="sma_cross",
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
-                start_date=NOW + timedelta(days=30),
+                start_date=WINDOW_END,
                 end_date=NOW,
             )
 
@@ -76,7 +77,7 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
                 execution_mode="other",
             )
 
@@ -88,7 +89,7 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
                 fill_model="midpoint",
             )
 
@@ -100,7 +101,7 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
                 slippage_bps=-1.0,
             )
 
@@ -112,6 +113,6 @@ class TestBacktestCreateBody:
                 instrument_public_id="BTC-USD",
                 exchange="kraken",
                 start_date=NOW,
-                end_date=NOW + timedelta(days=30),
+                end_date=WINDOW_END,
                 commission_bps=600.0,
             )

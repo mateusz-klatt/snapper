@@ -1806,13 +1806,12 @@ async def test_resolution_revalidates_episode_opened_at_before_copying(
         )
         await session.commit()
     tampered_episode = (await _episodes(repo))[-1]
+    resolving_evaluation = _evaluation(_T0 + timedelta(seconds=4), "matched", sequence_id=4)
     with (
         patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
         pytest.raises(RuntimeError, match="opened_at is inconsistent"),
     ):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=4), "matched", sequence_id=4)
-        )
+        await repo.record_portfolio_reconciliation(resolving_evaluation)
     assert len(await _observations(repo)) == 3
     assert len(await _episodes(repo)) == 1
 
@@ -1998,13 +1997,12 @@ async def test_resolution_revalidates_retained_episode_detail_before_copying(
     tampered_episode = (await _episodes(repo))[-1]
     observation_count = len(await _observations(repo))
     episode_count = len(await _episodes(repo))
+    resolving_evaluation = _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
     with (
         patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
         pytest.raises(RuntimeError, match="detail observation"),
     ):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(resolving_evaluation)
     assert len(await _observations(repo)) == observation_count
     assert len(await _episodes(repo)) == episode_count
 
@@ -2081,13 +2079,12 @@ async def test_resolution_rechecks_episode_state_consistency_before_copying(
         await session.commit()
     tampered_episode = (await _episodes(repo))[-1]
     episode_count = len(await _episodes(repo))
+    resolving_evaluation = _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
     with (
         patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
         pytest.raises(RuntimeError, match="lineage does not match reconciliation state"),
     ):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(resolving_evaluation)
     assert len(await _observations(repo)) == 4
     assert len(await _episodes(repo)) == episode_count
 

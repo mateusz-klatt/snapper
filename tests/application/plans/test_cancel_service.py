@@ -211,14 +211,17 @@ class TestPlansCancelService:
     async def test_plan_not_found_raises(self) -> None:
         """Missing plan → :class:`PlanNotFoundError`."""
         repo = _build_repo(plan=None)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanNotFoundError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="missing",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -226,14 +229,17 @@ class TestPlansCancelService:
         """Plan whose wallet is not accessible → :class:`PlanScopeError`."""
         plan = _make_plan(wallet_public_id="wallet-X")
         repo = _build_repo(plan=plan, accessible_wallets=["wallet-1"])
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanScopeError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
         repo.update_execution_plan_status.assert_not_awaited()
 
@@ -259,14 +265,17 @@ class TestPlansCancelService:
         """Terminal plan → :class:`PlanAlreadyTerminalError`."""
         plan = _make_plan(status="cancelled")
         repo = _build_repo(plan=plan)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanAlreadyTerminalError) as exc:
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-new",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
         assert exc.value.status == "cancelled"
 
@@ -307,14 +316,17 @@ class TestPlansCancelService:
         """Plan claimed key A; caller supplies key B → mismatch."""
         plan = _make_plan(status="cancel_requested", cancel_idempotency_key="key-A")
         repo = _build_repo(plan=plan)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelIdempotencyKeyMismatchError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-B",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -322,14 +334,17 @@ class TestPlansCancelService:
         """Plan in cancel_requested but no key yet → InProgress error."""
         plan = _make_plan(status="cancel_requested", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelInProgressError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -337,14 +352,17 @@ class TestPlansCancelService:
         """CAS returns ``not_found`` → :class:`PlanConcurrentChangeError`."""
         plan = _make_plan(status="active")
         repo = _build_repo(plan=plan, claim_outcome="not_found", claim_plan=None)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanConcurrentChangeError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -352,14 +370,17 @@ class TestPlansCancelService:
         """Caps enforcer rejects → :class:`CapsViolationError` re-raised."""
         plan = _make_plan(status="active")
         repo = _build_repo(plan=plan)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(CapsViolationError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -370,14 +391,17 @@ class TestPlansCancelService:
             plan=plan,
             insert_command_raises=IntegrityError("stmt", {}, Exception("dup-cmd")),
         )
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelEmitError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
         repo.update_execution_plan_status.assert_awaited_once()
         compensation_kwargs = repo.update_execution_plan_status.await_args.kwargs
@@ -392,14 +416,17 @@ class TestPlansCancelService:
             insert_command_raises=IntegrityError("stmt", {}, Exception("dup-cmd")),
         )
         repo.update_execution_plan_status = AsyncMock(side_effect=RuntimeError("compensate failed"))
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelEmitError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -428,14 +455,17 @@ class TestPlansCancelService:
         plan = _make_plan(status="active", child_client_order_id=None, native_instrument=None)
         repo = _build_repo(plan=plan)
         repo.get_execution_plan.side_effect = [plan, None]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelEmitError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -532,14 +562,17 @@ class TestPlansCancelServiceR1:
             plan=plan,
             insert_command_raises=RuntimeError("connection reset"),
         )
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelEmitError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="key-1",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
         repo.update_execution_plan_status.assert_awaited_once()
         compensation_kwargs = repo.update_execution_plan_status.await_args.kwargs
@@ -563,14 +596,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active", cancel_idempotency_key=None)
         plan_post = _make_plan(status="cancel_requested", cancel_idempotency_key="winner-key")
         repo = _build_repo(plan=plan_pre, claim_outcome="key_mismatch", claim_plan=plan_post)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelIdempotencyKeyMismatchError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -587,14 +623,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active")
         plan_terminal = _make_plan(status="cancelled", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre, claim_outcome="terminal", claim_plan=plan_terminal)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanAlreadyTerminalError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -614,14 +653,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active")
         plan_in_progress = _make_plan(status="cancel_requested", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre, claim_outcome="in_progress", claim_plan=plan_in_progress)
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelInProgressError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -686,14 +728,17 @@ class TestPlansCancelServiceR1:
             ),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_post]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelIdempotencyKeyMismatchError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -722,14 +767,17 @@ class TestPlansCancelServiceR1:
             claim_raises=IntegrityError("stmt", {}, Exception("FOREIGN KEY constraint failed")),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_post]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanConcurrentChangeError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -775,14 +823,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, plan_pre]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(CapsViolationError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="caller-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -804,14 +855,17 @@ class TestPlansCancelServiceR1:
         plan_post = _make_plan(status="cancel_requested", cancel_idempotency_key="winner-key")
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, plan_post]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(PlanCancelIdempotencyKeyMismatchError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -831,14 +885,17 @@ class TestPlansCancelServiceR1:
         plan_terminal = _make_plan(status="cancelled", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, plan_terminal]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(PlanAlreadyTerminalError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="caller-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -858,14 +915,17 @@ class TestPlansCancelServiceR1:
         plan_in_progress = _make_plan(status="cancel_requested", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, plan_in_progress]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(PlanCancelInProgressError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="caller-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -880,14 +940,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active", cancel_idempotency_key=None)
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, plan_pre]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(CapsViolationError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key=None,
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -900,14 +963,17 @@ class TestPlansCancelServiceR1:
         plan_pre = _make_plan(status="active")
         repo = _build_repo(plan=plan_pre)
         repo.get_execution_plan.side_effect = [plan_pre, None]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        rejecting_enforcer = _reject_enforcer()
         with pytest.raises(CapsViolationError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="caller-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_reject_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=rejecting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -934,14 +1000,17 @@ class TestPlansCancelServiceR1:
             claim_raises=IntegrityError("stmt", {}, Exception("transient")),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_post]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanConcurrentChangeError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key=None,
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -1021,14 +1090,17 @@ class TestPlansCancelServiceR1:
             claim_raises=IntegrityError("stmt", {}, Exception("partial unique")),
         )
         repo.get_execution_plan.side_effect = [plan_pre, None]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanConcurrentChangeError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -1076,14 +1148,17 @@ class TestPlansCancelServiceR1:
             ),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_post]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelIdempotencyKeyMismatchError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -1096,14 +1171,17 @@ class TestPlansCancelServiceR1:
             claim_raises=IntegrityError("stmt", {}, Exception("UNIQUE constraint failed: other")),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_terminal]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanAlreadyTerminalError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
     @pytest.mark.asyncio
@@ -1116,14 +1194,17 @@ class TestPlansCancelServiceR1:
             claim_raises=IntegrityError("stmt", {}, Exception("UNIQUE constraint failed: other")),
         )
         repo.get_execution_plan.side_effect = [plan_pre, plan_in_progress]
+        caller_principal = _make_principal()
+        sequence_tracker = _make_tracker()
+        admitting_enforcer = _admit_enforcer()
         with pytest.raises(PlanCancelInProgressError):
             await PlansCancelService.cancel_by_plan_public_id(
                 plan_public_id="plan-1",
                 idempotency_key="loser-key",
-                principal=_make_principal(),
+                principal=caller_principal,
                 repo=repo,
-                tracker=_make_tracker(),
-                caps_enforcer=_admit_enforcer(),
+                tracker=sequence_tracker,
+                caps_enforcer=admitting_enforcer,
             )
 
 

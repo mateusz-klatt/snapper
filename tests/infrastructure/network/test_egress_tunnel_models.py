@@ -75,8 +75,9 @@ class TestTunnelDescriptor:
         When TunnelDescriptor is instantiated,
         Then ValidationError fires (pattern violation).
         """
+        descriptor_fields = _valid_descriptor_dict()
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="bad_id", **_valid_descriptor_dict())
+            TunnelDescriptor(id="bad_id", **descriptor_fields)
 
     def test_id_rejects_empty(self) -> None:
         """Spec — id min_length=1.
@@ -85,8 +86,9 @@ class TestTunnelDescriptor:
         When the model is constructed,
         Then ValidationError fires.
         """
+        descriptor_fields = _valid_descriptor_dict()
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="", **_valid_descriptor_dict())
+            TunnelDescriptor(id="", **descriptor_fields)
 
     def test_interface_must_start_with_wg_prefix(self) -> None:
         """Spec — interface name MUST start with ``wg-``.
@@ -203,10 +205,9 @@ class TestTunnelDescriptor:
         When TunnelDescriptor.model_validate runs,
         Then ValidationError fires.
         """
+        payload_with_unknown_field = {"id": "wg-de-1", "wibble": 1, **_valid_descriptor_dict()}
         with pytest.raises(ValidationError):
-            TunnelDescriptor.model_validate(
-                {"id": "wg-de-1", "wibble": 1, **_valid_descriptor_dict()}
-            )
+            TunnelDescriptor.model_validate(payload_with_unknown_field)
 
     def test_allowed_ips_accepts_json_list(self) -> None:
         """Spec — JSON array → tuple coercion via the before-validator.

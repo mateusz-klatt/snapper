@@ -72,9 +72,10 @@ class TestValidateUserWalletScope:
             and the repository is never consulted.
         """
         repo = AsyncMock()
+        claims_without_operators = _claims(operator_public_ids=[])
         with pytest.raises(PermissionError) as exc:
             await validate_user_wallet_scope(
-                _claims(operator_public_ids=[]),
+                claims_without_operators,
                 wallet_public_id="w-1",
                 repository=repo,
             )
@@ -112,9 +113,10 @@ class TestValidateUserWalletScope:
         """
         repo = AsyncMock()
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[{"public_id": "w-2"}])
+        out_of_scope_claims = _claims()
         with pytest.raises(PermissionError) as exc:
             await validate_user_wallet_scope(
-                _claims(),
+                out_of_scope_claims,
                 wallet_public_id="w-1",
                 repository=repo,
             )
@@ -206,9 +208,10 @@ class TestEnsureOperatorInClaims:
             :data:`OPERATOR_SCOPE_ERROR_CODE` — the stable classifier
             MCPServer tool errors surface to clients.
         """
+        claims_limited_to_op_1 = _claims(operator_public_ids=["op-1"])
         with pytest.raises(PermissionError) as exc:
             ensure_operator_in_claims(
-                _claims(operator_public_ids=["op-1"]),
+                claims_limited_to_op_1,
                 "op-2",
             )
         assert OPERATOR_SCOPE_ERROR_CODE in str(exc.value)

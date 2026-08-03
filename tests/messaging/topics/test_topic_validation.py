@@ -776,8 +776,10 @@ def test_validate_topic_signals_live_and_paper_variants() -> None:
     """
     ok_live, msg_live = validate_topic("signals.kraken.BTC-USD.live")
     ok_paper, msg_paper = validate_topic("signals.paper.BTC-USD.momentum")
-    assert ok_live is True and msg_live == ""
-    assert ok_paper is True and msg_paper == ""
+    assert ok_live is True
+    assert msg_live == ""
+    assert ok_paper is True
+    assert msg_paper == ""
 
 
 def test_validate_topic_signals_invalid_suffix() -> None:
@@ -801,7 +803,8 @@ def test_validate_topic_system_heartbeats_and_invalid_type() -> None:
     """
     ok_prefix, msg_prefix = validate_topic("system.heartbeats")
     ok_invalid, msg_invalid = validate_topic("system.unknown")
-    assert ok_prefix is True and msg_prefix == ""
+    assert ok_prefix is True
+    assert msg_prefix == ""
     assert ok_invalid is False
     assert "Invalid system type" in msg_invalid
 
@@ -839,7 +842,8 @@ def test_validate_subscription_pattern_prefix_and_wildcard() -> None:
     """
     ok_prefix, msg_prefix = validate_subscription_pattern("market.kraken.BTC-USD.")
     ok_wildcard, msg_wildcard = validate_subscription_pattern("market.*")
-    assert ok_prefix is True and msg_prefix == ""
+    assert ok_prefix is True
+    assert msg_prefix == ""
     assert ok_wildcard is False
     assert "Wildcards" in msg_wildcard
 

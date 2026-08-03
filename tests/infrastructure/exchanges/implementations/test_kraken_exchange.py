@@ -23,7 +23,6 @@ from ccxt.base.errors import NetworkError
 from kraken.exceptions import KrakenDeadlineElapsedError
 from loguru import logger
 from pydantic import ValidationError
-from pytest import MonkeyPatch
 
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
@@ -186,7 +185,7 @@ def test_spot_health_tracker_dark_recovers_trades_too() -> None:
 
 @pytest.mark.asyncio
 async def test_spot_trade_dark_recovery_resubscribes_trade(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A genuinely dark Spot trade subscription is re-subscribed.
 
@@ -2339,11 +2338,12 @@ class TestKrakenExchangeClient:
         mock_ws_client.exception_occur = True
         with patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock):
             kraken_client._ws_client = mock_ws_client
+            executions_of_dead_client = kraken_client.subscribe_executions()
             with (
                 patch.object(kraken_client, "_close_ws_client", new_callable=AsyncMock),
                 pytest.raises(ConnectionError),
             ):
-                async for _ in kraken_client.subscribe_executions():
+                async for _ in executions_of_dead_client:
                     pytest.fail("dead client must not yield")
         params = mock_ws_client.subscribe.call_args.kwargs["params"]
         assert params["snap_orders"] is False
@@ -2373,8 +2373,9 @@ class TestKrakenExchangeClient:
                 mock_ws_client.exception_occur = True
 
             asyncio.create_task(flip_after_subscribe())
+            executions_until_death = kraken_client.subscribe_executions()
             with pytest.raises(ConnectionError, match="private WS connection lost"):
-                async for _ in kraken_client.subscribe_executions():
+                async for _ in executions_until_death:
                     pytest.fail("no message was enqueued")
         mock_ws_client.close.assert_awaited()
         assert kraken_client._ws_client is None
@@ -2406,8 +2407,9 @@ class TestKrakenExchangeClient:
             patch.object(kr, "_SDK_SEND_TIMEOUT_S", 0.05),
         ):
             kraken_client._ws_client = mock_ws_client
+            executions_over_hung_subscribe = kraken_client.subscribe_executions()
             with pytest.raises(TimeoutError):
-                async for _ in kraken_client.subscribe_executions():
+                async for _ in executions_over_hung_subscribe:
                     pytest.fail("hung subscribe must not yield")
         mock_ws_client.close.assert_awaited_once()
         assert kraken_client._ws_client is None
@@ -2440,8 +2442,9 @@ class TestKrakenExchangeClient:
             patch.object(kr, "_SDK_SEND_TIMEOUT_S", 0.05),
         ):
             kraken_client._ws_client = subscribed
+            executions_over_replaced_slot = kraken_client.subscribe_executions()
             with pytest.raises(TimeoutError):
-                async for _ in kraken_client.subscribe_executions():
+                async for _ in executions_over_replaced_slot:
                     pytest.fail("hung subscribe must not yield")
         subscribed.close.assert_not_awaited()
         replacement.close.assert_not_awaited()
@@ -2472,8 +2475,9 @@ class TestKrakenExchangeClient:
                 subscribed.exception_occur = True
 
             asyncio.create_task(swap_slot_then_kill())
+            executions_until_slot_swap = kraken_client.subscribe_executions()
             with pytest.raises(ConnectionError, match="private WS connection lost"):
-                async for _ in kraken_client.subscribe_executions():
+                async for _ in executions_until_slot_swap:
                     pytest.fail("no message was enqueued")
         subscribed.close.assert_not_awaited()
         replacement.close.assert_not_awaited()
@@ -3849,6 +3853,13 @@ class TestCreateOrderNetworkRetryExclusion:
         """
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.RequestTimeout("request timed out")
+        timed_out_request = ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=float("0.1"),
+            client_order_id="client_p02",
+        )
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch(
@@ -3857,15 +3868,7 @@ class TestCreateOrderNetworkRetryExclusion:
             ),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client.create_order(
-                ExchangeOrderRequest(
-                    symbol="BTC-USD",
-                    side=OrderSideEnum.BUY,
-                    type=ExchangeOrderTypeEnum.MARKET,
-                    amount=float("0.1"),
-                    client_order_id="client_p02",
-                )
-            )
+            await kraken_client.create_order(timed_out_request)
         mock_client.create_order.assert_called_once()
         assert "retry_network_errors" not in mock_client.create_order.call_args.kwargs
         assert isinstance(exc_info.value.__cause__, ccxt.RequestTimeout)
@@ -3887,19 +3890,18 @@ class TestCreateOrderNetworkRetryExclusion:
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.NetworkError("connection reset")
         kraken_client._circuit_failures = kraken_client._max_failures - 1
+        breaker_tripping_request = ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=float("0.1"),
+            client_order_id="coid-unretried-network-failure-feeds-circuit-breaker",
+        )
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             pytest.raises(AmbiguousOrderSubmitError),
         ):
-            await kraken_client.create_order(
-                ExchangeOrderRequest(
-                    symbol="BTC-USD",
-                    side=OrderSideEnum.BUY,
-                    type=ExchangeOrderTypeEnum.MARKET,
-                    amount=float("0.1"),
-                    client_order_id="coid-unretried-network-failure-feeds-circuit-breaker",
-                )
-            )
+            await kraken_client.create_order(breaker_tripping_request)
         assert kraken_client._circuit_failures == kraken_client._max_failures
         assert kraken_client._circuit_open_until > time.time()
         with pytest.raises(RuntimeError, match="Circuit breaker open"):
@@ -4024,12 +4026,13 @@ class TestAmbiguousSubmitClassification:
         async def failing_dispatch(func: Any, /, *args: Any, **kwargs: Any) -> Any:
             raise RestPoolDispatchError("can't start new thread")
 
+        ccxt_dispatch_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch.object(kraken_client, "_dispatch_blocking", failing_dispatch),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(ccxt_dispatch_request)
         assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.venue_answered is False
@@ -4052,12 +4055,13 @@ class TestAmbiguousSubmitClassification:
         async def failing_dispatch(func: Any, /, *args: Any, **kwargs: Any) -> Any:
             raise RestPoolDispatchError("can't start new thread")
 
+        native_dispatch_request = self._request()
         with (
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
             patch.object(kraken_client, "_dispatch_blocking", failing_dispatch),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client._create_order_via_native(self._request())
+            await kraken_client._create_order_via_native(native_dispatch_request)
         assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
         assert exc_info.value.client_order_id == "client_tax"
         trade_client.create_order.assert_not_called()
@@ -4076,6 +4080,7 @@ class TestAmbiguousSubmitClassification:
         """
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.RateLimitExceeded("rate limited")
+        rate_limited_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch(
@@ -4084,7 +4089,7 @@ class TestAmbiguousSubmitClassification:
             ),
             pytest.raises(ccxt.RateLimitExceeded),
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(rate_limited_request)
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_open_is_not_wrapped(
@@ -4099,11 +4104,12 @@ class TestAmbiguousSubmitClassification:
         """
         kraken_client._circuit_open_until = time.time() + 3600
         mock_client = AsyncMock()
+        breaker_open_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             pytest.raises(RuntimeError, match="Circuit breaker open"),
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(breaker_open_request)
         mock_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
@@ -4138,12 +4144,13 @@ class TestAmbiguousSubmitClassification:
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = definitive_error
         lookup = AsyncMock()
+        definitive_rejection_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch.object(kraken_client, "find_order_by_client_id", lookup),
             pytest.raises(type(definitive_error)),
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(definitive_rejection_request)
         lookup.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4181,12 +4188,13 @@ class TestAmbiguousSubmitClassification:
             'kraken {"error":["EOrder:Order already exists"]}'
         )
         lookup = AsyncMock()
+        bare_error_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch.object(kraken_client, "find_order_by_client_id", lookup),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(bare_error_request)
         assert type(exc_info.value.__cause__) is ccxt.ExchangeError
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.instrument == "BTC-USD"
@@ -4230,11 +4238,12 @@ class TestAmbiguousSubmitClassification:
         mock_client.create_order.side_effect = ccxt.ExchangeError(
             f'kraken {{"error":["{unmapped_venue_text}"]}}'
         )
+        unmapped_text_request = self._request()
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client.create_order(self._request())
+            await kraken_client.create_order(unmapped_text_request)
         assert unmapped_venue_text in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -4256,11 +4265,12 @@ class TestAmbiguousSubmitClassification:
         trade_client.create_order.side_effect = requests.exceptions.ConnectionError(
             "reset after send"
         )
+        native_transport_request = self._request()
         with (
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client._create_order_via_native(self._request())
+            await kraken_client._create_order_via_native(native_transport_request)
         assert isinstance(exc_info.value.__cause__, requests.exceptions.ConnectionError)
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.venue_answered is False
@@ -4281,12 +4291,13 @@ class TestAmbiguousSubmitClassification:
         trade_client = MagicMock()
         trade_client.create_order.return_value = {"error": ["EOrder:Order already exists"]}
         log_order = AsyncMock()
+        native_unmapped_error_request = self._request()
         with (
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
             patch.object(kraken_client, "_log_order_to_db", log_order),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client._create_order_via_native(self._request())
+            await kraken_client._create_order_via_native(native_unmapped_error_request)
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.instrument == "BTC-USD"
         assert exc_info.value.venue_answered is True
@@ -4308,11 +4319,12 @@ class TestAmbiguousSubmitClassification:
         deadline_error = KrakenDeadlineElapsedError({"error": ["EService:Deadline elapsed"]})
         trade_client = MagicMock()
         trade_client.create_order.side_effect = deadline_error
+        native_deadline_request = self._request()
         with (
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
-            await kraken_client._create_order_via_native(self._request())
+            await kraken_client._create_order_via_native(native_deadline_request)
         assert exc_info.value.__cause__ is deadline_error
         assert exc_info.value.client_order_id == "client_tax"
         assert exc_info.value.instrument == "BTC-USD"
@@ -4875,8 +4887,9 @@ async def test_subscribe_executions_consumes_queue_then_raises_on_death() -> Non
     client._execution_queue = _OneShotQueue({"execution": 1}, ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
         updates: list[Any] = []
+        executions = client.subscribe_executions(req_id=5)
         with pytest.raises(ConnectionError, match="private WS connection lost"):
-            async for item in client.subscribe_executions(req_id=5):
+            async for item in executions:
                 updates.append(item)
     assert updates == [{"execution": 1}]
     ws.subscribe.assert_called_once()
@@ -6310,18 +6323,18 @@ class TestKrakenFallbackToNativeAPI:
         self, kraken_client: KrakenExchangeClient
     ) -> None:
         """Verify cancel order no fallback without symbol."""
-        with (
-            patch.object(kraken_client, "_ccxt_client") as mock_ccxt_client,
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
-                side_effect=ValueError("Unknown native symbol"),
-            ),
-            pytest.raises(ValueError, match="Unknown native symbol"),
-        ):
+        with patch.object(kraken_client, "_ccxt_client") as mock_ccxt_client:
             mock_ccxt_client.cancel_order = AsyncMock(
                 side_effect=ValueError("Unknown native symbol")
             )
-            await kraken_client.cancel_order("ORDER123", symbol=None)
+            with (
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                    side_effect=ValueError("Unknown native symbol"),
+                ),
+                pytest.raises(ValueError, match="Unknown native symbol"),
+            ):
+                await kraken_client.cancel_order("ORDER123", symbol=None)
 
     @pytest.mark.asyncio
     async def test_get_trade_client_lazy_initialization(
@@ -6393,7 +6406,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         )
 
     @pytest.fixture(autouse=True)
-    def _patch_symbol_mapper(self, monkeypatch: MonkeyPatch) -> None:
+    def _patch_symbol_mapper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _identity(symbol: str) -> str:
             return symbol
 
@@ -6574,7 +6587,7 @@ class TestCcxtOrderLeverageAndPostOnly:
         )
 
     @pytest.fixture(autouse=True)
-    def _patch_symbol_mapper(self, monkeypatch: MonkeyPatch) -> None:
+    def _patch_symbol_mapper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Map native symbols to CCXT format via identity function."""
 
         def _identity(symbol: str) -> str:
@@ -7015,7 +7028,7 @@ class TestKrakenLiveFixtures:
         )
 
     @pytest.fixture(autouse=True)
-    def _patch_symbol_mapper(self, monkeypatch: MonkeyPatch) -> None:
+    def _patch_symbol_mapper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Map native symbols to CCXT format for BTC-EUR."""
 
         def _native_to_ccxt(symbol: str) -> str:
@@ -9059,13 +9072,14 @@ class TestStopOrderTranslation:
             provably-not-placed, so the executor may definitively reject.
         """
         mock_client = AsyncMock()
+        stop_request_without_trigger = self._stop_request(
+            ExchangeOrderTypeEnum.STOP_LOSS, stop_price=None
+        )
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             pytest.raises(ValueError, match="requires stop_price"),
         ):
-            await kraken_client.create_order(
-                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS, stop_price=None)
-            )
+            await kraken_client.create_order(stop_request_without_trigger)
         mock_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
@@ -9264,7 +9278,7 @@ def _trade_built_candle() -> CandleUpdate:
 
 @pytest.mark.asyncio
 async def test_handle_trade_data_folds_into_trade_built_builder_when_enabled(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Enabled shadow folds each parsed spot trade into the trade-built builder.
 
@@ -9290,7 +9304,7 @@ async def test_handle_trade_data_folds_into_trade_built_builder_when_enabled(
 
 @pytest.mark.asyncio
 async def test_handle_trade_data_skips_trade_built_builder_when_disabled(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Disabled shadow leaves the trade-built builder untouched (no leak when off).
 
@@ -9358,7 +9372,7 @@ async def test_subscribe_trade_built_candles_drains_queue_and_isolates_native() 
 
 @pytest.mark.asyncio
 async def test_trade_built_candle_aggregator_enqueues_completed_candles(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The aggregator routes grace-completed buckets into the trade-built queue.
 
@@ -9402,7 +9416,7 @@ async def test_trade_built_candle_aggregator_enqueues_completed_candles(
 
 @pytest.mark.asyncio
 async def test_trade_built_candle_aggregator_survives_tick_failure(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failing aggregator tick is logged and swallowed so the task survives.
 

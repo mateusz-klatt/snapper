@@ -319,7 +319,8 @@ class TestStrategyFactory:
                         if state.pending_batch:
                             break
                         await asyncio.sleep(0.02)
-                    assert state.pending_batch and state.pending_batch[0].open_at == T1
+                    assert state.pending_batch
+                    assert state.pending_batch[0].open_at == T1
                     await pub.send_multipart([topic.encode(), _candle_payload(T2, 101.0)])
                     for _ in range(100):
                         if state.pending_batch and state.pending_batch[0].open_at == T2:
@@ -366,8 +367,9 @@ class TestStrategyFactory:
                 assert strategy.zmq_context is existing_ctx
                 async with asyncio.timeout(3.0):
                     await broker.wait_for_subscription(b"market.")
+                system_prefix_deadline = asyncio.timeout(0.2)
                 with pytest.raises(TimeoutError):
-                    async with asyncio.timeout(0.2):
+                    async with system_prefix_deadline:
                         await broker.wait_for_subscription(b"system.")
             finally:
                 listen = strategy._listen_task
@@ -479,12 +481,17 @@ class TestStrategyFactory:
             def __init__(self, config: StrategyConfig) -> None:
                 self.config = config
 
+        rejected_config = _strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"])
+        rejected_state = _make_state(
+            expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"})
+        )
+        rejected_drain = DrainCoordinator()
         with pytest.raises(TypeError, match="non-BaseStrategy"):
             make_backtest_replay_strategy(
                 inner_class=_NotBase,
-                inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
-                state=_make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"})),
-                drain=DrainCoordinator(),
+                inner_config=rejected_config,
+                state=rejected_state,
+                drain=rejected_drain,
                 local_xsub="inproc://local-xsub",
                 local_xpub="inproc://local-xpub",
             )

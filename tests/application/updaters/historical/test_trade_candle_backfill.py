@@ -526,21 +526,29 @@ def test_constructor_validates_inputs() -> None:
     When: Services are constructed,
     Then: ValueError is raised for each invalid input.
     """
+    window_start = _dt(0)
+    window_end = _dt(1)
+    empty_window_bound = _dt(1)
     with pytest.raises(ValueError):
-        TradeCandleBackfillService(exchange="not-real", start=_dt(0), end=_dt(1), symbols=["BTC"])
+        TradeCandleBackfillService(
+            exchange="not-real",
+            start=window_start,
+            end=window_end,
+            symbols=["BTC"],
+        )
     with patch(f"{_SERVICE_MODULE}.get_settings", return_value=FakeSettings()):
         with pytest.raises(ValueError, match="start must be before end"):
             TradeCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(1),
-                end=_dt(1),
+                start=empty_window_bound,
+                end=empty_window_bound,
                 symbols=["BTC"],
             )
         with pytest.raises(ValueError, match="pass all_symbols"):
             TradeCandleBackfillService(
                 exchange=ExchangeEnum.KRAKEN,
-                start=_dt(0),
-                end=_dt(1),
+                start=window_start,
+                end=window_end,
             )
 
 

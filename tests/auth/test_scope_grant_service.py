@@ -187,12 +187,14 @@ class TestRevokeGrantOrchestration:
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
 
+        revoked_at = datetime.now(UTC)
+
         with pytest.raises(ScopeGrantNotFoundError):
             await service.revoke_grant(
                 grant_public_id="grant-none",
                 revoked_by_user_public_id="user-admin",
                 reason=None,
-                now=datetime.now(UTC),
+                now=revoked_at,
             )
         assert publisher.sent == []
 
@@ -211,12 +213,14 @@ class TestRevokeGrantOrchestration:
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
 
+        revoked_at = datetime.now(UTC)
+
         with pytest.raises(ValueError, match="invalid scope_kind"):
             await service.revoke_grant(
                 grant_public_id="grant-1",
                 revoked_by_user_public_id="user-admin",
                 reason=None,
-                now=datetime.now(UTC),
+                now=revoked_at,
             )
         assert publisher.sent == []
 
@@ -345,8 +349,10 @@ class TestCreateGrantOrchestration:
         service.set_msg_publisher(publisher)
         insert = _make_insert_request()
 
+        created_at = datetime.now(UTC)
+
         with pytest.raises(ValueError, match="invalid scope_kind"):
-            await service.create_grant(insert, now=datetime.now(UTC))
+            await service.create_grant(insert, now=created_at)
         assert publisher.sent == []
 
 
@@ -454,6 +460,8 @@ class TestHandoverOrchestration:
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
 
+        handover_at = datetime.now(UTC)
+
         with pytest.raises(ValueError, match="invalid scope_kind"):
             await service.handover(
                 grant_public_id="grant-1",
@@ -462,7 +470,7 @@ class TestHandoverOrchestration:
                 reason=None,
                 session_id="sess",
                 sequence_id=1,
-                now=datetime.now(UTC),
+                now=handover_at,
             )
         assert publisher.sent == []
 

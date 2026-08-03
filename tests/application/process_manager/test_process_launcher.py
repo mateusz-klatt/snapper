@@ -2242,10 +2242,11 @@ async def test_resolve_classified_strategy_scope_operator_label_unresolved() -> 
     Then: It raises rather than launching unscoped.
     """
     repository = _WalletLookupRepository(active_operators=[_operator_row("op-uuid", label="desk")])
+    unmatched_operator_classification = _label_classification(operator_public_id="label:missing")
     with pytest.raises(StrategyLabelUnresolvedError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(operator_public_id="label:missing"),
+            classification=unmatched_operator_classification,
             principal_operator_public_ids=None,
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2267,10 +2268,11 @@ async def test_resolve_classified_strategy_scope_operator_label_ambiguous() -> N
             _operator_row("op-b", label="desk"),
         ]
     )
+    ambiguous_operator_classification = _label_classification(operator_public_id="label:desk")
     with pytest.raises(StrategyLabelAmbiguousError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(operator_public_id="label:desk"),
+            classification=ambiguous_operator_classification,
             principal_operator_public_ids=None,
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2287,10 +2289,11 @@ async def test_resolve_classified_strategy_scope_operator_label_blank_rejected()
     Then: It raises the invalid-label error without touching the catalogue.
     """
     repository = _WalletLookupRepository()
+    blank_operator_classification = _label_classification(operator_public_id="label:   ")
     with pytest.raises(StrategyLabelInvalidError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(operator_public_id="label:   "),
+            classification=blank_operator_classification,
             principal_operator_public_ids=None,
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2309,10 +2312,11 @@ async def test_resolve_classified_strategy_scope_operator_label_out_of_principal
     Then: It fails closed rather than resolving across scope.
     """
     repository = _WalletLookupRepository(active_operators=[_operator_row("op-uuid", label="desk")])
+    out_of_scope_operator_classification = _label_classification(operator_public_id="label:desk")
     with pytest.raises(StrategyLabelUnresolvedError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(operator_public_id="label:desk"),
+            classification=out_of_scope_operator_classification,
             principal_operator_public_ids=["other-op"],
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2332,13 +2336,14 @@ async def test_resolve_classified_strategy_scope_wallet_label_mode_filtered() ->
         operator_wallets=[_wallet_row("wallet-live", is_paper=False, label="shared")],
         active_operators=[_operator_row("op-uuid", label="desk")],
     )
+    wrong_mode_wallet_classification = _label_classification(
+        operator_public_id="label:desk",
+        wallet_public_id="label:shared",
+    )
     with pytest.raises(StrategyLabelUnresolvedError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(
-                operator_public_id="label:desk",
-                wallet_public_id="label:shared",
-            ),
+            classification=wrong_mode_wallet_classification,
             principal_operator_public_ids=["op-uuid"],
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2387,13 +2392,14 @@ async def test_resolve_classified_strategy_scope_wallet_label_ambiguous() -> Non
             _wallet_row("wallet-b", is_paper=True, label="paper"),
         ]
     )
+    ambiguous_wallet_classification = _label_classification(
+        operator_public_id="",
+        wallet_public_id="label:paper",
+    )
     with pytest.raises(StrategyLabelAmbiguousError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(
-                operator_public_id="",
-                wallet_public_id="label:paper",
-            ),
+            classification=ambiguous_wallet_classification,
             principal_operator_public_ids=[],
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -2410,13 +2416,14 @@ async def test_resolve_classified_strategy_scope_wallet_label_blank_rejected() -
     Then: It raises the invalid-label error without touching the catalogue.
     """
     repository = _WalletLookupRepository()
+    blank_wallet_classification = _label_classification(
+        operator_public_id="",
+        wallet_public_id="label:",
+    )
     with pytest.raises(StrategyLabelInvalidError):
         await resolve_classified_strategy_scope(
             repository,
-            classification=_label_classification(
-                operator_public_id="",
-                wallet_public_id="label:",
-            ),
+            classification=blank_wallet_classification,
             principal_operator_public_ids=[],
             allow_admin_lookup_without_operator=False,
             allow_unscoped_paper=False,
@@ -5267,7 +5274,8 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
         lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
-    assert repo.last_session is not None and repo.last_session.commit_called is True
+    assert repo.last_session is not None
+    assert repo.last_session.commit_called is True
     new_row = repo.last_session.added[-1]
     updated = json.loads(new_row.value)
     assert updated["tags"] == ["sync"]
@@ -5352,7 +5360,8 @@ async def test_sync_registry_update_handles_default_parameters_failure(
     updated_setting = cast(Setting, repo.setting)
     persisted = json.loads(updated_setting.value)
     assert persisted["parameters"] == {}
-    assert repo.last_session is not None and repo.last_session.commit_called is False
+    assert repo.last_session is not None
+    assert repo.last_session.commit_called is False
 
 
 @pytest.mark.asyncio
@@ -5406,8 +5415,10 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
         lambda: {"existing": entry},
     )
     await factory.sync_registry_to_database()
-    assert repo.first_session is not None and repo.first_session.commit_called is False
-    assert repo.second_session is not None and repo.second_session.commit_called is True
+    assert repo.first_session is not None
+    assert repo.first_session.commit_called is False
+    assert repo.second_session is not None
+    assert repo.second_session.commit_called is True
 
 
 @pytest.mark.asyncio
@@ -5508,7 +5519,8 @@ async def test_sync_registry_skips_tag_update_when_already_present(
     updated_setting = cast(Setting, repo.setting)
     persisted = json.loads(updated_setting.value)
     assert persisted["tags"] == ["keep"]
-    assert repo.last_session is not None and repo.last_session.commit_called is False
+    assert repo.last_session is not None
+    assert repo.last_session.commit_called is False
 
 
 @pytest.mark.asyncio

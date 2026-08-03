@@ -2249,9 +2249,12 @@ class TestGetPositionCycleTool:
         result = await call_raw_tool(server, "get_position_cycle", {"cycle_public_id": "cycle-1"})
         envelope = _decode_envelope(result)
         cycle = envelope["details"]["position_cycle"]
-        assert isinstance(cycle["timestamp"], str) and "T" in cycle["timestamp"]
-        assert isinstance(cycle["opened_at"], str) and "T" in cycle["opened_at"]
-        assert isinstance(cycle["closed_at"], str) and "T" in cycle["closed_at"]
+        assert isinstance(cycle["timestamp"], str)
+        assert "T" in cycle["timestamp"]
+        assert isinstance(cycle["opened_at"], str)
+        assert "T" in cycle["opened_at"]
+        assert isinstance(cycle["closed_at"], str)
+        assert "T" in cycle["closed_at"]
 
     @pytest.mark.asyncio
     async def test_open_cycle_returns_null_closed_at(self) -> None:
@@ -2674,7 +2677,8 @@ class TestCancelOrderTool:
         )
         envelope = _decode_envelope(result)
         plan_payload = envelope["details"]["plan"]
-        assert isinstance(plan_payload["timestamp"], str) and "T" in plan_payload["timestamp"]
+        assert isinstance(plan_payload["timestamp"], str)
+        assert "T" in plan_payload["timestamp"]
         assert isinstance(plan_payload["created_at"], str)
         assert isinstance(plan_payload["cancel_requested_at"], str)
 
@@ -2740,11 +2744,13 @@ class TestGetOhlcvTool:
         candles = envelope["details"]["candles"]
         assert len(candles) == 1
         row = candles[0]
-        assert isinstance(row, list) and len(row) == 6
+        assert isinstance(row, list)
+        assert len(row) == 6
         assert row[0] == candle["open_at"].isoformat()
         repo.get_candles.assert_awaited_once()
         kwargs = repo.get_candles.await_args.kwargs
-        assert kwargs["start"] is None and kwargs["end"] is None
+        assert kwargs["start"] is None
+        assert kwargs["end"] is None
         assert kwargs["order"] == "desc"
         assert kwargs["limit"] == 200
 
@@ -2951,8 +2957,10 @@ class TestListRecentSignalsTool:
         )
         envelope = _decode_envelope(result)
         sig = envelope["details"]["signals"][0]
-        assert isinstance(sig["fired_at"], str) and "T" in sig["fired_at"]
-        assert isinstance(sig["timestamp"], str) and "T" in sig["timestamp"]
+        assert isinstance(sig["fired_at"], str)
+        assert "T" in sig["fired_at"]
+        assert isinstance(sig["timestamp"], str)
+        assert "T" in sig["timestamp"]
 
     @pytest.mark.asyncio
     async def test_missing_since_returns_invalid_argument(self) -> None:

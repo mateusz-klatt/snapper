@@ -4,6 +4,7 @@ import re
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -377,18 +378,22 @@ def test_transaction_context_receives_failures_for_automatic_rollback(
     transaction = connection.begin.return_value
     failure = RuntimeError("DDL failed")
     connection.execute.side_effect = (None, None, None, failure)
+    invoke_failing_helper = (
+        partial(
+            lifecycle._execute_validation_transaction,
+            connection,
+            "ALTER TABLE trades VALIDATE CONSTRAINT ck_trades_legacy_range",
+        )
+        if validation
+        else partial(
+            lifecycle._execute_transaction,
+            connection,
+            ("ALTER TABLE trades ADD CONSTRAINT broken",),
+        )
+    )
 
     with pytest.raises(RuntimeError, match="DDL failed") as raised:
-        if validation:
-            lifecycle._execute_validation_transaction(
-                connection,
-                "ALTER TABLE trades VALIDATE CONSTRAINT ck_trades_legacy_range",
-            )
-        else:
-            lifecycle._execute_transaction(
-                connection,
-                ("ALTER TABLE trades ADD CONSTRAINT broken",),
-            )
+        invoke_failing_helper()
 
     connection.begin.assert_called_once_with()
     transaction.__enter__.assert_called_once_with()
@@ -406,6 +411,7 @@ def test_execute_ensure_refuses_rows_that_arrive_after_planning() -> None:
     """A DEFAULT row appearing under the parent lock must block leaf creation."""
     connection = _connection_double()
     statement = "CREATE TABLE trades_d20260801 PARTITION OF trades"
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "_direct_partitions", return_value=(_default_ref(),)),
@@ -414,7 +420,7 @@ def test_execute_ensure_refuses_rows_that_arrive_after_planning() -> None:
     ):
         lifecycle._execute_ensure(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             (statement,),
         )
 
@@ -531,6 +537,7 @@ def test_partition_topology_requirement_refuses_an_ordinary_relation() -> None:
         state=lifecycle.RelationState.ORDINARY,
         partition_key=None,
     )
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "inspect", return_value=report),
@@ -538,7 +545,7 @@ def test_partition_topology_requirement_refuses_an_ordinary_relation() -> None:
     ):
         lifecycle._require_partitioned_topology(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             _ANCHOR,
         )
 
@@ -547,6 +554,7 @@ def test_partition_topology_requirement_refuses_the_wrong_partition_key() -> Non
     """A RANGE parent on another timestamp cannot pass by relation kind alone."""
     connection = _connection_double()
     report = replace(_partitioned(()), partition_key="RANGE (timestamp)")
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "inspect", return_value=report),
@@ -554,7 +562,7 @@ def test_partition_topology_requirement_refuses_the_wrong_partition_key() -> Non
     ):
         lifecycle._require_partitioned_topology(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             _ANCHOR,
         )
 
@@ -644,6 +652,7 @@ def test_partitioned_verification_refuses_each_required_child_gap(
 ) -> None:
     """Legacy, DEFAULT, and exact future bounds are independently mandatory."""
     connection = _connection_double()
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "FUTURE_LEAF_TARGET", 1),
@@ -656,7 +665,7 @@ def test_partitioned_verification_refuses_each_required_child_gap(
     ):
         lifecycle._verify_partitioned(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             _ANCHOR,
         )
 
@@ -714,6 +723,7 @@ def test_legacy_index_parentage_refuses_absence_and_malformed_edges(
         if shape_present
         else None
     )
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(
@@ -727,7 +737,7 @@ def test_legacy_index_parentage_refuses_absence_and_malformed_edges(
     ):
         lifecycle._verify_legacy_index_parentage(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             "trades_legacy",
         )
 
@@ -769,6 +779,7 @@ def test_partitioned_relation_shapes_refuse_a_range_check_on_the_parent() -> Non
     """The adoption-only range proof must remain legacy-local."""
     connection = _connection_double()
     parent_range = lifecycle.ConstraintInfo(definition=_range_definition(), validated=True)
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "_verify_relation_columns"),
@@ -778,7 +789,7 @@ def test_partitioned_relation_shapes_refuse_a_range_check_on_the_parent() -> Non
     ):
         lifecycle._verify_partitioned_relation_shapes(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             "trades_legacy",
             _ANCHOR,
         )
@@ -802,6 +813,7 @@ def test_partitioned_relation_shapes_refuse_each_invalid_legacy_range_state(
 ) -> None:
     """Missing, unvalidated, and shifted legacy bounds must all fail closed."""
     connection = _connection_double()
+    trades_spec = lifecycle._spec("trades")
 
     with (
         patch.object(lifecycle, "_verify_relation_columns"),
@@ -811,7 +823,7 @@ def test_partitioned_relation_shapes_refuse_each_invalid_legacy_range_state(
     ):
         lifecycle._verify_partitioned_relation_shapes(
             connection,
-            lifecycle._spec("trades"),
+            trades_spec,
             "trades_legacy",
             _ANCHOR,
         )
@@ -991,12 +1003,12 @@ def test_parent_index_verifier_refuses_a_manifest_name_mismatch() -> None:
     connection = MagicMock(spec=Connection)
     connection.execute.return_value = [("unexpected_parent",)]
 
-    s5778_value_1 = cast(Connection, connection)
-    s5778_value_2 = lifecycle._spec("ticks")
+    typed_connection = cast(Connection, connection)
+    ticks_spec = lifecycle._spec("ticks")
     with pytest.raises(lifecycle.DailyPartitionError, match="parent index manifest"):
         lifecycle._verify_parent_indexes(
-            s5778_value_1,
-            s5778_value_2,
+            typed_connection,
+            ticks_spec,
         )
 
 
@@ -1012,13 +1024,14 @@ def test_parent_index_verifier_refuses_absent_and_malformed_shapes(
     shape = (
         _shape(expected.columns, unique=False, constraint_backed=False) if shape_present else None
     )
+    typed_connection = cast(Connection, connection)
 
     with (
         patch.object(lifecycle, "_index_shape", return_value=shape),
         patch.object(lifecycle, "_index_matches", return_value=False),
         pytest.raises(lifecycle.DailyPartitionError, match="unexpected shape"),
     ):
-        lifecycle._verify_parent_indexes(cast(Connection, connection), spec)
+        lifecycle._verify_parent_indexes(typed_connection, spec)
 
 
 def test_parent_index_verifier_accepts_every_named_exact_shape() -> None:
@@ -1269,6 +1282,7 @@ def test_leaf_verifier_rejects_every_malformed_primary_shape(
 ) -> None:
     """Leaf identity requires an exact constraint-backed local ``id`` PK."""
     connection = _connection_double()
+    candles_spec = lifecycle._spec("candles")
 
     with (
         patch.object(lifecycle, "_verify_relation_columns"),
@@ -1280,7 +1294,7 @@ def test_leaf_verifier_rejects_every_malformed_primary_shape(
     ):
         lifecycle._verify_leaf_local_objects(
             connection,
-            lifecycle._spec("candles"),
+            candles_spec,
             "candles_d20260801",
         )
 
@@ -1352,6 +1366,7 @@ def test_leaf_verifier_rejects_every_malformed_active_public_id_shape(
     """Every part of the leaf-local active-public-id arbiter is mandatory."""
     connection = _connection_double()
     primary = _shape(("id",), unique=True, constraint_backed=True)
+    candles_spec = lifecycle._spec("candles")
 
     with (
         patch.object(lifecycle, "_verify_relation_columns"),
@@ -1363,7 +1378,7 @@ def test_leaf_verifier_rejects_every_malformed_active_public_id_shape(
     ):
         lifecycle._verify_leaf_local_objects(
             connection,
-            lifecycle._spec("candles"),
+            candles_spec,
             "candles_d20260801",
         )
 

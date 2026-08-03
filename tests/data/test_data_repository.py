@@ -115,7 +115,9 @@ class TestPolygonSmallBranches:
         assert snapshots[0].close == pytest.approx(1.5)
 
     @pytest.mark.asyncio
-    async def test_poll_tickers_handles_keyboard_interrupt(self) -> None:
+    async def test_poll_tickers_handles_keyboard_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test poll_tickers handles KeyboardInterrupt.
 
         Given: Sleep raises KeyboardInterrupt,
@@ -133,14 +135,12 @@ class TestPolygonSmallBranches:
         async def fake_sleep(_: float) -> None:
             raise KeyboardInterrupt()
 
-        original_sleep = asyncio.sleep
-        asyncio.sleep = fake_sleep
-        try:
-            await client.poll_tickers(symbols=["X:BTCUSD"], interval_seconds=0.01)
-        except KeyboardInterrupt:
-            pytest.fail("KeyboardInterrupt should be handled inside poll_tickers")
-        finally:
-            asyncio.sleep = original_sleep
+        with monkeypatch.context() as interrupting_sleep:
+            interrupting_sleep.setattr(asyncio, "sleep", fake_sleep)
+            try:
+                await client.poll_tickers(symbols=["X:BTCUSD"], interval_seconds=0.01)
+            except KeyboardInterrupt:
+                pytest.fail("KeyboardInterrupt should be handled inside poll_tickers")
 
     @pytest.mark.asyncio
     async def test_subscribe_instruments_builds_ticker_dict(self) -> None:
@@ -252,7 +252,9 @@ class TestPolygonSmallBranches:
         client._save_symbols_to_cache.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_poll_tickers_logs_generic_error(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_poll_tickers_logs_generic_error(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test poll_tickers logs generic errors.
 
         Given: RuntimeError during polling,
@@ -262,9 +264,7 @@ class TestPolygonSmallBranches:
         client = PolygonExchangeClient.__new__(PolygonExchangeClient)
         client.rate_limit = 120
         caplog.set_level("ERROR")
-        original_logger: Any = polygon_module.logger
         logger_mock = MagicMock()
-        polygon_module.logger = logger_mock
 
         async def failing_sleep(_: float) -> None:
             raise RuntimeError("sleep boom")
@@ -283,14 +283,11 @@ class TestPolygonSmallBranches:
                 await stopping_sleep(delay)
 
         client.get_ticker = MagicMock(side_effect=RuntimeError("fetch failed"))
-        original_sleep = asyncio.sleep
-        asyncio.sleep = sleep_side_effect
-        try:
+        with monkeypatch.context() as patched_polling_runtime:
+            patched_polling_runtime.setattr(polygon_module, "logger", logger_mock)
+            patched_polling_runtime.setattr(asyncio, "sleep", sleep_side_effect)
             with pytest.raises(asyncio.CancelledError):
                 await client.poll_tickers(symbols=["X:BTCUSD"], interval_seconds=0.01)
-        finally:
-            asyncio.sleep = original_sleep
-            polygon_module.logger = original_logger
         assert any(
             "Polling error" in str(call.args[0]) for call in logger_mock.error.call_args_list
         )

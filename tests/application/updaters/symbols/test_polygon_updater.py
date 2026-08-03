@@ -323,7 +323,7 @@ async def test_subscribe_instruments_downloads_and_caches(
     When: Subscribe instruments is iterated,
     Then: Tickers returned and cache save function invoked.
     """
-    FakeRestWithClient.tickers_data = [FakeTicker()]
+    monkeypatch.setattr(FakeRestWithClient, "tickers_data", [FakeTicker()])
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.polygon.RESTClient", FakeRestWithClient
     )
@@ -362,7 +362,7 @@ async def test_subscribe_instruments_saves_cache_with_missing_fields(
         market = None
         locale = None
 
-    FakeRestWithClient.tickers_data = [SparseTicker()]
+    monkeypatch.setattr(FakeRestWithClient, "tickers_data", [SparseTicker()])
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.polygon.RESTClient", FakeRestWithClient
     )
@@ -399,7 +399,7 @@ async def test_subscribe_instruments_sleeps_each_page(monkeypatch: pytest.Monkey
             self.market = "crypto"
             self.locale = "global"
 
-    FakeRestWithClient.tickers_data = [MinimalTicker(i) for i in range(1000)]
+    monkeypatch.setattr(FakeRestWithClient, "tickers_data", [MinimalTicker(i) for i in range(1000)])
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.polygon.RESTClient", FakeRestWithClient
     )
@@ -432,7 +432,7 @@ async def test_subscribe_instruments_empty_skips_cache_save(
     When: Subscribe instruments is iterated,
     Then: No cache save invoked.
     """
-    FakeRestWithClient.tickers_data = []
+    monkeypatch.setattr(FakeRestWithClient, "tickers_data", [])
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.polygon.RESTClient", FakeRestWithClient
     )
@@ -466,7 +466,7 @@ async def test_subscribe_instruments_handles_missing_ticker_field(
         def __init__(self) -> None:
             self.name = "Missing ticker"
 
-    FakeRestWithClient.tickers_data = [NoTicker()]
+    monkeypatch.setattr(FakeRestWithClient, "tickers_data", [NoTicker()])
     monkeypatch.setattr(
         "snapper.infrastructure.exchanges.implementations.polygon.RESTClient", FakeRestWithClient
     )
@@ -521,7 +521,8 @@ async def test_poll_tickers_warns_fast_interval_and_handles_error(
     )
     await client.poll_tickers(symbols, interval_seconds=1.0)
     assert warnings
-    assert sleep_calls and len(sleep_calls) >= 1
+    assert sleep_calls
+    assert len(sleep_calls) >= 1
 
 
 @pytest.mark.asyncio

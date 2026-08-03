@@ -315,8 +315,9 @@ class TestPooledAsyncTransport:
         factory = _RecordingFactory(side_effect=connect_err)
         transport = PooledAsyncTransport(transport_factory=factory)
 
+        connect_error_request = self._make_request()
         with pytest.raises(httpx.ConnectError, match="simulated tunnel down"):
-            await transport.handle_async_request(self._make_request())
+            await transport.handle_async_request(connect_error_request)
 
         snap_by_id = {snap.id: snap for snap in pool.snapshot()}
         assert snap_by_id["wg-pl-1"].quarantine_until is not None
@@ -349,8 +350,9 @@ class TestPooledAsyncTransport:
         factory = _RecordingFactory(side_effect=timeout)
         transport = PooledAsyncTransport(transport_factory=factory)
 
+        connect_timeout_request = self._make_request()
         with pytest.raises(httpx.ConnectTimeout, match="connect timed out"):
-            await transport.handle_async_request(self._make_request())
+            await transport.handle_async_request(connect_timeout_request)
 
         snap_by_id = {snap.id: snap for snap in pool.snapshot()}
         assert snap_by_id["wg-pl-1"].quarantine_until is not None
@@ -378,8 +380,9 @@ class TestPooledAsyncTransport:
         factory = _RecordingFactory(side_effect=read_err)
         transport = PooledAsyncTransport(transport_factory=factory)
 
+        read_error_request = self._make_request()
         with pytest.raises(httpx.ReadError, match="simulated read failure"):
-            await transport.handle_async_request(self._make_request())
+            await transport.handle_async_request(read_error_request)
 
         snap = pool.snapshot()[0]
         assert snap.quarantine_until is None
