@@ -19,7 +19,7 @@ _PROJECT_SCOPES = (
     (
         Path("frontend/sonar-project.properties"),
         _REPO_ROOT / "frontend",
-        "e2e/**,src/test/**,**/*.test.ts,**/*.test.tsx,**/*.spec.ts,**/*.spec.tsx",
+        "e2e/**,src/test/**,**/*.test.mjs,**/*.test.ts,**/*.test.tsx,**/*.spec.ts,**/*.spec.tsx",
     ),
     (
         Path("integrations/snapper-mcp/sonar-project.properties"),
