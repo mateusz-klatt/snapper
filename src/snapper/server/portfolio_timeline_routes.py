@@ -409,6 +409,11 @@ def _coverage_data(coverage: PnlEquityCoverage) -> PnlEquityCoverageData:
         first_minute=coverage.first_minute,
         last_minute=coverage.last_minute,
         sample_calc_version=coverage.sample_calc_version,
+        valuation_basis=coverage.valuation_basis,
+        converted_from=coverage.converted_from,
+        conversion_rate_source=coverage.conversion_rate_source,
+        conversion_withheld_minutes=coverage.conversion_withheld_minutes,
+        drawdown_withheld_reason=coverage.drawdown_withheld_reason,
     )
 
 

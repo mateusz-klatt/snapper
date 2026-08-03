@@ -1005,13 +1005,28 @@ class PnlPointEquityOverlay:
 class PnlEquityCoverage:
     """Envelope-level disclosure of the observed-equity overlay (D13/R10/R11).
 
-    ``sampled`` is ``True`` only for a current-truth USD scope whose window is
-    backed by at least one ``complete`` current-epoch sample; every other scope
-    and every fail-closed withholding reports ``sampled=False`` with null/zero
+    ``sampled`` is ``True`` only for a current-truth scope whose window is
+    backed by at least one ``complete`` current-epoch sample that survived
+    valuation into the requested currency; every other scope and every
+    fail-closed withholding reports ``sampled=False`` with null/zero
     provenance. ``venue_scope`` and ``external_flows_adjusted`` are surfaced from
     the samples' uniform coverage blocks; ``complete_minutes`` / ``first_minute``
     / ``last_minute`` describe the ``complete`` sample minutes in the requested
     window; ``sample_calc_version`` is the exact backing sample version.
+
+    Samples persist in USD alone, so a non-USD request is served by converting
+    each minute's stocks at that same minute's proven fiat close.
+    ``valuation_basis`` is the currency the served stocks are denominated in and
+    ``converted_from`` names the persisted basis whenever a conversion was
+    applied, so a consumer can never mistake a converted number for a natively
+    sampled one. ``conversion_rate_source`` is the elected venue plane backing
+    every converted minute. ``conversion_withheld_minutes`` counts the
+    ``complete`` sample minutes dropped because that exact minute had no proven
+    close — the same fail-closed refusal the curve applies, never a nearest
+    minute or a carried rate. ``drawdown_withheld_reason`` is set on a converted
+    overlay because a drawdown's running peak is basis-dependent: converting a
+    USD-peak fraction would misstate the target-currency drawdown, so the
+    fraction is withheld rather than restated (Phase-6 scope).
     """
 
     sampled: bool
@@ -1021,6 +1036,11 @@ class PnlEquityCoverage:
     first_minute: datetime | None
     last_minute: datetime | None
     sample_calc_version: str | None
+    valuation_basis: str | None
+    converted_from: str | None
+    conversion_rate_source: str | None
+    conversion_withheld_minutes: int
+    drawdown_withheld_reason: Literal["currency_basis_unsupported"] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1042,6 +1062,7 @@ class _EquityOverlayRequest:
     from_time: datetime
     to_time: datetime
     current_truth: bool
+    as_of: datetime
     points: tuple[PnlTimelinePoint, ...]
 
 
@@ -1064,6 +1085,9 @@ _EMPTY_EQUITY_OVERLAY: Final[PnlPointEquityOverlay] = PnlPointEquityOverlay(
 _EMPTY_EQUITY_OVERLAY_MAP: Final[Mapping[datetime, PnlPointEquityOverlay]] = MappingProxyType({})
 """Shared immutable empty overlay map for unsampled series results."""
 
+_USD_VALUATION_BASIS: Final[str] = "USD"
+"""The only currency Phase-5B samples persist in; every other basis is converted."""
+
 _UNSAMPLED_EQUITY_COVERAGE: Final[PnlEquityCoverage] = PnlEquityCoverage(
     sampled=False,
     venue_scope=None,
@@ -1072,6 +1096,11 @@ _UNSAMPLED_EQUITY_COVERAGE: Final[PnlEquityCoverage] = PnlEquityCoverage(
     first_minute=None,
     last_minute=None,
     sample_calc_version=None,
+    valuation_basis=None,
+    converted_from=None,
+    conversion_rate_source=None,
+    conversion_withheld_minutes=0,
+    drawdown_withheld_reason=None,
 )
 """The disclosure for every unsampled or fail-closed overlay resolution."""
 
@@ -4130,8 +4159,145 @@ def _build_equity_overlay(
         first_minute=min(overlay),
         last_minute=max(overlay),
         sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+        valuation_basis=_USD_VALUATION_BASIS,
+        converted_from=None,
+        conversion_rate_source=None,
+        conversion_withheld_minutes=0,
+        drawdown_withheld_reason=None,
     )
     return _EquityOverlayResult(overlay=MappingProxyType(overlay), coverage=coverage)
+
+
+async def _load_overlay_conversion(
+    repo: Repository,
+    valuation_ccy: str,
+    minutes: frozenset[datetime],
+    as_of: datetime,
+) -> tuple[FxRateMap, FxVenueMap]:
+    """Elect the USD-to-target plane over exactly the overlay's sample minutes.
+
+    The overlay converts a sparse set of endpoint minutes rather than a dense
+    grid, so the requirement is the exact minute set: a daily-granularity window
+    would otherwise request every minute it spans. The election primitives are
+    the ones the curve already uses, so a converted overlay minute is priced off
+    the same finalized plane, with the same exact-minute discipline, as every
+    other number in the response. Shadow pinning is deliberately not collected
+    here: this path serves a read, and reads never mint durable proofs.
+
+    Args:
+        repo: Repository providing plane discovery and candle reads.
+        valuation_ccy: Requested non-USD target currency.
+        minutes: Exact overlay minutes needing a proven close.
+        as_of: Knowledge horizon threading every considered version.
+
+    Returns:
+        The rate map and the pinned oriented plane for the USD pair.
+    """
+    requirements: dict[FxPairKey, set[datetime]] = {
+        currency_pair_key(valuation_ccy, "USD"): set(minutes)
+    }
+    candidates = await _discover_fx_candidates(repo, requirements, as_of)
+    candidate_planes = _candidate_planes(candidates, {})
+    rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
+    return build_fx_rates(rows), _resolve_fx_planes(requirements, candidate_planes, rows, "USD")
+
+
+def _converted_point_overlay(
+    overlay: PnlPointEquityOverlay,
+    minute: datetime,
+    valuation_ccy: str,
+    rates: FxRateMap,
+    venues: FxVenueMap,
+) -> PnlPointEquityOverlay | None:
+    """Restate one minute's stocks in the target currency, or refuse the minute.
+
+    Every stock converts at that minute's single proven close, so the partition
+    ``cash = equity - position_value`` survives the restatement exactly. The
+    drawdown fraction is deliberately dropped rather than carried: its running
+    peak was established in USD, and a fraction of a USD peak is not the
+    target-currency drawdown. A leg that cannot be priced, or that overflows,
+    refuses the whole minute instead of serving a partly converted trio.
+
+    Args:
+        overlay: The USD-denominated stocks of one qualified sample minute.
+        minute: The grid minute whose close prices the conversion.
+        valuation_ccy: Requested target currency.
+        rates: Plane-qualified exact-minute closes.
+        venues: Consumer-pinned oriented plane per pair.
+
+    Returns:
+        The restated overlay, or ``None`` when the minute cannot be proven.
+    """
+    converted: list[float] = []
+    for amount in (overlay.equity, overlay.cash, overlay.position_value):
+        if amount is None:
+            return None
+        value = convert_amount(amount, "USD", valuation_ccy, minute, rates, venues)
+        if value is None or not math.isfinite(value):
+            return None
+        converted.append(value)
+    return PnlPointEquityOverlay(
+        equity=converted[0],
+        cash=converted[1],
+        position_value=converted[2],
+        drawdown=None,
+    )
+
+
+def _convert_equity_overlay(
+    result: _EquityOverlayResult,
+    valuation_ccy: str,
+    rates: FxRateMap,
+    venues: FxVenueMap,
+) -> _EquityOverlayResult:
+    """Restate a USD overlay into the requested currency, minute by minute.
+
+    Minutes without a proven close are dropped and counted, never approximated,
+    so a partially convertible window serves the minutes it can prove and
+    discloses the rest. An entirely unconvertible window degrades to the
+    unsampled disclosure: claiming ``sampled`` while serving no stock would
+    misreport coverage.
+
+    Args:
+        result: The resolved USD overlay and its disclosure.
+        valuation_ccy: Requested target currency.
+        rates: Plane-qualified exact-minute closes.
+        venues: Consumer-pinned oriented plane per pair.
+
+    Returns:
+        The converted overlay result with its conversion disclosure.
+    """
+    converted: dict[datetime, PnlPointEquityOverlay] = {}
+    withheld = 0
+    for minute, overlay in result.overlay.items():
+        restated = _converted_point_overlay(overlay, minute, valuation_ccy, rates, venues)
+        if restated is None:
+            withheld += 1
+            continue
+        converted[minute] = restated
+    if not converted:
+        return _EquityOverlayResult(
+            overlay=_EMPTY_EQUITY_OVERLAY_MAP,
+            coverage=replace(
+                _UNSAMPLED_EQUITY_COVERAGE,
+                valuation_basis=valuation_ccy,
+                converted_from="USD",
+                conversion_withheld_minutes=withheld,
+            ),
+        )
+    plane = venues.get(currency_pair_key(valuation_ccy, "USD"))
+    coverage = replace(
+        result.coverage,
+        complete_minutes=len(converted),
+        first_minute=min(converted),
+        last_minute=max(converted),
+        valuation_basis=valuation_ccy,
+        converted_from="USD",
+        conversion_rate_source=None if plane is None else plane[2],
+        conversion_withheld_minutes=withheld,
+        drawdown_withheld_reason="currency_basis_unsupported",
+    )
+    return _EquityOverlayResult(overlay=MappingProxyType(converted), coverage=coverage)
 
 
 async def _resolve_equity_overlay(
@@ -4140,18 +4306,24 @@ async def _resolve_equity_overlay(
 ) -> _EquityOverlayResult:
     """Load the one bounded complete-sample read and fold it, when eligible (D13/R4).
 
-    Only a current-truth USD scope is eligible; every other scope withholds the
+    Only a current-truth scope is eligible; a historical read withholds the
     overlay without a read. The single ``get_portfolio_pnl_samples`` call applies
     the exact R4 predicate set (active, ``point_kind='sample'``, exact scope, the
     current anchor epoch, the exact sample ``calc_version``, ``complete`` status)
     over the requested grid window, so there is one bounded sample read per request.
+
+    Samples exist in USD alone, so the query is always USD-scoped and a non-USD
+    request is served by converting the folded overlay at each minute's proven
+    close. A currency with no provable plane therefore yields the honest
+    unsampled disclosure with its withheld-minute count rather than an error or
+    a silently empty overlay.
     """
-    if not request.current_truth or request.valuation_ccy != "USD":
+    if not request.current_truth:
         return _UNSAMPLED_EQUITY_OVERLAY_RESULT
     query = PortfolioPnlSampleQuery(
         wallet_public_id=request.wallet_public_id,
         mode=request.mode,
-        valuation_ccy=request.valuation_ccy,
+        valuation_ccy=_USD_VALUATION_BASIS,
         epoch_public_id=request.epoch_public_id,
         calc_version=PNL_SAMPLE_CALC_VERSION,
     )
@@ -4161,7 +4333,16 @@ async def _resolve_equity_overlay(
         request.to_time,
         status="complete",
     )
-    return _build_equity_overlay(request, samples)
+    result = _build_equity_overlay(request, samples)
+    if request.valuation_ccy == _USD_VALUATION_BASIS or not result.overlay:
+        return result
+    rates, venues = await _load_overlay_conversion(
+        repo,
+        request.valuation_ccy,
+        frozenset(result.overlay),
+        request.as_of,
+    )
+    return _convert_equity_overlay(result, request.valuation_ccy, rates, venues)
 
 
 async def _finalize_wallet_pnl_series(
@@ -4477,6 +4658,7 @@ async def build_wallet_pnl_series(
                 from_time=from_time,
                 to_time=to_time,
                 current_truth=policy.current_truth,
+                as_of=as_of,
                 points=result.points,
             ),
         ),

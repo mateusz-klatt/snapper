@@ -1248,6 +1248,11 @@ class TestEquityOverlayResponse:
             "first_minute": "2026-07-20T10:00:00Z",
             "last_minute": "2026-07-20T10:02:00Z",
             "sample_calc_version": "5B.2",
+            "valuation_basis": "USD",
+            "converted_from": None,
+            "conversion_rate_source": None,
+            "conversion_withheld_minutes": 0,
+            "drawdown_withheld_reason": None,
         }
         points = payload["points"]
         assert (points[0]["equity"], points[0]["cash"], points[0]["position_value"]) == (
@@ -1273,6 +1278,11 @@ class TestEquityOverlayResponse:
             "first_minute": None,
             "last_minute": None,
             "sample_calc_version": None,
+            "valuation_basis": None,
+            "converted_from": None,
+            "conversion_rate_source": None,
+            "conversion_withheld_minutes": 0,
+            "drawdown_withheld_reason": None,
         }
         assert all(point["equity"] is None for point in payload["points"])
         assert all(point["drawdown"] is None for point in payload["points"])

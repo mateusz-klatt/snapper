@@ -34,6 +34,7 @@ from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline_service import _UNSAMPLED_EQUITY_COVERAGE
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
@@ -52,8 +53,10 @@ from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBu
 from snapper.application.portfolio.pnl_timeline_service import _build_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
+from snapper.application.portfolio.pnl_timeline_service import _convert_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _derive_series_replay_metadata
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayRequest
+from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayResult
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _execution_rows_with_effective_time
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
@@ -6507,6 +6510,7 @@ def _overlay_request(
         from_time=_T0,
         to_time=_m(2),
         current_truth=current_truth,
+        as_of=_m(2),
         points=tuple(points),
     )
 
@@ -6687,6 +6691,11 @@ class TestBuildEquityOverlay:
             first_minute=_m(1),
             last_minute=_m(2),
             sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+            valuation_basis="USD",
+            converted_from=None,
+            conversion_rate_source=None,
+            conversion_withheld_minutes=0,
+            drawdown_withheld_reason=None,
         )
         assert result.overlay[_m(1)].equity == 300.0
         assert result.overlay[_m(2)].equity == 1000.0
@@ -6715,6 +6724,126 @@ class TestBuildEquityOverlay:
         assert set(result.overlay) == {_m(1)}
 
 
+class TestConvertEquityOverlay:
+    """Cover the read-time restatement of a USD overlay into another basis (#91)."""
+
+    @staticmethod
+    def _eur_repo(minutes: Sequence[int]) -> FakeRepo:
+        """Build a repo whose EUR-USD plane closes at 1.25 for each grid minute."""
+        return FakeRepo(fx_rows=[_fx_row("EUR", "USD", minute, 1.25) for minute in minutes])
+
+    async def test_every_stock_restates_at_the_minute_close(self) -> None:
+        """Restate every stock at its own minute close.
+
+        Given a USD overlay minute backed by a proven EUR-USD close
+        When the overlay is requested in EUR
+        Then every stock divides by that exact close and the partition survives.
+        """
+        repo = self._eur_repo([1])
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(1))], valuation_ccy="EUR")
+        )
+        overlay = result.overlay[_m(1)]
+        equity, cash, position_value = overlay.equity, overlay.cash, overlay.position_value
+        assert equity is not None and cash is not None and position_value is not None
+        assert equity == pytest.approx(1000.0 / 1.25)
+        assert cash == pytest.approx(400.0 / 1.25)
+        assert position_value == pytest.approx(600.0 / 1.25)
+        assert cash == pytest.approx(equity - position_value)
+        assert result.coverage.sampled is True
+        assert result.coverage.valuation_basis == "EUR"
+        assert result.coverage.converted_from == "USD"
+        assert result.coverage.conversion_rate_source == "kraken"
+
+    async def test_drawdown_is_withheld_on_a_converted_basis(self) -> None:
+        """Withhold the drawdown whenever the basis changed.
+
+        Given a converted overlay
+        When the response is assembled
+        Then the USD-peak drawdown fraction is withheld with its disclosed reason.
+        """
+        repo = self._eur_repo([1])
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(1))], valuation_ccy="EUR")
+        )
+        assert result.overlay[_m(1)].drawdown is None
+        assert result.coverage.drawdown_withheld_reason == "currency_basis_unsupported"
+
+    async def test_unproven_minutes_are_withheld_and_counted(self) -> None:
+        """Drop an unproven minute instead of approximating it.
+
+        Given two sampled minutes with a close for only the first
+        When the overlay is requested in EUR
+        Then the unproven minute is dropped and disclosed, never approximated.
+        """
+        repo = self._eur_repo([1])
+        repo.load_samples([_sample_row(_m(1)), _sample_row(_m(2))])
+        result = await _resolve_equity_overlay(
+            repo,
+            _overlay_request([_grid_point(_m(1)), _grid_point(_m(2))], valuation_ccy="EUR"),
+        )
+        assert set(result.overlay) == {_m(1)}
+        assert result.coverage.complete_minutes == 1
+        assert result.coverage.conversion_withheld_minutes == 1
+
+    async def test_usd_request_is_never_converted(self) -> None:
+        """Serve a USD request natively.
+
+        Given a USD request
+        When the overlay resolves
+        Then it is served natively with no conversion disclosure at all.
+        """
+        repo = self._eur_repo([1])
+        repo.load_samples([_sample_row(_m(1))])
+        result = await _resolve_equity_overlay(repo, _overlay_request([_grid_point(_m(1))]))
+        assert result.overlay[_m(1)].equity == 1000.0
+        assert result.overlay[_m(1)].drawdown is not None
+        assert result.coverage.valuation_basis == "USD"
+        assert result.coverage.converted_from is None
+        assert result.coverage.conversion_withheld_minutes == 0
+        assert repo.fx_plane_calls == []
+
+    def test_a_null_stock_refuses_its_whole_minute(self) -> None:
+        """Refuse a minute whose stocks are incomplete.
+
+        Given a minute whose stocks are not all present
+        When the overlay is restated
+        Then that minute is refused rather than partly converted.
+        """
+        result = _EquityOverlayResult(
+            overlay={
+                _m(1): PnlPointEquityOverlay(
+                    equity=10.0, cash=None, position_value=4.0, drawdown=None
+                )
+            },
+            coverage=_UNSAMPLED_EQUITY_COVERAGE,
+        )
+        converted = _convert_equity_overlay(
+            result,
+            "EUR",
+            {("EUR", "USD", "kraken", _m(1)): 1.25},
+            {("EUR", "USD"): ("EUR", "USD", "kraken")},
+        )
+        assert converted.overlay == {}
+        assert converted.coverage.conversion_withheld_minutes == 1
+
+    async def test_conversion_requests_only_the_overlay_minutes(self) -> None:
+        """Bound the plane read by the overlay minutes.
+
+        Given a sparse overlay
+        When its conversion evidence is elected
+        Then the plane read is bounded by the overlay minutes, not the grid span.
+        """
+        repo = self._eur_repo([2])
+        repo.load_samples([_sample_row(_m(2))])
+        await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(2))], valuation_ccy="EUR")
+        )
+        assert repo.fx_candidate_range_calls[-1] == (_m(1), _m(2))
+
+
 class TestResolveEquityOverlay:
     """Cover the eligibility gate and the single bounded sample read (R4/D13)."""
 
@@ -6726,13 +6855,25 @@ class TestResolveEquityOverlay:
         assert result.coverage.sampled is False
         assert repo.sample_calls == []
 
-    async def test_non_usd_skips_the_read(self) -> None:
-        """A non-USD scope resolves an unsampled overlay without a read."""
+    async def test_non_usd_reads_the_usd_scope_and_withholds_without_a_plane(self) -> None:
+        """A non-USD scope reads the persisted USD samples and refuses unproven minutes.
+
+        Samples exist in USD alone, so the read is USD-scoped whatever the caller
+        asked for; with no electable plane every minute is withheld and the
+        disclosure names the attempted basis rather than pretending the scope was
+        never sampled.
+        """
         repo = FakeRepo()
         repo.load_samples([_sample_row(_m(1))])
-        result = await _resolve_equity_overlay(repo, _overlay_request(valuation_ccy="EUR"))
+        result = await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(1))], valuation_ccy="EUR")
+        )
         assert result.coverage.sampled is False
-        assert repo.sample_calls == []
+        assert result.overlay == {}
+        assert result.coverage.valuation_basis == "EUR"
+        assert result.coverage.converted_from == "USD"
+        assert result.coverage.conversion_withheld_minutes == 1
+        assert [call[0].valuation_ccy for call in repo.sample_calls] == ["USD"]
 
     async def test_eligible_scope_reads_once_and_folds(self) -> None:
         """An eligible scope issues exactly one exact-predicate sample read."""
@@ -6781,6 +6922,11 @@ class TestBuildWalletSeriesEquityOverlay:
             first_minute=_T0,
             last_minute=_m(2),
             sample_calc_version=PNL_SAMPLE_CALC_VERSION,
+            valuation_basis="USD",
+            converted_from=None,
+            conversion_rate_source=None,
+            conversion_withheld_minutes=0,
+            drawdown_withheld_reason=None,
         )
         assert result.equity_overlay_at(_T0).equity == 150.0
         assert result.equity_overlay_at(_m(1)).cash == 400.0

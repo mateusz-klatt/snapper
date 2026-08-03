@@ -123,6 +123,11 @@ def _unsampled_coverage() -> PnlEquityCoverageData:
         first_minute=None,
         last_minute=None,
         sample_calc_version=None,
+        valuation_basis=None,
+        converted_from=None,
+        conversion_rate_source=None,
+        conversion_withheld_minutes=0,
+        drawdown_withheld_reason=None,
     )
 
 
@@ -136,6 +141,29 @@ def _sampled_coverage() -> PnlEquityCoverageData:
         first_minute=_NOW,
         last_minute=_NOW,
         sample_calc_version="5B.2",
+        valuation_basis="USD",
+        converted_from=None,
+        conversion_rate_source=None,
+        conversion_withheld_minutes=0,
+        drawdown_withheld_reason=None,
+    )
+
+
+def _converted_coverage() -> PnlEquityCoverageData:
+    """Build the sampled disclosure of an overlay converted out of USD."""
+    return PnlEquityCoverageData(
+        sampled=True,
+        venue_scope="spot_only",
+        external_flows_adjusted=False,
+        complete_minutes=2,
+        first_minute=_NOW,
+        last_minute=_NOW,
+        sample_calc_version="5B.2",
+        valuation_basis="EUR",
+        converted_from="USD",
+        conversion_rate_source="kraken",
+        conversion_withheld_minutes=1,
+        drawdown_withheld_reason="currency_basis_unsupported",
     )
 
 
@@ -536,6 +564,42 @@ class TestEquityCoverageContract:
         stray_minutes["complete_minutes"] = 2
         with pytest.raises(ValidationError):
             PnlEquityCoverageData.model_validate(stray_minutes)
+
+    def test_converted_coverage_round_trips(self) -> None:
+        """A converted disclosure carries its basis, source, and withheld counts."""
+        payload = _converted_coverage().model_dump()
+        restored = PnlEquityCoverageData.model_validate(payload)
+        assert restored.valuation_basis == "EUR"
+        assert restored.converted_from == "USD"
+        assert restored.conversion_rate_source == "kraken"
+        assert restored.conversion_withheld_minutes == 1
+        assert restored.drawdown_withheld_reason == "currency_basis_unsupported"
+
+    def test_converted_coverage_rejects_restating_its_own_basis(self) -> None:
+        """Converting USD into USD is not a conversion and must be refused."""
+        payload = _converted_coverage().model_dump()
+        payload["valuation_basis"] = "USD"
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
+
+    def test_unconverted_coverage_rejects_conversion_state(self) -> None:
+        """A natively sampled disclosure must not claim any conversion provenance."""
+        for field, value in (
+            ("conversion_rate_source", "kraken"),
+            ("conversion_withheld_minutes", 1),
+            ("drawdown_withheld_reason", "currency_basis_unsupported"),
+        ):
+            payload = _sampled_coverage().model_dump()
+            payload[field] = value
+            with pytest.raises(ValidationError):
+                PnlEquityCoverageData.model_validate(payload)
+
+    def test_converted_sampled_coverage_must_withhold_its_drawdown(self) -> None:
+        """A served converted overlay may not carry a USD-basis drawdown fraction."""
+        payload = _converted_coverage().model_dump()
+        payload["drawdown_withheld_reason"] = None
+        with pytest.raises(ValidationError):
+            PnlEquityCoverageData.model_validate(payload)
 
     def test_envelope_requires_equity_coverage(self) -> None:
         """The series envelope cannot drop the equity-coverage disclosure."""

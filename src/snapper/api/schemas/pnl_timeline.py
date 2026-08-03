@@ -260,10 +260,21 @@ class PnlEquityCoverageData(StrictBody):
     first_minute: datetime | None
     last_minute: datetime | None
     sample_calc_version: str | None
+    valuation_basis: str | None
+    converted_from: str | None
+    conversion_rate_source: str | None
+    conversion_withheld_minutes: int
+    drawdown_withheld_reason: Literal["currency_basis_unsupported"] | None
 
     @model_validator(mode="after")
     def _require_consistent_coverage(self) -> Self:
-        """Keep the disclosure internally honest for both sampled states."""
+        """Keep the disclosure internally honest for both sampled states.
+
+        The conversion fields are deliberately outside the sampled-provenance
+        tuple: an unsampled result still discloses the basis it attempted and
+        the minutes it withheld, which is the only way a consumer can tell an
+        unprovable currency apart from a scope that was never sampled at all.
+        """
         provenance = (
             self.venue_scope,
             self.external_flows_adjusted,
@@ -272,13 +283,35 @@ class PnlEquityCoverageData(StrictBody):
             self.sample_calc_version,
         )
         if self.sampled:
-            if None in provenance or self.complete_minutes < 1:
+            if None in provenance or self.valuation_basis is None or self.complete_minutes < 1:
                 raise ValueError(
                     "a sampled coverage requires full provenance and a complete minute"
                 )
         elif any(field is not None for field in provenance) or self.complete_minutes != 0:
             raise ValueError("an unsampled coverage must null every provenance field")
+        self._require_consistent_conversion()
         return self
+
+    def _require_consistent_conversion(self) -> None:
+        """Refuse a conversion disclosure that contradicts its own basis.
+
+        A converted overlay must name what it converted from and must withhold
+        the USD-basis drawdown; a natively sampled overlay must claim neither.
+
+        Raises:
+            ValueError: When the conversion fields contradict each other.
+        """
+        converted = self.converted_from is not None
+        if converted and self.valuation_basis == self.converted_from:
+            raise ValueError("a converted coverage must not restate its own basis")
+        if not converted and (
+            self.conversion_rate_source is not None
+            or self.conversion_withheld_minutes != 0
+            or self.drawdown_withheld_reason is not None
+        ):
+            raise ValueError("an unconverted coverage must not disclose conversion state")
+        if converted and self.sampled and self.drawdown_withheld_reason is None:
+            raise ValueError("a converted sampled coverage must withhold its drawdown basis")
 
 
 class PnlExecutionCorrectionData(StrictBody):
