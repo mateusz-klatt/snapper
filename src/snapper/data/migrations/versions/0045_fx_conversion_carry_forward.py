@@ -64,6 +64,20 @@ _OUTCOME_AFTER = (
 )
 
 
+def _recreate_mode() -> str:
+    """Return the batch recreate mode this dialect actually needs.
+
+    SQLite cannot alter a CHECK constraint in place, so its table must be
+    rebuilt. PostgreSQL alters constraints directly; forcing a rebuild there
+    copies every row for nothing and, worse, leaves the finished table bound to
+    the ``_alembic_tmp_`` identity sequence the rebuild created.
+
+    Returns:
+        ``"always"`` on SQLite, ``"auto"`` elsewhere.
+    """
+    return "always" if op.get_bind().dialect.name == "sqlite" else "auto"
+
+
 def _carry_minute_sql() -> str:
     """Return the dialect-specific carried-minute equality predicate."""
     return _CARRY_MINUTE_SQLITE if op.get_bind().dialect.name == "sqlite" else _CARRY_MINUTE_PG
@@ -82,7 +96,7 @@ def upgrade() -> None:
     triggers bound to a table that no longer exists.
     """
     drop_fx_conversion_immutability_triggers(op.get_bind())
-    with op.batch_alter_table("fx_conversion_proofs", recreate="always") as batch:
+    with op.batch_alter_table("fx_conversion_proofs", recreate=_recreate_mode()) as batch:
         batch.add_column(
             sa.Column(
                 "carried_minutes",
@@ -97,7 +111,7 @@ def upgrade() -> None:
             "ck_fx_proofs_carried_bound",
             f"carried_minutes BETWEEN 0 AND {MAX_CARRIED_MINUTES}",
         )
-    with op.batch_alter_table("fx_conversion_elections", recreate="always") as batch:
+    with op.batch_alter_table("fx_conversion_elections", recreate=_recreate_mode()) as batch:
         batch.drop_constraint("ck_fx_elections_completeness", type_="check")
         batch.drop_constraint("ck_fx_elections_outcome", type_="check")
         batch.create_check_constraint("ck_fx_elections_completeness", _COMPLETENESS_AFTER)
@@ -123,12 +137,12 @@ def downgrade() -> None:
             "downgrading would drop evidence a replay depends on"
         )
     drop_fx_conversion_immutability_triggers(bind)
-    with op.batch_alter_table("fx_conversion_elections", recreate="always") as batch:
+    with op.batch_alter_table("fx_conversion_elections", recreate=_recreate_mode()) as batch:
         batch.drop_constraint("ck_fx_elections_completeness", type_="check")
         batch.drop_constraint("ck_fx_elections_outcome", type_="check")
         batch.create_check_constraint("ck_fx_elections_completeness", _COMPLETENESS_BEFORE)
         batch.create_check_constraint("ck_fx_elections_outcome", _OUTCOME_BEFORE)
-    with op.batch_alter_table("fx_conversion_proofs", recreate="always") as batch:
+    with op.batch_alter_table("fx_conversion_proofs", recreate=_recreate_mode()) as batch:
         batch.drop_constraint("ck_fx_proofs_carried_bound", type_="check")
         batch.drop_constraint("ck_fx_proofs_carried_minute", type_="check")
         batch.create_check_constraint("ck_fx_proofs_exact_minute", _exact_minute_sql())
