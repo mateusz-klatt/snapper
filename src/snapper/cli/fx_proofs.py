@@ -38,12 +38,12 @@ def _oldest(requirements: list[FxProofBackfillRequirement]) -> datetime:
 
 
 def _render_requirement_state(result: FxProofBackfillResult) -> None:
-    """Print the post-run DB state rather than the stale discovery state."""
+    """Print state visible at each durable consumer's knowledge horizon."""
     groups: dict[tuple[str, str, str], list[FxProofBackfillRequirement]] = defaultdict(list)
     for requirement in result.requirements:
         groups[_group_key(requirement)].append(requirement)
     typer.echo("Requirement state")
-    typer.echo("wallet | pair | scope kind | electorates | oldest minute | now state")
+    typer.echo("wallet | pair | scope kind | electorates | oldest minute | consumer-horizon state")
     for key, requirements in sorted(groups.items()):
         states = {
             "proof" if item.pinned else "refusal-audit" if item.refusal_audited else "missing"
@@ -119,7 +119,9 @@ def _render(result: FxProofBackfillResult, apply: bool) -> None:
     typer.echo(f"refusal audit creations | {result.refusal_audit_creations}")
     typer.echo(f"mode | {'apply' if apply else 'report'}")
     typer.echo(f"processed consumers | {result.processed_consumers}")
-    typer.echo(f"fully verified | {'yes' if result.fully_verified else 'NO'}")
+    typer.echo(f"unreached consumers | {result.unreached_consumers}")
+    resolved = "yes" if result.fully_verified else "NO"
+    typer.echo(f"fully resolved (proof or refusal audit) | {resolved}")
 
 
 def _anchored_checkpoint(path: Path) -> Path:

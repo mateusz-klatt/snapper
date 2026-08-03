@@ -83,7 +83,7 @@ def test_command_renders_now_state_classified_writes_and_adverse_exit(
         ["--apply", "--checkpoint", str(tmp_path / "cursor.json")],
     )
     assert report.exit_code == 0
-    assert "now state" in report.stdout
+    assert "consumer-horizon state" in report.stdout
     assert "proof creations | 1" in report.stdout
     assert "refusal audit creations | 1" in report.stdout
     assert "lost=execution:e1@minute" in report.stdout

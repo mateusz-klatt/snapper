@@ -6,15 +6,18 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import pytest
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinMetrics
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillConsumer
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillDiscovery
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillRequirement
+from snapper.application.portfolio.fx_proof_backfill import _acquire_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import _checkpoint_start
 from snapper.application.portfolio.fx_proof_backfill import _consumer_discovery
 from snapper.application.portfolio.fx_proof_backfill import _consumer_manifest
@@ -22,11 +25,13 @@ from snapper.application.portfolio.fx_proof_backfill import _expected_evaluation
 from snapper.application.portfolio.fx_proof_backfill import _fsync_directory
 from snapper.application.portfolio.fx_proof_backfill import _metric_delta
 from snapper.application.portfolio.fx_proof_backfill import _ordered_consumers
+from snapper.application.portfolio.fx_proof_backfill import _release_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import _write_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import discover_fx_proof_backfill
 from snapper.application.portfolio.fx_proof_backfill import fx_proof_backfill_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import reset_fx_proof_backfill_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import run_fx_proof_backfill
+from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
@@ -51,6 +56,9 @@ def _consumer(version: str = "5B.2") -> FxProofBackfillConsumer:
         valuation_ccy="USD",
         calculation_version=version,
         knowledge_at=_HORIZON,
+        epoch_public_id="00000000-0000-7000-8000-000000000850",
+        epoch_start=_MINUTE - timedelta(hours=1),
+        point_time_cut=_MINUTE + timedelta(minutes=5),
         watermarks={"coinbase": 3},
     )
 
@@ -164,7 +172,11 @@ class _DiscoveryRepository:
     ) -> list[PnlTimelineAccrualRow]:
         """Return the sealed foreign funding row at the same horizon."""
         self.horizons.append(as_of)
-        return [_accrual()]
+        before = _accrual()
+        before["accrued_at"] = _MINUTE - timedelta(hours=2)
+        after = _accrual()
+        after["accrued_at"] = _MINUTE + timedelta(minutes=6)
+        return [before, _accrual(), after]
 
     async def get_instrument_symbol_refs(
         self, instrument_public_ids: list[str], as_of: datetime
@@ -290,6 +302,15 @@ async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> 
     assert by_pair[("PLN", "USD")].evaluation.required_minutes == frozenset(
         {_MINUTE + timedelta(minutes=2)}
     )
+    true_digest = build_requirement_manifest_digest((_MINUTE + timedelta(minutes=2),))
+    padded_digest = build_requirement_manifest_digest(
+        (
+            _MINUTE - timedelta(hours=2),
+            _MINUTE + timedelta(minutes=2),
+            _MINUTE + timedelta(minutes=6),
+        )
+    )
+    assert true_digest != padded_digest
     assert discovery.semantic_refusals[0].instrument_public_id == _UNTRUSTED
     assert discovery.semantic_refusals[0].lost_requirements == (
         f"execution:00000000-0000-7000-8000-000000000003@{_MINUTE.isoformat()}",
@@ -458,8 +479,30 @@ async def test_repository_aggregates_active_watermark_union_in_sql(tmp_path: Pat
         watermarks_json="{}",
         **{**common, "valuation_ccy": "EUR"},
     )
+    anchor = PortfolioPnlPoint(
+        public_id="00000000-0000-7000-8000-000000000857",
+        session_id="00000000-0000-7000-8000-000000000858",
+        sequence_id=4,
+        timestamp=_HORIZON - timedelta(minutes=2),
+        point_time=_MINUTE - timedelta(minutes=1),
+        point_kind="anchor",
+        valuation_status="incomplete",
+        watermarks_json="{}",
+        **common,
+    )
+    eur_anchor = PortfolioPnlPoint(
+        public_id="00000000-0000-7000-8000-000000000859",
+        session_id="00000000-0000-7000-8000-000000000860",
+        sequence_id=5,
+        timestamp=_HORIZON - timedelta(minutes=2),
+        point_time=_MINUTE - timedelta(minutes=1),
+        point_kind="anchor",
+        valuation_status="incomplete",
+        watermarks_json="{}",
+        **{**common, "valuation_ccy": "EUR"},
+    )
     async with repository.session() as session:
-        session.add_all((first, second, empty_scope))
+        session.add_all((first, second, empty_scope, anchor, eur_anchor))
         await session.commit()
     consumers = await repository.list_fx_proof_backfill_consumers()
     assert len(consumers) == 2
@@ -476,18 +519,21 @@ async def test_repository_aggregates_active_watermark_union_in_sql(tmp_path: Pat
         await repository.get_pnl_timeline_execution_prefix_at_watermarks(
             _WALLET, "live", {"": -1}, _HORIZON
         )
-    async with repository.session() as session:
-        second.watermarks_json = "[]"
-        session.add(second)
-        await session.commit()
-    with pytest.raises(ValueError, match="invalid execution watermarks"):
-        await repository.list_fx_proof_backfill_consumers()
-    async with repository.session() as session:
-        second.watermarks_json = '{"bad":-1}'
-        session.add(second)
-        await session.commit()
-    with pytest.raises(ValueError, match="invalid execution watermarks"):
-        await repository.list_fx_proof_backfill_consumers()
+    for malformed in (
+        "[]",
+        '{"bad":-1}',
+        '{"bad":"1"}',
+        '{"bad":1.5}',
+        '{"bad":true}',
+        '{"bad":{}}',
+        '{"bad":null}',
+    ):
+        async with repository.session() as session:
+            second.watermarks_json = malformed
+            session.add(second)
+            await session.commit()
+        with pytest.raises(ValueError, match="invalid execution watermarks"):
+            await repository.list_fx_proof_backfill_consumers()
     await repository.engine.dispose()
 
 
@@ -544,7 +590,7 @@ async def test_report_discovery_deduplicates_identical_requirements(
     monkeypatch.setattr(fake, "list_fx_proof_backfill_consumers", consumers)
     discovery = await discover_fx_proof_backfill(cast(Repository, fake))
     assert len(discovery.requirements) == 2
-    assert len(discovery.semantic_refusals) == 2
+    assert len(discovery.semantic_refusals) == 1
 
 
 @pytest.mark.asyncio
@@ -588,8 +634,8 @@ async def test_report_mode_and_adverse_apply_completion_paths(
     consumer = _consumer()
 
     async def consumers() -> list[FxProofBackfillConsumer]:
-        """Return one consumer for both modes."""
-        return [consumer]
+        """Return three consumers so an abort exposes two unreached peers."""
+        return [consumer, _consumer("5C.1"), _consumer("5D.1")]
 
     async def derive(
         repo: Repository, selected: FxProofBackfillConsumer
@@ -608,11 +654,89 @@ async def test_report_mode_and_adverse_apply_completion_paths(
     report = await run_fx_proof_backfill(repository, False, tmp_path / "report.json")
     monkeypatch.setattr(repository, "pin_fx_conversion_artifact", fail_pin)
     applied = await run_fx_proof_backfill(repository, True, tmp_path / "apply.json")
-    assert report.fully_verified
+    assert not report.fully_verified
     assert applied.aborted
     assert not applied.fully_verified
     assert applied.processed_consumers == 0
+    assert applied.unreached_consumers == 2
     await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_poisoned_prefix_is_isolated_in_report_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One certifiably poisoned consumer cannot suppress its durable peers.
+
+    Given three ordered consumers whose middle prefix fails certification
+    When report and apply traverse the complete consumer universe
+    Then the middle cut is enumerated once and both peers remain processed
+    """
+    repository = await _repository(tmp_path, "isolated.db")
+    consumers = [_consumer("5A.13"), _consumer("5B.2"), _consumer("5C.1")]
+
+    async def list_consumers() -> list[FxProofBackfillConsumer]:
+        """Return the three durable cuts in poison-witness order."""
+        return consumers
+
+    async def derive(
+        repo: Repository, selected: FxProofBackfillConsumer
+    ) -> FxProofBackfillDiscovery:
+        """Fail only the middle prefix using the repository's refusal class."""
+        if selected.calculation_version == "5B.2":
+            raise ExecutionChainError("non_contiguous_execution_prefix")
+        return FxProofBackfillDiscovery((_requirement(selected.calculation_version),), ())
+
+    monkeypatch.setattr(repository, "list_fx_proof_backfill_consumers", list_consumers)
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._consumer_discovery", derive
+    )
+    report = await run_fx_proof_backfill(repository, False, tmp_path / "report.json")
+    applied = await run_fx_proof_backfill(repository, True, tmp_path / "apply.json")
+    assert len(report.requirements) == 2
+    assert len(report.semantic_refusals) == 1
+    assert "non_contiguous_execution_prefix" in report.semantic_refusals[0].reason
+    assert len(applied.requirements) == 2
+    assert applied.processed_consumers == 3
+    assert applied.unreached_consumers == 0
+    await repository.engine.dispose()
+
+
+def test_windows_apply_lock_uses_guarded_native_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows branch locks one byte without importing POSIX fcntl.
+
+    Given a Windows platform marker and a native lock API probe
+    When the apply lock helpers acquire and release one byte
+    Then only the guarded Windows operations execute in order
+    """
+    calls: list[int] = []
+    windows_api = ModuleType("msvcrt")
+    windows_api.LK_NBLCK = 1
+    windows_api.LK_UNLCK = 2
+
+    def locking(descriptor: int, operation: int, length: int) -> None:
+        """Record the selected Windows lock operation."""
+        calls.append(operation)
+
+    windows_api.locking = locking
+
+    def load_module(name: str) -> ModuleType:
+        """Return the guarded Windows API for the deferred import."""
+        return windows_api
+
+    monkeypatch.setattr("snapper.application.portfolio.fx_proof_backfill.sys.platform", "win32")
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill.importlib.import_module",
+        load_module,
+    )
+    lock_path = tmp_path / "native.lock"
+    with lock_path.open("a+b") as stream:
+        stream.write(b"\0")
+        _acquire_apply_lock(stream)
+        _release_apply_lock(stream)
+    assert calls == [1, 2]
 
 
 def test_owned_electorate_count_includes_only_required_identity_pair() -> None:

@@ -1,16 +1,21 @@
 """Operator certification of durable consumer-wide FX requirement electorates."""
 
-import fcntl
 import hashlib
+import importlib
 import json
 import os
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
+from typing import Protocol
 from typing import cast
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_conversion_shadow import FX_ELECTION_POLICY_VERSION
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
@@ -27,6 +32,7 @@ from snapper.application.portfolio.pnl_timeline_service import (
     _partition_series_execution_price_refs,
 )
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
+from snapper.data.fx_conversion_digests import canonical_fx_refusal_reason
 from snapper.data.repository import Repository
 from snapper.data.repository_types import FxConversionRefusalQuery
 from snapper.data.repository_types import FxConversionSuccessfulQuery
@@ -37,6 +43,27 @@ from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 FX_PROOF_BACKFILL_BATCH_SIZE = 50
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 FX_PROOF_BACKFILL_CHECKPOINT = _PROJECT_ROOT / "data" / "fx-proof-backfill-checkpoint.json"
+
+
+class _WindowsLockApi(Protocol):
+    """Typed surface of the deferred Windows byte-lock module."""
+
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, descriptor: int, operation: int, length: int) -> None:
+        """Lock or unlock one byte on an open descriptor."""
+
+
+class _PosixLockApi(Protocol):
+    """Typed surface of the deferred POSIX advisory-lock module."""
+
+    LOCK_EX: int
+    LOCK_NB: int
+    LOCK_UN: int
+
+    def flock(self, descriptor: int, operation: int) -> None:
+        """Apply one advisory lock operation to an open descriptor."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +111,7 @@ class FxProofBackfillResult:
     refusal_audit_creations: int
     aborted: bool
     fully_verified: bool
+    unreached_consumers: int = 0
 
 
 def _consumer_key(consumer: FxProofBackfillConsumer) -> str:
@@ -96,6 +124,9 @@ def _consumer_key(consumer: FxProofBackfillConsumer) -> str:
             consumer.valuation_ccy,
             consumer.calculation_version,
             consumer.knowledge_at.isoformat(),
+            consumer.epoch_public_id,
+            consumer.epoch_start.isoformat(),
+            consumer.point_time_cut.isoformat(),
             watermarks,
         )
     )
@@ -186,15 +217,40 @@ def fx_proof_backfill_apply_lock(checkpoint_path: Path) -> Iterator[None]:
     """
     lock_path = checkpoint_path.with_suffix(f"{checkpoint_path.suffix}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as stream:
+    with lock_path.open("a+b") as stream:
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(b"\0")
+            stream.flush()
         try:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
+            _acquire_apply_lock(stream)
+        except OSError as error:
             raise ValueError("another FX proof backfill apply is already running") from error
         try:
             yield
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            _release_apply_lock(stream)
+
+
+def _acquire_apply_lock(stream: BinaryIO) -> None:
+    """Acquire the platform-native nonblocking writer lock."""
+    stream.seek(0)
+    if sys.platform == "win32":
+        msvcrt = cast(_WindowsLockApi, importlib.import_module("msvcrt"))
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    fcntl = cast(_PosixLockApi, importlib.import_module("fcntl"))
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_apply_lock(stream: BinaryIO) -> None:
+    """Release the platform-native writer lock held by this stream."""
+    stream.seek(0)
+    if sys.platform == "win32":
+        msvcrt = cast(_WindowsLockApi, importlib.import_module("msvcrt"))
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl = cast(_PosixLockApi, importlib.import_module("fcntl"))
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _metric_delta(before: FxShadowPinMetrics, after: FxShadowPinMetrics) -> FxShadowPinMetrics:
@@ -285,11 +341,13 @@ async def _artifact_state(
 
 def _canonical_refusal_reason(evaluation: FxShadowEvaluation) -> str:
     """Build the same canonical missing-minute reason F2 persists."""
-    missing = [minute.isoformat() for minute in sorted(evaluation.required_minutes)]
-    return json.dumps(
-        {"reason": "fx_conversion_unproven", "unproven_minutes": missing},
-        sort_keys=True,
-        separators=(",", ":"),
+    return canonical_fx_refusal_reason(
+        {
+            "reason": "fx_conversion_unproven",
+            "unproven_minutes": [
+                minute.astimezone(UTC).isoformat() for minute in sorted(evaluation.required_minutes)
+            ],
+        }
     )
 
 
@@ -306,7 +364,13 @@ async def _consumer_discovery(
         horizon,
     )
     executions = prefix["executions"]
-    accruals = await repo.get_accruals_for_pnl(consumer.wallet_public_id, consumer.mode, horizon)
+    accruals = [
+        row
+        for row in await repo.get_accruals_for_pnl(
+            consumer.wallet_public_id, consumer.mode, horizon
+        )
+        if consumer.epoch_start < row["accrued_at"] <= consumer.point_time_cut
+    ]
     instrument_ids = sorted(
         {row["instrument_public_id"] for row in executions}
         | {row["instrument_public_id"] for row in accruals}
@@ -417,14 +481,36 @@ async def discover_fx_proof_backfill(repo: Repository) -> FxProofBackfillDiscove
     requirements: list[FxProofBackfillRequirement] = []
     refusals: list[FxProofBackfillSemanticRefusal] = []
     for consumer in await repo.list_fx_proof_backfill_consumers():
-        discovery = await _consumer_discovery(repo, consumer)
+        discovery = await _isolated_consumer_discovery(repo, consumer)
         requirements.extend(discovery.requirements)
         refusals.extend(discovery.semantic_refusals)
     deduplicated = {_requirement_key(item): item for item in requirements}
     return FxProofBackfillDiscovery(
         tuple(deduplicated[key] for key in sorted(deduplicated)),
-        tuple(sorted(refusals, key=_semantic_refusal_key)),
+        _deduplicated_refusals(refusals),
     )
+
+
+async def _isolated_consumer_discovery(
+    repo: Repository,
+    consumer: FxProofBackfillConsumer,
+) -> FxProofBackfillDiscovery:
+    """Convert a certifiable poisoned prefix into one consumer refusal."""
+    try:
+        return await _consumer_discovery(repo, consumer)
+    except ExecutionChainError as error:
+        refusal = FxProofBackfillSemanticRefusal(
+            wallet_public_id=consumer.wallet_public_id,
+            valuation_ccy=consumer.valuation_ccy,
+            calculation_version=consumer.calculation_version,
+            instrument_public_id="*",
+            reason=f"execution_prefix_unproven:{error}",
+            lost_requirements=tuple(
+                f"sealed-prefix:{exchange}@{watermark}"
+                for exchange, watermark in sorted(consumer.watermarks.items())
+            ),
+        )
+        return FxProofBackfillDiscovery((), (refusal,))
 
 
 def _semantic_refusal_key(refusal: FxProofBackfillSemanticRefusal) -> tuple[str, ...]:
@@ -435,7 +521,16 @@ def _semantic_refusal_key(refusal: FxProofBackfillSemanticRefusal) -> tuple[str,
         refusal.calculation_version,
         refusal.instrument_public_id,
         refusal.reason,
+        *refusal.lost_requirements,
     )
+
+
+def _deduplicated_refusals(
+    refusals: list[FxProofBackfillSemanticRefusal],
+) -> tuple[FxProofBackfillSemanticRefusal, ...]:
+    """Return semantic refusal lines once under their complete identity."""
+    unique = {_semantic_refusal_key(refusal): refusal for refusal in refusals}
+    return tuple(unique[key] for key in sorted(unique))
 
 
 async def _refresh_requirement(
@@ -515,7 +610,9 @@ async def run_fx_proof_backfill(
             0,
             0,
             False,
-            True,
+            not discovery.semantic_refusals
+            and all(item.pinned or item.refusal_audited for item in discovery.requirements),
+            0,
         )
     consumers = await repo.list_fx_proof_backfill_consumers()
     digest = _consumer_manifest(consumers)
@@ -526,8 +623,10 @@ async def run_fx_proof_backfill(
     proof_creations = 0
     refusal_creations = 0
     aborted = False
+    reached = 0
     for index, consumer in _ordered_consumers(consumers, start):
-        discovery = await _consumer_discovery(repo, consumer)
+        reached += 1
+        discovery = await _isolated_consumer_discovery(repo, consumer)
         refusals.extend(discovery.semantic_refusals)
         consumer_requirements: list[FxProofBackfillRequirement] = []
         consumer_metrics = fx_shadow_pin_metrics()
@@ -547,23 +646,26 @@ async def run_fx_proof_backfill(
         processed += 1
         next_cursor = (index + 1) % max(len(consumers), 1)
         _write_checkpoint(checkpoint_path, digest, next_cursor)
+    deduplicated = {_requirement_key(item): item for item in requirements}
     refreshed_requirements = [
         await _refresh_requirement(repo, requirement) for requirement in requirements
     ]
+    refreshed_deduplicated = {_requirement_key(item): item for item in refreshed_requirements}
     fully_verified = (
         not aborted
         and not refusals
-        and all(item.pinned or item.refusal_audited for item in refreshed_requirements)
+        and all(item.pinned or item.refusal_audited for item in refreshed_deduplicated.values())
     )
     if fully_verified:
         reset_fx_proof_backfill_checkpoint(checkpoint_path)
     return FxProofBackfillResult(
-        tuple(sorted(refreshed_requirements, key=_requirement_key)),
-        tuple(sorted(refusals, key=_semantic_refusal_key)),
+        tuple(refreshed_deduplicated[key] for key in sorted(deduplicated)),
+        _deduplicated_refusals(refusals),
         _metric_delta(metrics_before, fx_shadow_pin_metrics()),
         processed,
         proof_creations,
         refusal_creations,
         aborted,
         fully_verified,
+        max(len(consumers) - reached, 0) if aborted else 0,
     )

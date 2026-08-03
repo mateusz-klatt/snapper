@@ -34,6 +34,9 @@ class FxProofBackfillConsumer:
     valuation_ccy: str
     calculation_version: str
     knowledge_at: datetime
+    epoch_public_id: str
+    epoch_start: datetime
+    point_time_cut: datetime
     watermarks: dict[str, int]
 
 

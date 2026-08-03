@@ -400,12 +400,22 @@ proves every requirement has a proof or canonical refusal audit. Use
 `--reset-checkpoint` with `--apply` to discard the hint under the same exclusive
 host lock used by the writer.
 
+The printed fully-resolved flag means every requirement has either a proof or
+a canonical refusal audit; F5's coverage gate must not interpret it as proof
+coverage. A partially proven requirement exits successfully when its remaining
+gap is carried by the embedded canonical refusal, which automation must treat
+as resolved but not fully proven.
+
 All execution, symbol, candle, accrual, and proof reads use the active durable
 consumer union's maximum knowledge timestamp. The calculation-version label is
 also consumer-owned: anchors and samples can produce separate otherwise-equal
 election identities when their stored versions differ. The scope deliberately
 excludes spot-reconciliation anchors and never extends persisted cuts with a
 newly captured execution prefix.
+
+Each backdated election `timestamp` asserts knowledge at the durable consumer
+horizon by design, so the historical `as_of` lookup can see exactly the proof
+or refusal that certifies that consumer.
 
 ### `db-seed`
 

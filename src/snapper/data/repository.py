@@ -18556,7 +18556,7 @@ class SQLAlchemyRepository(Repository):
     async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
         """Aggregate active P&L cuts in SQL without materializing point entities."""
         json_rows = (
-            "jsonb_each_text(COALESCE(p.watermarks_json, '{}')::jsonb)"
+            "jsonb_each(COALESCE(p.watermarks_json, '{}')::jsonb)"
             if self.dialect_name == "postgresql"
             else "json_each(COALESCE(p.watermarks_json, '{}'))"
         )
@@ -18565,50 +18565,87 @@ class SQLAlchemyRepository(Repository):
             if self.dialect_name == "postgresql"
             else "json_type(COALESCE(watermarks_json, '{}'))"
         )
-        watermark_cast = (
-            "CAST(j.value AS BIGINT)"
+        watermark_valid = (
+            "jsonb_typeof(j.value) = 'number' AND j.value::text ~ '^[0-9]+$'"
             if self.dialect_name == "postgresql"
-            else "CAST(j.value AS INTEGER)"
+            else "j.type = 'integer'"
         )
         statement = text(f"""
             WITH scopes AS (
-                SELECT wallet_public_id, mode, valuation_ccy, calc_version,
+                SELECT wallet_public_id, mode, valuation_ccy, calc_version, epoch_public_id,
                        MAX(timestamp) AS knowledge_at,
+                       MAX(point_time) AS point_time_cut,
                        MAX(CASE WHEN {json_type} <> 'object' THEN 1 ELSE 0 END) AS invalid_json
                 FROM portfolio_pnl_points
                 WHERE known_to = :known_to
-                GROUP BY wallet_public_id, mode, valuation_ccy, calc_version
+                GROUP BY wallet_public_id, mode, valuation_ccy, calc_version, epoch_public_id
+            ), epochs AS (
+                SELECT wallet_public_id, mode, valuation_ccy, epoch_public_id,
+                       MAX(point_time) AS epoch_start
+                FROM portfolio_pnl_points
+                WHERE known_to = :known_to AND point_kind = 'anchor'
+                GROUP BY wallet_public_id, mode, valuation_ccy, epoch_public_id
             ), expanded AS (
                 SELECT p.wallet_public_id, p.mode, p.valuation_ccy, p.calc_version,
-                       j.key AS exchange, {watermark_cast} AS watermark
+                       p.epoch_public_id, j.key AS exchange,
+                       CASE WHEN {watermark_valid} THEN CAST(j.value AS BIGINT) END AS watermark,
+                       CASE WHEN {watermark_valid} THEN 0 ELSE 1 END AS invalid_value
                 FROM portfolio_pnl_points AS p, {json_rows} AS j
                 WHERE p.known_to = :known_to
             )
             SELECT s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
-                   s.knowledge_at, s.invalid_json, e.exchange, MAX(e.watermark) AS watermark
+                   s.epoch_public_id, s.knowledge_at, x.epoch_start, s.point_time_cut,
+                   s.invalid_json, MAX(e.invalid_value) AS invalid_value,
+                   e.exchange, MAX(e.watermark) AS watermark
             FROM scopes AS s
+            LEFT JOIN epochs AS x
+              ON x.wallet_public_id = s.wallet_public_id
+             AND x.mode = s.mode
+             AND x.valuation_ccy = s.valuation_ccy
+             AND x.epoch_public_id = s.epoch_public_id
             LEFT JOIN expanded AS e
               ON e.wallet_public_id = s.wallet_public_id
              AND e.mode = s.mode
              AND e.valuation_ccy = s.valuation_ccy
              AND e.calc_version = s.calc_version
+             AND e.epoch_public_id = s.epoch_public_id
             GROUP BY s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
-                     s.knowledge_at, s.invalid_json, e.exchange
+                     s.epoch_public_id, s.knowledge_at, x.epoch_start, s.point_time_cut,
+                     s.invalid_json, e.exchange
             ORDER BY s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
-                     e.exchange
-            """).columns(knowledge_at=TZDateTime())
+                     s.epoch_public_id, e.exchange
+            """).columns(
+            knowledge_at=TZDateTime(), epoch_start=TZDateTime(), point_time_cut=TZDateTime()
+        )
         known_to = (
-            KNOWN_TO_MAX if self.dialect_name == "postgresql" else "9999-12-31 23:59:59.000000"
+            KNOWN_TO_MAX
+            if self.dialect_name == "postgresql"
+            else KNOWN_TO_MAX.replace(tzinfo=None).isoformat(sep=" ", timespec="microseconds")
         )
         async with self.session() as s:
             rows = (await s.execute(statement, {"known_to": known_to})).all()
-        consumers: dict[tuple[str, str, str, str], FxProofBackfillConsumer] = {}
+        consumers: dict[tuple[str, str, str, str, str], FxProofBackfillConsumer] = {}
         for row in rows:
-            wallet, mode, valuation, version, raw_knowledge, invalid, exchange, watermark = row
-            if invalid:
+            (
+                wallet,
+                mode,
+                valuation,
+                version,
+                epoch,
+                raw_knowledge,
+                raw_epoch_start,
+                raw_point_time_cut,
+                invalid,
+                invalid_value,
+                exchange,
+                watermark,
+            ) = row
+            if invalid or invalid_value or raw_epoch_start is None:
                 raise ValueError("active P&L consumer has invalid execution watermarks")
             knowledge = cast(datetime, raw_knowledge)
-            key = (wallet, mode, valuation, version)
+            epoch_start = cast(datetime, raw_epoch_start)
+            point_time_cut = cast(datetime, raw_point_time_cut)
+            key = (wallet, mode, valuation, version, epoch)
             consumer = consumers.get(key)
             watermarks = {} if consumer is None else dict(consumer.watermarks)
             if exchange is not None:
@@ -18621,6 +18658,9 @@ class SQLAlchemyRepository(Repository):
                 valuation_ccy=valuation,
                 calculation_version=version,
                 knowledge_at=knowledge,
+                epoch_public_id=epoch,
+                epoch_start=epoch_start,
+                point_time_cut=point_time_cut,
                 watermarks=watermarks,
             )
         return [consumers[key] for key in sorted(consumers)]
