@@ -377,20 +377,35 @@ intact; dropping or archiving it is a separate operator action.
 
 Reports the exact execution-minute FX conversion requirements sealed by the
 persisted watermark maps of every active P&L anchor and sample. Report mode is
-the default and performs no writes. It groups unpinned requirements by wallet,
-currency pair, and election scope and lists every unprovable requirement.
+the default and performs no writes. Each election manifest is the consumer
+union's complete exact-minute set for one currency pair, never a collection of
+singleton manifests. This is the identity F4 must request: changing the minute
+electorate can change both the manifest digest and the coverage-ranked plane.
+The report groups post-run states by wallet, currency pair, and election scope
+and lists every unprovable instrument with its lost durable events.
 
 ```bash
 snapper fx-proofs backfill
 snapper fx-proofs backfill --apply
 snapper fx-proofs backfill --apply --checkpoint data/fx-proof-backfill-checkpoint.json
+snapper fx-proofs backfill --apply --reset-checkpoint
 ```
 
 `--apply` pins proofs and canonical refusal audits in fixed-size batches. The
-checkpoint is advanced only after a complete batch, so rerunning an interrupted
-operation safely converges through the proof repository's canonical identity.
-The scope deliberately excludes spot-reconciliation anchors and never extends
-the persisted cuts with a newly captured execution prefix.
+anchored checkpoint advances after each completed consumer union and is only a
+performance hint: every rerun asks the database whether each requirement is
+already pinned, so a restored empty database is repopulated even when an old
+cursor survives. The checkpoint is removed only after post-apply verification
+proves every requirement has a proof or canonical refusal audit. Use
+`--reset-checkpoint` with `--apply` to discard the hint under the same exclusive
+host lock used by the writer.
+
+All execution, symbol, candle, accrual, and proof reads use the active durable
+consumer union's maximum knowledge timestamp. The calculation-version label is
+also consumer-owned: anchors and samples can produce separate otherwise-equal
+election identities when their stored versions differ. The scope deliberately
+excludes spot-reconciliation anchors and never extends persisted cuts with a
+newly captured execution prefix.
 
 ### `db-seed`
 

@@ -253,6 +253,7 @@ from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeIntegrityWorkItem
 from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import TZDateTime
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
@@ -331,6 +332,7 @@ from snapper.data.repository_types import FxConversionElectionRow
 from snapper.data.repository_types import FxConversionOperation
 from snapper.data.repository_types import FxConversionProofInsertRow
 from snapper.data.repository_types import FxConversionProofRow
+from snapper.data.repository_types import FxConversionRefusalQuery
 from snapper.data.repository_types import FxConversionScopeKind
 from snapper.data.repository_types import FxConversionSuccessfulQuery
 from snapper.data.repository_types import FxProofBackfillConsumer
@@ -3289,6 +3291,15 @@ class Repository(ABC):
     @abstractmethod
     def dialect_name(self) -> str:
         """Return the database dialect name (sqlite, postgresql)."""
+        ...
+
+    @abstractmethod
+    async def has_visible_fx_conversion_refusal(
+        self,
+        query: FxConversionRefusalQuery,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether one matching canonical refusal audit is visible."""
         ...
 
     @abstractmethod
@@ -9479,6 +9490,40 @@ class SQLAlchemyRepository(Repository):
             return await self._read_fx_conversion_artifact_by_public_id(
                 session, election.public_id, as_of
             )
+
+    async def has_visible_fx_conversion_refusal(
+        self,
+        query: FxConversionRefusalQuery,
+        as_of: datetime,
+    ) -> bool:
+        """Check the full canonical refusal identity at one consumer horizon."""
+        manifest_digest = build_requirement_manifest_digest(query["required_minutes"])
+        reason_digest = build_refusal_reason_digest(query["refusal_reason_json"])
+        filters = [
+            FxConversionElection.timestamp <= as_of,
+            FxConversionElection.known_to > as_of,
+            FxConversionElection.completeness_state == "refused",
+            FxConversionElection.scope_kind == query["scope_kind"],
+            FxConversionElection.source_currency == query["source_currency"],
+            FxConversionElection.target_currency == query["target_currency"],
+            FxConversionElection.unordered_pair == query["unordered_pair"],
+            FxConversionElection.requirement_manifest_digest == manifest_digest,
+            FxConversionElection.refusal_reason_digest == reason_digest,
+            FxConversionElection.election_policy_version == query["election_policy_version"],
+            FxConversionElection.calculation_version == query["calculation_version"],
+        ]
+        if query["scope_kind"] == "instrument_owned":
+            filters.append(
+                FxConversionElection.consumer_instrument_public_id
+                == query["consumer_instrument_public_id"]
+            )
+        else:
+            filters.append(FxConversionElection.consumer_instrument_public_id.is_(None))
+        async with self.session() as session:
+            count = await session.scalar(
+                select(func.count()).select_from(FxConversionElection).where(*filters)
+            )
+            return count is not None and count > 0
 
     @staticmethod
     def _fx_artifacts_equivalent(
@@ -18509,47 +18554,76 @@ class SQLAlchemyRepository(Repository):
         }
 
     async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
-        """Enumerate active P&L artifacts without including reconciliation anchors."""
+        """Aggregate active P&L cuts in SQL without materializing point entities."""
+        json_rows = (
+            "jsonb_each_text(COALESCE(p.watermarks_json, '{}')::jsonb)"
+            if self.dialect_name == "postgresql"
+            else "json_each(COALESCE(p.watermarks_json, '{}'))"
+        )
+        json_type = (
+            "jsonb_typeof(COALESCE(watermarks_json, '{}')::jsonb)"
+            if self.dialect_name == "postgresql"
+            else "json_type(COALESCE(watermarks_json, '{}'))"
+        )
+        watermark_cast = (
+            "CAST(j.value AS BIGINT)"
+            if self.dialect_name == "postgresql"
+            else "CAST(j.value AS INTEGER)"
+        )
+        statement = text(f"""
+            WITH scopes AS (
+                SELECT wallet_public_id, mode, valuation_ccy, calc_version,
+                       MAX(timestamp) AS knowledge_at,
+                       MAX(CASE WHEN {json_type} <> 'object' THEN 1 ELSE 0 END) AS invalid_json
+                FROM portfolio_pnl_points
+                WHERE known_to = :known_to
+                GROUP BY wallet_public_id, mode, valuation_ccy, calc_version
+            ), expanded AS (
+                SELECT p.wallet_public_id, p.mode, p.valuation_ccy, p.calc_version,
+                       j.key AS exchange, {watermark_cast} AS watermark
+                FROM portfolio_pnl_points AS p, {json_rows} AS j
+                WHERE p.known_to = :known_to
+            )
+            SELECT s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
+                   s.knowledge_at, s.invalid_json, e.exchange, MAX(e.watermark) AS watermark
+            FROM scopes AS s
+            LEFT JOIN expanded AS e
+              ON e.wallet_public_id = s.wallet_public_id
+             AND e.mode = s.mode
+             AND e.valuation_ccy = s.valuation_ccy
+             AND e.calc_version = s.calc_version
+            GROUP BY s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
+                     s.knowledge_at, s.invalid_json, e.exchange
+            ORDER BY s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
+                     e.exchange
+            """).columns(knowledge_at=TZDateTime())
+        known_to = (
+            KNOWN_TO_MAX if self.dialect_name == "postgresql" else "9999-12-31 23:59:59.000000"
+        )
         async with self.session() as s:
-            rows = list(
-                (
-                    await s.execute(
-                        select(PortfolioPnlPoint)
-                        .where(PortfolioPnlPoint.known_to == KNOWN_TO_MAX)
-                        .order_by(
-                            PortfolioPnlPoint.wallet_public_id,
-                            PortfolioPnlPoint.mode,
-                            PortfolioPnlPoint.valuation_ccy,
-                            PortfolioPnlPoint.point_time,
-                            PortfolioPnlPoint.public_id,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        consumers: list[FxProofBackfillConsumer] = []
+            rows = (await s.execute(statement, {"known_to": known_to})).all()
+        consumers: dict[tuple[str, str, str, str], FxProofBackfillConsumer] = {}
         for row in rows:
-            raw = row.watermarks_json or "{}"
-            payload = json.loads(raw)
-            if not isinstance(payload, dict) or any(
-                not isinstance(key, str) or not isinstance(value, int) or value < 0
-                for key, value in payload.items()
-            ):
+            wallet, mode, valuation, version, raw_knowledge, invalid, exchange, watermark = row
+            if invalid:
                 raise ValueError("active P&L consumer has invalid execution watermarks")
-            consumers.append(
-                FxProofBackfillConsumer(
-                    public_id=row.public_id,
-                    wallet_public_id=row.wallet_public_id,
-                    mode=cast(Literal["live", "paper"], row.mode),
-                    valuation_ccy=row.valuation_ccy,
-                    calculation_version=row.calc_version,
-                    point_kind=cast(Literal["anchor", "sample"], row.point_kind),
-                    knowledge_at=row.timestamp,
-                    watermarks=cast(dict[str, int], payload),
-                )
+            knowledge = cast(datetime, raw_knowledge)
+            key = (wallet, mode, valuation, version)
+            consumer = consumers.get(key)
+            watermarks = {} if consumer is None else dict(consumer.watermarks)
+            if exchange is not None:
+                if not isinstance(watermark, int) or watermark < 0:
+                    raise ValueError("active P&L consumer has invalid execution watermarks")
+                watermarks[exchange] = watermark
+            consumers[key] = FxProofBackfillConsumer(
+                wallet_public_id=wallet,
+                mode=cast(Literal["live", "paper"], mode),
+                valuation_ccy=valuation,
+                calculation_version=version,
+                knowledge_at=knowledge,
+                watermarks=watermarks,
             )
-        return consumers
+        return [consumers[key] for key in sorted(consumers)]
 
     async def get_pnl_timeline_execution_prefix_at_watermarks(
         self,

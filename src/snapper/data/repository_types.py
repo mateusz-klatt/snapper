@@ -29,12 +29,10 @@ FxConversionOperation = Literal["direct", "inverse"]
 class FxProofBackfillConsumer:
     """One active durable P&L consumer and its sealed execution cut."""
 
-    public_id: str
     wallet_public_id: str
     mode: Literal["live", "paper"]
     valuation_ccy: str
     calculation_version: str
-    point_kind: Literal["anchor", "sample"]
     knowledge_at: datetime
     watermarks: dict[str, int]
 
@@ -139,6 +137,12 @@ class FxConversionSuccessfulQuery(TypedDict):
     required_minutes: tuple[datetime, ...]
     election_policy_version: str
     calculation_version: str
+
+
+class FxConversionRefusalQuery(FxConversionSuccessfulQuery):
+    """Stable coordinates for a visible canonical refusal-audit lookup."""
+
+    refusal_reason_json: str
 
 
 class TradeIntegrityWorkItemInsertRow(TypedDict):

@@ -35,7 +35,7 @@ from snapper.data.repository_types import FxConversionScopeKind
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 
-_ELECTION_POLICY_VERSION = "pnl-fiat-v1"
+FX_ELECTION_POLICY_VERSION = "pnl-fiat-v1"
 MAX_SHADOW_MANIFEST_MINUTES = 15
 SHADOW_PIN_TICK_TIMEOUT_SECONDS = 10.0
 
@@ -131,6 +131,7 @@ class FxShadowPinContext:
 
     calculation_version: str
     evaluations: list[FxShadowEvaluation]
+    manifest_limit: int | None = MAX_SHADOW_MANIFEST_MINUTES
 
     def collect(self, factory: Callable[[], Sequence[FxShadowEvaluation]]) -> None:
         """Collect guarded bounded evaluations without exposing construction errors.
@@ -140,7 +141,10 @@ class FxShadowPinContext:
         """
         try:
             for evaluation in factory():
-                if len(evaluation.required_minutes) > MAX_SHADOW_MANIFEST_MINUTES:
+                if (
+                    self.manifest_limit is not None
+                    and len(evaluation.required_minutes) > self.manifest_limit
+                ):
                     _log_once(
                         "oversized",
                         "FX shadow pin skipped oversized manifest for {}",
@@ -295,6 +299,25 @@ def _reason(state: FxConversionCompleteness, missing: Sequence[datetime]) -> str
     )
 
 
+def fx_shadow_evaluation_completeness(
+    evaluation: FxShadowEvaluation,
+) -> FxConversionCompleteness:
+    """Classify one raw evaluation by its exact proven-minute subset.
+
+    Args:
+        evaluation: Raw election result whose selected rows are classified.
+
+    Returns:
+        Complete, partial, or refused under the F2 artifact contract.
+    """
+    proof_minutes = set(_selected_rows(evaluation, evaluation.rows))
+    if proof_minutes == set(evaluation.required_minutes):
+        return "complete"
+    if proof_minutes:
+        return "partial"
+    return "refused"
+
+
 def _build_artifact(
     evaluation: FxShadowEvaluation,
     as_of: datetime,
@@ -306,12 +329,7 @@ def _build_artifact(
     rows = evaluation.rows
     selected_rows = _selected_rows(evaluation, rows)
     proof_minutes = set(selected_rows)
-    if proof_minutes == set(evaluation.required_minutes):
-        state: FxConversionCompleteness = "complete"
-    elif proof_minutes:
-        state = "partial"
-    else:
-        state = "refused"
+    state = fx_shadow_evaluation_completeness(evaluation)
     selected = evaluation.selected_plane if state != "refused" else None
     election_id = str(uuid7())
     session_id = str(uuid7())
@@ -345,7 +363,7 @@ def _build_artifact(
             if selected_rows
             else as_of
         ),
-        election_policy_version=_ELECTION_POLICY_VERSION,
+        election_policy_version=FX_ELECTION_POLICY_VERSION,
         calculation_version=calculation_version,
         selected_source_exchange=(
             None if selected_candidate is None else selected_candidate["source_exchange"]

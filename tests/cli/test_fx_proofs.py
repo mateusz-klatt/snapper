@@ -1,4 +1,4 @@
-"""CLI rendering and operator refusal witnesses for FX proof backfill."""
+"""CLI post-state rendering, locking, reset, and exit-code witnesses."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -9,69 +9,105 @@ import pytest
 from typer.testing import CliRunner
 
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinMetrics
+from snapper.application.portfolio.fx_proof_backfill import FX_PROOF_BACKFILL_CHECKPOINT
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillResult
+from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillSemanticRefusal
+from snapper.cli.fx_proofs import _anchored_checkpoint
 from snapper.cli.fx_proofs import _render
 from snapper.cli.fx_proofs import _run
+from snapper.cli.fx_proofs import _run_locked
 from snapper.cli.fx_proofs import fx_proofs_app
 from snapper.config.settings import AppSettings
 from snapper.data.repository import Repository
 from tests.application.portfolio.test_fx_proof_backfill import _requirement
 
 
-def test_backfill_command_renders_groups_refusals_and_summary(
+def _result(
+    adverse: bool = False,
+    semantic: bool = True,
+) -> FxProofBackfillResult:
+    """Build one post-apply result with proof, refusal, and optional failure."""
+    proof = replace(_requirement(), pinned=True)
+    refusal = replace(
+        _requirement(),
+        evaluation=replace(_requirement().evaluation, selected_plane=None, rows=()),
+        pinned=False,
+        refusal_audited=True,
+    )
+    semantic_refusals = (
+        (
+            FxProofBackfillSemanticRefusal(
+                wallet_public_id=proof.wallet_public_id,
+                valuation_ccy="USD",
+                calculation_version="5B.2",
+                instrument_public_id="lost-instrument",
+                reason="execution_price_provenance_unproven",
+                lost_requirements=("execution:e1@minute",),
+            ),
+        )
+        if semantic
+        else ()
+    )
+    return FxProofBackfillResult(
+        requirements=(proof, refusal),
+        semantic_refusals=semantic_refusals,
+        metrics=FxShadowPinMetrics(creation=2, reuse=1, failure=int(adverse)),
+        processed_consumers=1,
+        proof_creations=1,
+        refusal_audit_creations=1,
+        aborted=adverse,
+        fully_verified=not adverse,
+    )
+
+
+def test_command_renders_now_state_classified_writes_and_adverse_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator sees post-state and Typer's nonzero exit is not swallowed.
+
+    Given proof-bearing and refusal-audit creations plus an adverse apply result
+    When report and apply commands render
+    Then NOW states and classified counts print, failure is a refusal, and apply exits one
+    """
+    healthy = _result()
+    adverse = _result(adverse=True)
+
+    def run_locked(apply: bool, checkpoint: Path, reset_checkpoint: bool) -> FxProofBackfillResult:
+        """Return the result selected by mutation mode."""
+        return adverse if apply else healthy
+
+    monkeypatch.setattr("snapper.cli.fx_proofs._run_locked", run_locked)
+    report = CliRunner().invoke(fx_proofs_app, [])
+    applied = CliRunner().invoke(
+        fx_proofs_app,
+        ["--apply", "--checkpoint", str(tmp_path / "cursor.json")],
+    )
+    assert report.exit_code == 0
+    assert "now state" in report.stdout
+    assert "proof creations | 1" in report.stdout
+    assert "refusal audit creations | 1" in report.stdout
+    assert "lost=execution:e1@minute" in report.stdout
+    assert applied.exit_code == 1
+    assert "persistence | aborted=true | failure=1" in applied.stdout
+    assert "refused:" not in applied.stdout
+
+
+def test_command_validation_error_and_checkpoint_anchoring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The operator receives grouped gaps, explicit refusals, and all counters.
+    """Relative paths anchor to the repo and validated errors remain stable.
 
-    Given one provable and one refused unpinned requirement
-    When the default report command renders its result
-    Then grouping, semantic refusal, mode, and seven counters are printed
+    Given relative and absolute cursor paths plus a reset without apply
+    When path normalization and the command validation execute
+    Then paths are deterministic and the invalid reset exits nonzero
     """
-    requirement = _requirement()
-    refusal = replace(
-        requirement,
-        consumer_public_id="00000000-0000-7000-8000-000000000899",
-        evaluation=replace(requirement.evaluation, selected_plane=None, rows=()),
-    )
-    result = FxProofBackfillResult(
-        requirements=(requirement, refusal),
-        semantic_refusals=("wallet | USD | 5B.2 | execution identity unproven",),
-        metrics=FxShadowPinMetrics(creation=1, reuse=2),
-        processed=0,
-    )
-
-    async def run(apply: bool, checkpoint: Path) -> FxProofBackfillResult:
-        """Return the fixed report without opening a database."""
-        return result
-
-    monkeypatch.setattr("snapper.cli.fx_proofs._run", run)
-    invoked = CliRunner().invoke(fx_proofs_app, [])
-    assert invoked.exit_code == 0
-    assert "Unpinned requirements" in invoked.stdout
-    assert "fx_conversion_unproven" in invoked.stdout
-    assert "creation | 1" in invoked.stdout
-    assert "reuse | 2" in invoked.stdout
-    assert "mode | report" in invoked.stdout
-    applied = CliRunner().invoke(fx_proofs_app, ["--apply"])
-    assert applied.exit_code == 1
-
-
-def test_backfill_command_reports_operator_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Validated discovery failures become stable nonzero operator refusals.
-
-    Given discovery cannot prove a durable requirement identity
-    When the apply command is invoked
-    Then the semantic error is emitted and the command exits nonzero
-    """
-
-    async def run(apply: bool, checkpoint: Path) -> FxProofBackfillResult:
-        """Raise the same validated failure produced by discovery."""
-        raise ValueError("identity cannot be proven")
-
-    monkeypatch.setattr("snapper.cli.fx_proofs._run", run)
-    invoked = CliRunner().invoke(fx_proofs_app, ["--apply"])
+    relative = _anchored_checkpoint(Path("custom/cursor.json"))
+    absolute = _anchored_checkpoint(Path("/tmp/cursor.json"))
+    assert relative == FX_PROOF_BACKFILL_CHECKPOINT.parents[1] / "custom/cursor.json"
+    assert absolute == Path("/tmp/cursor.json")
+    invoked = CliRunner().invoke(fx_proofs_app, ["--reset-checkpoint"])
     assert invoked.exit_code == 1
-    assert "refused: identity cannot be proven" in invoked.output
+    assert "--reset-checkpoint requires --apply" in invoked.output
 
 
 @pytest.mark.asyncio
@@ -87,7 +123,7 @@ async def test_run_opens_configured_repository_and_empty_report_renders(
     Then the repository is forwarded and the refusal section states none
     """
     repository = cast(Repository, object())
-    expected = FxProofBackfillResult((), (), FxShadowPinMetrics(), 0)
+    expected = FxProofBackfillResult((), (), FxShadowPinMetrics(), 0, 0, 0, False, True)
     monkeypatch.setattr(
         "snapper.cli.fx_proofs.get_settings",
         lambda: cast(AppSettings, SimpleNamespace(db_url="sqlite+aiosqlite:///unused.db")),
@@ -105,3 +141,27 @@ async def test_run_opens_configured_repository_and_empty_report_renders(
     assert await _run(False, tmp_path / "cursor.json") is expected
     _render(expected, False)
     assert "Refusals\nnone" in capsys.readouterr().out
+
+
+def test_locked_runner_resets_only_under_apply_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reset and apply occur inside the same single-writer critical section.
+
+    Given a cursor file and a stub async runner
+    When locked apply requests reset
+    Then the cursor is absent before the runner starts and the result returns
+    """
+    checkpoint = tmp_path / "cursor.json"
+    checkpoint.write_text("stale", encoding="utf-8")
+    expected = _result(semantic=False)
+
+    async def run(apply: bool, selected: Path) -> FxProofBackfillResult:
+        """Assert reset completed before repository work."""
+        assert not selected.exists()
+        return expected
+
+    monkeypatch.setattr("snapper.cli.fx_proofs._run", run)
+    assert _run_locked(True, checkpoint, True) is expected
+    assert _run_locked(True, checkpoint, False) is expected
+    assert _run_locked(False, checkpoint, False) is expected

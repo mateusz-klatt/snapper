@@ -1,5 +1,6 @@
-"""Operator proof-backfill report, batching, and convergence witnesses."""
+"""Consumer-wide FX proof-backfill derivation and recovery witnesses."""
 
+import json
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -8,238 +9,83 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from sqlalchemy import select
 
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
+from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinMetrics
+from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillConsumer
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillDiscovery
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillRequirement
 from snapper.application.portfolio.fx_proof_backfill import _checkpoint_start
-from snapper.application.portfolio.fx_proof_backfill import _consumer_evaluations
-from snapper.application.portfolio.fx_proof_backfill import _is_pinned
-from snapper.application.portfolio.fx_proof_backfill import _manifest_digest
-from snapper.application.portfolio.fx_proof_backfill import _trusted_execution_context
-from snapper.application.portfolio.fx_proof_backfill import _union_consumers
+from snapper.application.portfolio.fx_proof_backfill import _consumer_discovery
+from snapper.application.portfolio.fx_proof_backfill import _consumer_manifest
+from snapper.application.portfolio.fx_proof_backfill import _expected_evaluation_count
+from snapper.application.portfolio.fx_proof_backfill import _fsync_directory
+from snapper.application.portfolio.fx_proof_backfill import _metric_delta
+from snapper.application.portfolio.fx_proof_backfill import _ordered_consumers
 from snapper.application.portfolio.fx_proof_backfill import _write_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import discover_fx_proof_backfill
+from snapper.application.portfolio.fx_proof_backfill import fx_proof_backfill_apply_lock
+from snapper.application.portfolio.fx_proof_backfill import reset_fx_proof_backfill_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import run_fx_proof_backfill
-from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
-from snapper.data.repository_types import FxProofBackfillConsumer
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRateRow
+from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
-from snapper.data.repository_types import PortfolioPnlAnchorRow
 
 _MINUTE = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
-_AS_OF = datetime(2026, 8, 2, 13, 0, tzinfo=UTC)
+_HORIZON = datetime(2026, 8, 2, 13, 0, tzinfo=UTC)
+_WALLET = "00000000-0000-7000-8000-000000000810"
+_INSTRUMENT = "00000000-0000-7000-8000-000000000821"
+_UNTRUSTED = "00000000-0000-7000-8000-000000000829"
 
 
-def _row() -> PnlFxRateRow:
-    """Build one exact candle version consumed by the raw election."""
-    return {
-        "base": "EUR",
-        "quote": "USD",
-        "exchange": "kraken",
-        "open_at": _MINUTE - timedelta(minutes=1),
-        "close": 1.125,
-        "native_symbol": "EUR/USD",
-        "instrument_public_id": "00000000-0000-7000-8000-000000000802",
-        "candle_id": 42,
-        "candle_public_id": "00000000-0000-7000-8000-000000000803",
-        "candle_session_id": "00000000-0000-7000-8000-000000000801",
-        "candle_sequence_id": 7,
-        "candle_timestamp": _MINUTE - timedelta(minutes=1),
-        "candle_known_to": datetime.max.replace(tzinfo=UTC),
-    }
-
-
-def _requirement() -> FxProofBackfillRequirement:
-    """Build one unpinned durable singleton-minute requirement."""
-    row = _row()
-    evaluation = FxShadowEvaluation(
-        scope_kind="shared_pair",
-        consumer_instrument_public_id=None,
-        pair=("EUR", "USD"),
-        target_currency="USD",
-        required_minutes=frozenset({_MINUTE}),
-        candidate_planes=frozenset({("EUR", "USD", "kraken")}),
-        selected_plane=("EUR", "USD", "kraken"),
-        requested_knowledge_at=_AS_OF,
-        rows=(row,),
-        authoritative_rates={("EUR", "USD", "kraken", _MINUTE): row["close"]},
-    )
-    return FxProofBackfillRequirement(
-        wallet_public_id="00000000-0000-7000-8000-000000000810",
+def _consumer(version: str = "5B.2") -> FxProofBackfillConsumer:
+    """Build one SQL-aggregated active P&L consumer union."""
+    return FxProofBackfillConsumer(
+        wallet_public_id=_WALLET,
+        mode="live",
         valuation_ccy="USD",
-        calculation_version="5B.2",
-        consumer_public_id="00000000-0000-7000-8000-000000000811",
-        evaluation=evaluation,
-        pinned=False,
+        calculation_version=version,
+        knowledge_at=_HORIZON,
+        watermarks={"coinbase": 3},
     )
 
 
-async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
-    """Create an isolated repository carrying the real F1 identity contract."""
-    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'backfill.db'}")
-    await repository.create_all()
-    return repository
-
-
-@pytest.mark.asyncio
-async def test_report_is_no_write_and_apply_twice_converges(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Report writes nothing and a complete rerun reuses the canonical proof.
-
-    Given one durable singleton requirement and the real F1 repository
-    When report mode runs once and apply mode runs twice
-    Then report creates nothing and the second apply reports reuse without creation
-    """
-    repository = await _repository(tmp_path)
-
-    async def discover(_: object) -> FxProofBackfillDiscovery:
-        """Return the same durable requirement on every operator invocation."""
-        return FxProofBackfillDiscovery((_requirement(),), ())
-
-    monkeypatch.setattr(
-        "snapper.application.portfolio.fx_proof_backfill.discover_fx_proof_backfill",
-        discover,
-    )
-    checkpoint = tmp_path / "checkpoint.json"
-    report = await run_fx_proof_backfill(repository, False, checkpoint)
-    first = await run_fx_proof_backfill(repository, True, checkpoint)
-    second = await run_fx_proof_backfill(repository, True, checkpoint)
-    assert report.processed == 0
-    assert report.metrics.creation == 0
-    assert not checkpoint.exists()
-    assert first.metrics.creation == 1
-    assert first.metrics.reuse == 0
-    assert second.metrics.creation == 0
-    assert second.metrics.reuse == 1
-    await repository.engine.dispose()
-
-
-def test_checkpoint_validation_and_execution_identity_refusal(tmp_path: Path) -> None:
-    """Checkpoint drift and unprovable execution identity both refuse explicitly.
-
-    Given absent, valid, malformed, and drifted checkpoints plus untrusted lineage
-    When the cursor and trusted execution context are validated
-    Then only the valid cursor is accepted and semantic identity loss is named
-    """
-    path = tmp_path / "nested" / "checkpoint.json"
-    digest = _manifest_digest([_requirement()])
-    assert _checkpoint_start(path, digest) == 0
-    _write_checkpoint(path, digest, 3)
-    assert _checkpoint_start(path, digest) == 3
-    path.write_text("[]", encoding="utf-8")
-    with pytest.raises(ValueError, match="does not match"):
-        _checkpoint_start(path, digest)
-    path.write_text('{"cursor":-1,"manifest_digest":"same"}', encoding="utf-8")
-    with pytest.raises(ValueError, match="does not match"):
-        _checkpoint_start(path, digest)
-    path.write_text(f'{{"cursor":-1,"manifest_digest":"{digest}"}}', encoding="utf-8")
-    with pytest.raises(ValueError, match="cursor"):
-        _checkpoint_start(path, digest)
-    with pytest.raises(ValueError, match="identity cannot be proven"):
-        _trusted_execution_context([_execution()], cast(list[InstrumentSymbolRefRow], []))
-    older = replace(_consumer(), watermarks={"coinbase": 3})
-    newer = replace(
-        _consumer(),
-        public_id="00000000-0000-7000-8000-000000000825",
-        knowledge_at=_AS_OF + timedelta(minutes=1),
-        watermarks={"coinbase": 2, "kraken": 4},
-    )
-    different = replace(newer, calculation_version="5A.13")
-    unions = _union_consumers([newer, older, different])
-    assert len(unions) == 2
-    assert unions[1].public_id == newer.public_id
-    assert unions[1].watermarks == {"coinbase": 3, "kraken": 4}
-
-
-class _DiscoveryRepository:
-    """Minimal repository surface for exact backfill discovery tests."""
-
-    def __init__(self, artifact_present: bool = False, identity_present: bool = True) -> None:
-        self.artifact_present = artifact_present
-        self.identity_present = identity_present
-
-    async def get_pnl_timeline_execution_prefix_at_watermarks(
-        self,
-        wallet_public_id: str,
-        mode: str,
-        watermarks: dict[str, int],
-        as_of: datetime,
-    ) -> PnlTimelineExecutionPrefix:
-        """Return one already-certified execution row."""
-        return {"watermarks": watermarks, "executions": [_execution()], "annulments": []}
-
-    async def get_instrument_symbol_refs(
-        self, instrument_public_ids: list[str], as_of: datetime
-    ) -> list[InstrumentSymbolRefRow]:
-        """Return the immutable currency and venue identity for the execution."""
-        return [_ref()] if self.identity_present else []
-
-    async def get_pnl_fx_rate_exchanges(
-        self,
-        pairs: list[tuple[str, str]],
-        start: datetime,
-        end: datetime,
-        as_of: datetime,
-    ) -> list[tuple[str, str, str]]:
-        """Expose the one eligible shared EUR/USD plane."""
-        return [("EUR", "USD", "kraken")]
-
-    async def get_pnl_fx_rate_candles(
-        self,
-        planes: list[tuple[str, str, str]],
-        start: datetime,
-        end: datetime,
-        as_of: datetime,
-    ) -> list[PnlFxRateRow]:
-        """Return exact evidence for the requested singleton minute."""
-        return [_row()]
-
-    async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
-        """Return one active durable sample cut."""
-        return [_consumer()]
-
-    async def get_latest_visible_fx_conversion_artifact(
-        self, query: object, as_of: datetime
-    ) -> object | None:
-        """Represent whether the successful identity is already pinned."""
-        return object() if self.artifact_present else None
-
-
-def _execution() -> PnlTimelineOpeningExecutionRow:
-    """Build one EUR-priced execution requiring an exact conversion minute."""
+def _execution(
+    minute: datetime,
+    sequence: int,
+    instrument: str = _INSTRUMENT,
+) -> PnlTimelineOpeningExecutionRow:
+    """Build one EUR-priced execution in a sealed prefix."""
     return {
-        "public_id": "00000000-0000-7000-8000-000000000820",
-        "instrument_public_id": "00000000-0000-7000-8000-000000000821",
+        "public_id": f"00000000-0000-7000-8000-{sequence:012d}",
+        "instrument_public_id": instrument,
         "exchange": "coinbase",
-        "scope_sequence": 1,
-        "order_public_id": "00000000-0000-7000-8000-000000000822",
+        "scope_sequence": sequence,
+        "order_public_id": f"00000000-0000-7000-8001-{sequence:012d}",
         "side": "buy",
         "status": "filled",
         "size": 1.0,
         "price": 10.0,
         "fee": 0.0,
         "fee_asset": "EUR",
-        "executed_at": _MINUTE,
-        "timestamp": _MINUTE,
-        "exec_id": "fill-1",
+        "executed_at": minute,
+        "timestamp": minute,
+        "exec_id": f"fill-{sequence}",
         "trade_id": None,
-        "client_order_id": "order-1",
+        "client_order_id": f"order-{sequence}",
         "shard_key": "spot",
     }
 
 
 def _ref() -> InstrumentSymbolRefRow:
-    """Build the stable BTC/EUR identity spanning the execution."""
+    """Build stable BTC/EUR denomination and venue evidence."""
     return {
-        "instrument_public_id": "00000000-0000-7000-8000-000000000821",
+        "instrument_public_id": _INSTRUMENT,
         "native_symbol": "BTC/EUR",
         "exchange": "coinbase",
         "instrument_exchange": "coinbase",
@@ -250,139 +96,540 @@ def _ref() -> InstrumentSymbolRefRow:
     }
 
 
-def _consumer() -> FxProofBackfillConsumer:
-    """Build one active sample and its persisted sealed watermark."""
-    return FxProofBackfillConsumer(
-        public_id="00000000-0000-7000-8000-000000000823",
-        wallet_public_id="00000000-0000-7000-8000-000000000824",
-        mode="live",
+def _accrual() -> PnlTimelineAccrualRow:
+    """Build one durable foreign-currency funding conversion."""
+    return {
+        "instrument_public_id": _INSTRUMENT,
+        "exchange": "coinbase",
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": _MINUTE + timedelta(minutes=2),
+        "amount": 3.0,
+        "amount_asset": "PLN",
+    }
+
+
+def _row(
+    base: str,
+    quote: str,
+    exchange: str,
+    minute: datetime,
+    identity: int,
+) -> PnlFxRateRow:
+    """Build one exact candle version for a candidate plane minute."""
+    return {
+        "base": base,
+        "quote": quote,
+        "exchange": exchange,
+        "open_at": minute - timedelta(minutes=1),
+        "close": 1.125,
+        "native_symbol": f"{base}/{quote}",
+        "instrument_public_id": _INSTRUMENT,
+        "candle_id": identity,
+        "candle_public_id": f"00000000-0000-7000-8003-{identity:012d}",
+        "candle_session_id": "00000000-0000-7000-8004-000000000001",
+        "candle_sequence_id": identity,
+        "candle_timestamp": minute - timedelta(minutes=1),
+        "candle_known_to": datetime.max.replace(tzinfo=UTC),
+    }
+
+
+class _DiscoveryRepository:
+    """Repository probe exposing competing planes and one lost instrument."""
+
+    def __init__(self) -> None:
+        self.horizons: list[datetime] = []
+
+    async def get_pnl_timeline_execution_prefix_at_watermarks(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: dict[str, int],
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Return the exact supplied cut and record its knowledge horizon."""
+        self.horizons.append(as_of)
+        return {
+            "watermarks": watermarks,
+            "executions": [
+                _execution(_MINUTE, 1),
+                _execution(_MINUTE + timedelta(minutes=1), 2),
+                _execution(_MINUTE, 3, _UNTRUSTED),
+            ],
+            "annulments": [],
+        }
+
+    async def get_accruals_for_pnl(
+        self, wallet_public_id: str, mode: str, as_of: datetime
+    ) -> list[PnlTimelineAccrualRow]:
+        """Return the sealed foreign funding row at the same horizon."""
+        self.horizons.append(as_of)
+        return [_accrual()]
+
+    async def get_instrument_symbol_refs(
+        self, instrument_public_ids: list[str], as_of: datetime
+    ) -> list[InstrumentSymbolRefRow]:
+        """Prove only the trusted instrument and preserve the lost peer."""
+        self.horizons.append(as_of)
+        return [_ref()]
+
+    async def get_pnl_fx_rate_exchanges(
+        self,
+        pairs: list[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[tuple[str, str, str]]:
+        """Expose partial Binance and complete Kraken candidate planes."""
+        self.horizons.append(as_of)
+        planes: list[tuple[str, str, str]] = []
+        if ("EUR", "USD") in pairs or ("USD", "EUR") in pairs:
+            planes.extend(("EUR", "USD", venue) for venue in ("binance", "kraken"))
+        if ("PLN", "USD") in pairs or ("USD", "PLN") in pairs:
+            planes.append(("PLN", "USD", "kraken"))
+        return planes
+
+    async def get_pnl_fx_rate_candles(
+        self,
+        planes: list[tuple[str, str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Make Binance partial while Kraken covers the true electorate."""
+        self.horizons.append(as_of)
+        rows = [
+            _row("EUR", "USD", "binance", _MINUTE, 1),
+            _row("EUR", "USD", "kraken", _MINUTE, 2),
+            _row("EUR", "USD", "kraken", _MINUTE + timedelta(minutes=1), 3),
+            _row("PLN", "USD", "kraken", _MINUTE + timedelta(minutes=2), 4),
+        ]
+        return [
+            row
+            for row in rows
+            if (row["base"], row["quote"], row["exchange"]) in planes
+            and start <= row["open_at"] <= end
+        ]
+
+    async def get_latest_visible_fx_conversion_artifact(
+        self, query: object, as_of: datetime
+    ) -> None:
+        """Report no existing proof and record the lookup horizon."""
+        self.horizons.append(as_of)
+        return None
+
+    async def has_visible_fx_conversion_refusal(self, query: object, as_of: datetime) -> bool:
+        """Report no existing refusal audit and record the lookup horizon."""
+        self.horizons.append(as_of)
+        return False
+
+    async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
+        """Return one SQL-aggregated consumer union."""
+        return [_consumer()]
+
+
+def _requirement(version: str = "5B.2") -> FxProofBackfillRequirement:
+    """Build one complete full-set requirement for apply convergence tests."""
+    rows = (
+        _row("EUR", "USD", "kraken", _MINUTE, 10),
+        _row("EUR", "USD", "kraken", _MINUTE + timedelta(minutes=1), 11),
+    )
+    evaluation = FxShadowEvaluation(
+        scope_kind="shared_pair",
+        consumer_instrument_public_id=None,
+        pair=("EUR", "USD"),
+        target_currency="USD",
+        required_minutes=frozenset({_MINUTE, _MINUTE + timedelta(minutes=1)}),
+        candidate_planes=frozenset({("EUR", "USD", "kraken")}),
+        selected_plane=("EUR", "USD", "kraken"),
+        requested_knowledge_at=_HORIZON,
+        rows=rows,
+        authoritative_rates={
+            (
+                row["base"],
+                row["quote"],
+                row["exchange"],
+                row["open_at"] + timedelta(minutes=1),
+            ): row["close"]
+            for row in rows
+        },
+    )
+    return FxProofBackfillRequirement(
+        wallet_public_id=_WALLET,
         valuation_ccy="USD",
-        calculation_version="5B.2",
-        point_kind="sample",
-        knowledge_at=_AS_OF,
-        watermarks={"coinbase": 1},
+        calculation_version=version,
+        knowledge_at=_HORIZON,
+        evaluation=evaluation,
+        pinned=False,
+        refusal_audited=False,
     )
 
 
-@pytest.mark.asyncio
-async def test_discovery_uses_singleton_manifest_and_detects_existing_pin() -> None:
-    """Discovery follows event semantics and checks the complete F1 identity.
+async def _repository(tmp_path: Path, name: str) -> SQLAlchemyRepository:
+    """Create an isolated real F1 repository."""
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / name}")
+    await repository.create_all()
+    return repository
 
-    Given one sealed EUR-priced execution with exact current candle evidence
-    When its consumer is discovered before and after a matching pin exists
-    Then its true one-minute shared manifest is returned with the right pin state
+
+@pytest.mark.asyncio
+async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> None:
+    """Full consumer electorates reproduce election ranking and retain good peers.
+
+    Given Binance covers one EUR minute, Kraken covers both, one PLN accrual, and one bad instrument
+    When the consumer is derived at its sealed knowledge horizon
+    Then Kraken wins the two-minute manifest, accrual conversion remains, and only the bad peer refuses
     """
-    missing_repo = cast(Repository, _DiscoveryRepository())
-    evaluations = await _consumer_evaluations(missing_repo, _consumer(), _AS_OF)
-    missing = await discover_fx_proof_backfill(missing_repo)
-    present_repo = cast(Repository, _DiscoveryRepository(artifact_present=True))
-    assert len(evaluations) == 1
-    assert evaluations[0].required_minutes == frozenset({_MINUTE})
-    assert not missing.requirements[0].pinned
-    assert await _is_pinned(present_repo, evaluations[0], "5B.2")
-    refused = await discover_fx_proof_backfill(
-        cast(Repository, _DiscoveryRepository(identity_present=False))
+    fake = _DiscoveryRepository()
+    repo = cast(Repository, fake)
+    discovery = await _consumer_discovery(repo, _consumer())
+    by_pair = {item.evaluation.pair: item for item in discovery.requirements}
+    eur = by_pair[("EUR", "USD")].evaluation
+    assert eur.required_minutes == frozenset({_MINUTE, _MINUTE + timedelta(minutes=1)})
+    assert eur.selected_plane == ("EUR", "USD", "kraken")
+    assert by_pair[("PLN", "USD")].evaluation.required_minutes == frozenset(
+        {_MINUTE + timedelta(minutes=2)}
     )
-    assert "identity cannot be proven" in refused.semantic_refusals[0]
+    assert discovery.semantic_refusals[0].instrument_public_id == _UNTRUSTED
+    assert discovery.semantic_refusals[0].lost_requirements == (
+        f"execution:00000000-0000-7000-8000-000000000003@{_MINUTE.isoformat()}",
+    )
+    assert fake.horizons and set(fake.horizons) == {_HORIZON}
 
 
 @pytest.mark.asyncio
-async def test_failed_batch_does_not_advance_checkpoint(
+async def test_apply_db_state_overrides_cursor_and_completed_rerun_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed canonical write leaves the resumable cursor before its batch.
+    """Cursor position never hides missing DB work and completed DB state skips writes.
 
-    Given one requirement and a repository whose pin writer fails
-    When apply processes the bounded batch
-    Then failure is counted and no checkpoint claims the batch completed
+    Given a cursor at consumer one, an empty restored DB, and two calculation-version requirements
+    When apply runs, then runs again against the populated DB
+    Then both missing proofs are created despite the hint and the rerun performs zero pin reuse calls
     """
+    repository = await _repository(tmp_path, "restored.db")
+    consumers = [_consumer("5A.13"), _consumer("5B.2")]
 
-    class _FailingRepository:
-        async def pin_fx_conversion_artifact(self, election: object, proofs: object) -> object:
-            """Fail the persistence boundary deterministically."""
-            raise RuntimeError("write failed")
+    async def list_consumers() -> list[FxProofBackfillConsumer]:
+        """Return both durable calculation-version unions."""
+        return consumers
 
-    async def discover(_: object) -> FxProofBackfillDiscovery:
-        """Return one requirement for the failed batch."""
-        return FxProofBackfillDiscovery((_requirement(),), ())
+    async def derive(
+        repo: Repository, consumer: FxProofBackfillConsumer
+    ) -> FxProofBackfillDiscovery:
+        """Return the requirement belonging to the selected consumer."""
+        return FxProofBackfillDiscovery((_requirement(consumer.calculation_version),), ())
 
+    monkeypatch.setattr(repository, "list_fx_proof_backfill_consumers", list_consumers)
     monkeypatch.setattr(
-        "snapper.application.portfolio.fx_proof_backfill.discover_fx_proof_backfill",
-        discover,
+        "snapper.application.portfolio.fx_proof_backfill._consumer_discovery", derive
     )
-    checkpoint = tmp_path / "failed.json"
-    result = await run_fx_proof_backfill(
-        cast(Repository, _FailingRepository()),
-        True,
-        checkpoint,
-    )
-    assert result.processed == 0
-    assert result.metrics.failure == 1
+    checkpoint = tmp_path / "cursor.json"
+    _write_checkpoint(checkpoint, _consumer_manifest(consumers), 1)
+    first = await run_fx_proof_backfill(repository, True, checkpoint)
+    second = await run_fx_proof_backfill(repository, True, checkpoint)
+    assert first.proof_creations == 2
+    assert first.metrics.creation == 2
+    assert first.fully_verified
     assert not checkpoint.exists()
+    assert second.proof_creations == 0
+    assert second.metrics.creation == 0
+    assert second.metrics.reuse == 0
+    await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_repository_enumerates_only_active_pnl_cuts_and_proves_exact_empty_map(
-    tmp_path: Path,
+async def test_refusal_audit_is_classified_without_claiming_proof_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repository discovery exposes P&L consumers and never captures a newer cut.
+    """A missing-candle election creates an audit but never claims a proof.
 
-    Given one active P&L anchor with a persisted empty watermark map
-    When F3 enumerates consumers and certifies that exact map
-    Then the anchor is returned and the proven execution prefix remains empty
+    Given one full-set requirement whose raw election has no selected plane
+    When apply persists and verifies the canonical refusal
+    Then the audit count increments while proof creations stay zero
     """
-    repository = await _repository(tmp_path)
-    wallet = "00000000-0000-7000-8000-000000000830"
-    anchor = PortfolioPnlAnchorRow(
-        public_id=portfolio_pnl_anchor_public_id(wallet, "live", "USD"),
-        session_id="00000000-0000-7000-8000-000000000831",
+    repository = await _repository(tmp_path, "refusal.db")
+    consumer = _consumer()
+    refused = replace(
+        _requirement(),
+        evaluation=replace(_requirement().evaluation, selected_plane=None, rows=()),
+    )
+
+    async def consumers() -> list[FxProofBackfillConsumer]:
+        """Return the refusal's durable consumer."""
+        return [consumer]
+
+    async def derive(
+        repo: Repository, selected: FxProofBackfillConsumer
+    ) -> FxProofBackfillDiscovery:
+        """Return the raw refusal evaluation."""
+        return FxProofBackfillDiscovery((refused,), ())
+
+    monkeypatch.setattr(repository, "list_fx_proof_backfill_consumers", consumers)
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._consumer_discovery", derive
+    )
+    result = await run_fx_proof_backfill(repository, True, tmp_path / "refusal.json")
+    assert result.proof_creations == 0
+    assert result.refusal_audit_creations == 1
+    assert result.requirements[0].refusal_audited
+    assert not result.requirements[0].pinned
+    owned = replace(
+        refused,
+        evaluation=replace(
+            refused.evaluation,
+            scope_kind="instrument_owned",
+            consumer_instrument_public_id=_INSTRUMENT,
+        ),
+    )
+
+    async def derive_owned(
+        repo: Repository, selected: FxProofBackfillConsumer
+    ) -> FxProofBackfillDiscovery:
+        """Return one instrument-owned raw refusal."""
+        return FxProofBackfillDiscovery((owned,), ())
+
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._consumer_discovery", derive_owned
+    )
+    owned_result = await run_fx_proof_backfill(repository, True, tmp_path / "owned-refusal.json")
+    assert owned_result.requirements[0].refusal_audited
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_repository_aggregates_active_watermark_union_in_sql(tmp_path: Path) -> None:
+    """Active point enumeration returns SQL maxima instead of ORM point entities.
+
+    Given two active points in one scope with different exchange cuts and timestamps
+    When the repository enumerates F3 consumers
+    Then one union carries per-exchange maxima and the latest consumer horizon
+    """
+    repository = await _repository(tmp_path, "aggregate.db")
+    common = {
+        "wallet_public_id": _WALLET,
+        "mode": "live",
+        "valuation_ccy": "USD",
+        "epoch_public_id": "00000000-0000-7000-8000-000000000850",
+        "calc_version": "5B.2",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "external_flow_adjustment": 0.0,
+        "unrealized_pnl": None,
+        "cash_usd": None,
+        "position_value_usd": None,
+        "drawdown": None,
+        "mark_source": None,
+        "mark_time": None,
+        "opening_basket_json": "{}",
+        "contributions_json": None,
+    }
+    first = PortfolioPnlPoint(
+        public_id="00000000-0000-7000-8000-000000000851",
+        session_id="00000000-0000-7000-8000-000000000852",
         sequence_id=1,
-        timestamp=_AS_OF,
-        wallet_public_id=wallet,
-        mode="live",
-        valuation_ccy="USD",
+        timestamp=_HORIZON - timedelta(minutes=1),
         point_time=_MINUTE,
-        point_kind="anchor",
-        epoch_public_id="00000000-0000-7000-8000-000000000832",
-        calc_version="5A.13",
-        valuation_status="complete",
-        realized_pnl=0.0,
-        fee_pnl=0.0,
-        accrual_pnl=0.0,
-        unrealized_pnl=0.0,
-        external_flow_adjustment=0.0,
-        cash_usd=None,
-        position_value_usd=None,
-        drawdown=None,
-        mark_source="finalized_1m",
-        mark_time=_MINUTE,
+        point_kind="sample",
+        valuation_status="incomplete",
+        watermarks_json='{"coinbase":2,"kraken":4}',
+        **common,
+    )
+    second = PortfolioPnlPoint(
+        public_id="00000000-0000-7000-8000-000000000853",
+        session_id="00000000-0000-7000-8000-000000000854",
+        sequence_id=2,
+        timestamp=_HORIZON,
+        point_time=_MINUTE + timedelta(minutes=1),
+        point_kind="sample",
+        valuation_status="incomplete",
+        watermarks_json='{"coinbase":7}',
+        **common,
+    )
+    empty_scope = PortfolioPnlPoint(
+        public_id="00000000-0000-7000-8000-000000000855",
+        session_id="00000000-0000-7000-8000-000000000856",
+        sequence_id=3,
+        timestamp=_HORIZON,
+        point_time=_MINUTE,
+        point_kind="sample",
+        valuation_status="incomplete",
         watermarks_json="{}",
-        opening_basket_json="{}",
-        contributions_json="{}",
+        **{**common, "valuation_ccy": "EUR"},
     )
-    await repository.record_portfolio_pnl_anchor(anchor)
+    async with repository.session() as session:
+        session.add_all((first, second, empty_scope))
+        await session.commit()
     consumers = await repository.list_fx_proof_backfill_consumers()
+    assert len(consumers) == 2
+    usd = next(consumer for consumer in consumers if consumer.valuation_ccy == "USD")
+    eur = next(consumer for consumer in consumers if consumer.valuation_ccy == "EUR")
+    assert usd.watermarks == {"coinbase": 7, "kraken": 4}
+    assert usd.knowledge_at == _HORIZON
+    assert eur.watermarks == {}
     prefix = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
-        wallet,
-        "live",
-        {},
-        _AS_OF,
+        _WALLET, "live", {}, _HORIZON
     )
-    assert len(consumers) == 1
-    assert consumers[0].point_kind == "anchor"
-    assert consumers[0].watermarks == {}
     assert prefix["executions"] == []
     with pytest.raises(ValueError, match="watermark map"):
         await repository.get_pnl_timeline_execution_prefix_at_watermarks(
-            wallet,
-            "live",
-            {"": -1},
-            _AS_OF,
+            _WALLET, "live", {"": -1}, _HORIZON
         )
     async with repository.session() as session:
-        persisted = (await session.execute(select(PortfolioPnlPoint))).scalar_one()
-        persisted.watermarks_json = "[]"
+        second.watermarks_json = "[]"
+        session.add(second)
+        await session.commit()
+    with pytest.raises(ValueError, match="invalid execution watermarks"):
+        await repository.list_fx_proof_backfill_consumers()
+    async with repository.session() as session:
+        second.watermarks_json = '{"bad":-1}'
+        session.add(second)
         await session.commit()
     with pytest.raises(ValueError, match="invalid execution watermarks"):
         await repository.list_fx_proof_backfill_consumers()
     await repository.engine.dispose()
+
+
+def test_checkpoint_lock_reset_rotation_and_metric_delta(tmp_path: Path) -> None:
+    """Checkpoint durability helpers preserve hint-only and single-writer semantics.
+
+    Given stale and valid cursor files, two consumers, and process metric snapshots
+    When hints, rotation, reset, and lock contention are exercised
+    Then stale hints restart, every consumer remains ordered, and only one writer enters
+    """
+    consumers = [_consumer("5A.13"), _consumer("5B.2")]
+    digest = _consumer_manifest(consumers)
+    checkpoint = tmp_path / "nested" / "cursor.json"
+    assert _checkpoint_start(checkpoint, digest, 2) == 0
+    _write_checkpoint(checkpoint, digest, 1)
+    assert _checkpoint_start(checkpoint, digest, 2) == 1
+    checkpoint.write_text(json.dumps({"cursor": 9, "manifest_digest": digest}), encoding="utf-8")
+    assert _checkpoint_start(checkpoint, digest, 2) == 0
+    checkpoint.write_text("[]", encoding="utf-8")
+    assert _checkpoint_start(checkpoint, digest, 2) == 0
+    assert [index for index, _ in _ordered_consumers(consumers, 1)] == [1, 0]
+    before = FxShadowPinMetrics(creation=2, reuse=1)
+    after = FxShadowPinMetrics(creation=5, reuse=4, failure=1)
+    delta = _metric_delta(before, after)
+    assert (delta.creation, delta.reuse, delta.failure) == (3, 3, 1)
+    with (
+        fx_proof_backfill_apply_lock(checkpoint),
+        pytest.raises(ValueError, match="already running"),
+        fx_proof_backfill_apply_lock(checkpoint),
+    ):
+        raise AssertionError("unreachable")
+    reset_fx_proof_backfill_checkpoint(checkpoint)
+    reset_fx_proof_backfill_checkpoint(checkpoint)
+    _fsync_directory(tmp_path)
+    assert not checkpoint.exists()
+
+
+@pytest.mark.asyncio
+async def test_report_discovery_deduplicates_identical_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical shared identities across consumer discovery appear only once.
+
+    Given the same consumer union is returned twice
+    When the no-write discovery report is assembled
+    Then shared-pair identity is deduplicated without changing its full manifest
+    """
+    fake = _DiscoveryRepository()
+
+    async def consumers() -> list[FxProofBackfillConsumer]:
+        """Return a duplicate union to probe report deduplication."""
+        return [_consumer(), _consumer()]
+
+    monkeypatch.setattr(fake, "list_fx_proof_backfill_consumers", consumers)
+    discovery = await discover_fx_proof_backfill(cast(Repository, fake))
+    assert len(discovery.requirements) == 2
+    assert len(discovery.semantic_refusals) == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluation_count_mismatch_becomes_enumerated_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swallowed collector factory failure cannot silently erase requirements.
+
+    Given derived event requirements but a loader that collects no evaluations
+    When the consumer invariant compares expected and actual electorates
+    Then the whole lost input set is returned as an explicit semantic refusal
+    """
+
+    async def load_without_collection(
+        *arguments: object,
+    ) -> tuple[dict[object, object], dict[object, object], set[object]]:
+        """Represent a collector factory failure after requirement derivation."""
+        return {}, {}, set()
+
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._load_request_fx_rates",
+        load_without_collection,
+    )
+    discovery = await _consumer_discovery(cast(Repository, _DiscoveryRepository()), _consumer())
+    assert discovery.requirements == ()
+    assert discovery.semantic_refusals[-1].reason == "fx_evaluation_count_mismatch"
+    assert any("EUR-USD" in item for item in discovery.semantic_refusals[-1].lost_requirements)
+
+
+@pytest.mark.asyncio
+async def test_report_mode_and_adverse_apply_completion_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No-write reporting and an adverse writer expose distinct completion states.
+
+    Given one consumer requirement and a repository writer that fails
+    When report mode runs and apply attempts the same requirement
+    Then report stays verified while apply aborts before checkpoint completion
+    """
+    repository = await _repository(tmp_path, "failure.db")
+    consumer = _consumer()
+
+    async def consumers() -> list[FxProofBackfillConsumer]:
+        """Return one consumer for both modes."""
+        return [consumer]
+
+    async def derive(
+        repo: Repository, selected: FxProofBackfillConsumer
+    ) -> FxProofBackfillDiscovery:
+        """Return one missing proof requirement."""
+        return FxProofBackfillDiscovery((_requirement(),), ())
+
+    async def fail_pin(election: object, proofs: object) -> object:
+        """Fail the F1 persistence boundary."""
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(repository, "list_fx_proof_backfill_consumers", consumers)
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._consumer_discovery", derive
+    )
+    report = await run_fx_proof_backfill(repository, False, tmp_path / "report.json")
+    monkeypatch.setattr(repository, "pin_fx_conversion_artifact", fail_pin)
+    applied = await run_fx_proof_backfill(repository, True, tmp_path / "apply.json")
+    assert report.fully_verified
+    assert applied.aborted
+    assert not applied.fully_verified
+    assert applied.processed_consumers == 0
+    await repository.engine.dispose()
+
+
+def test_owned_electorate_count_includes_only_required_identity_pair() -> None:
+    """The evaluation invariant counts real instrument-owned electorates exactly.
+
+    Given one identity instrument with its own-pair and one unrelated pair requirement
+    When the expected F2 evaluation count is derived
+    Then one owned and one shared electorate are required
+    """
+    requirements = {
+        _INSTRUMENT: {
+            ("BTC", "EUR"): {_MINUTE},
+            ("EUR", "USD"): {_MINUTE},
+        }
+    }
+    identities = {
+        _INSTRUMENT: ("BTC", "EUR", "coinbase"),
+        _UNTRUSTED: ("ETH", "EUR", "coinbase"),
+    }
+    assert _expected_evaluation_count(requirements, identities) == 2
