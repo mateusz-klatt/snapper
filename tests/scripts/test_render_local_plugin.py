@@ -100,6 +100,16 @@ class TestRenderPlugin:
         rendered_files = sorted(p.name for p in (plugin_dir / CLAUDE_PLUGIN_SUBDIR).iterdir())
         assert rendered_files == ["marketplace.json", "plugin.json"]
 
+    def test_renders_a_top_level_json_array_without_manifest_rewrite(self, tmp_path: Path) -> None:
+        """A non-object JSON template bypasses manifest trigger qualification."""
+        _write_template(tmp_path, "catalog.json", json.dumps([PLACEHOLDER, "stable"]))
+
+        plugin_dir = render_plugin(tmp_path)
+
+        rendered_path = plugin_dir / CLAUDE_PLUGIN_SUBDIR / "catalog.json"
+        rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+        assert rendered == [str(tmp_path), "stable"]
+
     def test_render_is_idempotent(self, tmp_path: Path) -> None:
         """Re-running render against the same templates yields identical output."""
         _write_template(tmp_path, "plugin.json", json.dumps({"path": PLACEHOLDER}))
@@ -208,6 +218,16 @@ class TestQualifySkillTriggers:
     def test_ignores_a_manifest_without_monitors(self) -> None:
         """A manifest declaring no monitors is a no-op, not an error."""
         assert qualify_skill_triggers({"name": "snapper-mcp-local"}) is False
+
+    def test_ignores_non_object_monitor_entries(self) -> None:
+        """Malformed monitor entries are skipped without mutating the manifest."""
+        manifest: dict[str, JsonValue] = {
+            "name": "snapper-mcp-local",
+            "monitors": ["invalid"],
+        }
+
+        assert qualify_skill_triggers(manifest) is False
+        assert manifest["monitors"] == ["invalid"]
 
     def test_render_qualifies_the_rendered_manifest(self, tmp_path: Path) -> None:
         """The rendered plugin carries the qualified trigger, the template the bare one."""
