@@ -304,7 +304,8 @@ def refresh_workflow_file(path: Path, workspace_root: Path) -> int:
             print(f"  {safe_path}: {line.strip()} -> {new_line.strip()}")
         new_lines.append(new_line)
     if changed_count > 0:
-        safe_path.write_text("".join(new_lines), encoding="utf-8")
+        with safe_path.open("w", encoding="utf-8") as stream:
+            stream.write("".join(new_lines))
     return changed_count
 
 

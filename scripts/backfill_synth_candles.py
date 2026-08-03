@@ -142,14 +142,17 @@ class _ExchangeScheduler:
             self.now,
         )
         logger.info(f"[{exchange}] {len(symbols)} symbols, {len(public_ids)} resolved")
+        eligible: list[tuple[str, str]] = []
+        for symbol in symbols:
+            if (exchange, symbol) in self.done:
+                continue
+            instrument_public_id = public_ids.get(symbol)
+            if instrument_public_id is None:
+                self.totals.skipped_no_instrument += 1
+                continue
+            eligible.append((symbol, instrument_public_id))
         async with asyncio.TaskGroup() as task_group:
-            for symbol in symbols:
-                if (exchange, symbol) in self.done:
-                    continue
-                instrument_public_id = public_ids.get(symbol)
-                if instrument_public_id is None:
-                    self.totals.skipped_no_instrument += 1
-                    continue
+            for symbol, instrument_public_id in eligible:
                 task_group.create_task(self.worker(exchange, symbol, instrument_public_id))
 
 

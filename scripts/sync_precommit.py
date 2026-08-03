@@ -130,7 +130,8 @@ def _write_config(content: str) -> None:
     Raises:
         FileNotFoundError: If config file does not exist.
     """
-    _precommit_config_path().write_text(content, encoding="utf-8")
+    with _precommit_config_path().open("w", encoding="utf-8") as stream:
+        stream.write(content)
 
 
 def update_config(

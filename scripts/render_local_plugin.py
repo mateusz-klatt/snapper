@@ -271,7 +271,8 @@ def _substitute_placeholder_in_file(
     except UnicodeDecodeError:
         return
     if PLACEHOLDER in text:
-        safe_path.write_text(text.replace(PLACEHOLDER, replacement), encoding="utf-8")
+        with safe_path.open("w", encoding="utf-8") as stream:
+            stream.write(text.replace(PLACEHOLDER, replacement))
 
 
 def update_claude_settings(settings_path: Path, plugin_dir: Path) -> bool:

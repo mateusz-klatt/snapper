@@ -2801,7 +2801,8 @@ def strip_eslint_disable_file(file_path: Path, allowed_root: Path) -> None:
     updated = _strip_jsdoc_blocks(updated)
 
     if updated != content:
-        safe_file_path.write_text(updated, encoding="utf-8")
+        with safe_file_path.open("w", encoding="utf-8") as stream:
+            stream.write(updated)
 
 
 def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:

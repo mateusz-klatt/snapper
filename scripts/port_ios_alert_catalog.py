@@ -318,7 +318,8 @@ def upsert_nav_alerts(common_path: Path, nav_label: str, locales_root: Path) -> 
     sorted_nav = dict(sorted(nav.items()))
     raw["nav"] = sorted_nav
     rendered = json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
-    safe_common_path.write_text(rendered, encoding="utf-8")
+    with safe_common_path.open("w", encoding="utf-8") as stream:
+        stream.write(rendered)
 
 
 def _merge_preserving_frontend_keys(
