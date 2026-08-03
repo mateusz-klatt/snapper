@@ -65,7 +65,7 @@ _OUTCOME_AFTER = (
 )
 
 
-def _recreate_mode() -> Literal["auto", "always", "never"]:
+def _recreate_mode() -> Literal["auto", "always"]:
     """Return the batch recreate mode this dialect actually needs.
 
     SQLite cannot alter a CHECK constraint in place, so its table must be
