@@ -22,6 +22,7 @@ import json
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from loguru import logger
 from starlette.types import ASGIApp
@@ -39,6 +40,17 @@ from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _MUTATION_METHODS = {b"POST", b"PUT", b"DELETE", b"PATCH"}
+
+
+def _uuid_text_or_none(value: object) -> str | None:
+    """Return canonical UUID text, otherwise ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return None
+    return str(parsed)
 
 
 class ClientProvenanceMiddleware:
@@ -229,9 +241,16 @@ class ClientProvenanceMiddleware:
         if not isinstance(payload, dict):
             return None
 
-        session_id: str = payload.get("session_id", "")
-        sequence_id: int = payload.get("sequence_id", 0)
-        public_id: str = payload.get("public_id", "")
+        raw_session_id = payload.get("session_id")
+        raw_sequence_id = payload.get("sequence_id")
+        raw_public_id = payload.get("public_id")
+        session_id = raw_session_id if isinstance(raw_session_id, str) else ""
+        sequence_id = (
+            raw_sequence_id
+            if isinstance(raw_sequence_id, int) and not isinstance(raw_sequence_id, bool)
+            else 0
+        )
+        public_id = raw_public_id if isinstance(raw_public_id, str) else ""
 
         if not session_id and sequence_id == 0 and not public_id:
             return payload
@@ -280,12 +299,11 @@ class ClientProvenanceMiddleware:
             return
         try:
             redacted = redact(payload_dict)
-            client_session = (
-                payload_dict.get("session_id") if isinstance(payload_dict, dict) else None
-            )
-            client_public = (
-                payload_dict.get("public_id") if isinstance(payload_dict, dict) else None
-            )
+            client_session: str | None = None
+            client_public: str | None = None
+            if isinstance(payload_dict, dict):
+                client_session = _uuid_text_or_none(payload_dict.get("session_id"))
+                client_public = _uuid_text_or_none(payload_dict.get("public_id"))
             repo = get_repository(self.db_url)
             now = datetime.now(UTC)
             row = Control(

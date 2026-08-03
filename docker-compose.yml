@@ -309,6 +309,9 @@ services:
     container_name: snapper-web
     entrypoint: ["/usr/bin/caddy"]
     command: ["run", "--config", "/etc/caddy/Caddyfile"]
+    environment:
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
     ports:
       - "127.0.0.1:8000:8000"
     expose:

@@ -18,6 +18,8 @@ from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
+_CLIENT_SESSION_ID = "019e873c-cf6c-72a4-88d6-07199e9cbd96"
+_CLIENT_PUBLIC_ID = "019fc3ba-79f6-72dd-8f24-09084ae1d7c5"
 
 
 async def _echo_handler(request: Request) -> JSONResponse:
@@ -89,7 +91,13 @@ class TestControlRecordingOk:
         ):
             app = _create_test_app(db_url=TEST_DB_URL)
             client = TestClient(app)
-            body = json.dumps({"session_id": "s1", "sequence_id": 1, "public_id": "p1"})
+            body = json.dumps(
+                {
+                    "session_id": _CLIENT_SESSION_ID,
+                    "sequence_id": 1,
+                    "public_id": _CLIENT_PUBLIC_ID,
+                }
+            )
             resp = client.post("/mutate", content=body)
 
         assert resp.status_code == 200
@@ -99,7 +107,124 @@ class TestControlRecordingOk:
         assert row.direction == "inbound"
         assert row.outcome == "ok"
         assert row.detail is None
+        assert row.client_session_id == _CLIENT_SESSION_ID
+        assert row.client_public_id == _CLIENT_PUBLIC_ID
         assert "[REDACTED]" not in (row.payload or "")
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"sequence_id": 0},
+            {"session_id": "", "sequence_id": 0, "public_id": ""},
+        ],
+        ids=["absent", "empty"],
+    )
+    async def test_missing_client_uuid_provenance_is_persisted_as_null(
+        self, body: dict[str, object]
+    ) -> None:
+        """Missing client UUIDs remain in payload but bind as nullable SQL fields."""
+        mock_repo, mock_session = _build_mock_repo()
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            app = _create_test_app(db_url=TEST_DB_URL)
+            client = TestClient(app)
+            response = client.post("/mutate", content=json.dumps(body))
+
+        assert response.status_code == 200
+        row = mock_session.add.call_args[0][0]
+        assert row.client_session_id is None
+        assert row.client_public_id is None
+        assert json.loads(row.payload) == body
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"session_id": "not-a-uuid", "public_id": "also-invalid"},
+            {"session_id": " ", "public_id": "\t"},
+            {"session_id": ["unexpected"], "public_id": 42},
+        ],
+        ids=["malformed", "whitespace", "wrong-types"],
+    )
+    async def test_invalid_client_uuid_provenance_is_persisted_as_null(
+        self, body: dict[str, object]
+    ) -> None:
+        """Invalid client UUIDs cannot make PostgreSQL discard the audit row."""
+        mock_repo, mock_session = _build_mock_repo()
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            app = _create_test_app(db_url=TEST_DB_URL)
+            client = TestClient(app)
+            response = client.post("/mutate", content=json.dumps(body))
+
+        assert response.status_code == 200
+        row = mock_session.add.call_args[0][0]
+        assert row.client_session_id is None
+        assert row.client_public_id is None
+        assert json.loads(row.payload) == body
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_noncanonical_uuid_text_is_canonicalized_for_sql_columns(self) -> None:
+        """Python-only UUID spellings cannot break PostgreSQL audit persistence.
+
+        Given: Valid UUID values using URN and brace spellings,
+        When: A mutation is recorded into native UUID columns,
+        Then: The SQL fields are canonical while the audit payload remains original.
+        """
+        mock_repo, mock_session = _build_mock_repo()
+        body = {
+            "session_id": f"urn:uuid:{_CLIENT_SESSION_ID}",
+            "public_id": "{" + _CLIENT_PUBLIC_ID.upper() + "}",
+        }
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            app = _create_test_app(db_url=TEST_DB_URL)
+            client = TestClient(app)
+            response = client.post("/mutate", content=json.dumps(body))
+
+        assert response.status_code == 200
+        row = mock_session.add.call_args[0][0]
+        assert row.client_session_id == _CLIENT_SESSION_ID
+        assert row.client_public_id == _CLIENT_PUBLIC_ID
+        assert json.loads(row.payload) == body
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sequence_id", ["1", [1], {"value": 1}, True])
+    async def test_invalid_sequence_type_does_not_break_request_or_recording(
+        self, sequence_id: object
+    ) -> None:
+        """Malformed provenance remains non-blocking before endpoint validation."""
+        mock_repo, mock_session = _build_mock_repo()
+        body = {
+            "session_id": _CLIENT_SESSION_ID,
+            "sequence_id": sequence_id,
+            "public_id": _CLIENT_PUBLIC_ID,
+        }
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            app = _create_test_app(db_url=TEST_DB_URL)
+            client = TestClient(app)
+            response = client.post("/mutate", content=json.dumps(body))
+
+        assert response.status_code == 200
+        assert mock_session.add.call_args[0][0].client_session_id == _CLIENT_SESSION_ID
         mock_session.commit.assert_awaited_once()
 
 
