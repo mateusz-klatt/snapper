@@ -632,6 +632,7 @@ async def test_finding_keeps_cursor_and_worklog_obligation_pending(tmp_path: Pat
         )
 
     assert second_result.findings
-    assert (second_result.cursor_timestamp, second_result.cursor_id) == first_cursor
+    second_cursor = (second_result.cursor_timestamp, second_result.cursor_id)
+    assert second_cursor == first_cursor
     assert pending == 1
     await repository.engine.dispose()

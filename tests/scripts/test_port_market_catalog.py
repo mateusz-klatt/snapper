@@ -221,7 +221,8 @@ class TestRewritePlaceholders:
         )
         assert result == "%1$@ extra {{rogue}}"
         err = capsys.readouterr().err
-        assert "rogue" in err and "not in EN template order" in err
+        assert "rogue" in err
+        assert "not in EN template order" in err
 
     def test_repeated_name_uses_same_positional_index(self) -> None:
         """Repeated name maps to the same ``%N$@`` slot."""

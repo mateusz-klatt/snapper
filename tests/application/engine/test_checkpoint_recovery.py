@@ -1796,10 +1796,10 @@ class TestR9GapRecovery:
         shard = coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
         shard.position.position_qty = 0.5
 
+        rebuild_from = datetime(2024, 6, 1, tzinfo=UTC)
+
         with pytest.raises(RuntimeError):
-            await coord._rebuild_shard_if_gapped(
-                "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
-            )
+            await coord._rebuild_shard_if_gapped("kraken.BTC-USD.live", rebuild_from)
 
         assert coord.trade_service._shards[
             "kraken.BTC-USD.live"

@@ -416,14 +416,16 @@ async def test_rejects_polygon_exchange() -> None:
     When: coverage is verified,
     Then: a ValueError is raised before any DB read.
     """
+    empty_repo = cast(Any, _StubRepo({}))
+    cut_date = date(2026, 6, 15)
     with pytest.raises(ValueError, match="polygon"):
         await verify_candle_coverage(
-            repo=cast(Any, _StubRepo({})),
+            repo=empty_repo,
             cache=None,
             exchange=ExchangeEnum.POLYGON,
             native_symbols=["FET-USD"],
             timeframes=["5m"],
-            cut_date=date(2026, 6, 15),
+            cut_date=cut_date,
             as_of=_AS_OF,
             writer_lag_s=_WRITER_LAG,
             min_bars=3,
@@ -477,8 +479,9 @@ async def test_rejects_unknown_timeframe() -> None:
     When: coverage is verified,
     Then: a ValueError naming it is raised.
     """
+    empty_repo = _StubRepo({})
     with pytest.raises(ValueError, match="unverifiable"):
-        await _verify(_StubRepo({}), timeframes=["2m"])
+        await _verify(empty_repo, timeframes=["2m"])
 
 
 def _settings(symbols: list[str]) -> Any:

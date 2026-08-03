@@ -157,8 +157,10 @@ class TestNarrowestMatches:
         ordered = _narrowest_matches(device=_device(), alert=alert, prefs=prefs)
 
         assert ordered[0]["wallet_public_id"] == "wal-1"
-        assert ordered[1]["operator_public_id"] == "op-1" and ordered[1]["wallet_public_id"] is None
-        assert ordered[2]["operator_public_id"] is None and ordered[2]["wallet_public_id"] is None
+        assert ordered[1]["operator_public_id"] == "op-1"
+        assert ordered[1]["wallet_public_id"] is None
+        assert ordered[2]["operator_public_id"] is None
+        assert ordered[2]["wallet_public_id"] is None
 
     def test_other_device_prefs_ignored(self) -> None:
         """Covered by test body."""

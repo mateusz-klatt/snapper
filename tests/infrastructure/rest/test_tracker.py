@@ -377,7 +377,9 @@ class TestSingletonAccess:
         second = get_rest_call_tracker()
         assert first is second
 
-    def test_returns_seeded_instance_when_created_before_inner_check(self) -> None:
+    def test_returns_seeded_instance_when_created_before_inner_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The inner singleton check reuses an instance seeded during lock entry.
 
         Given:
@@ -391,7 +393,7 @@ class TestSingletonAccess:
             ``get_rest_call_tracker`` returns that seeded instance.
         """
         seeded = RestCallTracker()
-        tracker_module._SingletonHolder.instance = None
+        monkeypatch.setattr(tracker_module._SingletonHolder, "instance", None)
 
         class _SeedLock:
             def __enter__(self) -> None:

@@ -262,8 +262,9 @@ class TestBaseline:
         """Malformed and non-canonical baseline documents fail closed."""
         document = _baseline_document()
         document[field] = value
+        baseline_path = _write_baseline(tmp_path, document)
         with pytest.raises(ratchet.RatchetError, match=message):
-            ratchet.load_baseline(_write_baseline(tmp_path, document))
+            ratchet.load_baseline(baseline_path)
 
 
 class TestInventoryCollection:

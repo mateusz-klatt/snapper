@@ -366,6 +366,7 @@ class TestCreateWallet:
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        created_at = datetime.now(UTC)
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             pytest.raises(IntegrityError),
@@ -376,7 +377,7 @@ class TestCreateWallet:
                 is_paper=False,
                 session_id="test-session",
                 sequence_id=99,
-                timestamp=datetime.now(UTC),
+                timestamp=created_at,
             )
 
 
@@ -453,6 +454,7 @@ class TestCreateOperator:
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        created_at = datetime.now(UTC)
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             pytest.raises(IntegrityError),
@@ -462,5 +464,5 @@ class TestCreateOperator:
                 description=None,
                 session_id="test-session",
                 sequence_id=1,
-                timestamp=datetime.now(UTC),
+                timestamp=created_at,
             )

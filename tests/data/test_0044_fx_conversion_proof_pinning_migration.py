@@ -129,12 +129,12 @@ def test_0044_election_checks_reject_invalid_rows(
 ) -> None:
     """Every election CHECK rejects a concrete violating insert."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
-    s5778_value_1 = _election("00000000-0000-7000-8000-000000000010", **overrides)
+    violating_election = _election("00000000-0000-7000-8000-000000000010", **overrides)
     with pytest.raises(IntegrityError):
         _insert(
             engine,
             "fx_conversion_elections",
-            s5778_value_1,
+            violating_election,
         )
     engine.dispose()
 
@@ -153,7 +153,7 @@ def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
 ) -> None:
     """Proof checks enforce operation, rate shape, and the prior-minute candle."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
-    s5778_value_1 = _proof(
+    violating_proof = _proof(
         "00000000-0000-7000-8000-000000000011",
         "00000000-0000-7000-8000-000000000010",
         **overrides,
@@ -162,7 +162,7 @@ def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
         _insert(
             engine,
             "fx_conversion_proofs",
-            s5778_value_1,
+            violating_proof,
         )
     engine.dispose()
 
@@ -272,15 +272,17 @@ def test_0044_proof_unique_index_and_immutability_triggers(migrated_db_path: Pat
     _insert(
         engine, "fx_conversion_proofs", _proof("00000000-0000-7000-8000-000000000031", election_id)
     )
-    s5778_value_1 = _proof("00000000-0000-7000-8000-000000000032", election_id)
+    duplicate_proof = _proof("00000000-0000-7000-8000-000000000032", election_id)
     with pytest.raises(IntegrityError):
         _insert(
             engine,
             "fx_conversion_proofs",
-            s5778_value_1,
+            duplicate_proof,
         )
+    election_update = sa.text("UPDATE fx_conversion_elections SET sequence_id = 9")
     with engine.begin() as connection, pytest.raises(IntegrityError, match="append-only"):
-        connection.execute(sa.text("UPDATE fx_conversion_elections SET sequence_id = 9"))
+        connection.execute(election_update)
+    proof_delete = sa.text("DELETE FROM fx_conversion_proofs")
     with engine.begin() as connection, pytest.raises(IntegrityError, match="append-only"):
-        connection.execute(sa.text("DELETE FROM fx_conversion_proofs"))
+        connection.execute(proof_delete)
     engine.dispose()

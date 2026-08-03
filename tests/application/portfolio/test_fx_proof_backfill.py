@@ -323,7 +323,8 @@ async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> 
     assert discovery.semantic_refusals[0].lost_requirements == (
         f"execution:00000000-0000-7000-8000-000000000003@{_MINUTE.isoformat()}",
     )
-    assert fake.horizons and set(fake.horizons) == {_HORIZON}
+    assert fake.horizons
+    assert set(fake.horizons) == {_HORIZON}
 
 
 @pytest.mark.asyncio

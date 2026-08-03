@@ -533,8 +533,10 @@ def test_get_expirations_return_values_when_state_exists() -> None:
     )
     conn_exp = manager.get_connection_expiration(cast(Any, websocket))
     ws_exp = manager.get_ws_token_expiration(cast(Any, websocket))
-    assert conn_exp is not None and conn_exp == datetime.fromtimestamp(token_data.exp, UTC)
-    assert ws_exp is not None and ws_exp == datetime.fromtimestamp(payload.exp, UTC)
+    assert conn_exp is not None
+    assert conn_exp == datetime.fromtimestamp(token_data.exp, UTC)
+    assert ws_exp is not None
+    assert ws_exp == datetime.fromtimestamp(payload.exp, UTC)
     WebSocketAuthManager.clear_instance()
 
 

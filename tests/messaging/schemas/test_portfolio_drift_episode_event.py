@@ -111,10 +111,11 @@ def test_resolved_frame_rejects_close_before_open() -> None:
     When: The schema validates the temporal order.
     Then: Validation rejects the impossible lifecycle.
     """
+    closed_before_opened = _OPENED_AT - timedelta(microseconds=1)
     with pytest.raises(ValidationError, match="cannot precede"):
         _event(
             "resolved",
-            closed_at=_OPENED_AT - timedelta(microseconds=1),
+            closed_at=closed_before_opened,
             resolution_reason="matched",
         )
 

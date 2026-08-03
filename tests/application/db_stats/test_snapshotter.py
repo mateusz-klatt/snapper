@@ -294,7 +294,9 @@ class TestSampleOnce:
         assert telemetry_row.total == 42
 
     @pytest.mark.asyncio
-    async def test_per_table_timeout_emits_stale_clone(self) -> None:
+    async def test_per_table_timeout_emits_stale_clone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A per-table query timeout marks that row stale without aborting the loop."""
 
         async def hanging(entry: TableEntry) -> TableCounters:
@@ -306,12 +308,8 @@ class TestSampleOnce:
         snapshotter = DbStatsSnapshotter(
             repo=repo, interval_seconds=60, disabled=False, clock=_stable_clock()
         )
-        original_timeout = snapshotter_module.PER_TABLE_TIMEOUT_SECONDS
-        try:
-            snapshotter_module.PER_TABLE_TIMEOUT_SECONDS = 0.01
-            snapshot = await snapshotter._sample_once()
-        finally:
-            snapshotter_module.PER_TABLE_TIMEOUT_SECONDS = original_timeout
+        monkeypatch.setattr(snapshotter_module, "PER_TABLE_TIMEOUT_SECONDS", 0.01)
+        snapshot = await snapshotter._sample_once()
         telemetry_row = snapshot.find("telemetry")
         assert telemetry_row is not None
         assert telemetry_row.is_stale is True

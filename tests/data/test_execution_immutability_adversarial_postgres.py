@@ -38,6 +38,7 @@ from sqlalchemy import update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import quoted_name
 from sqlalchemy.sql.expression import Executable
@@ -185,6 +186,18 @@ def _mutation_vectors(row_id: int) -> dict[str, Executable]:
     }
 
 
+async def _execute_and_commit(session: AsyncSession, statement: Executable) -> None:
+    """Run one mutation vector and commit it as a single awaited step.
+
+    The append-only trigger can surface either while the statement
+    executes or when the transaction commits, depending on the vector, so
+    both steps must stay inside one awaited unit for the rejection
+    assertion to cover them.
+    """
+    await session.execute(statement)
+    await session.commit()
+
+
 async def _assert_every_mutation_is_rejected(
     repository: SQLAlchemyRepository, wallet: str, row_id: int
 ) -> None:
@@ -192,8 +205,7 @@ async def _assert_every_mutation_is_rejected(
     for statement in _mutation_vectors(row_id).values():
         async with repository.session() as s:
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
         async with repository.session() as s:
             survivors = int(
                 (
@@ -234,8 +246,7 @@ async def _assert_replica_role_bypass_is_rejected(
         async with repository.session() as s:
             await s.execute(text("SET session_replication_role = replica"))
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
         async with repository.session() as s:
             survivors = int(
                 (

@@ -1331,13 +1331,14 @@ async def test_sample_write_transaction_refuses_an_unknown_dialect(
 ) -> None:
     """A new backend never silently skips the periodic writer's lock."""
     session = AsyncMock()
+    write_scope = _scope()
     with patch.object(
         SQLAlchemyRepository,
         "dialect_name",
         new_callable=PropertyMock,
         return_value="unknown",
     ), pytest.raises(NotImplementedError, match="sample write transaction"):
-        await repository._begin_portfolio_pnl_sample_write_transaction(session, _scope())
+        await repository._begin_portfolio_pnl_sample_write_transaction(session, write_scope)
 
 
 async def test_collision_read_short_circuits_on_no_minutes(

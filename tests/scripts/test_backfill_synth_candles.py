@@ -692,8 +692,10 @@ async def test_run_unknown_timeframe_exits() -> None:
     When: run executes,
     Then: It raises SystemExit.
     """
+    unsupported_timeframe_args = _args(timeframes="5m,bogus")
+
     with pytest.raises(SystemExit):
-        await backfill.run(_args(timeframes="5m,bogus"))
+        await backfill.run(unsupported_timeframe_args)
 
 
 def test_main_returns_zero_on_success() -> None:

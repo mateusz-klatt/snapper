@@ -610,7 +610,9 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     return mapper
 
 
-def test_clear_instance_logs_warning_on_repository_dispose_error() -> None:
+def test_clear_instance_logs_warning_on_repository_dispose_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Clear instance logs a warning when repository disposal fails.
 
     Given: A singleton instance whose repository dispose raises,
@@ -621,7 +623,7 @@ def test_clear_instance_logs_warning_on_repository_dispose_error() -> None:
     repository = Mock()
     repository.dispose.side_effect = RuntimeError("dispose failed")
     mapper.repository = repository
-    SymbolMapperService._instance = mapper
+    monkeypatch.setattr(SymbolMapperService, "_instance", mapper)
     with patch.object(symbol_mapper_module.logger, "warning") as warning_mock:
         SymbolMapperService.clear_instance()
     warning_mock.assert_called_once()
@@ -1659,11 +1661,8 @@ class TestDatabaseSymbolMapperZMQIntegration:
             patch.object(SymbolMapperService, "load_mappings_from_db", return_value=[]),
         ):
             mapper = SymbolMapperService()
-            try:
-                mapper.trigger_cache_invalidation(fail_fast=False)
-                mapper.trigger_cache_invalidation(fail_fast=True)
-            except Exception as e:
-                pytest.fail(f"trigger_cache_invalidation should not raise: {e}")
+            mapper.trigger_cache_invalidation(fail_fast=False)
+            mapper.trigger_cache_invalidation(fail_fast=True)
 
 
 class TestSymbolMapperEdgeCases:

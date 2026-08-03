@@ -184,8 +184,9 @@ class TestDetection:
         Then: ValueError propagates.
         """
         _wire_common(monkeypatch, universe=[], splits=[], candle_rows={}, api_key="")
+        service = PolygonSplitRepairService()
         with pytest.raises(ValueError, match="API key"):
-            await PolygonSplitRepairService().start()
+            await service.start()
 
     @pytest.mark.asyncio
     async def test_out_of_universe_and_filtered_events_are_skipped(
@@ -336,7 +337,9 @@ class TestRepairChain:
         assert loader.calls[0]["since"] == window_start
         assert synth.calls[0]["cut_date"] == window_start
         assert synth.calls[0]["symbols"] == ["NFLX"]
-        assert refetch.started and loader.started and synth.started
+        assert refetch.started
+        assert loader.started
+        assert synth.started
         superseded_tfs = [
             call.kwargs["timeframe"] for call in repo.supersede_current_candles.await_args_list
         ]

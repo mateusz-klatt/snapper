@@ -76,16 +76,18 @@ class TestBacktestProgressDataMilestoneInvariant:
 
     def test_progress_with_milestone_rejected(self) -> None:
         """event='progress' + milestone='25pct' → ValidationError."""
+        event_timestamp = self._ts()
         with pytest.raises(ValidationError, match="milestone field must be None"):
             BacktestProgressData(
-                timestamp=self._ts(), event="progress", milestone="25pct", **self._COMMON
+                timestamp=event_timestamp, event="progress", milestone="25pct", **self._COMMON
             )
 
     def test_milestone_without_bucket_rejected(self) -> None:
         """event='milestone' + milestone=None → ValidationError."""
+        event_timestamp = self._ts()
         with pytest.raises(ValidationError, match="requires a milestone bucket"):
             BacktestProgressData(
-                timestamp=self._ts(), event="milestone", milestone=None, **self._COMMON
+                timestamp=event_timestamp, event="milestone", milestone=None, **self._COMMON
             )
 
     def test_valid_progress_event(self) -> None:

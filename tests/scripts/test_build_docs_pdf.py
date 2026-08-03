@@ -1877,7 +1877,7 @@ class TestAdditionalCoverage:
         builder.build_html()
         html_with_unknown = 'href="snapper-anchor:doc#nonexistent-section"'
         result = builder._resolve_internal_links(html_with_unknown)
-        assert html_with_unknown == result
+        assert result == html_with_unknown
 
     def test_normalize_pre_blocks_unknown_language_preserved(
         self,

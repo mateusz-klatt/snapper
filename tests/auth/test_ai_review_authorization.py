@@ -29,10 +29,11 @@ def test_ai_reviewer_role_and_grant_are_exact() -> None:
     Then: The role value, operational role set, and decision-capable read grant are exact.
     """
     assert UserRole.AI_REVIEWER.value == "ai_reviewer"
-    assert {
+    review_principal_roles = AI_REVIEW_PRINCIPAL_ROLES
+    assert review_principal_roles == {
         UserRole.AI_REVIEWER,
         UserRole.AI_DELEGATE,
-    } == AI_REVIEW_PRINCIPAL_ROLES
+    }
     assert ROLE_PERMISSIONS[UserRole.AI_REVIEWER] == {
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
@@ -196,8 +197,9 @@ def test_ai_reviewer_permission_gates_allow_decisions_but_deny_audit_reads() -> 
         require_permission(Permission.SUBMIT_AI_REVIEW_DECISION)(current_user=principal)
         is principal
     )
+    review_audit_gate = require_permission(Permission.READ_AI_REVIEWS)
     with pytest.raises(HTTPException) as exc_info:
-        require_permission(Permission.READ_AI_REVIEWS)(current_user=principal)
+        review_audit_gate(current_user=principal)
     assert exc_info.value.status_code == 403
 
 

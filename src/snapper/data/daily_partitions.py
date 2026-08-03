@@ -321,7 +321,7 @@ _TABLE_SPECS: Final[dict[str, TableSpec]] = {
                 name="candles_p_uq_itf_open",
                 columns=("instrument_public_id", "timeframe", "open_at"),
                 unique=True,
-                predicate=("known_to = TIMESTAMPTZ '9999-12-31 23:59:59+00:00'"),
+                predicate="known_to = TIMESTAMPTZ '9999-12-31 23:59:59+00:00'",
             ),
             IndexSpec(
                 name="candles_p_ix_instr_open",

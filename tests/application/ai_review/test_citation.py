@@ -110,12 +110,14 @@ async def test_unknown_review_id_raises_citation_error(tmp_path: Path) -> None:
     Then AiReviewCitationError fires with a "not found" message.
     """
     repo = await _build_repo(tmp_path)
+    expected_user_pid = str(uuid7())
+    expected_wallet_pid = str(uuid7())
     with pytest.raises(AiReviewCitationError, match="not found"):
         await validate_ai_review_citation(
             repo,
             ai_review_public_id="ghost-review-id",
-            expected_user_public_id=str(uuid7()),
-            expected_wallet_public_id=str(uuid7()),
+            expected_user_public_id=expected_user_pid,
+            expected_wallet_public_id=expected_wallet_pid,
         )
 
 
@@ -246,11 +248,12 @@ async def test_strategy_validator_unknown_review_raises(tmp_path: Path) -> None:
     """
     repo = await _build_repo(tmp_path)
     bogus_id = str(uuid7())
+    expected_wallet_pid = str(uuid7())
     with pytest.raises(AiReviewCitationError, match="not found"):
         await validate_ai_review_citation_for_strategy(
             repo,
             ai_review_public_id=bogus_id,
-            expected_wallet_public_id=str(uuid7()),
+            expected_wallet_public_id=expected_wallet_pid,
         )
 
 

@@ -168,22 +168,20 @@ class TestReplayProvenanceMigration:
         """
         engine, cfg = pre_provenance_db
         command.upgrade(cfg, "head")
+        rejected_origin_insert = sa.text(
+            "INSERT INTO trade_commands (public_id, command_type, "
+            "shard_key, wallet_public_id, exchange, instrument, mode, "
+            "strategy_id, client_order_id, venue_client_id, side, "
+            "order_type, quantity, status, attempt_count, created_at, "
+            "correlation_id, session_id, sequence_id, timestamp, "
+            "known_to, origin) VALUES ('cmd-bad', 'submit', "
+            "'paper.BTC-USD.paper', 'wal-1', 'paper', 'BTC-USD', "
+            "'paper', 'engine-buy', 'cid-bad', 'cid-bad', 'buy', "
+            "'market', 1.0, 'created', 0, :ts, 'corr-bad', 'sess-1', "
+            "1, :ts, :kt, 'backtest')"
+        )
         with engine.begin() as conn, pytest.raises(sa.exc.IntegrityError):
-            conn.execute(
-                sa.text(
-                    "INSERT INTO trade_commands (public_id, command_type, "
-                    "shard_key, wallet_public_id, exchange, instrument, mode, "
-                    "strategy_id, client_order_id, venue_client_id, side, "
-                    "order_type, quantity, status, attempt_count, created_at, "
-                    "correlation_id, session_id, sequence_id, timestamp, "
-                    "known_to, origin) VALUES ('cmd-bad', 'submit', "
-                    "'paper.BTC-USD.paper', 'wal-1', 'paper', 'BTC-USD', "
-                    "'paper', 'engine-buy', 'cid-bad', 'cid-bad', 'buy', "
-                    "'market', 1.0, 'created', 0, :ts, 'corr-bad', 'sess-1', "
-                    "1, :ts, :kt, 'backtest')"
-                ),
-                {"ts": _TS, "kt": _ACTIVE},
-            )
+            conn.execute(rejected_origin_insert, {"ts": _TS, "kt": _ACTIVE})
 
     def test_downgrade_removes_columns(self, pre_provenance_db: tuple[sa.Engine, Config]) -> None:
         """Downgrading one step removes the three provenance columns.

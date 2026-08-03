@@ -105,7 +105,8 @@ class TestCoverageRoute:
         for name in ("tick_window_seconds", "candle_window_seconds"):
             query_meta = signature.parameters[name].annotation.__metadata__[0]
             gt_constraints = [m for m in query_meta.metadata if isinstance(m, Gt)]
-            assert gt_constraints and gt_constraints[0].gt == 0
+            assert gt_constraints
+            assert gt_constraints[0].gt == 0
 
     def test_endpoint_binds_read_system_status_permission(self) -> None:
         """The route signature binds ``require_permission(READ_SYSTEM_STATUS)``."""

@@ -56,8 +56,12 @@ def test_cci_length_mismatch_raises() -> None:
     When: cci is called,
     Then: it raises ValueError.
     """
+    high = pd.Series([1.0, 2.0])
+    short_low = pd.Series([1.0])
+    close = pd.Series([1.0, 2.0])
+
     with pytest.raises(ValueError, match="equal length"):
-        cci(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]))
+        cci(high, short_low, close)
 
 
 def test_cci_aligns_companions_to_close_index() -> None:

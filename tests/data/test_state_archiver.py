@@ -487,6 +487,7 @@ def test_state_archiver_unknown_group_column_raises(tmp_path: Path) -> None:
     row = (1, *(values.get(c, "") for c in columns))
     repo = _StateStubRepo(rows=[row])
     archiver = StateArchiver(repo, tmp_path)
+    export_day = date(2024, 1, 1)
     with (
         patch.dict(
             "snapper.data.archiver.STATE_TABLES",
@@ -496,8 +497,8 @@ def test_state_archiver_unknown_group_column_raises(tmp_path: Path) -> None:
     ):
         archiver.export(
             table="test_bogus",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=export_day,
+            day_end=export_day,
         )
 
 

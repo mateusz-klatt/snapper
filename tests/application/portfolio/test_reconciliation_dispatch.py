@@ -529,10 +529,12 @@ def test_replay_boundary_builder_rejects_an_absent_capture() -> None:
         boundary=None,
         history_capture=None,
     )
+    unanchored_bundle = _unanchored_spot_bundle()
+
     with pytest.raises(ValueError, match="^spot_boundary_unavailable$"):
         reconciliation_dispatch._spot_replay_boundary(
             context,
-            _unanchored_spot_bundle(),
+            unanchored_bundle,
             None,
         )
 
@@ -722,8 +724,10 @@ def test_every_incoherent_boundary_relationship_is_rejected_at_construction(
         re-runs the validating constructor).
     Then: ValueError with the exact named reason is raised.
     """
+    coherent_boundary = _boundary()
+
     with pytest.raises(ValueError, match=reason):
-        replace(_boundary(), **changes)
+        replace(coherent_boundary, **changes)
 
 
 async def test_margin_gate_takes_precedence_over_a_present_boundary() -> None:

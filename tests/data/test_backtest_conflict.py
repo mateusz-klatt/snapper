@@ -130,9 +130,6 @@ class TestRealSqliteIntegrityError:
     def test_real_sqlite_partial_index_violation_detected(self, migrated_db: sa.Engine) -> None:
         """Two running rows in real SQLite trigger detected conflict."""
         _insert_running_row(migrated_db, public_id="run-a")
-        try:
+        with pytest.raises(IntegrityError) as conflict:
             _insert_running_row(migrated_db, public_id="run-b")
-        except IntegrityError as e:
-            assert is_single_running_conflict(e)
-        else:
-            pytest.fail("Expected IntegrityError from second running insert")
+        assert is_single_running_conflict(conflict.value)

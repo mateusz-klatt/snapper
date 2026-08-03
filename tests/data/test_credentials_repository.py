@@ -114,7 +114,7 @@ class TestCreateWalletCredential:
             reconciliation_method="unclassified",
         )
 
-        s5778_value_1 = timedelta(microseconds=1)
+        conflict_offset = timedelta(microseconds=1)
         with pytest.raises(CredentialConflictError) as excinfo:
             await repo.create_wallet_credential(
                 wallet_public_id=wallet_id,
@@ -124,7 +124,7 @@ class TestCreateWalletCredential:
                 label=None,
                 session_id="test-session",
                 sequence_id=11,
-                timestamp=base_ts + s5778_value_1,
+                timestamp=base_ts + conflict_offset,
                 reconciliation_method="unclassified",
             )
 
@@ -142,6 +142,7 @@ class TestCreateWalletCredential:
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        credential_timestamp = datetime.now(UTC)
         with (
             patch.object(repo, "session", return_value=mock_ctx),
             patch.object(repo, "_begin_portfolio_reconciliation_write", new=AsyncMock()),
@@ -162,7 +163,7 @@ class TestCreateWalletCredential:
                 label=None,
                 session_id="s",
                 sequence_id=99,
-                timestamp=datetime.now(UTC),
+                timestamp=credential_timestamp,
                 reconciliation_method="unclassified",
             )
 
@@ -213,7 +214,7 @@ class TestRotateWalletCredential:
     @pytest.mark.asyncio
     async def test_missing_credential_raises_not_found(self, repo: SQLAlchemyRepository) -> None:
         """Rotating a non-existent credential raises ``CredentialNotFoundError``."""
-        s5778_value_1 = datetime.now(UTC)
+        rotation_timestamp = datetime.now(UTC)
         with pytest.raises(CredentialNotFoundError):
             await repo.rotate_wallet_credential(
                 credential_public_id="00000000-0000-7000-8000-000000000000",
@@ -221,7 +222,7 @@ class TestRotateWalletCredential:
                 label=None,
                 session_id="test-session",
                 sequence_id=99,
-                timestamp=s5778_value_1,
+                timestamp=rotation_timestamp,
             )
 
     @pytest.mark.asyncio

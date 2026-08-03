@@ -632,7 +632,8 @@ class TestCheckDrift:
         ):
             assert port.check_drift() == 1
         err = capsys.readouterr().err
-        assert "DIFFERS" in err and "en/alerts.json" in err
+        assert "DIFFERS" in err
+        assert "en/alerts.json" in err
 
     def test_returns_one_when_alerts_json_missing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

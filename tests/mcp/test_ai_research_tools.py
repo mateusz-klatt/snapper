@@ -370,6 +370,7 @@ async def test_submit_market_view_does_not_mask_unknown_repository_error() -> No
     """
     repository = _repository(insert_error=ValueError("unexpected market view failure"))
     server = _server(repository, _claims())
+    market_view_payload = _payload()
 
     with pytest.raises(ToolError, match="unexpected market view failure"):
         await call_raw_tool(
@@ -377,7 +378,7 @@ async def test_submit_market_view_does_not_mask_unknown_repository_error() -> No
             "submit_market_view",
             {
                 "research_round_public_id": "round-1",
-                "payload": _payload(),
+                "payload": market_view_payload,
             },
         )
 

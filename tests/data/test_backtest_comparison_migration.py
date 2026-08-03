@@ -341,25 +341,24 @@ class TestBacktestComparisonIxPublicIdPartialUnique:
                     "known_to": KNOWN_TO_MAX_LITERAL,
                 },
             )
+        duplicate_insert = sa.text(
+            "INSERT INTO backtest_comparisons "
+            "(public_id, wallet_public_id, run_a_public_id, run_b_public_id, "
+            "pairing_mode, session_id, sequence_id, timestamp, known_to) "
+            "VALUES (:public_id, :wallet, :run_a, :run_b, 'manual', "
+            ":session, 2, :ts, :known_to)"
+        )
+        duplicate_params = {
+            "public_id": public_id,
+            "wallet": str(uuid7()),
+            "run_a": str(uuid7()),
+            "run_b": str(uuid7()),
+            "session": str(uuid7()),
+            "ts": now,
+            "known_to": KNOWN_TO_MAX_LITERAL,
+        }
         with pytest.raises(sa.exc.IntegrityError), engine.begin() as conn:
-            conn.execute(
-                sa.text(
-                    "INSERT INTO backtest_comparisons "
-                    "(public_id, wallet_public_id, run_a_public_id, run_b_public_id, "
-                    "pairing_mode, session_id, sequence_id, timestamp, known_to) "
-                    "VALUES (:public_id, :wallet, :run_a, :run_b, 'manual', "
-                    ":session, 2, :ts, :known_to)"
-                ),
-                {
-                    "public_id": public_id,
-                    "wallet": str(uuid7()),
-                    "run_a": str(uuid7()),
-                    "run_b": str(uuid7()),
-                    "session": str(uuid7()),
-                    "ts": now,
-                    "known_to": KNOWN_TO_MAX_LITERAL,
-                },
-            )
+            conn.execute(duplicate_insert, duplicate_params)
 
 
 class TestBacktestComparisonRunsDistinctCheck:

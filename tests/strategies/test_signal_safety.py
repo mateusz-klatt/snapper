@@ -750,10 +750,9 @@ class TestEmitFailureFatal:
             "_emit_signal_group",
             AsyncMock(side_effect=RuntimeError("publisher down")),
         )
+        candle_frame = _candle(_OPEN_AT).model_dump_json()
         with pytest.raises(RuntimeError, match="publisher down"):
-            await strategy._handle_bus_frame(
-                "market.kraken.BTC-USD.candles.1h", _candle(_OPEN_AT).model_dump_json()
-            )
+            await strategy._handle_bus_frame("market.kraken.BTC-USD.candles.1h", candle_frame)
 
     @pytest.mark.asyncio
     async def test_stop_cancels_listen_task_before_socket_close(self) -> None:
@@ -807,10 +806,9 @@ class TestIsolationCoverageBranches:
             "_dispatch_market_data",
             AsyncMock(side_effect=asyncio.CancelledError()),
         )
+        candle_frame = _candle(_OPEN_AT).model_dump_json()
         with pytest.raises(asyncio.CancelledError):
-            await strategy._handle_bus_frame(
-                "market.kraken.BTC-USD.candles.1h", _candle(_OPEN_AT).model_dump_json()
-            )
+            await strategy._handle_bus_frame("market.kraken.BTC-USD.candles.1h", candle_frame)
 
     @pytest.mark.asyncio
     async def test_wrapper_waits_stop_only_without_listen_task(self) -> None:

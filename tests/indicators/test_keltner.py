@@ -42,5 +42,8 @@ def test_keltner_length_mismatch_raises() -> None:
     When: keltner is called,
     Then: it raises ValueError.
     """
+    high = pd.Series([1.0, 2.0])
+    short_low = pd.Series([1.0])
+    close = pd.Series([1.0, 2.0])
     with pytest.raises(ValueError, match="equal length"):
-        keltner(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]))
+        keltner(high, short_low, close)

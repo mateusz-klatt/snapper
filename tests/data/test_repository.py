@@ -200,8 +200,9 @@ async def test_session_rolls_back_on_exception() -> None:
     """
     session = _DummyAsyncSession()
     repo = _make_repo(lambda: _session_factory(session))
+    session_context = repo.session()
     with pytest.raises(ValueError):
-        async with repo.session():
+        async with session_context:
             raise ValueError("boom")
     assert session.rollback_called is True
 
@@ -1748,8 +1749,9 @@ async def test_sqlalchemy_session_rolls_back_on_exception(monkeypatch: pytest.Mo
             await dummy.rollback()
 
     monkeypatch.setattr(sa_repo, "session_factory", lambda: DummyCtx())
+    session_context = sa_repo.session()
     with pytest.raises(RuntimeError):
-        async with sa_repo.session():
+        async with session_context:
             raise RuntimeError("boom")
     assert dummy.rolled
 

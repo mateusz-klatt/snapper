@@ -122,8 +122,9 @@ def test_ai_delegate_fails_require_permission_for_manage_users() -> None:
         ROLE_PERMISSIONS[AI_DELEGATE] and finds MANAGE_USERS absent.
     """
     checker = require_permission(Permission.MANAGE_USERS)
+    delegate_principal = _principal(UserRole.AI_DELEGATE)
     with pytest.raises(HTTPException) as exc:
-        checker(current_user=_principal(UserRole.AI_DELEGATE))
+        checker(current_user=delegate_principal)
     assert exc.value.status_code == 403
 
 

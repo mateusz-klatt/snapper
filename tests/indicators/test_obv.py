@@ -39,5 +39,7 @@ def test_obv_length_mismatch_raises() -> None:
     When: obv is called,
     Then: it raises ValueError.
     """
+    close = pd.Series([1.0, 2.0])
+    volume = pd.Series([1.0])
     with pytest.raises(ValueError, match="equal length"):
-        obv(pd.Series([1.0, 2.0]), pd.Series([1.0]))
+        obv(close, volume)

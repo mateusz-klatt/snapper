@@ -351,16 +351,17 @@ def test_0029_sqlite_backfills_scopes_tightens_and_swaps_anchor_kind(
         ("exec-6", _WALLET_A, "walutomat", "live", 3),
     ]
 
+    duplicate_scope_insert = sa.text(
+        "INSERT INTO executions (public_id, order_public_id, "
+        "wallet_public_id, exchange, mode, scope_sequence, side, status, "
+        "price, size, fee, fee_asset, session_id, sequence_id, timestamp, "
+        "known_to) VALUES ('exec-dup', 'order-live-w', :wallet, "
+        "'walutomat', 'live', 1, 'buy', 'filled', 1.25, 2.0, 0.1, 'PLN', "
+        "'session-1', 1, :timestamp, :known_to)"
+    )
     with pytest.raises(sa.exc.IntegrityError), engine.begin() as connection:
         connection.execute(
-            sa.text(
-                "INSERT INTO executions (public_id, order_public_id, "
-                "wallet_public_id, exchange, mode, scope_sequence, side, status, "
-                "price, size, fee, fee_asset, session_id, sequence_id, timestamp, "
-                "known_to) VALUES ('exec-dup', 'order-live-w', :wallet, "
-                "'walutomat', 'live', 1, 'buy', 'filled', 1.25, 2.0, 0.1, 'PLN', "
-                "'session-1', 1, :timestamp, :known_to)"
-            ),
+            duplicate_scope_insert,
             {"wallet": _WALLET_A, "timestamp": _TS, "known_to": _ACTIVE},
         )
     for bad_scope in (
@@ -369,16 +370,17 @@ def test_0029_sqlite_backfills_scopes_tightens_and_swaps_anchor_kind(
         "'walutomat', 'simulated', 9",
         "'walutomat', 'live', 0",
     ):
+        invalid_scope_insert = sa.text(
+            "INSERT INTO executions (public_id, order_public_id, "
+            "wallet_public_id, exchange, mode, scope_sequence, side, "
+            "status, price, size, fee, fee_asset, session_id, "
+            "sequence_id, timestamp, known_to) VALUES ('exec-bad', "
+            f"'order-live-w', :wallet, {bad_scope}, 'buy', 'filled', "
+            "1.25, 2.0, 0.1, 'PLN', 'session-1', 1, :timestamp, :known_to)"
+        )
         with pytest.raises(sa.exc.IntegrityError), engine.begin() as connection:
             connection.execute(
-                sa.text(
-                    "INSERT INTO executions (public_id, order_public_id, "
-                    "wallet_public_id, exchange, mode, scope_sequence, side, "
-                    "status, price, size, fee, fee_asset, session_id, "
-                    "sequence_id, timestamp, known_to) VALUES ('exec-bad', "
-                    f"'order-live-w', :wallet, {bad_scope}, 'buy', 'filled', "
-                    "1.25, 2.0, 0.1, 'PLN', 'session-1', 1, :timestamp, :known_to)"
-                ),
+                invalid_scope_insert,
                 {"wallet": _WALLET_A, "timestamp": _TS, "known_to": _ACTIVE},
             )
 

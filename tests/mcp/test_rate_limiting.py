@@ -218,7 +218,7 @@ class TestRateLimitMiddleware:
         for _ in range(2):
             assert client_b.post("/t", json={}).status_code == 200
 
-    def test_limiter_disabled_passes_through(self) -> None:
+    def test_limiter_disabled_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Disabled global limiter short-circuits the middleware.
 
         Given: the global slowapi limiter has been disabled
@@ -228,14 +228,11 @@ class TestRateLimitMiddleware:
             load-test and ops deployments that want to turn
             throttling off without editing code.
         """
-        limiter.enabled = False
-        try:
-            app = _build_harness(_claims(user_public_id="no-limit"))
-            client = TestClient(app)
-            for _ in range(10):
-                assert client.post("/t", json={}).status_code == 200
-        finally:
-            limiter.enabled = True
+        monkeypatch.setattr(limiter, "enabled", False)
+        app = _build_harness(_claims(user_public_id="no-limit"))
+        client = TestClient(app)
+        for _ in range(10):
+            assert client.post("/t", json={}).status_code == 200
 
     def test_default_limit_constant_is_parseable(self) -> None:
         """:data:`MCP_RATE_LIMIT` parses to a valid window.

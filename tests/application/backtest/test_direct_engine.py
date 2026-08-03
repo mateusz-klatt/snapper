@@ -528,8 +528,9 @@ class TestCooperativeCancel:
             repo = AsyncMock()
             engine = DirectDbEngine(repo, NOW, bt_repo=bt_repo, cancel_poll_ms=0)
             collector = ResultCollector()
+            run_config = self._build_config()
             with pytest.raises(asyncio.CancelledError):
-                await engine.run("run-1", self._build_config(), collector)
+                await engine.run("run-1", run_config, collector)
             assert bt_repo.get_run.await_count == 1
             assert mock_instance._handle_candle_data.await_count == 0
 

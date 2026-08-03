@@ -395,7 +395,8 @@ class TestHealthLoopRetry:
         assert len(aggregate_logs) == 1
         message = aggregate_logs[0].message
         assert "3 stale subscription(s)" in message
-        assert "ticker=2" in message and "trade=1" in message
+        assert "ticker=2" in message
+        assert "trade=1" in message
         assert message.index("ticker") < message.index("trade")
         assert "ticker/BTC/USD" in message
 

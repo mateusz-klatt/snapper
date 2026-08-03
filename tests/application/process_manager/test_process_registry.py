@@ -256,7 +256,8 @@ async def test_strategy_process_stop(mock_strategy: MagicMock) -> None:
         await process.stop()
         mock_stop.assert_called_once_with("my_strategy")
         assert process.strategy is None
-        assert process._stop_event is not None and process._stop_event.is_set()
+        assert process._stop_event is not None
+        assert process._stop_event.is_set()
 
 
 @pytest.mark.asyncio

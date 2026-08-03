@@ -271,7 +271,8 @@ class TestTwoCoordinatorsSplitSignals:
         """
         trader_0, trader_1 = two_coordinator_stack.traders
         instruments_0, instruments_1 = _pick_live_instruments_per_instance()
-        assert instruments_0 and instruments_1, "live instrument set must span both instances"
+        assert instruments_0, "live instrument set must span both instances"
+        assert instruments_1, "live instrument set must span both instances"
         for inst in instruments_0 + instruments_1:
             await _publish_live_signal(
                 two_coordinator_stack.client_context,

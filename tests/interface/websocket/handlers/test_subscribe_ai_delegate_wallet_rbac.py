@@ -170,16 +170,18 @@ class TestAIDelegateWalletScopeFilter:
     @pytest.mark.asyncio
     async def test_ai_delegate_without_repository_raises(self) -> None:
         """Missing repository for AI_DELEGATE is a runtime wiring bug."""
+        delegate_principal = _principal(
+            UserRole.AI_DELEGATE,
+            operators=["op-1"],
+            delegate_public_id="delegate-1",
+        )
+        as_of = datetime.now(UTC)
         with pytest.raises(RuntimeError, match="dispatch table wiring is broken"):
             await _enforce_ai_delegate_wallet_scope(
                 ["signals.kraken.BTC-USD.live"],
-                _principal(
-                    UserRole.AI_DELEGATE,
-                    operators=["op-1"],
-                    delegate_public_id="delegate-1",
-                ),
+                delegate_principal,
                 repository=None,
-                as_of=datetime.now(UTC),
+                as_of=as_of,
             )
 
     @pytest.mark.asyncio

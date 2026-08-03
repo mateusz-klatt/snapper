@@ -142,7 +142,8 @@ def test_observe_on_mode_boundary_emits_final_then_intermediate() -> None:
     fin.observe("BTC-USD", _row(open_at=_T0, complete=False))
     released = fin.observe("BTC-USD", _row(open_at=_T0 + timedelta(minutes=1), complete=False))
     assert len(released) == 2
-    assert released[0][1]["open_at"] == _T0 and released[0][1]["complete"] is True
+    assert released[0][1]["open_at"] == _T0
+    assert released[0][1]["complete"] is True
     assert released[1][1]["open_at"] == _T0 + timedelta(minutes=1)
     assert released[1][1]["complete"] is False
 

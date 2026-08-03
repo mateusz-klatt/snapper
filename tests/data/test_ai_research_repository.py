@@ -191,6 +191,7 @@ async def test_round_creation_lock_rejects_an_unknown_dialect(
 ) -> None:
     """Unsupported databases cannot create an unprotected pending slot."""
     mock_session = AsyncMock(spec=AsyncSession)
+    typed_session = cast(AsyncSession, mock_session)
     with (
         patch.object(
             type(repository),
@@ -200,9 +201,7 @@ async def test_round_creation_lock_rejects_an_unknown_dialect(
         ),
         pytest.raises(NotImplementedError, match="mysql"),
     ):
-        await repository._begin_ai_research_round_create_transaction(
-            cast(AsyncSession, mock_session)
-        )
+        await repository._begin_ai_research_round_create_transaction(typed_session)
     mock_session.execute.assert_not_awaited()
 
 

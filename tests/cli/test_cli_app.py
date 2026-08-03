@@ -5515,11 +5515,12 @@ async def test_strategies_summary_loop_ticks_and_survives_errors() -> None:
         if len(sleeps) >= 2:
             raise asyncio.CancelledError
 
+    summary_launcher = cast(Any, DummyLauncher())
     with (
         patch.object(app_module.asyncio, "sleep", _fast_sleep),
         pytest.raises(asyncio.CancelledError),
     ):
-        await app_module._strategies_summary_loop(cast(Any, DummyLauncher()))
+        await app_module._strategies_summary_loop(summary_launcher)
     assert len(attempts) == 2
     assert sleeps == [5.0, 5.0]
 
@@ -5548,11 +5549,12 @@ async def test_reconcile_loop_ticks_and_survives_errors() -> None:
         if len(sleeps) >= 2:
             raise asyncio.CancelledError
 
+    reconcile_launcher = cast(Any, DummyLauncher())
     with (
         patch.object(app_module.asyncio, "sleep", _fast_sleep),
         pytest.raises(asyncio.CancelledError),
     ):
-        await app_module._reconcile_loop(cast(Any, DummyLauncher()))
+        await app_module._reconcile_loop(reconcile_launcher)
     assert len(attempts) == 2
     assert sleeps == [10.0, 10.0]
 

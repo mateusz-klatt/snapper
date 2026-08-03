@@ -328,9 +328,11 @@ def test_fixture_lock_preserves_existing_file_and_releases_after_error(
     monkeypatch.setattr(builder, "_acquire_lock", acquire)
     monkeypatch.setattr(builder, "_release_lock", release)
 
+    body_failure = RuntimeError("body failed")
+
     with pytest.raises(RuntimeError, match="body failed"), builder._fixture_lock(lock_path):
         assert lock_path.read_bytes() == b"x"
-        raise RuntimeError("body failed")
+        raise body_failure
 
     acquired_file = acquire.call_args.args[0]
     release.assert_called_once_with(acquired_file)

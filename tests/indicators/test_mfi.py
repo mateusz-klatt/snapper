@@ -77,8 +77,12 @@ def test_mfi_length_mismatch_raises() -> None:
     When: mfi is called,
     Then: it raises ValueError.
     """
+    high = pd.Series([1.0, 2.0])
+    short_low = pd.Series([1.0])
+    close = pd.Series([1.0, 2.0])
+    volume = pd.Series([1.0, 2.0])
     with pytest.raises(ValueError, match="equal length"):
-        mfi(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]), pd.Series([1.0, 2.0]))
+        mfi(high, short_low, close, volume)
 
 
 def test_mfi_aligns_companions_to_close_index() -> None:

@@ -329,11 +329,11 @@ async def test_desk_directory_rejects_inactive_identity(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Directory reads reject an unknown or inactive desk identity."""
-    s5778_value_1 = datetime.now(UTC)
+    as_of = datetime.now(UTC)
     with pytest.raises(DeskMembershipNotFoundError, match="desk"):
         await repository.list_human_desk_members(
             "00000000-0000-7000-8000-000000000199",
-            s5778_value_1,
+            as_of,
         )
 
 
@@ -351,12 +351,13 @@ async def test_membership_commit_failure_keeps_revocation_and_rolls_back_state(
     async def fail_commit(_session: AsyncSession) -> None:
         raise RuntimeError("forced membership commit failure")
 
+    detach_command = _detach(_DESK_A, 2)
     with (
         patch.object(AsyncSession, "commit", new=fail_commit),
         pytest.raises(RuntimeError, match="forced membership commit failure"),
     ):
         await repository.detach_viewer_from_desk(
-            _detach(_DESK_A, 2),
+            detach_command,
             revoke_authority,
         )
     assert revoked == [_VIEWER]

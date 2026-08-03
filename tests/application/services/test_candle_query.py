@@ -463,10 +463,11 @@ class TestFetchCacheOnly:
     @pytest.mark.asyncio
     async def test_cache_unavailable_for_cache_eligible_raises(self) -> None:
         """``cache is None`` on 1m raises :class:`CacheUnavailableError`."""
+        empty_repo = cast(Repository, _stub_repo([]))
         with pytest.raises(CacheUnavailableError):
             await fetch_cache_only(
                 cache=None,
-                repo=cast(Repository, _stub_repo([])),
+                repo=empty_repo,
                 exchange="kraken",
                 native_symbol="BTC-USD",
                 timeframe="1m",
@@ -476,10 +477,11 @@ class TestFetchCacheOnly:
     @pytest.mark.asyncio
     async def test_cache_unavailable_for_derived_raises(self) -> None:
         """``cache is None`` on 5m raises :class:`CacheUnavailableError`."""
+        empty_repo = cast(Repository, _stub_repo([]))
         with pytest.raises(CacheUnavailableError):
             await fetch_cache_only(
                 cache=None,
-                repo=cast(Repository, _stub_repo([])),
+                repo=empty_repo,
                 exchange="kraken",
                 native_symbol="BTC-USD",
                 timeframe="5m",

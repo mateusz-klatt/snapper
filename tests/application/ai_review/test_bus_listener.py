@@ -211,6 +211,7 @@ class TestBusDispatchFrame:
     async def test_cancelled_error_propagates_from_handler(self) -> None:
         """``CancelledError`` from the handler must unwind the loop cleanly."""
         svc = AiReviewService.get_instance()
+        caps_violation_frame = _caps_violation_payload()
         with (
             patch.object(
                 svc,
@@ -220,7 +221,7 @@ class TestBusDispatchFrame:
             pytest.raises(asyncio.CancelledError),
         ):
             await svc._bus_dispatch_frame(
-                "bus.caps_violation_after_ai_approve", _caps_violation_payload()
+                "bus.caps_violation_after_ai_approve", caps_violation_frame
             )
 
 

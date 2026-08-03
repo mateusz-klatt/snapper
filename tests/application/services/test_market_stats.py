@@ -111,8 +111,9 @@ class TestPairKeyParser:
 
     def test_non_string_raises(self) -> None:
         """A non-string input raises before splitting."""
+        non_string_key = cast(Any, 42)
         with pytest.raises(StatsPairConfigError):
-            parse_pair_key(cast(Any, 42))
+            parse_pair_key(non_string_key)
 
 
 class TestPairSpecParser:
@@ -151,8 +152,9 @@ class TestPairSpecParser:
 
     def test_specs_non_list_raises(self) -> None:
         """A non-list shape (e.g. a string) raises at the top level."""
+        non_list_raw = cast(Any, "not-a-list")
         with pytest.raises(StatsPairConfigError, match="must be a list"):
-            parse_pair_specs(cast(Any, "not-a-list"))
+            parse_pair_specs(non_list_raw)
 
 
 class TestAlignmentAndStats:

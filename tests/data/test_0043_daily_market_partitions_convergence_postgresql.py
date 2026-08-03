@@ -907,11 +907,11 @@ def test_postgresql_comparator_rejects_each_transactional_catalog_mutation(
         try:
             apply_catalog_mutation(mutated_connection, mutation)
             mutated = catalog_fingerprint(mutated_connection)
+            compared_left, compared_right = (
+                (mutated, fresh) if target == "manual" else (manual, mutated)
+            )
             with pytest.raises(AssertionError, match=_MUTATION_SECTIONS[mutation]):
-                if target == "manual":
-                    assert_catalogs_identical(mutated, fresh)
-                else:
-                    assert_catalogs_identical(manual, mutated)
+                assert_catalogs_identical(compared_left, compared_right)
         finally:
             transaction.rollback()
     with engine.connect() as restored_connection:

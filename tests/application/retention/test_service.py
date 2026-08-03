@@ -147,9 +147,10 @@ class TestPoliciesModuleValidation:
 
     def test_telemetry_policy_present_in_default_list(self) -> None:
         """Sanity-check the shipped default policy."""
-        assert (
+        default_policies = RETENTION_POLICIES
+        assert default_policies == (
             RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30),
-        ) == RETENTION_POLICIES
+        )
 
     def test_validate_policies_raises_for_unknown_table(self) -> None:
         """The import-time guard rejects a non-event-table policy."""

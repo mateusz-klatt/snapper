@@ -305,13 +305,15 @@ class TestTopicForMessage:
         When: Constructing the object,
         Then: ValueError is raised by the model validator.
         """
+        timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        fired_at = datetime.now(UTC)
         with pytest.raises(ValueError, match="strategy_name"):
             SignalData(
                 session_id="",
                 sequence_id=0,
                 public_id="test-public-id",
-                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-                fired_at=datetime.now(UTC),
+                timestamp=timestamp,
+                fired_at=fired_at,
                 instrument="BTC-USD",
                 exchange="paper",
                 side="buy",

@@ -295,8 +295,9 @@ async def test_start_process_refuses_when_predecessor_survives_cancel(
     stubborn_task: asyncio.Task[None] = asyncio.create_task(_stubborn())
     await asyncio.sleep(0)
     factory.process_tasks["w"] = cast(asyncio.Task[object], stubborn_task)
+    successor_config = _make_config("w")
     with pytest.raises(RuntimeError, match="survived cancellation"):
-        await factory.start_process(_make_config("w"))
+        await factory.start_process(successor_config)
     assert factory.process_tasks.get("w") is stubborn_task
     release.set()
     await stubborn_task
@@ -371,8 +372,9 @@ async def test_start_process_refuses_when_predecessor_stop_fails() -> None:
     factory = _make_factory()
     broken = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("wedged")))
     factory.started_processes["b"] = broken
+    successor_config = _make_config("b")
     with pytest.raises(RuntimeError, match="failed to stop"):
-        await factory.start_process(_make_config("b"))
+        await factory.start_process(successor_config)
     assert factory.started_processes.get("b") is broken
 
 

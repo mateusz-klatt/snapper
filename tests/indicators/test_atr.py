@@ -64,5 +64,8 @@ def test_atr_length_mismatch_raises() -> None:
     When: atr is called,
     Then: it raises ValueError.
     """
+    high = pd.Series([1.0, 2.0])
+    short_low = pd.Series([1.0])
+    close = pd.Series([1.0, 2.0])
     with pytest.raises(ValueError, match="equal length"):
-        atr(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]))
+        atr(high, short_low, close)

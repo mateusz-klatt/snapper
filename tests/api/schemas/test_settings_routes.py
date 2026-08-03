@@ -386,6 +386,7 @@ class TestSettingsRoutes:
                 description=None,
             ),
         )
+        rest_request = self._make_rest_request()
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch(
@@ -396,7 +397,7 @@ class TestSettingsRoutes:
             pytest.raises(HTTPException) as exc_info,
         ):
             await set_setting(
-                http_request=self._make_rest_request(),
+                http_request=rest_request,
                 key="nonexistent_key",
                 body=request,
                 user=mock_user,
@@ -464,13 +465,13 @@ class TestSettingsRoutes:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=RemoveSettingBody(),
         )
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
             pytest.raises(HTTPException) as exc_info,
         ):
-            mock_request = MagicMock()
-            mock_request.app.state.rest_tracker = SequenceTracker()
             await remove_setting(
                 request=mock_request, key="nonexistent_key", _body=body, user=mock_user, _csrf=None
             )

@@ -108,8 +108,9 @@ def test_ai_researcher_permission_gate_rejects_signal_access() -> None:
     Then: The permission gate returns HTTP 403.
     """
     checker = require_permission(Permission.READ_SIGNALS)
+    researcher = _principal(UserRole.AI_RESEARCHER)
 
     with pytest.raises(HTTPException) as exc_info:
-        checker(current_user=_principal(UserRole.AI_RESEARCHER))
+        checker(current_user=researcher)
 
     assert exc_info.value.status_code == 403

@@ -24,7 +24,8 @@ _HELPER_PATH = (
     Path(__file__).resolve().parent.parent.parent / "scripts" / "provision_egress_tunnel.py"
 )
 _spec = importlib.util.spec_from_file_location("provision_egress_tunnel", _HELPER_PATH)
-assert _spec is not None and _spec.loader is not None
+assert _spec is not None
+assert _spec.loader is not None
 provision = importlib.util.module_from_spec(_spec)
 sys.modules["provision_egress_tunnel"] = provision
 _spec.loader.exec_module(provision)

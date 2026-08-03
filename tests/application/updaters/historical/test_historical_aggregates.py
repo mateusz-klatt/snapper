@@ -295,10 +295,11 @@ def test_lookup_native_raises_when_archive_symbol_missing(
         native_symbol="BTC-USD", base="BTC", quote="USD", public_id="orphan-pub-id"
     )
     alias = SimpleNamespace(symbol_public_id="orphan-pub-id", exchange_symbol="X:BTCUSD")
-    cast(Any, service)._db_sync = _StubSyncRepo([[catalog], [alias]])
-    cast(Any, service)._archive_symbols = {}
+    service_internals = cast(Any, service)
+    service_internals._db_sync = _StubSyncRepo([[catalog], [alias]])
+    service_internals._archive_symbols = {}
     with pytest.raises(ValueError, match="No archive_symbol for symbol"):
-        cast(Any, service)._lookup_context_by_native("BTC-USD")
+        service_internals._lookup_context_by_native("BTC-USD")
 
 
 def test_lookup_polygon_raises_when_archive_symbol_missing(
@@ -314,10 +315,11 @@ def test_lookup_polygon_raises_when_archive_symbol_missing(
     catalog = SimpleNamespace(
         native_symbol="BTC-USD", base="BTC", quote="USD", public_id="orphan-pub-id"
     )
-    cast(Any, service)._db_sync = _StubSyncRepo([[alias], [catalog]])
-    cast(Any, service)._archive_symbols = {}
+    service_internals = cast(Any, service)
+    service_internals._db_sync = _StubSyncRepo([[alias], [catalog]])
+    service_internals._archive_symbols = {}
     with pytest.raises(ValueError, match="No archive_symbol for symbol"):
-        cast(Any, service)._lookup_context_by_polygon_symbol("X:BTCUSD")
+        service_internals._lookup_context_by_polygon_symbol("X:BTCUSD")
 
 
 class DummySettings(SimpleNamespace):

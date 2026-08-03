@@ -83,7 +83,8 @@ class TestPositionStopLossFiredRule:
         assert "BTC-USD" in rows[0]["body"]
         assert "kraken" in rows[0]["body"]
         dedup_key = rows[0]["dedup_key"]
-        assert dedup_key is not None and dedup_key.startswith("stop_loss.")
+        assert dedup_key is not None
+        assert dedup_key.startswith("stop_loss.")
         payload = rows[0]["payload"]
         assert payload is not None
         assert payload["title_loc_key"] == "alerts.title.position_stop_loss_fired"

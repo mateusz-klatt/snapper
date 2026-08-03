@@ -348,7 +348,8 @@ class TestEligiblePlanes:
         row = rows[0]
         assert row["instrument_public_id"] == "ins-eth-kraken"
         assert row["native_symbol"] == "ETH-USD"
-        assert isinstance(row["candle_id"], int) and row["candle_id"] > 0
+        assert isinstance(row["candle_id"], int)
+        assert row["candle_id"] > 0
         assert row["candle_public_id"] != ""
         assert row["open_at"] == _M
         assert row["candle_timestamp"] == _M

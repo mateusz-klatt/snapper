@@ -614,12 +614,14 @@ def test_paper_and_simulated_calls_are_explicitly_refused() -> None:
     When: The live-only futures evaluator is called directly.
     Then: It raises an explicit orchestration error rather than manufacturing a row.
     """
+    paper_account = _account(mode=ExecutionModeEnum.PAPER)
+    unexpected_capability = cast(CapabilityStatus, "unexpected")
     with pytest.raises(ValueError, match="live account"):
-        _evaluate(account=_account(mode=ExecutionModeEnum.PAPER))
+        _evaluate(account=paper_account)
     with pytest.raises(ValueError, match="simulated positions"):
         _evaluate(capability=CapabilityStatus.SIMULATED)
     with pytest.raises(ValueError, match="unknown futures"):
-        _evaluate(capability=cast(CapabilityStatus, "unexpected"))
+        _evaluate(capability=unexpected_capability)
 
 
 @pytest.mark.parametrize(

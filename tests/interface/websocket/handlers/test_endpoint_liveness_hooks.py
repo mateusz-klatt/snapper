@@ -157,13 +157,16 @@ async def test_dispatch_failure_still_fires_disconnect_hook(
     _wire_flow(monkeypatch, auth_result=auth_result, dispatch=dispatch)
     ws_auth_manager = _auth_manager()
     websocket = cast(WebSocket, object())
+    connection_manager = cast(WebSocketConnectionManager, ManagerStub())
+    ws_token_service = MagicMock()
+    repository = MagicMock()
     with pytest.raises(RuntimeError, match="loop crashed"):
         await _authenticate_and_dispatch(
             websocket,
-            cast(WebSocketConnectionManager, ManagerStub()),
+            connection_manager,
             ws_auth_manager,
-            MagicMock(),
-            MagicMock(),
+            ws_token_service,
+            repository,
             [False],
         )
     ws_auth_manager.on_disconnect.assert_awaited_once_with(websocket, user)
@@ -190,13 +193,16 @@ async def test_auth_complete_failure_still_fires_disconnect_hook(
     )
     ws_auth_manager = _auth_manager()
     websocket = cast(WebSocket, object())
+    connection_manager = cast(WebSocketConnectionManager, ManagerStub())
+    ws_token_service = MagicMock()
+    repository = MagicMock()
     with pytest.raises(RuntimeError, match="send failed"):
         await _authenticate_and_dispatch(
             websocket,
-            cast(WebSocketConnectionManager, ManagerStub()),
+            connection_manager,
             ws_auth_manager,
-            MagicMock(),
-            MagicMock(),
+            ws_token_service,
+            repository,
             [False],
         )
     dispatch.assert_not_awaited()

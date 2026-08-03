@@ -435,8 +435,9 @@ def test_unsupported_timeframe_raises() -> None:
     When: audit_candle_series is called,
     Then: it raises ValueError.
     """
+    base_candle = _candle(_BASE)
     with pytest.raises(ValueError, match="unsupported timeframe"):
-        audit_candle_series([_candle(_BASE)], "2m")
+        audit_candle_series([base_candle], "2m")
 
 
 def test_naive_open_at_is_treated_as_utc() -> None:

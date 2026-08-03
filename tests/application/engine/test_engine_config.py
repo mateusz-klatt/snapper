@@ -1471,10 +1471,11 @@ async def test_insert_strategy_trade_command_requires_repository() -> None:
         source_surface="strategy",
         idempotency_key=None,
     )
+    empty_insert_row = cast(TradeCommandInsertRow, {})
     with pytest.raises(RuntimeError, match="repository not initialized"):
         await engine._insert_strategy_trade_command(
             submission,
-            cast(TradeCommandInsertRow, {}),
+            empty_insert_row,
             ai_review_public_id=None,
             ai_review_dispatch_version=None,
         )

@@ -542,10 +542,16 @@ async def test_total_unique_index_refuses_a_fence_bypass_duplicate(
         index and the ledger keeps exactly one committed row.
     """
     await _ingest_fill(repository, scope, 1)
-    with pytest.raises(IntegrityError, match="uq_executions_scope_sequence"):
+    duplicate_row = _fill_row(scope, 1, 2)
+
+    async def _commit_bypassing_the_fence() -> None:
+        """Write the duplicate counter coordinate through a raw session."""
         async with repository.session() as s:
-            s.add(_fill_row(scope, 1, 2))
+            s.add(duplicate_row)
             await s.commit()
+
+    with pytest.raises(IntegrityError, match="uq_executions_scope_sequence"):
+        await _commit_bypassing_the_fence()
     assert await _committed_sequences(repository, scope) == [1]
 
 

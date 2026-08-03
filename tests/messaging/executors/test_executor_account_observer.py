@@ -3160,9 +3160,10 @@ class TestPortfolioDriftNotificationEmission:
         ex.repository.get_portfolio_drift_episode_transition = AsyncMock(
             side_effect=asyncio.CancelledError
         )
+        evaluation = _portfolio_evaluation()
 
         with pytest.raises(asyncio.CancelledError):
-            await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+            await ex._publish_portfolio_drift_notification(evaluation)
 
     @pytest.mark.asyncio
     async def test_scheduler_tracks_and_discards_completed_notify_task(self) -> None:

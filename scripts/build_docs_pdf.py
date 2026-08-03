@@ -196,9 +196,10 @@ class MermaidRenderer:
             stderr = exc.stderr.decode("utf-8", errors="ignore").strip()
             stdout = exc.stdout.decode("utf-8", errors="ignore").strip()
             details = stderr or stdout or ""
+            output_section = f"\n\nMermaid CLI output:\n{details}" if details else ""
             raise MermaidRenderingError(
                 "Failed to render Mermaid diagram. Ensure Mermaid CLI is installed and working."
-                + (f"\n\nMermaid CLI output:\n{details}" if details else "")
+                + output_section
             ) from exc
         finally:
             tmp_input.unlink(missing_ok=True)

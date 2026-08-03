@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import cast
 
 import pytest
-from pytest import MonkeyPatch
 
 from snapper.application.process_manager import spawner as spawner_module
 from snapper.application.process_manager.models import ProcessInstanceInfo
@@ -23,7 +22,7 @@ from snapper.core.types import ProcessRoleEnum
 IS_WINDOWS = sys.platform == "win32"
 
 
-def _reload_spawner_for_posix(monkeypatch: MonkeyPatch) -> types.ModuleType:
+def _reload_spawner_for_posix(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     """Reload spawner module simulating POSIX platform.
 
     On Windows, temporarily adds POSIX-only os attributes (setsid, killpg,
@@ -96,7 +95,7 @@ class DummyProcessWithWait:
 
 
 @pytest.fixture(autouse=True)
-def fast_sleep(monkeypatch: MonkeyPatch) -> None:
+def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch sleep function to avoid delays in tests."""
     monkeypatch.setattr(
         "snapper.application.process_manager.spawner.time.sleep",
@@ -132,7 +131,7 @@ class TestBuildProcessCommand:
 class TestSpawnerImmediateExitWithoutCapture:
     """Test cases for spawn failure without output capture."""
 
-    def test_spawn_immediate_exit_failure_no_capture(self, monkeypatch: MonkeyPatch) -> None:
+    def test_spawn_immediate_exit_failure_no_capture(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify spawn raises error on immediate exit without capture.
 
         Given: Process that exits immediately with failure code,
@@ -162,7 +161,7 @@ class TestSpawnerImmediateExitWithoutCapture:
 class TestSpawnerClassPathValidation:
     """Test cases for class path validation in spawn."""
 
-    def test_spawn_invalid_module_path(self, monkeypatch: MonkeyPatch) -> None:
+    def test_spawn_invalid_module_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify spawn rejects invalid class path without dots.
 
         Given: Class path without module separator,
@@ -187,7 +186,7 @@ class TestSpawnerClassPathValidation:
             )
         assert "invalid class" in str(exc.value).lower()
 
-    def test_spawn_missing_attribute(self, monkeypatch: MonkeyPatch) -> None:
+    def test_spawn_missing_attribute(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify spawn rejects non-existent class in module.
 
         Given: Valid module with non-existent class name,
@@ -227,7 +226,7 @@ class TestTerminateEdgeCases:
         result = service.terminate("nonexistent")
         assert result is False
 
-    def test_terminate_already_dead(self, monkeypatch: MonkeyPatch) -> None:
+    def test_terminate_already_dead(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify terminate handles already-exited process.
 
         Given: Process that already exited with returncode 0,
@@ -248,7 +247,7 @@ class TestTerminateEdgeCases:
         assert result is True
         assert info.exit_code == 0
 
-    def test_terminate_sigterm_fails_uses_terminate(self, monkeypatch: MonkeyPatch) -> None:
+    def test_terminate_sigterm_fails_uses_terminate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify terminate falls back to process.terminate() on SIGTERM failure.
 
         Given: Process where SIGTERM causes ProcessLookupError,
@@ -282,7 +281,7 @@ class TestTerminateEdgeCases:
         monkeypatch.setattr(sys, "platform", original_platform, raising=False)
         importlib.reload(spawner_module)
 
-    def test_terminate_sigkill_fails_uses_kill(self, monkeypatch: MonkeyPatch) -> None:
+    def test_terminate_sigkill_fails_uses_kill(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify kill fallback when SIGKILL via killpg fails.
 
         Given: Process that ignores SIGKILL via killpg,
@@ -327,7 +326,7 @@ class TestTerminateEdgeCases:
         monkeypatch.setattr(sys, "platform", original_platform, raising=False)
         importlib.reload(spawner_module)
 
-    def test_terminate_unkillable_process(self, monkeypatch: MonkeyPatch) -> None:
+    def test_terminate_unkillable_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify handling of process that cannot be killed.
 
         Given: Process that ignores all termination signals,
@@ -415,7 +414,7 @@ class TestListProcesses:
 class TestCaptureOutputPaths:
     """Test cases for output capture on spawn failure."""
 
-    def test_spawn_captures_stdout_stderr_on_failure(self, monkeypatch: MonkeyPatch) -> None:
+    def test_spawn_captures_stdout_stderr_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify spawn includes stdout/stderr in error on failure.
 
         Given: Process that fails with stdout and stderr output,
@@ -774,7 +773,7 @@ class StubbornProcess(DummyProcess):
 
 
 @pytest.fixture(autouse=True)
-def fast_sleep_v2(monkeypatch: MonkeyPatch) -> None:
+def fast_sleep_v2(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch sleep function to avoid delays in tests."""
 
     def _noop_sleep(seconds: float) -> None:
@@ -786,7 +785,7 @@ def fast_sleep_v2(monkeypatch: MonkeyPatch) -> None:
     )
 
 
-def test_spawn_success_registers_process(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_success_registers_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn registers process in service tracker.
 
     Given a valid class path and method configuration,
@@ -817,7 +816,7 @@ def test_spawn_success_registers_process(monkeypatch: MonkeyPatch) -> None:
     assert "snapper.server.process_runner" in captured_cmd
 
 
-def test_non_delegate_spawn_inherits_parent_environment(monkeypatch: MonkeyPatch) -> None:
+def test_non_delegate_spawn_inherits_parent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-delegate children retain implicit full environment inheritance.
 
     Given: A non-delegate process and a parent-scoped logfile variable,
@@ -852,7 +851,7 @@ def test_non_delegate_spawn_inherits_parent_environment(monkeypatch: MonkeyPatch
 
 
 def test_delegate_spawn_receives_only_allowlisted_environment(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Delegate children receive an exact secret-free environment.
 
@@ -947,7 +946,7 @@ def test_cleanup_missing_process_is_unchanged() -> None:
     assert service.processes == {}
 
 
-def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_duplicate_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn raises error for duplicate process names.
 
     Given a process already registered with a specific name,
@@ -979,7 +978,7 @@ def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:
         )
 
 
-def test_spawn_invalid_class_path(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_invalid_class_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn raises error for invalid class path.
 
     Given a class path pointing to non-existent module,
@@ -1004,7 +1003,7 @@ def test_spawn_invalid_class_path(monkeypatch: MonkeyPatch) -> None:
         )
 
 
-def test_spawn_restores_sys_path_on_failure(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_restores_sys_path_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn retains cwd in sys.path when class import fails.
 
     Given a faulty sys.path that raises on remove,
@@ -1036,7 +1035,7 @@ def test_spawn_restores_sys_path_on_failure(monkeypatch: MonkeyPatch) -> None:
     assert cwd in faulty
 
 
-def test_spawn_immediate_exit_success(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_immediate_exit_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn handles immediate successful exit.
 
     Given a process that exits immediately with code 0,
@@ -1062,7 +1061,7 @@ def test_spawn_immediate_exit_success(monkeypatch: MonkeyPatch) -> None:
     assert info.exit_code == 0
 
 
-def test_spawn_immediate_exit_failure(monkeypatch: MonkeyPatch) -> None:
+def test_spawn_immediate_exit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify spawn raises error on immediate failure exit.
 
     Given a process that exits immediately with non-zero code,
@@ -1095,7 +1094,7 @@ def test_spawn_immediate_exit_failure(monkeypatch: MonkeyPatch) -> None:
     assert "traceback" in str(exc.value)
 
 
-def test_terminate_process_gracefully(monkeypatch: MonkeyPatch) -> None:
+def test_terminate_process_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify graceful process termination on Linux.
 
     Given a spawned process on Linux platform,
@@ -1132,12 +1131,13 @@ def test_terminate_process_gracefully(monkeypatch: MonkeyPatch) -> None:
     assert service.terminate("worker", timeout=1.0) is True
     assert dummy.returncode == 0
     assert service.processes["worker"].exit_code == 0
-    assert calls and calls[0][1] == signal.SIGTERM
+    assert calls
+    assert calls[0][1] == signal.SIGTERM
     monkeypatch.setattr(sys, "platform", original_platform, raising=False)
     importlib.reload(spawner_module)
 
 
-def test_terminate_process_force_kill(monkeypatch: MonkeyPatch) -> None:
+def test_terminate_process_force_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify force kill when graceful termination times out.
 
     Given a stubborn process that ignores SIGTERM on Linux,
@@ -1202,7 +1202,7 @@ def test_get_status_for_unknown_process() -> None:
     assert status.error == "Process not found"
 
 
-def test_get_status_for_stopped_process(monkeypatch: MonkeyPatch) -> None:
+def test_get_status_for_stopped_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_status returns exit code for stopped process.
 
     Given a registered process that has already exited,
@@ -1228,7 +1228,7 @@ def test_get_status_for_stopped_process(monkeypatch: MonkeyPatch) -> None:
     assert status.heartbeat_age_seconds is not None
 
 
-def test_cleanup_removes_finished_process(monkeypatch: MonkeyPatch) -> None:
+def test_cleanup_removes_finished_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cleanup removes finished process from tracker.
 
     Given a process that has already exited,
@@ -1249,7 +1249,7 @@ def test_cleanup_removes_finished_process(monkeypatch: MonkeyPatch) -> None:
     assert "worker" not in service.processes
 
 
-def test_cleanup_active_process_triggers_terminate(monkeypatch: MonkeyPatch) -> None:
+def test_cleanup_active_process_triggers_terminate(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cleanup terminates still-running process.
 
     Given a process that is still running,
@@ -1279,7 +1279,7 @@ def test_cleanup_active_process_triggers_terminate(monkeypatch: MonkeyPatch) -> 
     assert "worker" not in service.processes
 
 
-def test_cleanup_all_handles_errors(monkeypatch: MonkeyPatch) -> None:
+def test_cleanup_all_handles_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify cleanup_all continues despite individual errors.
 
     Given multiple registered processes where one fails to terminate,
