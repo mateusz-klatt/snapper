@@ -260,6 +260,7 @@ from snapper.data.models import UserActiveToken
 from snapper.data.models import UserAlertDefault
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
+from snapper.data.models import UUIDColumn
 from snapper.data.models import VenueAccountObservation
 from snapper.data.models import VenueAccountState
 from snapper.data.models import VenueEvent
@@ -18615,7 +18616,11 @@ class SQLAlchemyRepository(Repository):
             ORDER BY s.wallet_public_id, s.mode, s.valuation_ccy, s.calc_version,
                      s.epoch_public_id, e.exchange
             """).columns(
-            knowledge_at=TZDateTime(), epoch_start=TZDateTime(), point_time_cut=TZDateTime()
+            wallet_public_id=UUIDColumn(),
+            epoch_public_id=UUIDColumn(),
+            knowledge_at=TZDateTime(),
+            epoch_start=TZDateTime(),
+            point_time_cut=TZDateTime(),
         )
         known_to = (
             KNOWN_TO_MAX
@@ -18642,6 +18647,8 @@ class SQLAlchemyRepository(Repository):
             ) = row
             if invalid or invalid_value or raw_epoch_start is None:
                 raise ValueError("active P&L consumer has invalid execution watermarks")
+            wallet = str(wallet)
+            epoch = str(epoch)
             knowledge = cast(datetime, raw_knowledge)
             epoch_start = cast(datetime, raw_epoch_start)
             point_time_cut = cast(datetime, raw_point_time_cut)

@@ -1,15 +1,20 @@
 """Consumer-wide FX proof-backfill derivation and recovery witnesses."""
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from typing import cast
+from uuid import UUID
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
@@ -20,6 +25,7 @@ from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillRequi
 from snapper.application.portfolio.fx_proof_backfill import _acquire_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import _checkpoint_start
 from snapper.application.portfolio.fx_proof_backfill import _consumer_discovery
+from snapper.application.portfolio.fx_proof_backfill import _consumer_key
 from snapper.application.portfolio.fx_proof_backfill import _consumer_manifest
 from snapper.application.portfolio.fx_proof_backfill import _expected_evaluation_count
 from snapper.application.portfolio.fx_proof_backfill import _fsync_directory
@@ -33,6 +39,7 @@ from snapper.application.portfolio.fx_proof_backfill import reset_fx_proof_backf
 from snapper.application.portfolio.fx_proof_backfill import run_fx_proof_backfill
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import PortfolioPnlPoint
+from snapper.data.models import UUIDColumn
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSymbolRefRow
@@ -534,6 +541,72 @@ async def test_repository_aggregates_active_watermark_union_in_sql(tmp_path: Pat
             await session.commit()
         with pytest.raises(ValueError, match="invalid execution watermarks"):
             await repository.list_fx_proof_backfill_consumers()
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_consumer_query_decodes_postgresql_uuid_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native PostgreSQL UUID results must cross the textual repository boundary.
+
+    Given: The raw SQL consumer query and PostgreSQL-native UUID result values.
+    When: Its declared result types decode the wallet and epoch identities.
+    Then: Both identities become strings before execution-prefix certification.
+    """
+    repository = await _repository(tmp_path, "postgres-identities.db")
+    captured: list[Any] = []
+
+    epoch_id = UUID("00000000-0000-7000-8000-000000000850")
+
+    class _NativeUuidResult:
+        def all(self) -> list[tuple[object, ...]]:
+            return [
+                (
+                    UUID(_WALLET),
+                    "live",
+                    "USD",
+                    "5B.2",
+                    epoch_id,
+                    _HORIZON,
+                    _MINUTE,
+                    _MINUTE,
+                    0,
+                    0,
+                    None,
+                    None,
+                )
+            ]
+
+    class _CaptureSession:
+        async def execute(self, statement: object, _params: object) -> _NativeUuidResult:
+            captured.append(statement)
+            return _NativeUuidResult()
+
+    @asynccontextmanager
+    async def capture_session() -> AsyncIterator[_CaptureSession]:
+        yield _CaptureSession()
+
+    monkeypatch.setattr(repository, "session", capture_session)
+    consumers = await repository.list_fx_proof_backfill_consumers()
+    assert len(consumers) == 1
+    assert consumers[0].wallet_public_id == _WALLET
+    assert consumers[0].epoch_public_id == str(epoch_id)
+    assert isinstance(consumers[0].wallet_public_id, str)
+    assert isinstance(consumers[0].epoch_public_id, str)
+    assert _consumer_key(consumers[0]).startswith(f"{_WALLET}|live|USD|5B.2|")
+    statement = captured[0]
+    dialect = postgresql.dialect()
+    for column_name, native_value in (
+        ("wallet_public_id", UUID(_WALLET)),
+        ("epoch_public_id", epoch_id),
+    ):
+        column_type = statement.selected_columns[column_name].type
+        assert isinstance(column_type, UUIDColumn)
+        processor = column_type.dialect_impl(dialect).result_processor(dialect, None)
+        assert processor is not None
+        assert processor(native_value) == str(native_value)
     await repository.engine.dispose()
 
 
