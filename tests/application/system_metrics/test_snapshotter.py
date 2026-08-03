@@ -190,6 +190,7 @@ class TestSnapshotter:
                 "upgrade_required": 0,
                 "mismatch": 0,
                 "failure": 0,
+                "dropped": 0,
             },
             tracemalloc_active=False,
             cgroup_version=None,

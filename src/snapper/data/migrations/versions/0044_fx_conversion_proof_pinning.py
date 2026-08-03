@@ -218,6 +218,11 @@ def upgrade() -> None:
         sa.Column("proof_digest", sa.String(64), nullable=False),
         sa.CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),
         sa.CheckConstraint(
+            "(operation = 'direct' AND conversion_rate_decimal IS NOT NULL) "
+            "OR (operation = 'inverse' AND conversion_rate_decimal IS NULL)",
+            name="ck_fx_proofs_operation_rate",
+        ),
+        sa.CheckConstraint(
             exact_minute_sql,
             name="ck_fx_proofs_exact_minute",
         ),

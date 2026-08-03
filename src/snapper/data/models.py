@@ -1812,6 +1812,11 @@ class FxConversionProof(TemporalMixin, Base):
         ),
         CheckConstraint("operation IN ('direct', 'inverse')", name="ck_fx_proofs_operation"),
         CheckConstraint(
+            "(operation = 'direct' AND conversion_rate_decimal IS NOT NULL) "
+            "OR (operation = 'inverse' AND conversion_rate_decimal IS NULL)",
+            name="ck_fx_proofs_operation_rate",
+        ),
+        CheckConstraint(
             "datetime(conversion_minute) = datetime(candle_open_minute, '+1 minute')",
             name="ck_fx_proofs_exact_minute",
         ).ddl_if(dialect="sqlite"),

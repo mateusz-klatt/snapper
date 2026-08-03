@@ -1138,11 +1138,13 @@ class FxConversionArtifactValueError(TypeError):
 
 
 class FxConversionArtifactUpgradeRequiredError(RuntimeError):
-    """A complete re-election found a committed partial at the same horizon.
+    """A defective complete writer found a committed partial at the same horizon.
 
     Resolution requires the operator-gated annulment-style correction path from
     the proof-pinning plan's open decision 3. The writer never overwrites or
-    automatically upgrades the first durable artifact.
+    automatically upgrades the first durable artifact. Normal evidence growth
+    advances ``resolved_knowledge_at`` and creates a new version: superseded
+    partials stay active and latest-visible remains the authority contract.
     """
 
     def __init__(self, winner: FxConversionArtifactRow) -> None:

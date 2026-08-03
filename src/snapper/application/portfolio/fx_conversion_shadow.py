@@ -65,7 +65,12 @@ class FxShadowEvaluation:
 
 @dataclass
 class FxShadowPinMetrics:
-    """Process-local monotonic counters for shadow proof persistence."""
+    """Process-local monotonic counters for shadow proof persistence.
+
+    ``upgrade_required`` counts only defective writers competing at the same
+    evidence horizon. Normal partial-to-complete evidence growth creates a new
+    resolved horizon; both versions stay active and latest-visible is authority.
+    """
 
     creation: int = 0
     reuse: int = 0
@@ -73,13 +78,18 @@ class FxShadowPinMetrics:
     upgrade_required: int = 0
     mismatch: int = 0
     failure: int = 0
+    dropped: int = 0
 
 
 _METRICS = FxShadowPinMetrics()
 
 
 def fx_shadow_pin_metrics() -> FxShadowPinMetrics:
-    """Return an immutable-by-copy snapshot of shadow pin counters."""
+    """Return an immutable-by-copy snapshot of shadow pin counters.
+
+    Returns:
+        A detached snapshot of every process-local shadow counter.
+    """
     return FxShadowPinMetrics(
         creation=_METRICS.creation,
         reuse=_METRICS.reuse,
@@ -87,6 +97,7 @@ def fx_shadow_pin_metrics() -> FxShadowPinMetrics:
         upgrade_required=_METRICS.upgrade_required,
         mismatch=_METRICS.mismatch,
         failure=_METRICS.failure,
+        dropped=_METRICS.dropped,
     )
 
 
@@ -98,17 +109,19 @@ def reset_fx_shadow_pin_metrics() -> None:
     _METRICS.upgrade_required = 0
     _METRICS.mismatch = 0
     _METRICS.failure = 0
+    _METRICS.dropped = 0
     _LOGGED_FAILURE_CLASSES.clear()
 
 
-_LOGGED_FAILURE_CLASSES: set[str] = set()
+_LOGGED_FAILURE_CLASSES: set[tuple[str, tuple[str, str]]] = set()
 
 
 def _log_once(failure_class: str, message: str, pair: tuple[str, str]) -> None:
-    """Emit one process-local diagnostic for each shadow failure class."""
-    if failure_class in _LOGGED_FAILURE_CLASSES:
+    """Emit one process-local diagnostic for each failure class and pair."""
+    key = (failure_class, pair)
+    if key in _LOGGED_FAILURE_CLASSES:
         return
-    _LOGGED_FAILURE_CLASSES.add(failure_class)
+    _LOGGED_FAILURE_CLASSES.add(key)
     logger.error(message, pair)
 
 
@@ -120,7 +133,11 @@ class FxShadowPinContext:
     evaluations: list[FxShadowEvaluation]
 
     def collect(self, factory: Callable[[], Sequence[FxShadowEvaluation]]) -> None:
-        """Collect guarded bounded evaluations without exposing construction errors."""
+        """Collect guarded bounded evaluations without exposing construction errors.
+
+        Args:
+            factory: Deferred construction of raw election evaluations.
+        """
         try:
             for evaluation in factory():
                 if len(evaluation.required_minutes) > MAX_SHADOW_MANIFEST_MINUTES:
@@ -136,18 +153,34 @@ class FxShadowPinContext:
             _log_once("collection", "FX shadow pin evaluation collection failed for {}", ("?", "?"))
 
     async def flush(self, repo: Repository) -> None:
-        """Persist every collected evaluation after the tick's valuation work."""
-        pending = tuple(self.evaluations)
-        self.evaluations.clear()
-        await shadow_pin_fx_evaluations(repo, pending, self.calculation_version)
+        """Persist every collected evaluation after the tick's valuation work.
+
+        Args:
+            repo: Repository receiving the shadow artifacts.
+        """
+        while self.evaluations:
+            evaluation = self.evaluations[0]
+            await shadow_pin_fx_evaluations(repo, (evaluation,), self.calculation_version)
+            self.evaluations.pop(0)
 
     async def flush_bounded(self, repo: Repository) -> None:
-        """Flush under the single per-tick deadline without failing valuation."""
+        """Flush under the single per-tick deadline without failing valuation.
+
+        Args:
+            repo: Repository receiving the shadow artifacts.
+        """
         try:
             await asyncio.wait_for(self.flush(repo), timeout=SHADOW_PIN_TICK_TIMEOUT_SECONDS)
         except TimeoutError:
             _METRICS.failure += 1
-            _log_once("timeout", "FX shadow pin tick deadline exceeded for {}", ("*", "*"))
+            dropped = len(self.evaluations)
+            _METRICS.dropped += dropped
+            self.evaluations.clear()
+            _log_once(
+                "timeout",
+                f"FX shadow pin tick deadline exceeded; dropped={dropped} for {{}}",
+                ("*", "*"),
+            )
 
 
 _ACTIVE_CONTEXT: ContextVar[FxShadowPinContext | None] = ContextVar(
@@ -156,13 +189,24 @@ _ACTIVE_CONTEXT: ContextVar[FxShadowPinContext | None] = ContextVar(
 
 
 def current_fx_shadow_context() -> FxShadowPinContext | None:
-    """Return the explicitly activated snapshotter context for this async task."""
+    """Return the explicitly activated snapshotter context for this async task.
+
+    Returns:
+        The active durable-consumer context, or null outside that scope.
+    """
     return _ACTIVE_CONTEXT.get()
 
 
 @contextmanager
 def activate_fx_shadow_context(context: FxShadowPinContext | None) -> Iterator[None]:
-    """Scope collection to an explicitly enabled durable-consumer valuation."""
+    """Scope collection to an explicitly enabled durable-consumer valuation.
+
+    Args:
+        context: Collector to activate, or null to explicitly disable collection.
+
+    Yields:
+        Control while the supplied context is task-local and active.
+    """
     token = _ACTIVE_CONTEXT.set(context)
     try:
         yield
@@ -181,7 +225,17 @@ def canonical_candidate_planes(
     source: str,
     target: str,
 ) -> tuple[FxConversionCandidatePlane, ...]:
-    """Build the documented row-derived fallback for tuple-only discovery."""
+    """Build the documented row-derived fallback for tuple-only discovery.
+
+    Args:
+        candidates: Plane identities returned by tuple-only discovery.
+        rows: Loaded evidence rows that can complete candidate provenance.
+        source: Conversion source currency.
+        target: Conversion target currency.
+
+    Returns:
+        Canonically sorted candidate planes with complete provenance.
+    """
     candidate_set = set(candidates)
     completed = {
         (
@@ -239,11 +293,6 @@ def _reason(state: FxConversionCompleteness, missing: Sequence[datetime]) -> str
             "unproven_minutes": [minute.astimezone(UTC).isoformat() for minute in sorted(missing)],
         }
     )
-
-
-def replay_proof_rate(raw_close: Decimal, operation: FxConversionOperation) -> Decimal:
-    """Replay a proof from raw close; inverse multiplication is never persisted."""
-    return raw_close if operation == "direct" else Decimal(1) / raw_close
 
 
 def _build_artifact(
@@ -381,23 +430,26 @@ def _artifact_matches_raw(
         cast(str, selected_quote),
         cast(str, selected_exchange),
     )
-    authoritative = tuple(
-        (
-            proof["conversion_minute"],
-            Decimal(
-                str(
-                    evaluation.authoritative_rates[
-                        (
-                            *rate_key_plane,
-                            proof["conversion_minute"],
-                        )
-                    ]
-                )
-            ),
-            proof["operation"],
+    try:
+        authoritative = tuple(
+            (
+                proof["conversion_minute"],
+                Decimal(
+                    str(
+                        evaluation.authoritative_rates[
+                            (
+                                *rate_key_plane,
+                                proof["conversion_minute"],
+                            )
+                        ]
+                    )
+                ),
+                proof["operation"],
+            )
+            for proof in artifact["proofs"]
         )
-        for proof in artifact["proofs"]
-    )
+    except KeyError:
+        return False
     committed = tuple(
         (proof["conversion_minute"], proof["raw_close"], proof["operation"])
         for proof in artifact["proofs"]
@@ -410,7 +462,13 @@ async def shadow_pin_fx_evaluations(
     evaluations: Sequence[FxShadowEvaluation],
     calculation_version: str,
 ) -> None:
-    """Persist raw fiat elections while isolating every shadow-write failure."""
+    """Persist raw fiat elections while isolating every shadow-write failure.
+
+    Args:
+        repo: Repository receiving canonical election and proof artifacts.
+        evaluations: Already-authoritative raw valuation results to shadow.
+        calculation_version: Consumer calculation contract recorded on elections.
+    """
     for evaluation in evaluations:
         try:
             election, proofs = _build_artifact(

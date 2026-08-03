@@ -3214,7 +3214,6 @@ async def _load_request_fx_rates(
     ]
     general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
     rates = build_fx_rates(selected_rows)
-    all_rates = build_fx_rates(rows)
     shadow_context = current_fx_shadow_context()
     if shadow_context is not None:
         shadow_context.collect(
@@ -3230,7 +3229,7 @@ async def _load_request_fx_rates(
                         selected_plane=shared_planes.get(pair),
                         requested_knowledge_at=as_of,
                         rows=tuple(rows),
-                        authoritative_rates=all_rates,
+                        authoritative_rates=rates,
                     )
                     for pair, minutes in sorted(general_requirements.items())
                 ),
@@ -3245,7 +3244,7 @@ async def _load_request_fx_rates(
                         selected_plane=resolved_identity_planes.get(instrument_public_id),
                         requested_knowledge_at=as_of,
                         rows=tuple(rows),
-                        authoritative_rates=all_rates,
+                        authoritative_rates=rates,
                     )
                     for instrument_public_id, instrument_minutes in sorted(
                         instrument_requirements.items()

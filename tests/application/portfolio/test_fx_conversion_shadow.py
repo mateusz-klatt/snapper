@@ -19,9 +19,9 @@ from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluatio
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import _artifact_matches_raw
 from snapper.application.portfolio.fx_conversion_shadow import _build_artifact
+from snapper.application.portfolio.fx_conversion_shadow import _log_once
 from snapper.application.portfolio.fx_conversion_shadow import canonical_candidate_planes
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
-from snapper.application.portfolio.fx_conversion_shadow import replay_proof_rate
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
 from snapper.application.portfolio.fx_rates import convert_amount
@@ -101,7 +101,12 @@ async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
 
 
 def test_candidate_enumeration_is_stable_across_identical_evaluations() -> None:
-    """Discovery and row order cannot perturb considered candidate planes."""
+    """Discovery and row order cannot perturb considered candidate planes.
+
+    Given equivalent candidate and evidence sets in different orders
+    When their canonical candidate planes are built
+    Then both evaluations enumerate byte-identical candidates
+    """
     kraken = _row()
     walutomat = _row(exchange="walutomat", instrument="00000000-0000-7000-8000-000000000804")
     candidates = [("EUR", "USD", "kraken"), ("EUR", "USD", "walutomat")]
@@ -116,7 +121,12 @@ def test_candidate_enumeration_is_stable_across_identical_evaluations() -> None:
 async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
     tmp_path: Path,
 ) -> None:
-    """All raw outcomes pin while successful identity races remain observable."""
+    """All raw outcomes pin while successful identity races remain observable.
+
+    Given complete, conflicting, partial, and refused raw elections
+    When the shadow writer persists and repeats them
+    Then artifacts and outcome counters preserve their distinct semantics
+    """
     reset_fx_shadow_pin_metrics()
     repository = await _repository(tmp_path)
     next_minute = _MINUTE + timedelta(minutes=1)
@@ -179,7 +189,8 @@ async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
         metrics.upgrade_required,
         metrics.mismatch,
         metrics.failure,
-    ) == (3, 2, 1, 0, 0, 0)
+        metrics.dropped,
+    ) == (3, 2, 1, 0, 0, 0, 0)
     async with repository.session() as session:
         states: dict[str, int] = dict(
             (
@@ -208,7 +219,12 @@ async def test_shadow_creation_reuse_conflict_partial_and_refusal_are_audited(
 
 @pytest.mark.asyncio
 async def test_shadow_failure_is_isolated_from_the_raw_caller() -> None:
-    """An arbitrary persistence failure increments failure and never escapes."""
+    """An arbitrary persistence failure increments failure and never escapes.
+
+    Given a repository that rejects every shadow artifact
+    When a raw evaluation is shadow-pinned
+    Then the failure is counted without escaping to valuation
+    """
 
     class _FailingRepository:
         async def pin_fx_conversion_artifact(self, election: object, proofs: object) -> object:
@@ -223,7 +239,12 @@ async def test_shadow_failure_is_isolated_from_the_raw_caller() -> None:
 
 @pytest.mark.asyncio
 async def test_shadow_canonical_mismatch_is_observed_without_escaping(tmp_path: Path) -> None:
-    """A divergence from the authoritative raw rate fold increments mismatch."""
+    """A divergence from the authoritative raw rate fold increments mismatch.
+
+    Given a committed proof whose close differs from the consumed raw map
+    When the committed artifact is compared after pinning
+    Then mismatch increments without becoming a persistence failure
+    """
     reset_fx_shadow_pin_metrics()
     repository = await _repository(tmp_path)
     evaluation = replace(
@@ -235,8 +256,60 @@ async def test_shadow_canonical_mismatch_is_observed_without_escaping(tmp_path: 
     await repository.engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_missing_authoritative_plane_is_mismatch_not_failure(tmp_path: Path) -> None:
+    """A committed plane absent from raw authority is the strongest mismatch.
+
+    Given a pin whose selected plane has no key in the authoritative rate map
+    When the committed artifact is compared with valuation output
+    Then mismatch increments and generic failure remains unchanged
+    """
+    reset_fx_shadow_pin_metrics()
+    repository = await _repository(tmp_path)
+    await shadow_pin_fx_evaluations(
+        repository,
+        [replace(_evaluation(), authoritative_rates={})],
+        "5A.13",
+    )
+    metrics = fx_shadow_pin_metrics()
+    assert metrics.mismatch == 1
+    assert metrics.failure == 0
+    await repository.engine.dispose()
+
+
+def test_log_once_is_scoped_by_failure_class_and_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Log suppression retains one diagnostic for every affected pair.
+
+    Given repeated mismatch diagnostics for one pair and one for another
+    When pair-scoped log-once suppression is applied
+    Then each distinct pair logs exactly once
+    """
+    reset_fx_shadow_pin_metrics()
+    logged: list[tuple[str, tuple[str, str]]] = []
+
+    def capture(message: str, pair: tuple[str, str]) -> None:
+        """Capture the structured log call without depending on logger sinks."""
+        logged.append((message, pair))
+
+    monkeypatch.setattr("snapper.application.portfolio.fx_conversion_shadow.logger.error", capture)
+    _log_once("mismatch", "FX mismatch for {}", ("EUR", "USD"))
+    _log_once("mismatch", "FX mismatch for {}", ("EUR", "USD"))
+    _log_once("mismatch", "FX mismatch for {}", ("GBP", "USD"))
+    assert logged == [
+        ("FX mismatch for {}", ("EUR", "USD")),
+        ("FX mismatch for {}", ("GBP", "USD")),
+    ]
+
+
 def test_context_guards_collection_and_skips_bulk_manifests() -> None:
-    """Collection exceptions and catch-up-sized manifests never reach the tick."""
+    """Collection exceptions and catch-up-sized manifests never reach the tick.
+
+    Given a broken factory and repeated oversized evaluation manifests
+    When the guarded context collects them
+    Then no evaluation escapes and collection failure is counted once
+    """
     reset_fx_shadow_pin_metrics()
     context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
 
@@ -259,8 +332,15 @@ def test_context_guards_collection_and_skips_bulk_manifests() -> None:
 async def test_context_flush_deadline_is_failure_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The single per-tick wait budget times out without leaking its coroutine."""
-    context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+    """The deadline counts and reports evaluations abandoned by timeout.
+
+    Given two collected evaluations and a wait that reaches its deadline
+    When the bounded shadow flush is attempted
+    Then both drops and the failure are observable without coroutine leakage
+    """
+    context = FxShadowPinContext(
+        calculation_version="5B.2", evaluations=[_evaluation(), _evaluation()]
+    )
     reset_fx_shadow_pin_metrics()
 
     async def _timeout(coro: Coroutine[object, object, None], timeout: float) -> None:
@@ -269,14 +349,30 @@ async def test_context_flush_deadline_is_failure_isolated(
         coro.close()
         raise TimeoutError
 
+    logged: list[tuple[str, tuple[str, str]]] = []
+
+    def capture(message: str, pair: tuple[str, str]) -> None:
+        """Capture the timeout diagnostic without depending on logger sinks."""
+        logged.append((message, pair))
+
     monkeypatch.setattr(asyncio, "wait_for", _timeout)
+    monkeypatch.setattr("snapper.application.portfolio.fx_conversion_shadow.logger.error", capture)
     await context.flush_bounded(cast(Repository, object()))
-    assert fx_shadow_pin_metrics().failure == 1
+    metrics = fx_shadow_pin_metrics()
+    assert metrics.failure == 1
+    assert metrics.dropped == 2
+    assert context.evaluations == []
+    assert logged == [("FX shadow pin tick deadline exceeded; dropped=2 for {}", ("*", "*"))]
 
 
 @pytest.mark.asyncio
-async def test_duplicate_version_alignment_and_inverse_replay(tmp_path: Path) -> None:
-    """Last candle identity wins and inverse replay divides by the raw close."""
+async def test_duplicate_version_alignment(tmp_path: Path) -> None:
+    """Pinned provenance follows valuation's duplicate-version winner.
+
+    Given duplicate rows for one plane and minute with different candle ids
+    When the evaluation is shadow-pinned
+    Then the greatest candle id supplies the committed provenance
+    """
     repository = await _repository(tmp_path)
     older = _row()
     newer: PnlFxRateRow = {
@@ -289,23 +385,34 @@ async def test_duplicate_version_alignment_and_inverse_replay(tmp_path: Path) ->
     async with repository.session() as session:
         proof = (await session.execute(select(FxConversionProof))).scalars().one()
     assert proof.candle_id == 99
-    inverse_close = Decimal("0.9")
-    replayed = replay_proof_rate(inverse_close, "inverse")
-    converted = convert_amount(
-        1.0,
-        "EUR",
-        "USD",
-        _MINUTE,
-        {("USD", "EUR", "kraken", _MINUTE): 0.9},
-        {currency_pair_key("EUR", "USD"): ("USD", "EUR", "kraken")},
-    )
-    assert converted is not None
-    assert float(replayed) == converted
     await repository.engine.dispose()
 
 
+def test_inverse_replay_divides_each_authoritative_amount() -> None:
+    """Inverse replay uses production division rather than a reciprocal multiplier.
+
+    Given many amounts and one inverse proof represented by raw close plus operation
+    When each amount is replayed by division and converted by production
+    Then every floating-point result is exactly identical
+    """
+    raw_close = Decimal("0.9000000000000001")
+    rate = float(raw_close)
+    rates = {("USD", "EUR", "kraken", _MINUTE): rate}
+    planes = {currency_pair_key("EUR", "USD"): ("USD", "EUR", "kraken")}
+    amounts = [index * 0.125 + index % 17 * 0.000_001 for index in range(1, 2001)]
+    for amount in amounts:
+        converted = convert_amount(amount, "EUR", "USD", _MINUTE, rates, planes)
+        assert converted is not None
+        assert amount / rate == converted
+
+
 def test_discovered_candidates_override_row_fallback_and_resolve_from_evidence() -> None:
-    """Caller-supplied discovery retains row-less planes and evidence fixes identity time."""
+    """Caller discovery retains rowless planes while evidence fixes identity time.
+
+    Given full discovery with selected and rowless candidate planes
+    When the raw election artifact is constructed
+    Then every candidate remains and evidence bus time defines its horizon
+    """
     selected = FxConversionCandidatePlane(
         source_exchange="kraken",
         source_instrument_public_id=_INSTRUMENT,
@@ -329,8 +436,13 @@ def test_discovered_candidates_override_row_fallback_and_resolve_from_evidence()
 
 
 @pytest.mark.asyncio
-async def test_upgrade_metric_and_impossible_selected_plane_guard(tmp_path: Path) -> None:
-    """Upgrade incidents stay distinct and malformed committed planes mismatch."""
+async def test_same_horizon_upgrade_metric_and_impossible_plane_guard(tmp_path: Path) -> None:
+    """Same-horizon defects stay distinct and malformed committed planes mismatch.
+
+    Given a defective same-horizon writer and an impossible committed plane
+    When each shadow result is classified
+    Then upgrade-required and mismatch remain distinct incident classes
+    """
 
     class _UpgradeRepository:
         async def pin_fx_conversion_artifact(self, election: object, proofs: object) -> object:

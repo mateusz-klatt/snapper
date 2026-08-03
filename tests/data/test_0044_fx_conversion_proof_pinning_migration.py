@@ -143,12 +143,14 @@ def test_0044_election_checks_reject_invalid_rows(
     [
         {"operation": "sideways"},
         {"candle_open_minute": _MINUTE},
+        {"operation": "direct", "conversion_rate_decimal": None},
+        {"operation": "inverse", "conversion_rate_decimal": "1.10"},
     ],
 )
 def test_0044_proof_checks_enforce_operation_and_m_minus_one_relation(
     migrated_db_path: Path, overrides: dict[str, object]
 ) -> None:
-    """The proof CHECKs accept only a valid operation and prior-minute candle."""
+    """Proof checks enforce operation, rate shape, and the prior-minute candle."""
     engine = sa.create_engine(f"sqlite:///{migrated_db_path}")
     with pytest.raises(IntegrityError):
         _insert(

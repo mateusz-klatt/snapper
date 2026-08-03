@@ -141,6 +141,7 @@ class FxShadowPinMetricsSnapshot(TypedDict):
     upgrade_required: int
     mismatch: int
     failure: int
+    dropped: int
 
 
 class SystemMetricsSnapshot(TypedDict):

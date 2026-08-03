@@ -419,6 +419,66 @@ async def test_partial_reason_and_complete_upgrade_fail_closed(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_evidence_growth_layers_complete_over_partial(tmp_path: Path) -> None:
+    """Later evidence creates a complete version that outranks the active partial.
+
+    Given a partial artifact followed by complete evidence at a newer horizon
+    When latest-visible authority is read before and after that evidence arrives
+    Then both versions remain active while the complete version becomes authoritative
+    """
+    repository = await _repository(tmp_path)
+    missing = _MINUTE + timedelta(minutes=2)
+    partial = _election("00000000-0000-7000-8000-000000000150")
+    partial["required_minutes"] = (_MINUTE, missing)
+    partial["completeness_state"] = "partial"
+    partial["refusal_reason_json"] = (
+        '{"reason":"missing_candle","unproven_minutes":["2026-07-26T14:54:00+00:00"]}'
+    )
+    await repository.pin_fx_conversion_artifact(
+        partial, [_proof(partial["public_id"], "00000000-0000-7000-8000-000000000151")]
+    )
+    complete = {**partial, "public_id": "00000000-0000-7000-8000-000000000152"}
+    complete["timestamp"] = _HORIZON + timedelta(minutes=1)
+    complete["requested_knowledge_at"] = complete["timestamp"]
+    complete["resolved_knowledge_at"] = complete["timestamp"]
+    complete["completeness_state"] = "complete"
+    complete["refusal_reason_json"] = None
+    first_proof = _proof(complete["public_id"], "00000000-0000-7000-8000-000000000153")
+    second_proof: FxConversionProofInsertRow = {
+        **_proof(complete["public_id"], "00000000-0000-7000-8000-000000000154"),
+        "conversion_minute": missing,
+        "candle_open_minute": missing - timedelta(minutes=1),
+    }
+    await repository.pin_fx_conversion_artifact(complete, [first_proof, second_proof])
+    before_growth = await repository.get_latest_visible_fx_conversion_artifact(
+        _query(partial), _HORIZON
+    )
+    after_growth = await repository.get_latest_visible_fx_conversion_artifact(
+        _query(partial), _HORIZON + timedelta(minutes=1)
+    )
+    assert before_growth is not None
+    assert after_growth is not None
+    assert before_growth["election"]["public_id"] == partial["public_id"]
+    assert after_growth["election"]["public_id"] == complete["public_id"]
+    async with repository.session() as session:
+        active_count = len(
+            (
+                await session.execute(
+                    select(FxConversionElection).where(
+                        FxConversionElection.public_id.in_(
+                            (partial["public_id"], complete["public_id"])
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert active_count == 2
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["raw_close", "conversion_rate"])
 async def test_non_decimal_runtime_values_are_typed_errors(tmp_path: Path, field: str) -> None:
     """A float cannot cross the exact-decimal repository boundary."""

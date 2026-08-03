@@ -137,6 +137,7 @@ def _build_synthetic_snapshot(
             "upgrade_required": 4,
             "mismatch": 5,
             "failure": 6,
+            "dropped": 7,
         },
         tracemalloc_active=tracemalloc_active,
         cgroup_version=cgroup_version,

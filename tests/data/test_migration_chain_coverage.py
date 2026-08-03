@@ -165,7 +165,7 @@ def _revision(engine: sa.Engine) -> str | None:
 
 def _assert_head_artifacts(engine: sa.Engine) -> None:
     """Require every compact migration artifact that lacks a direct test."""
-    assert _revision(engine) == "0043"
+    assert _revision(engine) == "0044"
     assert "ix_venue_events_cid_event_type" in _indexes(engine, "venue_events")
     assert "ix_trade_commands_client_order_id" in _indexes(engine, "trade_commands")
     assert "ix_peg_status_timestamp" in _indexes(engine, "paired_execution_groups")

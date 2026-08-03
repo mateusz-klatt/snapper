@@ -446,6 +446,7 @@ class SystemMetricsSnapshotter:
                 "upgrade_required": fx_metrics.upgrade_required,
                 "mismatch": fx_metrics.mismatch,
                 "failure": fx_metrics.failure,
+                "dropped": fx_metrics.dropped,
             },
             tracemalloc_active=self._tracemalloc.is_active(),
             cgroup_version=cgroup_version,

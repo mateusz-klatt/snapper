@@ -168,6 +168,7 @@ class FxShadowPinMetrics(StrictBody):
     upgrade_required: int
     mismatch: int
     failure: int
+    dropped: int
 
 
 class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
