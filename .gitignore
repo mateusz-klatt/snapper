@@ -32,6 +32,8 @@ Thumbs.db.idea
 # Environment files with secrets
 .env
 .env.uat
+.env.bak*
+.env.*.bak
 *.key
 *.pem
 *.p12
