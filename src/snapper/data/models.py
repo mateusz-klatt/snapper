@@ -259,7 +259,9 @@ __all__ = [
 
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
+_CK_EXCHANGE_LOWER_NON_EMPTY = "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0"
 _CK_MODE_LIVE_PAPER = "mode IN ('live', 'paper')"
+_CK_MODE_LIVE = "mode = 'live'"
 _CK_SIDE_BUY_SELL = "side IN ('buy', 'sell')"
 _CK_ORDER_TYPE_VALUES = (
     "order_type IN ('market', 'limit', 'stop', 'stop_limit', 'stop-loss', "
@@ -1083,7 +1085,7 @@ class Execution(TemporalMixin, Base):
             unique=True,
         ),
         CheckConstraint(
-            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            _CK_EXCHANGE_LOWER_NON_EMPTY,
             name="ck_executions_exchange_lower",
         ),
         CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_executions_mode"),
@@ -1237,7 +1239,7 @@ class ExecutionAnnulment(TemporalMixin, Base):
             "correction_time",
         ),
         CheckConstraint(
-            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            _CK_EXCHANGE_LOWER_NON_EMPTY,
             name="ck_execution_annulments_exchange_lower",
         ),
         CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_execution_annulments_mode"),
@@ -1412,7 +1414,7 @@ class ExecutionAnnulmentVisibility(TemporalMixin, Base):
             "observed_at",
         ),
         CheckConstraint(
-            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            _CK_EXCHANGE_LOWER_NON_EMPTY,
             name="ck_execution_annulment_visibility_exchange_lower",
         ),
         CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_execution_annulment_visibility_mode"),
@@ -2088,7 +2090,7 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_spot_anchor_exchange_lower"),
-        CheckConstraint("mode = 'live'", name="ck_portfolio_spot_anchor_mode"),
+        CheckConstraint(_CK_MODE_LIVE, name="ck_portfolio_spot_anchor_mode"),
         CheckConstraint(
             "source_watermark_kind = 'scope_sequence' AND source_watermark >= 1",
             name="ck_portfolio_spot_anchor_watermark",
@@ -2248,7 +2250,7 @@ class PortfolioReconciliationObservation(TemporalMixin, Base):
             unique=True,
         ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_recon_obs_exchange_lower"),
-        CheckConstraint("mode = 'live'", name="ck_portfolio_recon_obs_mode"),
+        CheckConstraint(_CK_MODE_LIVE, name="ck_portfolio_recon_obs_mode"),
         CheckConstraint(_CK_RECONCILIATION_METHOD, name="ck_portfolio_recon_obs_method"),
         CheckConstraint(
             _CK_RECONCILIATION_EVALUATION_STATUS,
@@ -2351,7 +2353,7 @@ class PortfolioReconciliationState(TemporalMixin, Base):
         ),
         Index("ix_portfolio_reconciliation_states_wallet", "wallet_public_id"),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_recon_states_exchange_lower"),
-        CheckConstraint("mode = 'live'", name="ck_portfolio_recon_states_mode"),
+        CheckConstraint(_CK_MODE_LIVE, name="ck_portfolio_recon_states_mode"),
         CheckConstraint(_CK_RECONCILIATION_METHOD, name="ck_portfolio_recon_states_method"),
         CheckConstraint(
             _CK_RECONCILIATION_CURRENT_STATUS,
@@ -2465,7 +2467,7 @@ class PortfolioDriftEpisode(TemporalMixin, Base):
         ),
         Index("ix_portfolio_drift_episodes_status_opened", "status", "opened_at"),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_drift_exchange_lower"),
-        CheckConstraint("mode = 'live'", name="ck_portfolio_drift_mode"),
+        CheckConstraint(_CK_MODE_LIVE, name="ck_portfolio_drift_mode"),
         CheckConstraint(_CK_DRIFT_EPISODE_STATUS, name="ck_portfolio_drift_status"),
         CheckConstraint(
             _CK_DRIFT_EPISODE_OBSERVATION_ORDER,

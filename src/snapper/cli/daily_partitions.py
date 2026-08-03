@@ -30,6 +30,8 @@ from snapper.data.daily_partitions import market_data_table
 from snapper.data.daily_partitions import parse_anchor
 
 _HEAVY_LOAD_PER_CPU: Final[float] = 1.5
+_TABLE_ARGUMENT_HELP: Final[str] = "ticks, candles, or trades"
+_DRY_RUN_FLAG: Final[str] = "--dry-run/--apply"
 
 daily_partitions_app = typer.Typer(
     add_completion=False,
@@ -179,7 +181,7 @@ def _fatal(error: Exception) -> None:
 
 @daily_partitions_app.command(name="inspect")
 def inspect_command(
-    table: str = typer.Argument(..., help="ticks, candles, or trades"),
+    table: str = typer.Argument(..., help=_TABLE_ARGUMENT_HELP),
     anchor: str | None = typer.Option(
         None,
         "--anchor",
@@ -208,7 +210,7 @@ def inspect_command(
 
 @daily_partitions_app.command(name="adopt")
 def adopt_command(
-    table: str = typer.Argument(..., help="ticks, candles, or trades"),
+    table: str = typer.Argument(..., help=_TABLE_ARGUMENT_HELP),
     anchor: str = typer.Option(
         ...,
         "--anchor",
@@ -216,7 +218,7 @@ def adopt_command(
     ),
     dry_run: bool = typer.Option(
         True,
-        "--dry-run/--apply",
+        _DRY_RUN_FLAG,
         help="Print the plan by default; --apply explicitly executes DDL.",
     ),
 ) -> None:
@@ -250,7 +252,7 @@ def adopt_command(
 
 @daily_partitions_app.command(name="ensure")
 def ensure_command(
-    table: str = typer.Argument(..., help="ticks, candles, or trades"),
+    table: str = typer.Argument(..., help=_TABLE_ARGUMENT_HELP),
     anchor: str | None = typer.Option(
         None,
         "--anchor",
@@ -258,7 +260,7 @@ def ensure_command(
     ),
     dry_run: bool = typer.Option(
         True,
-        "--dry-run/--apply",
+        _DRY_RUN_FLAG,
         help="Print the plan by default; --apply explicitly executes DDL.",
     ),
 ) -> None:
@@ -290,7 +292,7 @@ def ensure_command(
 
 @daily_partitions_app.command(name="detach")
 def detach_command(
-    table: str = typer.Argument(..., help="ticks, candles, or trades"),
+    table: str = typer.Argument(..., help=_TABLE_ARGUMENT_HELP),
     day: str = typer.Option(..., "--day", help="Expired UTC event day as YYYY-MM-DD"),
     anchor: str | None = typer.Option(
         None,
@@ -299,7 +301,7 @@ def detach_command(
     ),
     dry_run: bool = typer.Option(
         True,
-        "--dry-run/--apply",
+        _DRY_RUN_FLAG,
         help="Print the plan by default; --apply explicitly executes plain DETACH.",
     ),
 ) -> None:

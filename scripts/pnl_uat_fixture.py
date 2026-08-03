@@ -146,6 +146,7 @@ _OSS_BASELINE_USERS: Final[dict[str, tuple[str, str, int, int]]] = {
 _OSS_BASELINE_ENCRYPTED_SETTINGS: Final[frozenset[str]] = frozenset(
     {"gemini_api_key", "kimi_api_key"}
 )
+_MARKET_PERSIST_AUTO_VALUE: Final[str] = '{"mode": "auto"}'
 _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
     "ui_origin": (
         "http://localhost:3000,http://localhost:8000",
@@ -155,7 +156,7 @@ _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
         1,
     ),
     "market_persist_ticks": (
-        '{"mode": "auto"}',
+        _MARKET_PERSIST_AUTO_VALUE,
         "market_persist",
         (
             "Tick persistence mode (auto = wallet-scope-derived, explicit = configured "
@@ -165,7 +166,7 @@ _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
         2,
     ),
     "market_persist_trades": (
-        '{"mode": "auto"}',
+        _MARKET_PERSIST_AUTO_VALUE,
         "market_persist",
         (
             "Trade persistence mode (auto = wallet-scope-derived, explicit = configured "
@@ -175,7 +176,7 @@ _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
         3,
     ),
     "market_persist_candles": (
-        '{"mode": "auto"}',
+        _MARKET_PERSIST_AUTO_VALUE,
         "market_persist",
         (
             "Candle persistence mode (auto = wallet-scope-derived, explicit = configured "

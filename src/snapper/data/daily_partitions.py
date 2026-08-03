@@ -40,6 +40,11 @@ INDEX_BUILD_STATEMENT_TIMEOUT: Final[str] = "12h"
 INDEX_BUILD_MAINTENANCE_WORK_MEM: Final[str] = "64MB"
 _ACTIVE_KNOWN_TO: Final[datetime] = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _ANCHOR_PATTERN: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}T00:00:00\+00:00")
+_SET_LOCAL_TIME_ZONE_UTC: Final[str] = "SET LOCAL TIME ZONE 'UTC'"
+_TIMESTAMPTZ: Final[str] = "timestamp with time zone"
+_DOUBLE_PRECISION: Final[str] = "double precision"
+_COMPACT_STRIP_PATTERN: Final[str] = r'[\s()"]'
+_QUOTED_LITERAL_PATTERN: Final[str] = r"'([^']+)'"
 
 
 class DailyPartitionError(RuntimeError):
@@ -415,7 +420,7 @@ def inspect(
     _require_public_schema(connection)
     spec = _spec(table)
     effective_anchor = current_utc_anchor() if anchor is None else _validate_anchor(anchor)
-    connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+    connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
     relation_row = connection.execute(
         text("""
             SELECT c.relkind::text,
@@ -519,7 +524,7 @@ def adopt(
         raise DailyPartitionError(
             f"refused: {spec.table} is in unsupported state {initial.state.value}"
         )
-    connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+    connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
     _verify_ordinary_schema(connection, spec, checked_anchor)
     _verify_sequence_owner(connection, spec)
     ordinary_checks = _ordinary_check_constraints(connection, spec)
@@ -1158,17 +1163,17 @@ def _ordinary_column_contract(spec: TableSpec) -> tuple[ColumnContract, ...]:
     common_end = (
         ColumnContract("session_id", "uuid", False),
         ColumnContract("sequence_id", "integer", False),
-        ColumnContract("timestamp", "timestamp with time zone", False),
-        ColumnContract("known_to", "timestamp with time zone", False),
+        ColumnContract("timestamp", _TIMESTAMPTZ, False),
+        ColumnContract("known_to", _TIMESTAMPTZ, False),
     )
     if spec.table == "ticks":
         return (
             common_start
             + (
-                ColumnContract("bid", "double precision", True),
-                ColumnContract("ask", "double precision", True),
-                ColumnContract("last", "double precision", True),
-                ColumnContract("volume", "double precision", False),
+                ColumnContract("bid", _DOUBLE_PRECISION, True),
+                ColumnContract("ask", _DOUBLE_PRECISION, True),
+                ColumnContract("last", _DOUBLE_PRECISION, True),
+                ColumnContract("volume", _DOUBLE_PRECISION, False),
             )
             + common_end
         )
@@ -1177,13 +1182,13 @@ def _ordinary_column_contract(spec: TableSpec) -> tuple[ColumnContract, ...]:
             common_start
             + (
                 ColumnContract("timeframe", "character varying(8)", False),
-                ColumnContract("open_at", "timestamp with time zone", False),
-                ColumnContract("open", "double precision", False),
-                ColumnContract("high", "double precision", False),
-                ColumnContract("low", "double precision", False),
-                ColumnContract("close", "double precision", False),
-                ColumnContract("volume", "double precision", False),
-                ColumnContract("vwap", "double precision", True),
+                ColumnContract("open_at", _TIMESTAMPTZ, False),
+                ColumnContract("open", _DOUBLE_PRECISION, False),
+                ColumnContract("high", _DOUBLE_PRECISION, False),
+                ColumnContract("low", _DOUBLE_PRECISION, False),
+                ColumnContract("close", _DOUBLE_PRECISION, False),
+                ColumnContract("volume", _DOUBLE_PRECISION, False),
+                ColumnContract("vwap", _DOUBLE_PRECISION, True),
                 ColumnContract("trades", "integer", True),
             )
             + common_end
@@ -1197,10 +1202,10 @@ def _ordinary_column_contract(spec: TableSpec) -> tuple[ColumnContract, ...]:
         common_start
         + (
             ColumnContract("trade_id", "character varying(64)", True),
-            ColumnContract("price", "double precision", False),
-            ColumnContract("size", "double precision", False),
+            ColumnContract("price", _DOUBLE_PRECISION, False),
+            ColumnContract("size", _DOUBLE_PRECISION, False),
             ColumnContract("side", "character varying(4)", False),
-            ColumnContract("executed_at", "timestamp with time zone", None),
+            ColumnContract("executed_at", _TIMESTAMPTZ, None),
         )
         + common_end
     )
@@ -1288,7 +1293,7 @@ def _compact_check(definition: str) -> str:
     Returns:
         Whitespace-, parenthesis-, quote-, and cast-free comparison text.
     """
-    compact = re.sub(r'[\s()"]', "", definition).lower()
+    compact = re.sub(_COMPACT_STRIP_PATTERN, "", definition).lower()
     compact = compact.replace("::charactervarying", "")
     compact = compact.replace("::text[]", "")
     return compact.replace("::text", "")
@@ -1762,7 +1767,7 @@ def _compact_key_constraint(definition: str) -> str:
     Returns:
         Whitespace-, quote-, and parenthesis-free definition.
     """
-    return re.sub(r'[\s()"]', "", definition).lower()
+    return re.sub(_COMPACT_STRIP_PATTERN, "", definition).lower()
 
 
 def _trade_u3_statement(connection: Connection, spec: TableSpec) -> str:
@@ -2118,7 +2123,7 @@ def _range_constraint_matches(
     Returns:
         Whether key nullability and the sole timestamp bound match exactly.
     """
-    literals = re.findall(r"'([^']+)'", definition)
+    literals = re.findall(_QUOTED_LITERAL_PATTERN, definition)
     if len(literals) != 1:
         return False
     try:
@@ -2128,7 +2133,7 @@ def _range_constraint_matches(
     if literal.tzinfo is None or literal.astimezone(UTC) != anchor:
         return False
     replaced = definition.replace(f"'{literals[0]}'", "'anchor'")
-    compact = re.sub(r'[\s()"]', "", replaced).lower()
+    compact = re.sub(_COMPACT_STRIP_PATTERN, "", replaced).lower()
     compact = compact.replace("::timestampwithtimezone", "")
     expected = f"check{spec.partition_key.lower()}isnotnulland{spec.partition_key.lower()}<'anchor'"
     return compact == expected
@@ -2369,7 +2374,7 @@ def _execute_transaction(
         statements: Ordered SQL statements in one atomic transaction.
     """
     with connection.begin():
-        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
         connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
         connection.execute(text(f"SET LOCAL statement_timeout = '{CUTOVER_STATEMENT_TIMEOUT}'"))
         for statement in statements:
@@ -2394,7 +2399,7 @@ def _execute_cutover(
         Verified partitioned topology observed inside the cutover transaction.
     """
     with connection.begin():
-        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
         connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
         connection.execute(text(f"SET LOCAL statement_timeout = '{CUTOVER_STATEMENT_TIMEOUT}'"))
         connection.execute(text(f"LOCK TABLE {spec.table} IN ACCESS EXCLUSIVE MODE"))
@@ -2415,7 +2420,7 @@ def _execute_validation_transaction(
         statement: Exact legacy CHECK validation DDL.
     """
     with connection.begin():
-        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
         connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
         connection.execute(text(f"SET LOCAL statement_timeout = '{VALIDATION_STATEMENT_TIMEOUT}'"))
         connection.execute(text(statement))
@@ -2437,7 +2442,7 @@ def _execute_ensure(
         DailyPartitionError: If DEFAULT detached or gained a row before the lock.
     """
     with connection.begin():
-        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
         connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
         connection.execute(text(f"SET LOCAL statement_timeout = '{CUTOVER_STATEMENT_TIMEOUT}'"))
         connection.execute(text(f"LOCK TABLE {spec.table} IN ACCESS EXCLUSIVE MODE"))
@@ -2486,7 +2491,7 @@ def _execute_detach_attempt(
         DailyPartitionError: If the locked attachment or bound has changed.
     """
     with connection.begin():
-        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
         connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
         connection.execute(text(f"SET LOCAL statement_timeout = '{CUTOVER_STATEMENT_TIMEOUT}'"))
         connection.execute(text(f"LOCK TABLE {spec.table} IN ACCESS EXCLUSIVE MODE"))
@@ -2930,7 +2935,7 @@ def _active_predicate_matches(predicate: str) -> bool:
     Returns:
         Whether the predicate is exactly ``known_to = active infinity``.
     """
-    literals = re.findall(r"'([^']+)'", predicate)
+    literals = re.findall(_QUOTED_LITERAL_PATTERN, predicate)
     if len(literals) != 1:
         return False
     try:
@@ -2940,7 +2945,7 @@ def _active_predicate_matches(predicate: str) -> bool:
     if value.tzinfo is None or value.astimezone(UTC) != _ACTIVE_KNOWN_TO:
         return False
     replaced = predicate.replace(f"'{literals[0]}'", "'active'")
-    compact = re.sub(r'[\s()"]', "", replaced).lower()
+    compact = re.sub(_COMPACT_STRIP_PATTERN, "", replaced).lower()
     compact = compact.replace("::timestampwithtimezone", "")
     return compact == "known_to='active'"
 
@@ -3044,7 +3049,7 @@ def _range_bound_matches(
     Returns:
         Whether the catalog bound exactly matches.
     """
-    values = re.findall(r"'([^']+)'", bound)
+    values = re.findall(_QUOTED_LITERAL_PATTERN, bound)
     expected_count = 1 if lower is None else 2
     if len(values) != expected_count:
         return False
