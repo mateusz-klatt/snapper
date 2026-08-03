@@ -93,6 +93,7 @@ def test_command_renders_now_state_classified_writes_and_adverse_exit(
 
 
 def test_command_validation_error_and_checkpoint_anchoring(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Relative paths anchor to the repo and validated errors remain stable.
@@ -100,11 +101,17 @@ def test_command_validation_error_and_checkpoint_anchoring(
     Given relative and absolute cursor paths plus a reset without apply
     When path normalization and the command validation execute
     Then paths are deterministic and the invalid reset exits nonzero
+
+    The absolute case takes its path from ``tmp_path`` rather than a POSIX
+    literal: on Windows a rootless path such as ``/tmp/cursor.json`` carries no
+    drive, so ``Path.is_absolute`` is False and the anchoring under test would
+    be asked the wrong question.
     """
+    already_absolute = tmp_path / "cursor.json"
     relative = _anchored_checkpoint(Path("custom/cursor.json"))
-    absolute = _anchored_checkpoint(Path("/tmp/cursor.json"))
+    absolute = _anchored_checkpoint(already_absolute)
     assert relative == FX_PROOF_BACKFILL_CHECKPOINT.parents[1] / "custom/cursor.json"
-    assert absolute == Path("/tmp/cursor.json")
+    assert absolute == already_absolute
     invoked = CliRunner().invoke(fx_proofs_app, ["--reset-checkpoint"])
     assert invoked.exit_code == 1
     assert "--reset-checkpoint requires --apply" in invoked.output

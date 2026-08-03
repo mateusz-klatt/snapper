@@ -168,8 +168,21 @@ def _checkpoint_start(path: Path, digest: str, consumer_count: int) -> int:
     return cursor
 
 
+def _directory_fsync_supported() -> bool:
+    """Report whether this platform can open a directory and fsync its descriptor.
+
+    POSIX opens a directory read-only and syncs it, which is what makes a
+    rename durable. Windows exposes no directory-fsync primitive and refuses
+    the open with ``PermissionError``, so there the already-synced file is the
+    only durability this helper can offer.
+    """
+    return os.name != "nt"
+
+
 def _fsync_directory(path: Path) -> None:
     """Make a checkpoint rename or removal durable in its containing directory."""
+    if not _directory_fsync_supported():
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)

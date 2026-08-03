@@ -1,6 +1,6 @@
 """Public-OSS prose audit for the bridge wire-contract working-tree file.
 
-The bridge OSS repo cannot reference internal Snapper jargon — plan
+The bridge OSS repo cannot reference internal Snapper jargon -- plan
 letters, section anchors, internal repo paths, internal handle
 names. The autogenerator already emits header-only docs in v1, so
 this scan is a defensive net that catches:
@@ -14,10 +14,10 @@ this scan is a defensive net that catches:
 
 Exit codes:
 
-    0 — no forbidden tokens found
-    1 — at least one forbidden token found; the script prints every
+    0 -- no forbidden tokens found
+    1 -- at least one forbidden token found; the script prints every
         match with file path + line number for the developer to fix
-    2 — target file missing or unreadable
+    2 -- target file missing or unreadable
 """
 
 import argparse
@@ -121,11 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not findings:
-        print(f"bridge-check oss-prose: OK — {safe_target_path} contains no forbidden tokens")
+        print(f"bridge-check oss-prose: OK -- {safe_target_path} contains no forbidden tokens")
         return 0
 
     print(
-        f"bridge-check oss-prose: FAIL — {len(findings)} forbidden token(s) found in "
+        f"bridge-check oss-prose: FAIL -- {len(findings)} forbidden token(s) found in "
         f"{safe_target_path}",
         file=sys.stderr,
     )

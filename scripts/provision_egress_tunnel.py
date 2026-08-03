@@ -4,10 +4,10 @@ Used by the operator once an external WireGuard VPN provider returns the
 peer-side parameters. Performs three distinct DB writes against the live
 SettingsService:
 
-1. ``egress_tunnel_<id>``                — TunnelDescriptor JSON (plain).
-2. ``egress_tunnel_<id>_private_key``    — Fernet-encrypted Curve25519 key.
-3. Optional ``egress_tunnel_<id>_preshared_key`` — Fernet-encrypted PSK.
-4. ``egress_pool`` (read-modify-write)   — append a ``socks5`` route and
+1. ``egress_tunnel_<id>``                -- TunnelDescriptor JSON (plain).
+2. ``egress_tunnel_<id>_private_key``    -- Fernet-encrypted Curve25519 key.
+3. Optional ``egress_tunnel_<id>_preshared_key`` -- Fernet-encrypted PSK.
+4. ``egress_pool`` (read-modify-write)   -- append a ``socks5`` route and
    force ``enabled: true`` if currently false.
 
 With ``--restart-sidecar``, the script also restarts snapper-egress so
@@ -31,7 +31,7 @@ Run inside the ``snapper`` container so it shares ``DB_URL`` +
 
 The provider identity, endpoint, and key fields are intentionally
 explicit so typos do not hide behind defaults; conventional routing and
-operator controls still have defaults. Each write step is idempotent —
+operator controls still have defaults. Each write step is idempotent --
 re-running with the same tunnel-id overwrites the descriptor/key values
 in place and does not duplicate the route inside egress_pool.
 """
@@ -55,7 +55,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--tunnel-id", required=True, help="Stable id without underscores (used in setting key)"
     )
-    p.add_argument("--interface", required=True, help="WG interface name, ≤15 chars, prefix wg-")
+    p.add_argument("--interface", required=True, help="WG interface name, <=15 chars, prefix wg-")
     p.add_argument("--address", required=True, help="Tunnel local IPv4 (e.g. 192.0.2.10)")
     p.add_argument(
         "--prefix-length", type=int, required=True, help="Usually 32 for a single-address WG peer"
@@ -74,7 +74,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--socks5-listen-port",
         type=int,
         required=True,
-        help="Port the sidecar binds for SOCKS5 (1024–65535)",
+        help="Port the sidecar binds for SOCKS5 (1024-65535)",
     )
     p.add_argument("--priority", type=int, required=True, help="Pool priority (lower = preferred)")
     p.add_argument(
@@ -118,7 +118,9 @@ async def _amain(args: argparse.Namespace) -> int:
         print(f"!! private key file is unsafe or unreadable: {exc}", file=sys.stderr)
         return 2
     if len(private_key) != 44 or not private_key.endswith("="):
-        print(f"!! private key length={len(private_key)} (expected 44) — aborting", file=sys.stderr)
+        print(
+            f"!! private key length={len(private_key)} (expected 44) -- aborting", file=sys.stderr
+        )
         return 2
 
     descriptor_payload = {

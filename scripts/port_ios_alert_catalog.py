@@ -12,7 +12,7 @@ label).
 Why a separate script rather than reusing
 ``gen_backend_i18n_catalog.py``: the backend variant outputs a flat
 ``{key: template}`` map for the backend resolver, whereas the frontend
-catalog wants a nested object structure (``alerts.title.foo`` →
+catalog wants a nested object structure (``alerts.title.foo`` ->
 ``{alerts: {title: {foo: "..."}}}``) and translates printf-style
 placeholders (``%@`` / ``%lld``) to i18next's positional format
 (``{{0}}``, ``{{1}}``, ...).
@@ -98,7 +98,7 @@ def iter_alert_keys(xcstrings: dict[str, object]) -> Iterable[str]:
     """
     strings = xcstrings.get("strings", {})
     if not isinstance(strings, dict):
-        raise SystemExit("xcstrings 'strings' is not a dict — file corrupt?")
+        raise SystemExit("xcstrings 'strings' is not a dict -- file corrupt?")
     for key in sorted(strings):
         if key.startswith(ALERTS_PREFIX):
             yield key
@@ -272,7 +272,7 @@ def build_locale_payload(
     for key in keys:
         if not key.startswith(ALERTS_PREFIX):
             raise SystemExit(
-                f"build_locale_payload received non-alerts key {key!r} — "
+                f"build_locale_payload received non-alerts key {key!r} -- "
                 f"iter_alert_keys upstream should have filtered it"
             )
         namespaced_key = key[len(ALERTS_PREFIX) :]
@@ -488,7 +488,7 @@ def check_drift() -> int:
             regenerated_alerts = locale_dir / ALERTS_FILENAME
             if _read(committed_alerts) != _read(regenerated_alerts):
                 if not committed_alerts.exists():
-                    diffs.append(f"  MISSING: {locale_dir.name}/alerts.json — re-run port script")
+                    diffs.append(f"  MISSING: {locale_dir.name}/alerts.json -- re-run port script")
                 else:
                     diffs.append(
                         f"  DIFFERS: {locale_dir.name}/alerts.json (committed != regenerated)"

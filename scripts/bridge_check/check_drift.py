@@ -9,15 +9,15 @@ The comparison is against the **working tree**, NOT against ``git
 HEAD``. This keeps ``make bridge-check`` correct in all three
 developer states:
 
-    just-regenerated  : working-tree == regen output → pass
-    just-committed    : working-tree == committed output == regen → pass
-    stale (schema edit without regen) : working-tree != regen → fail
+    just-regenerated  : working-tree == regen output -> pass
+    just-committed    : working-tree == committed output == regen -> pass
+    stale (schema edit without regen) : working-tree != regen -> fail
 
 Exit codes:
 
-    0 — working-tree wire-contract matches current schemas
-    1 — drift detected; the script prints the unified diff
-    2 — generator or filesystem error before comparison
+    0 -- working-tree wire-contract matches current schemas
+    1 -- drift detected; the script prints the unified diff
+    2 -- generator or filesystem error before comparison
 """
 
 import argparse
@@ -120,11 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if matches:
-        print(f"bridge-check drift: OK — {safe_target_path} matches current schemas")
+        print(f"bridge-check drift: OK -- {safe_target_path} matches current schemas")
         return 0
 
     print(
-        "bridge-check drift: FAIL — working-tree wire-contract is stale.\n"
+        "bridge-check drift: FAIL -- working-tree wire-contract is stale.\n"
         "Run `make ts-bridge` to regenerate, then commit the result.",
         file=sys.stderr,
     )

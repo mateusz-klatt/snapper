@@ -12,7 +12,7 @@ is a nested document keyed by ``market.<namespace>.<leaf>`` with one
 ``stringUnit`` per language. Placeholders translate from i18next's
 named tokens (``{{name}}`` / ``{{assetClass}}``) to xcstrings positional
 string codes (``%1$@`` / ``%2$@``) based on appearance order in the
-English template — the English template is the source of truth for
+English template -- the English template is the source of truth for
 placeholder ordering across the 45 locales. Numeric placeholders
 (``%lld`` / ``%d``) are NOT emitted; every i18next named token lowers
 to a string-typed xcstrings placeholder regardless of how the value
@@ -327,7 +327,7 @@ def generate(xcstrings_path: Path | None = None) -> None:
         tmp.write(rendered)
         tmp_path = Path(tmp.name)
     tmp_path.replace(target_path)
-    print(f"Wrote {written_keys} keys × {len(frontend_locales)} locales to {target_path}")
+    print(f"Wrote {written_keys} keys x {len(frontend_locales)} locales to {target_path}")
 
 
 def check_drift() -> int:

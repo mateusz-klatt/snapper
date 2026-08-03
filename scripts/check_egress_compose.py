@@ -297,7 +297,7 @@ def main(root: Path | None = None) -> int:
         errors.extend(_check_service(egress, compose_path))
         errors.extend(_check_unified_image_invariants(services, compose_path))
     if not found_any:
-        print("check_egress_compose: no compose file found — nothing to lint")
+        print("check_egress_compose: no compose file found -- nothing to lint")
         return 0
     if errors:
         for err in errors:

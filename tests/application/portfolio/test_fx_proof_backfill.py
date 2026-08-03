@@ -1,6 +1,7 @@
 """Consumer-wide FX proof-backfill derivation and recovery witnesses."""
 
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -642,6 +643,70 @@ def test_checkpoint_lock_reset_rotation_and_metric_delta(tmp_path: Path) -> None
     reset_fx_proof_backfill_checkpoint(checkpoint)
     _fsync_directory(tmp_path)
     assert not checkpoint.exists()
+
+
+def test_directory_durability_follows_the_platform_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Directory syncing runs only where a directory descriptor can be opened.
+
+    Given the running platform, then one reporting support and one reporting none
+    When the durability helper runs under each
+    Then the real platform never raises, and the descriptor is synced only when supported
+
+    The unpatched call is the regression guard: Windows refuses ``os.open`` on a
+    directory with ``PermissionError``, which is why the capability is consulted
+    at all. The patched pair then exercises both branches on every platform,
+    since neither can reach the other one natively.
+    """
+    _fsync_directory(tmp_path)
+    sentinel = 987654321
+    opened: list[Path] = []
+    synced: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_fsync = os.fsync
+    real_close = os.close
+
+    def fake_open(target: str | Path, flags: int) -> int:
+        """Hand back a sentinel for the probed directory and defer other opens."""
+        if Path(target) == tmp_path:
+            opened.append(Path(target))
+            return sentinel
+        return real_open(target, flags)
+
+    def fake_fsync(descriptor: int) -> None:
+        """Record a sentinel sync and defer every real descriptor."""
+        if descriptor == sentinel:
+            synced.append(descriptor)
+            return
+        real_fsync(descriptor)
+
+    def fake_close(descriptor: int) -> None:
+        """Record a sentinel close and defer every real descriptor."""
+        if descriptor == sentinel:
+            closed.append(descriptor)
+            return
+        real_close(descriptor)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(os, "fsync", fake_fsync)
+    monkeypatch.setattr(os, "close", fake_close)
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._directory_fsync_supported",
+        lambda: True,
+    )
+    _fsync_directory(tmp_path)
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill._directory_fsync_supported",
+        lambda: False,
+    )
+    _fsync_directory(tmp_path)
+    monkeypatch.undo()
+
+    assert opened == [tmp_path]
+    assert synced == [sentinel]
+    assert closed == [sentinel]
 
 
 @pytest.mark.asyncio
