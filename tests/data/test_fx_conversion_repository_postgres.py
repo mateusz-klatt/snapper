@@ -90,6 +90,7 @@ def _artifact() -> tuple[FxConversionElectionInsertRow, FxConversionProofInsertR
         "candle_sequence_id": 7,
         "candle_timestamp": minute - timedelta(minutes=1),
         "candle_known_to": horizon,
+        "carried_minutes": 0,
         "raw_close": Decimal("1.10"),
         "operation": "direct",
         "conversion_rate": Decimal("1.10"),
