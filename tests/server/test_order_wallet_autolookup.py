@@ -378,14 +378,18 @@ async def test_create_order_unknown_ai_review_citation_returns_403() -> None:
     )
     repo.get_ai_review = AsyncMock(return_value=None)
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id=None, ai_review_public_id="review-missing")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id=None, ai_review_public_id="review-missing"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 403
@@ -406,14 +410,18 @@ async def test_create_order_omitted_wallet_rejects_multiple_live_wallets() -> No
         return_value=[_make_wallet("wallet-a"), _make_wallet("wallet-b")]
     )
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id=None)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id=None),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 400
@@ -433,14 +441,18 @@ async def test_create_order_omitted_wallet_rejects_zero_live_wallets() -> None:
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id=None)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id=None),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 400
@@ -462,14 +474,18 @@ async def test_create_order_omitted_live_wallet_rejects_single_paper_wallet() ->
         return_value=[_make_wallet("wallet-paper", is_paper=True)]
     )
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id=None)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id=None),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 400
@@ -489,14 +505,18 @@ async def test_create_order_omitted_live_wallet_rejects_missing_operator_context
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock()
 
+    error_request = _make_request()
+    error_principal = _make_principal([])
+    error_command = _make_command(wallet_public_id=None)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal([]),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id=None),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 400
@@ -527,14 +547,18 @@ async def test_create_order_blank_wallet_rejects_before_autolookup(
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=wallets)
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_unvalidated_command(wallet_public_id=wallet_public_id)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_unvalidated_command(wallet_public_id=wallet_public_id),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 400
@@ -583,14 +607,18 @@ async def test_create_order_invalid_params_return_422() -> None:
     """
     repo = _make_repo()
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1", price=None)
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1", price=None),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 422
@@ -609,14 +637,18 @@ async def test_create_order_unknown_instrument_returns_422() -> None:
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
     repo.list_accessible_wallets_for_operators = AsyncMock()
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 422
@@ -668,14 +700,18 @@ async def test_create_order_plan_insert_unique_conflict_returns_409() -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_execution_plan = AsyncMock(side_effect=RuntimeError("duplicate key"))
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 409
@@ -694,14 +730,18 @@ async def test_create_order_plan_insert_generic_error_returns_500() -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_execution_plan = AsyncMock(side_effect=RuntimeError("database down"))
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 500
@@ -720,14 +760,18 @@ async def test_create_order_command_insert_failure_compensates_plan() -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("command insert failed"))
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 500
@@ -746,14 +790,18 @@ async def test_create_order_caps_violation_returns_422() -> None:
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_rejecting_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_rejecting_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 422
@@ -773,14 +821,18 @@ async def test_create_order_plan_missing_after_insert_returns_500() -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.get_execution_plan = AsyncMock(return_value=None)
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 500
@@ -874,13 +926,17 @@ async def test_cancel_plan_maps_domain_exceptions(
             "cancel_by_plan_public_id",
             _CancelRaiser(exc),
         )
+        error_repo = AsyncMock()
+        error_tracker = SequenceTracker()
+        error_principal = _make_principal()
+        error_caps_enforcer = _make_enforcer()
         with pytest.raises(HTTPException) as exc_info:
             await order_routes._cancel_plan(
-                repo=AsyncMock(),
-                tracker=SequenceTracker(),
-                principal=_make_principal(),
+                repo=error_repo,
+                tracker=error_tracker,
+                principal=error_principal,
                 plan_public_id="plan-1",
-                caps_enforcer=_make_enforcer(),
+                caps_enforcer=error_caps_enforcer,
             )
         assert exc_info.value.status_code == status_code
         assert detail_fragment in str(exc_info.value.detail)
@@ -897,15 +953,19 @@ async def test_cancel_by_client_order_id_not_found_returns_404() -> None:
     repo = AsyncMock()
     repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value=None)
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = MagicMock()
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.cancel_order_by_client_order_id(
-            request=_make_request(),
+            request=error_request,
             client_order_id="missing-client-order",
-            principal=_make_principal(),
+            principal=error_principal,
             _csrf=None,
-            command=MagicMock(),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 404
@@ -956,14 +1016,18 @@ async def test_create_order_explicit_wallet_out_of_scope_returns_403() -> None:
         return_value=[_make_wallet("wallet-other")]
     )
 
+    error_request = _make_request()
+    error_principal = _make_principal()
+    error_command = _make_command(wallet_public_id="wallet-1")
+    error_caps_enforcer = _make_enforcer()
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
-            request=_make_request(),
-            principal=_make_principal(),
+            request=error_request,
+            principal=error_principal,
             _csrf=None,
-            command=_make_command(wallet_public_id="wallet-1"),
+            command=error_command,
             repo=repo,
-            caps_enforcer=_make_enforcer(),
+            caps_enforcer=error_caps_enforcer,
         )
 
     assert exc_info.value.status_code == 403

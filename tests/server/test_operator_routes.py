@@ -212,12 +212,15 @@ class TestCreateOperator:
             )
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_create_operator_command(label="firm-desk")
         with pytest.raises(HTTPException) as excinfo:
             await create_operator(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_create_operator_command(label="firm-desk"),
+                command=error_command,
                 repo=mock_repo,
             )
 

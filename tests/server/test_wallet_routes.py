@@ -252,12 +252,15 @@ class TestCreateWallet:
             )
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_create_wallet_command(label="firm", is_paper=False)
         with pytest.raises(HTTPException) as excinfo:
             await create_wallet(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_create_wallet_command(label="firm", is_paper=False),
+                command=error_command,
                 repo=mock_repo,
             )
 

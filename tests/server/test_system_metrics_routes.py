@@ -250,10 +250,12 @@ class TestGetSystemMetrics:
     @pytest.mark.asyncio
     async def test_returns_503_when_snapshotter_attribute_missing(self) -> None:
         """Routes return 503 when no snapshotter is attached to ``app.state``."""
+        error_request = _make_request_with_snapshotter(None)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_system_metrics(
-                request=_make_request_with_snapshotter(None),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _SNAPSHOTTER_UNAVAILABLE_DETAIL
@@ -263,10 +265,12 @@ class TestGetSystemMetrics:
         """An empty buffer (no eager sample) still falls through to 503."""
         snapshotter = _make_snapshotter()
 
+        error_request = _make_request_with_snapshotter(snapshotter)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_system_metrics(
-                request=_make_request_with_snapshotter(snapshotter),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
 
@@ -359,10 +363,12 @@ class TestGetSystemMetricsHistory:
     @pytest.mark.asyncio
     async def test_returns_503_when_snapshotter_missing(self) -> None:
         """History endpoint also falls through to 503 when singleton absent."""
+        error_request = _make_request_with_snapshotter(None)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_system_metrics_history(
-                request=_make_request_with_snapshotter(None),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
                 since=None,
                 until=None,
                 limit=720,
@@ -449,10 +455,12 @@ class TestPostTracemallocStart:
     @pytest.mark.asyncio
     async def test_returns_503_when_snapshotter_missing(self) -> None:
         """Tracemalloc start falls through to 503 when singleton absent."""
+        error_request = _make_request_with_snapshotter(None)
+        error_principal = _runtime_diagnostics_principal()
         with pytest.raises(HTTPException) as exc:
             await post_system_metrics_tracemalloc_start(
-                request=_make_request_with_snapshotter(None),
-                _principal=_runtime_diagnostics_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 duration_s=1.0,
             )
@@ -497,10 +505,12 @@ class TestPostTracemallocStop:
     @pytest.mark.asyncio
     async def test_returns_503_when_snapshotter_missing(self) -> None:
         """Tracemalloc stop falls through to 503 when singleton absent."""
+        error_request = _make_request_with_snapshotter(None)
+        error_principal = _runtime_diagnostics_principal()
         with pytest.raises(HTTPException) as exc:
             await post_system_metrics_tracemalloc_stop(
-                request=_make_request_with_snapshotter(None),
-                _principal=_runtime_diagnostics_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
             )
         assert exc.value.status_code == 503

@@ -121,13 +121,14 @@ async def test_decision_listener_stops_listener_on_exception() -> None:
         start_bus_listener=AsyncMock(),
         stop_bus_listener=AsyncMock(),
     )
+    strategy_error = RuntimeError("strategy boom")
     with (
         patch("snapper.server.process_runner.get_settings", return_value=fake_settings),
         patch("snapper.server.process_runner.get_ai_review_service", return_value=fake_service),
         pytest.raises(RuntimeError, match="strategy boom"),
     ):
         async with _ai_review_decision_listener():
-            raise RuntimeError("strategy boom")
+            raise strategy_error
     fake_service.stop_bus_listener.assert_awaited_once_with()
 
 

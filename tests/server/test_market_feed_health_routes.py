@@ -146,7 +146,8 @@ class TestFeedHealthRoute:
             "snapper.auth.domain.permissions.ROLE_PERMISSIONS", restricted_permissions
         )
         permission_checker = require_permission(Permission.READ_SYSTEM_STATUS)
+        error_arg_1 = _principal()
         with pytest.raises(HTTPException) as exc:
-            permission_checker(_principal())
+            permission_checker(error_arg_1)
         assert exc.value.status_code == status.HTTP_403_FORBIDDEN
         assert exc.value.detail == "Permission 'read:system_status' required"

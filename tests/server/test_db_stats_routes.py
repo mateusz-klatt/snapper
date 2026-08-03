@@ -136,10 +136,12 @@ class TestGetDbStatsHandler:
     @pytest.mark.asyncio
     async def test_returns_503_when_snapshotter_attribute_missing(self) -> None:
         """No snapshotter attached → 503 with the unavailable detail (no Retry-After)."""
+        error_request = _make_request_with_snapshotter(None)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_db_table_stats(
-                request=_make_request_with_snapshotter(None),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _DB_STATS_UNAVAILABLE_DETAIL
@@ -154,10 +156,12 @@ class TestGetDbStatsHandler:
             latest_snapshot=None,
         )
 
+        error_request = _make_request_with_snapshotter(snapshotter)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_db_table_stats(
-                request=_make_request_with_snapshotter(snapshotter),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _DB_STATS_DISABLED_DETAIL
@@ -172,10 +176,12 @@ class TestGetDbStatsHandler:
             latest_snapshot=None,
         )
 
+        error_request = _make_request_with_snapshotter(snapshotter)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_db_table_stats(
-                request=_make_request_with_snapshotter(snapshotter),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _DB_STATS_NOT_YET_RUN_DETAIL
@@ -190,10 +196,12 @@ class TestGetDbStatsHandler:
             interval_seconds=300,
             latest_snapshot=None,
         )
+        error_request = _make_request_with_snapshotter(snapshotter)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_db_table_stats(
-                request=_make_request_with_snapshotter(snapshotter),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.headers is not None
         assert exc.value.headers["Retry-After"] == "300"

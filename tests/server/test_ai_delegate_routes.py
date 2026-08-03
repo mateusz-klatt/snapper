@@ -253,9 +253,10 @@ class TestCreateDelegate:
             permissions=[Permission.MANAGE_USERS],
         )
 
+        error_owner = _make_owner_principal("owner-superset")
         with pytest.raises(PermissionScopeError, match="manage:users"):
             await service.create_delegate(
-                owner=_make_owner_principal("owner-superset"),
+                owner=error_owner,
                 body=body,
             )
 
@@ -288,11 +289,12 @@ class TestCreateDelegate:
             ),
         )
 
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.create_delegate(
                 request=request,
                 body=body,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -765,11 +767,12 @@ class TestDelegateReadScopes:
         )
 
         assert readable.caps.max_open_orders == 5
+        error_body = DelegateCapsUpdateBody(caps=DelegateCapsBody(max_open_orders=99))
         with pytest.raises(DelegateNotFoundError):
             await service.update_caps(
                 public_id=created.delegate.public_id,
                 owner_public_id="other-manager",
-                body=DelegateCapsUpdateBody(caps=DelegateCapsBody(max_open_orders=99)),
+                body=error_body,
             )
 
 
@@ -823,11 +826,12 @@ class TestUpdateCaps:
                 caps=DelegateCapsBody(max_open_orders=9),
             ),
         )
+        error_body = DelegateCapsUpdateBody(caps=DelegateCapsBody(max_open_orders=99))
         with pytest.raises(DelegateNotFoundError):
             await service.update_caps(
                 public_id=created.delegate.public_id,
                 owner_public_id="owner-u2",
-                body=DelegateCapsUpdateBody(caps=DelegateCapsBody(max_open_orders=99)),
+                body=error_body,
             )
 
 
@@ -840,10 +844,12 @@ class TestBlankOwnerGuard:
     ) -> None:
         """Empty ``owner.user_public_id`` blocks create at the service boundary."""
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        error_owner = _make_owner_principal("")
+        error_body = DelegateCreateBody(label="blank", caps=DelegateCapsBody())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.create_delegate(
-                owner=_make_owner_principal(""),
-                body=DelegateCreateBody(label="blank", caps=DelegateCapsBody()),
+                owner=error_owner,
+                body=error_body,
             )
 
     @pytest.mark.asyncio
@@ -870,11 +876,12 @@ class TestBlankOwnerGuard:
     ) -> None:
         """PATCH refuses blank owner IDs."""
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        error_body = DelegateCapsUpdateBody(caps=DelegateCapsBody())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.update_caps(
                 public_id="whatever",
                 owner_public_id="",
-                body=DelegateCapsUpdateBody(caps=DelegateCapsBody()),
+                body=error_body,
             )
 
     @pytest.mark.asyncio
@@ -898,11 +905,12 @@ class TestBlankOwnerGuard:
             timestamp=datetime.now(UTC),
             payload=DelegateCreateBody(label="anything", caps=DelegateCapsBody()),
         )
+        error_owner = _make_owner_principal("")
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.create_delegate(
                 request=request,
                 body=body,
-                owner=_make_owner_principal(""),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -920,10 +928,11 @@ class TestBlankOwnerGuard:
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _BlankService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal("")
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.list_delegates(
                 request=request,
-                owner=_make_owner_principal(""),
+                owner=error_owner,
                 repo=repo,
             )
         assert exc.value.status_code == 401
@@ -940,11 +949,12 @@ class TestBlankOwnerGuard:
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _BlankService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal("")
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.get_delegate(
                 request=request,
                 delegate_public_id="whatever",
-                owner=_make_owner_principal(""),
+                owner=error_owner,
                 repo=repo,
             )
         assert exc.value.status_code == 401
@@ -970,12 +980,13 @@ class TestBlankOwnerGuard:
             timestamp=datetime.now(UTC),
             payload=DelegateCapsUpdateBody(caps=DelegateCapsBody()),
         )
+        error_owner = _make_owner_principal("")
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.update_delegate_caps(
                 request=request,
                 delegate_public_id="whatever",
                 body=body,
-                owner=_make_owner_principal(""),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -998,12 +1009,13 @@ class TestBlankOwnerGuard:
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _BlankService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal("")
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.deactivate_delegate(
                 request=request,
                 delegate_public_id="whatever",
                 body=None,
-                owner=_make_owner_principal(""),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -1081,10 +1093,12 @@ class TestDelegateProliferationCap:
         assert len(listed) == MAX_AI_DELEGATES_PER_OWNER
         assert reviewer_public_id in {delegate.public_id for delegate in listed}
         assert loaded.public_id == reviewer_public_id
+        error_owner = _make_owner_principal("owner-reviewer")
+        error_body = DelegateCreateBody(label="over-shared-cap", caps=DelegateCapsBody())
         with pytest.raises(DelegateProliferationError):
             await service.create_delegate(
-                owner=_make_owner_principal("owner-reviewer"),
-                body=DelegateCreateBody(label="over-shared-cap", caps=DelegateCapsBody()),
+                owner=error_owner,
+                body=error_body,
             )
 
     @pytest.mark.asyncio
@@ -1099,10 +1113,12 @@ class TestDelegateProliferationCap:
                 owner=_make_owner_principal("owner-cap"),
                 body=DelegateCreateBody(label=f"d-{i}", caps=DelegateCapsBody()),
             )
+        error_owner = _make_owner_principal("owner-cap")
+        error_body = DelegateCreateBody(label="one-too-many", caps=DelegateCapsBody())
         with pytest.raises(DelegateProliferationError):
             await service.create_delegate(
-                owner=_make_owner_principal("owner-cap"),
-                body=DelegateCreateBody(label="one-too-many", caps=DelegateCapsBody()),
+                owner=error_owner,
+                body=error_body,
             )
 
     @pytest.mark.asyncio
@@ -1172,11 +1188,12 @@ class TestDelegateProliferationCap:
             timestamp=datetime.now(UTC),
             payload=DelegateCreateBody(label="hit-cap", caps=DelegateCapsBody()),
         )
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.create_delegate(
                 request=request,
                 body=body,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -1275,12 +1292,13 @@ class TestCreateDelegateInsertFailureRollsBackAtomically:
                 "snapper.application.ai_delegates.service.hash_token",
                 return_value=collision_hash,
             ),
-            pytest.raises(IntegrityError),
         ):
-            await service.create_delegate(
-                owner=principal,
-                body=DelegateCreateBody(label="rollback", caps=DelegateCapsBody()),
-            )
+            error_body = DelegateCreateBody(label="rollback", caps=DelegateCapsBody())
+            with pytest.raises(IntegrityError):
+                await service.create_delegate(
+                    owner=principal,
+                    body=error_body,
+                )
         async with repo.session() as s:
             users = (
                 (await s.execute(_sel(User).where(User.created_by_user_public_id == "owner-rb")))
@@ -1361,14 +1379,14 @@ class TestServiceEdgeCases:
             )
             await s.commit()
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
-        with (
-            _patch.object(DelegateService, "_random_suffix", staticmethod(lambda: "fixed1")),
-            pytest.raises(DelegateLabelConflictError),
-        ):
-            await service.create_delegate(
-                owner=_make_owner_principal("owner-c"),
-                body=DelegateCreateBody(label="Collider", caps=DelegateCapsBody()),
-            )
+        with (_patch.object(DelegateService, "_random_suffix", staticmethod(lambda: "fixed1")),):
+            error_owner = _make_owner_principal("owner-c")
+            error_body = DelegateCreateBody(label="Collider", caps=DelegateCapsBody())
+            with pytest.raises(DelegateLabelConflictError):
+                await service.create_delegate(
+                    owner=error_owner,
+                    body=error_body,
+                )
 
     def test_slugify_empty_label_returns_fallback(self) -> None:
         """Degenerate labels fall back to ``delegate``."""
@@ -1529,11 +1547,12 @@ class TestRouteHandlers:
                 operator_public_id="op-NOT-MINE",
             ),
         )
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.create_delegate(
                 request=request,
                 body=body,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -1562,11 +1581,12 @@ class TestRouteHandlers:
             timestamp=datetime.now(UTC),
             payload=DelegateCreateBody(label="anything", caps=DelegateCapsBody()),
         )
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.create_delegate(
                 request=request,
                 body=body,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -1585,11 +1605,12 @@ class TestRouteHandlers:
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _MissingService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.get_delegate(
                 request=request,
                 delegate_public_id="does-not-exist",
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
             )
         assert exc.value.status_code == 404
@@ -1616,12 +1637,13 @@ class TestRouteHandlers:
             timestamp=datetime.now(UTC),
             payload=DelegateCapsUpdateBody(caps=DelegateCapsBody()),
         )
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.update_delegate_caps(
                 request=request,
                 delegate_public_id="nope",
                 body=body,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -1902,12 +1924,13 @@ class TestRouteHandlers:
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _MissingService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.deactivate_delegate(
                 request=request,
                 delegate_public_id="nope",
                 body=None,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -2022,12 +2045,13 @@ class TestRouteHandlers:
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _FoundService())
         monkeypatch.setattr(ai_delegate_routes, "get_user_service", lambda: _RaceUserService())
         request = _make_rest_request()
+        error_owner = _make_owner_principal()
         with pytest.raises(HTTPException) as exc:
             await ai_delegate_routes.deactivate_delegate(
                 request=request,
                 delegate_public_id="d5",
                 body=None,
-                owner=_make_owner_principal(),
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )

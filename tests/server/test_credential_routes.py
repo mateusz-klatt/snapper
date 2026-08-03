@@ -232,16 +232,18 @@ class TestCreateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await create_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "api_secret" in str(excinfo.value.detail)
@@ -278,16 +280,18 @@ class TestCreateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await create_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_409_CONFLICT
 
@@ -314,16 +318,18 @@ class TestCreateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await create_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "initial_balance" in str(excinfo.value.detail)
@@ -385,10 +391,12 @@ class TestCreateCredential:
             ),
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
@@ -416,10 +424,12 @@ class TestCreateCredential:
             ),
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
@@ -485,10 +495,12 @@ class TestCreateCredential:
             ),
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
@@ -515,10 +527,12 @@ class TestCreateCredential:
             ),
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
@@ -555,16 +569,18 @@ class TestCreateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await create_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await create_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_409_CONFLICT
 
@@ -606,14 +622,17 @@ class TestSetCredentialReconciliationMethod:
         mock_repo = AsyncMock()
         mock_repo.get_active_credential_by_id = AsyncMock(return_value=_cred_row())
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("spot_execution_replay")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-other",
                 credential_public_id="cred-1",
-                command=_method_command("spot_execution_replay"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -626,14 +645,17 @@ class TestSetCredentialReconciliationMethod:
         mock_repo = AsyncMock()
         mock_repo.get_active_credential_by_id = AsyncMock(return_value=None)
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("futures_position")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-missing",
-                command=_method_command("futures_position"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -647,14 +669,17 @@ class TestSetCredentialReconciliationMethod:
             return_value=_cred_row(exchange="kraken_futures")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("spot_execution_replay")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
-                command=_method_command("spot_execution_replay"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -669,14 +694,17 @@ class TestSetCredentialReconciliationMethod:
             return_value=_cred_row(exchange="kraken_futures_v2")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("futures_position")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
-                command=_method_command("futures_position"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -690,14 +718,17 @@ class TestSetCredentialReconciliationMethod:
             return_value=_cred_row(exchange="paper", credential_type="paper")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("futures_position")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
-                command=_method_command("futures_position"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -713,14 +744,17 @@ class TestSetCredentialReconciliationMethod:
             side_effect=ReconciliationMethodImmutableError("method is immutable")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _method_command("margin_ledger_replay")
         with pytest.raises(HTTPException) as excinfo:
             await set_credential_reconciliation_method(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
-                command=_method_command("margin_ledger_replay"),
+                command=error_command,
                 repo=mock_repo,
             )
 
@@ -816,17 +850,19 @@ class TestRotateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await rotate_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                credential_public_id="cred-missing",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await rotate_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    credential_public_id="cred-missing",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -864,17 +900,19 @@ class TestRotateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await rotate_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                credential_public_id="cred-1",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await rotate_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    credential_public_id="cred-1",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
         mock_repo.rotate_wallet_credential.assert_awaited_once()
@@ -910,17 +948,19 @@ class TestRotateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await rotate_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                credential_public_id="cred-1",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await rotate_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    credential_public_id="cred-1",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "api_secret" in str(excinfo.value.detail)
@@ -955,17 +995,19 @@ class TestRotateCredential:
                 "snapper.server.credential_routes.get_encryption_service",
                 return_value=mock_encryption,
             ),
-            pytest.raises(HTTPException) as excinfo,
         ):
-            await rotate_credential(
-                request=_make_request(),
-                _principal=_admin_principal(),
-                _csrf=None,
-                wallet_public_id="wallet-42",
-                credential_public_id="cred-1",
-                command=command,
-                repo=mock_repo,
-            )
+            error_request = _make_request()
+            error_principal = _admin_principal()
+            with pytest.raises(HTTPException) as excinfo:
+                await rotate_credential(
+                    request=error_request,
+                    _principal=error_principal,
+                    _csrf=None,
+                    wallet_public_id="wallet-42",
+                    credential_public_id="cred-1",
+                    command=command,
+                    repo=mock_repo,
+                )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "initial_balance" in str(excinfo.value.detail)

@@ -306,11 +306,14 @@ class TestResearcherProvisioning:
         """
         await _seed_owner(repo, "owner-forbidden", "owner-forbidden")
         _fresh_manager()
+        error_request = _request()
+        error_body = _create_request("Forbidden", [Permission.CREATE_ORDERS])
+        error_owner = _owner("owner-forbidden")
         with pytest.raises(HTTPException) as exc:
             await ai_researcher_routes.create_researcher(
-                request=_request(),
-                body=_create_request("Forbidden", [Permission.CREATE_ORDERS]),
-                owner=_owner("owner-forbidden"),
+                request=error_request,
+                body=error_body,
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -339,11 +342,14 @@ class TestResearcherProvisioning:
         Then: It returns 401 before opening a provisioning transaction.
         """
         _fresh_manager()
+        error_request = _request()
+        error_body = _create_request("Blank")
+        error_owner = _owner("")
         with pytest.raises(HTTPException) as exc:
             await ai_researcher_routes.create_researcher(
-                request=_request(),
-                body=_create_request("Blank"),
-                owner=_owner(""),
+                request=error_request,
+                body=error_body,
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -389,11 +395,14 @@ class TestIndependentProvisioningCaps:
                 owner=_owner(owner_public_id),
                 body=ResearcherCreateBody(label=f"research-{index}"),
             )
+        error_request = _request()
+        error_body = _create_request("one-too-many")
+        error_owner = _owner(owner_public_id)
         with pytest.raises(HTTPException) as exc:
             await ai_researcher_routes.create_researcher(
-                request=_request(),
-                body=_create_request("one-too-many"),
-                owner=_owner(owner_public_id),
+                request=error_request,
+                body=error_body,
+                owner=error_owner,
                 repo=repo,
                 _csrf=None,
             )
@@ -432,10 +441,12 @@ class TestIndependentProvisioningCaps:
             body=DelegateCreateBody(label="fifth", caps=DelegateCapsBody()),
         )
         assert fifth.delegate.is_active is True
+        error_owner = _owner(owner_public_id, "operator-cap")
+        error_body = DelegateCreateBody(label="sixth", caps=DelegateCapsBody())
         with pytest.raises(DelegateProliferationError):
             await service.create_delegate(
-                owner=_owner(owner_public_id, "operator-cap"),
-                body=DelegateCreateBody(label="sixth", caps=DelegateCapsBody()),
+                owner=error_owner,
+                body=error_body,
             )
 
 

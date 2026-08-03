@@ -2950,9 +2950,10 @@ class TestLifespanCancellation:
             mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
+            cancelled_error = asyncio.CancelledError()
             with pytest.raises(asyncio.CancelledError):
                 async with lifespan(mock_app):
-                    raise asyncio.CancelledError()
+                    raise cancelled_error
             mock_factory.stop_all_processes.assert_awaited_once()
             mock_manager.cleanup.assert_awaited()
 

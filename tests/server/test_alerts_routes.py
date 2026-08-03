@@ -301,11 +301,13 @@ class TestGetAlertEvent:
         repo = _make_repo()
         repo.get_alert_event_by_public_id = AsyncMock(return_value=None)
 
+        error_request = _make_request()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_alert_event(
-                request=_make_request(),
+                request=error_request,
                 alert_public_id="pid-unknown",
-                principal=_principal(),
+                principal=error_principal,
                 repo=repo,
             )
 
@@ -319,11 +321,13 @@ class TestGetAlertEvent:
             return_value=_alert_row("pid-foreign", user_public_id="user-gamma")
         )
 
+        error_request = _make_request()
+        error_principal = _principal("user-alpha")
         with pytest.raises(HTTPException) as exc:
             await get_alert_event(
-                request=_make_request(),
+                request=error_request,
                 alert_public_id="pid-foreign",
-                principal=_principal("user-alpha"),
+                principal=error_principal,
                 repo=repo,
             )
 

@@ -137,10 +137,12 @@ class TestStatsRoute:
         """A pair outside ``market_stats_pairs`` raises HTTP 404."""
         cache = _stub_cache()
         worker = self._worker_with_pair("kraken:BTC-USD", "kraken:ETH-USD")
+        error_request = _make_request(cache=cache, stats_worker=worker)
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_cached_pair_stats(
-                request=_make_request(cache=cache, stats_worker=worker),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
                 exchange_a="kraken",
                 symbol_a="OTHER",
                 exchange_b="kraken",
@@ -151,10 +153,12 @@ class TestStatsRoute:
     @pytest.mark.asyncio
     async def test_missing_worker_returns_503(self) -> None:
         """No stats worker on app.state raises HTTP 503."""
+        error_request = _make_request(cache=_stub_cache(), stats_worker=None)
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_cached_pair_stats(
-                request=_make_request(cache=_stub_cache(), stats_worker=None),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
                 exchange_a="kraken",
                 symbol_a="BTC-USD",
                 exchange_b="kraken",
@@ -165,10 +169,12 @@ class TestStatsRoute:
     @pytest.mark.asyncio
     async def test_invalid_exchange_raises_400(self) -> None:
         """An invalid exchange path parameter raises HTTP 400."""
+        error_request = _make_request()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_cached_pair_stats(
-                request=_make_request(),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
                 exchange_a="bogus",
                 symbol_a="BTC-USD",
                 exchange_b="kraken",
@@ -268,10 +274,12 @@ class TestConfiguredStatsRoute:
     @pytest.mark.asyncio
     async def test_missing_worker_returns_503(self) -> None:
         """No stats worker on app.state raises HTTP 503."""
+        error_request = _make_request(cache=_stub_cache(), stats_worker=None)
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_configured_cached_pair_stats(
-                request=_make_request(cache=_stub_cache(), stats_worker=None),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
         assert exc.value.detail == "Stats worker not initialized"
@@ -280,10 +288,12 @@ class TestConfiguredStatsRoute:
     async def test_missing_cache_returns_503(self) -> None:
         """No cache on app.state raises the stats-worker initialization 503."""
         worker = self._worker_with_pairs("kraken:BTC-USD|kraken:ETH-USD")
+        error_request = _make_request(cache=None, stats_worker=worker)
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_configured_cached_pair_stats(
-                request=_make_request(cache=None, stats_worker=worker),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
         assert exc.value.detail == "Stats worker not initialized"
@@ -310,8 +320,9 @@ class TestConfiguredStatsRoute:
             "snapper.auth.domain.permissions.ROLE_PERMISSIONS", restricted_permissions
         )
         permission_checker = require_permission(Permission.READ_MARKET_DATA)
+        error_arg_1 = _principal()
         with pytest.raises(HTTPException) as exc:
-            permission_checker(_principal())
+            permission_checker(error_arg_1)
         assert exc.value.status_code == status.HTTP_403_FORBIDDEN
         assert exc.value.detail == "Permission 'read:market_data' required"
 
@@ -360,10 +371,12 @@ class TestHealthRoute:
     @pytest.mark.asyncio
     async def test_health_without_cache_returns_503(self) -> None:
         """Missing cache state on health raises HTTP 503."""
+        error_request = _make_request(cache=None)
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await get_cache_health(
-                request=_make_request(cache=None),
-                _principal=_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 

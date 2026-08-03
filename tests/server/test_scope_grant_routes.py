@@ -190,9 +190,10 @@ class TestListScopeGrants:
             operator_public_ids=["op-1"],
         )
 
+        error_request = _make_request()
         with pytest.raises(HTTPException) as excinfo:
             await list_scope_grants(
-                request=_make_request(),
+                request=error_request,
                 principal=principal,
                 repo=mock_repo,
                 wallet_public_id="wallet-42",
@@ -285,10 +286,12 @@ class TestCreateScopeGrant:
             underlying_public_id=None,
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -307,10 +310,12 @@ class TestCreateScopeGrant:
             instrument_public_id="00000000-0000-7000-8000-0000000000bb",
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -338,10 +343,12 @@ class TestCreateScopeGrant:
             instrument_public_id=None,
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -367,10 +374,12 @@ class TestCreateScopeGrant:
             instrument_public_id="not-a-uuid",
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -398,10 +407,12 @@ class TestCreateScopeGrant:
             instrument_public_id=None,
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -423,10 +434,12 @@ class TestCreateScopeGrant:
         mock_service = AsyncMock()
         command = _make_create_command(wallet_public_id="BTC")
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -449,10 +462,12 @@ class TestCreateScopeGrant:
         mock_service = AsyncMock()
         command = _make_create_command(operator_public_id="BTC")
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
                 command=command,
                 scope_grant_service=mock_service,
@@ -479,12 +494,15 @@ class TestCreateScopeGrant:
             )
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_create_command()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_create_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -498,12 +516,15 @@ class TestCreateScopeGrant:
             side_effect=ScopeGrantValidationError("bad scope_kind")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_create_command()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_create_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -517,12 +538,15 @@ class TestCreateScopeGrant:
             side_effect=ScopeGrantNotFoundError("operator not found")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_create_command()
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_create_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -586,12 +610,15 @@ class TestHandoverScopeGrant:
             side_effect=ScopeGrantNotFoundError("source grant not found")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_handover_command()
         with pytest.raises(HTTPException) as excinfo:
             await handover_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_handover_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -605,12 +632,15 @@ class TestHandoverScopeGrant:
             side_effect=ScopeGrantValidationError("self-handover rejected")
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_handover_command()
         with pytest.raises(HTTPException) as excinfo:
             await handover_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_handover_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -629,12 +659,15 @@ class TestHandoverScopeGrant:
             )
         )
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_handover_command()
         with pytest.raises(HTTPException) as excinfo:
             await handover_scope_grant(
-                request=_make_request(),
-                _principal=_admin_principal(),
+                request=error_request,
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_handover_command(),
+                command=error_command,
                 scope_grant_service=mock_service,
             )
 
@@ -714,13 +747,16 @@ class TestRevokeScopeGrant:
         service = AsyncMock()
         service.revoke_grant = AsyncMock(side_effect=ScopeGrantNotFoundError("no such grant"))
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_revoke_command()
         with pytest.raises(HTTPException) as excinfo:
             await revoke_scope_grant(
-                request=_make_request(),
+                request=error_request,
                 grant_public_id="00000000-0000-7000-8000-0000000000ff",
-                _principal=_admin_principal(),
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_revoke_command(),
+                command=error_command,
                 scope_grant_service=service,
             )
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
@@ -803,13 +839,16 @@ class TestRevokeScopeGrant:
         )
         assert response.payload.public_id == target_grant
 
+        error_request = _make_request()
+        error_principal = _admin_principal()
+        error_command = _make_revoke_command()
         with pytest.raises(HTTPException) as excinfo:
             await revoke_scope_grant(
-                request=_make_request(),
+                request=error_request,
                 grant_public_id=target_grant,
-                _principal=_admin_principal(),
+                _principal=error_principal,
                 _csrf=None,
-                command=_make_revoke_command(),
+                command=error_command,
                 scope_grant_service=service,
             )
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND

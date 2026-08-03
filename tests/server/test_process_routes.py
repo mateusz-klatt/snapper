@@ -1411,12 +1411,14 @@ class TestGetProcessSchema:
         """
         mock_get_registry.return_value = {}
         settings = MagicMock()
+        error_request = _make_rest_request()
+        error_user = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await get_process_schema(
-                request=_make_rest_request(),
+                request=error_request,
                 name="nonexistent",
                 settings=settings,
-                _user=MagicMock(),
+                _user=error_user,
             )
         assert exc_info.value.status_code == 404
         assert "not found in registry" in exc_info.value.detail
@@ -1521,14 +1523,17 @@ class TestStartProcess:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
+        error_http_request = _make_rest_request()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name="executor_kraken",
                 body=body,
                 factory=mock_factory,
-                user=_operator_principal(),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 422
@@ -1694,17 +1699,22 @@ class TestProcessLifecyclePermissionSubsets:
                 "snapper.server.process_routes.get_registered_processes",
                 return_value={"target": entry},
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await create_process_configuration(
-                http_request=_make_rest_request(),
-                factory=factory,
-                settings=MagicMock(),
-                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
-                repo=MagicMock(),
-                _csrf=None,
-                body=self._create_body(enabled=True),
-            )
+            error_http_request = _make_rest_request()
+            error_settings = MagicMock()
+            error_user = _scoped_operator(Permission.CONFIGURE_STRATEGIES)
+            error_repo = MagicMock()
+            error_body = self._create_body(enabled=True)
+            with pytest.raises(HTTPException) as exc_info:
+                await create_process_configuration(
+                    http_request=error_http_request,
+                    factory=factory,
+                    settings=error_settings,
+                    user=error_user,
+                    repo=error_repo,
+                    _csrf=None,
+                    body=error_body,
+                )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'start:strategies' required"
         factory.create_process_config.assert_not_awaited()
@@ -1720,17 +1730,22 @@ class TestProcessLifecyclePermissionSubsets:
                 "snapper.server.process_routes.get_registered_processes",
                 return_value={"target": entry},
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await create_process_configuration(
-                http_request=_make_rest_request(),
-                factory=factory,
-                settings=MagicMock(),
-                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
-                repo=MagicMock(),
-                _csrf=None,
-                body=self._create_body(enabled=False),
-            )
+            error_http_request = _make_rest_request()
+            error_settings = MagicMock()
+            error_user = _scoped_operator(Permission.CONFIGURE_STRATEGIES)
+            error_repo = MagicMock()
+            error_body = self._create_body(enabled=False)
+            with pytest.raises(HTTPException) as exc_info:
+                await create_process_configuration(
+                    http_request=error_http_request,
+                    factory=factory,
+                    settings=error_settings,
+                    user=error_user,
+                    repo=error_repo,
+                    _csrf=None,
+                    body=error_body,
+                )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'manage:processes' required"
         factory.create_process_config.assert_not_awaited()
@@ -1774,15 +1789,19 @@ class TestProcessLifecyclePermissionSubsets:
         factory = MagicMock()
         factory.get_process_configs = AsyncMock(return_value=[config])
         factory.start_process_by_name = AsyncMock()
+        error_http_request = _make_rest_request()
+        error_user = _scoped_operator(Permission.MANAGE_PROCESSES)
+        error_repo = MagicMock()
+        error_body = self._start_body()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name=config.name,
                 factory=factory,
-                user=_scoped_operator(Permission.MANAGE_PROCESSES),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
-                body=self._start_body(),
+                body=error_body,
             )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'start:strategies' required"
@@ -1797,15 +1816,19 @@ class TestProcessLifecyclePermissionSubsets:
         factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
+        error_http_request = _make_rest_request()
+        error_user = _scoped_operator(Permission.START_STRATEGIES)
+        error_repo = MagicMock()
+        error_body = self._start_body()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name=config.name,
                 factory=factory,
-                user=_scoped_operator(Permission.START_STRATEGIES),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
-                body=self._start_body(),
+                body=error_body,
             )
         assert exc_info.value.status_code == 403
         factory.start_process_by_name.assert_not_awaited()
@@ -1832,15 +1855,19 @@ class TestProcessLifecyclePermissionSubsets:
         factory = MagicMock()
         factory.get_process_configs = AsyncMock(return_value=[config])
         factory.start_process_by_name = AsyncMock()
+        error_http_request = _make_rest_request()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
+        error_body = self._start_body()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name=config.name,
                 factory=factory,
-                user=_operator_principal(),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
-                body=self._start_body(),
+                body=error_body,
             )
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "unable to classify persisted strategy process"
@@ -1866,12 +1893,14 @@ class TestProcessLifecyclePermissionSubsets:
         factory.stop_process_by_name.assert_awaited_once()
 
         factory.stop_process_by_name.reset_mock()
+        error_request = _make_rest_request()
+        error_user = _scoped_operator(Permission.MANAGE_PROCESSES)
         with pytest.raises(HTTPException) as exc_info:
             await stop_process(
-                request=_make_rest_request(),
+                request=error_request,
                 name="strategy_target",
                 factory=factory,
-                user=_scoped_operator(Permission.MANAGE_PROCESSES),
+                user=error_user,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 403
@@ -1905,12 +1934,14 @@ class TestProcessLifecyclePermissionSubsets:
         factory.stop_process_by_name = AsyncMock(
             return_value=ProcessStopResult(status="not_running", message="not running")
         )
+        error_request = _make_rest_request()
+        error_user = _scoped_operator(Permission.STOP_STRATEGIES)
         with pytest.raises(HTTPException) as exc_info:
             await stop_process(
-                request=_make_rest_request(),
+                request=error_request,
                 name="unknown",
                 factory=factory,
-                user=_scoped_operator(Permission.STOP_STRATEGIES),
+                user=error_user,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 403
@@ -2131,14 +2162,17 @@ class TestCreateProcessConfiguration:
         )
         factory = MagicMock()
         settings = MagicMock()
+        error_http_request = _make_rest_request()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 body=request,
                 factory=factory,
                 settings=settings,
-                user=_operator_principal(),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 404
@@ -2196,14 +2230,18 @@ class TestCreateProcessConfiguration:
                 note=None,
             ),
         )
+        error_http_request = _make_rest_request()
+        error_settings = MagicMock()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await create_process_configuration(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 body=request,
                 factory=mock_factory,
-                settings=MagicMock(),
-                user=_operator_principal(),
-                repo=MagicMock(),
+                settings=error_settings,
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 409
@@ -2549,16 +2587,19 @@ class TestEnforceStrategyScope:
     @pytest.mark.asyncio
     async def test_live_empty_operator_and_wallet_rejected(self) -> None:
         """Live strategy cannot bypass wallet resolution with empty scope."""
+        error_parameters = _strategy_params(
+            operator_public_id="",
+            wallet_public_id="",
+            exchange="kraken",
+        )
+        error_principal = MagicMock(operator_public_ids=["op-1"])
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(
-                    operator_public_id="",
-                    wallet_public_id="",
-                    exchange="kraken",
-                ),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=["op-1"]),
-                repo=MagicMock(),
+                principal=error_principal,
+                repo=error_repo,
             )
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == (
@@ -2568,24 +2609,30 @@ class TestEnforceStrategyScope:
     @pytest.mark.asyncio
     async def test_wallet_without_operator_rejected(self) -> None:
         """Wallet supplied without operator -> 400."""
+        error_parameters = _strategy_params(operator_public_id="", wallet_public_id="w-1")
+        error_principal = MagicMock(operator_public_ids=[])
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(operator_public_id="", wallet_public_id="w-1"),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=[]),
-                repo=MagicMock(),
+                principal=error_principal,
+                repo=error_repo,
             )
         assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_operator_not_in_principal_rejected(self) -> None:
         """Operator not in principal.operator_public_ids -> 403."""
+        error_parameters = _strategy_params(operator_public_id="op-x", wallet_public_id="")
+        error_principal = MagicMock(operator_public_ids=["op-1"], username="alice")
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(operator_public_id="op-x", wallet_public_id=""),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
-                repo=MagicMock(),
+                principal=error_principal,
+                repo=error_repo,
             )
         assert exc_info.value.status_code == 403
         assert "alice" in exc_info.value.detail
@@ -2615,15 +2662,17 @@ class TestEnforceStrategyScope:
         """Operator-scoped wallet autolookup with no candidates returns 400."""
         repo = MagicMock()
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        error_parameters = _strategy_params(
+            operator_public_id="op-1",
+            wallet_public_id="",
+            exchange="kraken",
+        )
+        error_principal = MagicMock(operator_public_ids=["op-1"], username="alice")
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(
-                    operator_public_id="op-1",
-                    wallet_public_id="",
-                    exchange="kraken",
-                ),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                principal=error_principal,
                 repo=repo,
             )
         assert exc_info.value.status_code == 400
@@ -2661,11 +2710,13 @@ class TestEnforceStrategyScope:
         repo.list_active_scope_grants_for_wallet = AsyncMock(
             return_value=[{"operator_public_id": "op-other"}]
         )
+        error_parameters = _strategy_params(operator_public_id="op-1", wallet_public_id="w-1")
+        error_principal = MagicMock(operator_public_ids=["op-1"])
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(operator_public_id="op-1", wallet_public_id="w-1"),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=["op-1"]),
+                principal=error_principal,
                 repo=repo,
             )
         assert exc_info.value.status_code == 403
@@ -2675,16 +2726,19 @@ class TestEnforceStrategyScope:
     @pytest.mark.asyncio
     async def test_non_string_parameters_rejected_by_strategy_validation(self) -> None:
         """Non-string scope fields fail the strategy parameter validation gate."""
+        error_parameters = _strategy_params(
+            operator_public_id=42,
+            wallet_public_id=["x"],
+            exchange="paper",
+        )
+        error_principal = MagicMock(operator_public_ids=[])
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(
-                    operator_public_id=42,
-                    wallet_public_id=["x"],
-                    exchange="paper",
-                ),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=[]),
-                repo=MagicMock(),
+                principal=error_principal,
+                repo=error_repo,
             )
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "invalid strategy parameters for wallet resolution"
@@ -2694,15 +2748,17 @@ class TestEnforceStrategyScope:
         """Unknown strategy exchange fails before autolookup can bind a wallet."""
         repo = MagicMock()
         repo.list_accessible_wallets_for_operators = AsyncMock()
+        error_parameters = _strategy_params(
+            operator_public_id="op-1",
+            wallet_public_id="",
+            exchange="bogus",
+        )
+        error_principal = MagicMock(operator_public_ids=["op-1"], username="alice")
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters=_strategy_params(
-                    operator_public_id="op-1",
-                    wallet_public_id="",
-                    exchange="bogus",
-                ),
+                parameters=error_parameters,
                 role=ProcessRoleEnum.STRATEGY,
-                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                principal=error_principal,
                 repo=repo,
             )
         assert exc_info.value.status_code == 400
@@ -2823,13 +2879,14 @@ class TestScopeHelpers:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-eth"})
         repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"BTC-USD": "i-btc"})
+        error_arg_5 = datetime.now(UTC)
         with pytest.raises(StrategyOutputCoverageError) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,
                 {"outputs": ["BTC-USD"], "exchange": "kraken"},
                 "op-1",
                 "w-1",
-                datetime.now(UTC),
+                error_arg_5,
             )
         assert "BTC-USD" in exc_info.value.detail
 
@@ -2839,13 +2896,14 @@ class TestScopeHelpers:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value=set())
         repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={})
+        error_arg_5 = datetime.now(UTC)
         with pytest.raises(StrategyOutputCoverageError) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,
                 {"outputs": ["XYZ-USD"], "exchange": "kraken"},
                 "op-1",
                 "w-1",
-                datetime.now(UTC),
+                error_arg_5,
             )
         assert "XYZ-USD" in exc_info.value.detail
 
@@ -2868,14 +2926,17 @@ class TestStartProcessScopeRecheck:
         )
         factory = MagicMock()
         factory.get_process_configs = AsyncMock(return_value=[])
+        error_http_request = _make_rest_request()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name="any",
                 body=body,
                 factory=factory,
-                user=_operator_principal(),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 400
@@ -2895,14 +2956,17 @@ class TestStartProcessScopeRecheck:
         )
         factory = MagicMock()
         factory.get_process_configs = AsyncMock(return_value=[])
+        error_http_request = _make_rest_request()
+        error_user = _operator_principal()
+        error_repo = MagicMock()
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
-                http_request=_make_rest_request(),
+                http_request=error_http_request,
                 name="any",
                 body=body,
                 factory=factory,
-                user=_operator_principal(),
-                repo=MagicMock(),
+                user=error_user,
+                repo=error_repo,
                 _csrf=None,
             )
         assert exc_info.value.status_code == 400
@@ -3008,17 +3072,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=ProcessRoleEnum.STRATEGY,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "specify wallet_public_id; 2 wallets accessible"
@@ -3059,17 +3125,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=ProcessRoleEnum.STRATEGY,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == (
@@ -3115,17 +3183,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=None,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == (
@@ -3171,17 +3241,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=ProcessRoleEnum.STRATEGY,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == (
@@ -3313,17 +3385,19 @@ class TestStartProcessScopeRecheck:
                     }
                 ),
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "invalid persisted process role for strategy launch"
@@ -3363,17 +3437,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=None,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "unable to classify persisted strategy process"
@@ -3417,17 +3493,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=None,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "unable to classify persisted strategy process"
@@ -3471,17 +3549,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=ProcessRoleEnum.STRATEGY,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "specify wallet_public_id; 0 wallets accessible"
@@ -3584,17 +3664,19 @@ class TestStartProcessScopeRecheck:
                 "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
                 return_value=ProcessRoleEnum.STRATEGY,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "specify wallet_public_id; 0 wallets accessible"
@@ -3690,17 +3772,19 @@ class TestStartProcessScopeRecheck:
                     }
                 ),
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strategy",
-                body=body,
-                factory=factory,
-                user=_operator_principal(["op-1"]),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-1"])
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strategy",
+                    body=body,
+                    factory=factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
 
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == (
@@ -3866,13 +3950,15 @@ class TestResolveRoleForClassPath:
         ):
             mock_factory = MagicMock()
             mock_factory.start_process_by_name = AsyncMock()
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-mine"])
             with pytest.raises(HTTPException) as exc_info:
                 await start_process(
-                    http_request=_make_rest_request(),
+                    http_request=error_http_request,
                     name="strat-foreign",
                     body=body,
                     factory=mock_factory,
-                    user=_operator_principal(["op-mine"]),
+                    user=error_user,
                     repo=repo,
                     _csrf=None,
                 )
@@ -3941,13 +4027,15 @@ class TestResolveRoleForClassPath:
             mock_factory.start_process_by_name = AsyncMock(
                 return_value=ProcessStartResult(status="success", message="ok", public_id="run-1")
             )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal(["op-mine"])
             with pytest.raises(HTTPException) as exc_info:
                 await start_process(
-                    http_request=_make_rest_request(),
+                    http_request=error_http_request,
                     name="strat-listparams",
                     body=body,
                     factory=mock_factory,
-                    user=_operator_principal(["op-mine"]),
+                    user=error_user,
                     repo=repo,
                     _csrf=None,
                 )
@@ -4086,17 +4174,19 @@ class TestResolveRoleForClassPathHit:
                 "snapper.application.process_manager.strategy_scope.get_registered_processes",
                 return_value=registry,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="listparams",
-                body=body,
-                factory=mock_factory,
-                user=_operator_principal(),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_user = _operator_principal()
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="listparams",
+                    body=body,
+                    factory=mock_factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "invalid persisted strategy parameters"
         mock_factory.start_process_by_name.assert_not_called()
@@ -4191,17 +4281,20 @@ class TestResolveRoleForClassPathHit:
                 "snapper.application.process_manager.strategy_scope.get_registered_processes",
                 return_value=registry,
             ),
-            pytest.raises(HTTPException) as exc_info,
         ):
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strat-no-override",
-                body=body,
-                factory=MagicMock(),
-                user=_operator_principal(),
-                repo=repo,
-                _csrf=None,
-            )
+            error_http_request = _make_rest_request()
+            error_factory = MagicMock()
+            error_user = _operator_principal()
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=error_http_request,
+                    name="strat-no-override",
+                    body=body,
+                    factory=error_factory,
+                    user=error_user,
+                    repo=repo,
+                    _csrf=None,
+                )
         assert exc_info.value.status_code == 400
 
 
@@ -4435,12 +4528,14 @@ class TestSetProcessDesiredState:
 
         factory.update_process_config.reset_mock()
         mock_scope.reset_mock()
+        error_arg_3 = self._body("enable")
+        error_principal = _scoped_operator(Permission.STOP_STRATEGIES)
         with pytest.raises(HTTPException) as exc_info:
             await self._patch(
                 "strategy_x",
                 factory,
-                self._body("enable"),
-                principal=_scoped_operator(Permission.STOP_STRATEGIES),
+                error_arg_3,
+                principal=error_principal,
             )
         assert exc_info.value.status_code == 403
         mock_scope.assert_not_awaited()
@@ -4460,12 +4555,14 @@ class TestSetProcessDesiredState:
         factory.update_process_config.assert_awaited_once()
 
         factory.update_process_config.reset_mock()
+        error_arg_3 = self._body("disable")
+        error_principal = _scoped_operator(Permission.START_STRATEGIES)
         with pytest.raises(HTTPException) as exc_info:
             await self._patch(
                 "strategy_x",
                 factory,
-                self._body("disable"),
-                principal=_scoped_operator(Permission.START_STRATEGIES),
+                error_arg_3,
+                principal=error_principal,
             )
         assert exc_info.value.status_code == 403
         factory.update_process_config.assert_not_awaited()
@@ -4476,12 +4573,13 @@ class TestSetProcessDesiredState:
         config = self._config("strategy_x", enabled=True, role=ProcessRoleEnum.STRATEGY)
         factory = self._factory(config, autostart_includes=True)
         body = self._body("restart", restart_nonce="nonce-restart-01")
+        error_principal = _scoped_operator(Permission.START_STRATEGIES)
         with pytest.raises(HTTPException) as exc_info:
             await self._patch(
                 "strategy_x",
                 factory,
                 body,
-                principal=_scoped_operator(Permission.START_STRATEGIES),
+                principal=error_principal,
             )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'stop:strategies' required"
@@ -4503,12 +4601,14 @@ class TestSetProcessDesiredState:
         """Strategy lifecycle permissions cannot mutate core desired state."""
         config = self._config("core_x", enabled=True, role=ProcessRoleEnum.CORE)
         factory = self._factory(config, autostart_includes=True)
+        error_arg_3 = self._body("disable")
+        error_principal = _scoped_operator(Permission.STOP_STRATEGIES)
         with pytest.raises(HTTPException) as exc_info:
             await self._patch(
                 "core_x",
                 factory,
-                self._body("disable"),
-                principal=_scoped_operator(Permission.STOP_STRATEGIES),
+                error_arg_3,
+                principal=error_principal,
             )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'manage:processes' required"
@@ -4523,8 +4623,9 @@ class TestSetProcessDesiredState:
             "snapper.server.process_routes._enforce_strategy_scope", new_callable=AsyncMock
         ) as mock_scope:
             mock_scope.side_effect = HTTPException(status_code=403, detail="no grant")
+            error_arg_3 = self._body("enable")
             with pytest.raises(HTTPException) as exc:
-                await self._patch("strategy_x", factory, self._body("enable"))
+                await self._patch("strategy_x", factory, error_arg_3)
         assert exc.value.status_code == 403
         factory.update_process_config.assert_not_awaited()
 
@@ -4591,8 +4692,9 @@ class TestSetProcessDesiredState:
         """Restarting a disabled process is 409 and writes nothing."""
         config = self._config("p", enabled=False)
         factory = self._factory(config)
+        error_arg_3 = self._body("restart", restart_nonce="nonce-restart-01")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("p", factory, self._body("restart", restart_nonce="nonce-restart-01"))
+            await self._patch("p", factory, error_arg_3)
         assert exc.value.status_code == 409
         factory.update_process_config.assert_not_awaited()
 
@@ -4601,16 +4703,18 @@ class TestSetProcessDesiredState:
         """A restart with no client nonce is 422 (retry-idempotency requires it)."""
         config = self._config("p", enabled=True)
         factory = self._factory(config)
+        error_arg_3 = self._body("restart")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("p", factory, self._body("restart"))
+            await self._patch("p", factory, error_arg_3)
         assert exc.value.status_code == 422
 
     @pytest.mark.asyncio
     async def test_executor_instance_rejected_not_found(self) -> None:
         """A per-wallet executor instance has no desired-state config → 404, no config read."""
         factory = self._factory(None)
+        error_arg_3 = self._body("enable")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("executor_kraken_w000000000001", factory, self._body("enable"))
+            await self._patch("executor_kraken_w000000000001", factory, error_arg_3)
         assert exc.value.status_code == 404
         factory.get_process_configs.assert_not_awaited()
 
@@ -4618,16 +4722,18 @@ class TestSetProcessDesiredState:
     async def test_executor_template_rejected_unprocessable(self) -> None:
         """A bare executor template is config-only → 422."""
         factory = self._factory(None)
+        error_arg_3 = self._body("enable")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("executor_kraken", factory, self._body("enable"))
+            await self._patch("executor_kraken", factory, error_arg_3)
         assert exc.value.status_code == 422
 
     @pytest.mark.asyncio
     async def test_unknown_process_not_found(self) -> None:
         """A name with no active config row is 404."""
         factory = self._factory(None)
+        error_arg_3 = self._body("enable")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("ghost", factory, self._body("enable"))
+            await self._patch("ghost", factory, error_arg_3)
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -4641,8 +4747,9 @@ class TestSetProcessDesiredState:
         config = self._config("p", enabled=True)
         factory = self._factory(config)
         factory.update_process_config = AsyncMock(side_effect=KeyError("gone"))
+        error_arg_3 = self._body("disable")
         with pytest.raises(HTTPException) as exc:
-            await self._patch("p", factory, self._body("disable"))
+            await self._patch("p", factory, error_arg_3)
         assert exc.value.status_code == 404
 
     def test_restart_nonce_rejects_oversized_and_unsafe_values(self) -> None:
@@ -4807,16 +4914,16 @@ class TestUpdateProcessScopeConfig:
         factory.update_process_config_parameters.assert_awaited_once()
 
         factory.update_process_config_parameters.reset_mock()
-        with (
-            patch(self._ENFORCE, new_callable=AsyncMock) as denied_scope,
-            pytest.raises(HTTPException) as exc_info,
-        ):
-            await self._invoke(
-                "strategy_x",
-                factory,
-                self._body(),
-                principal=_scoped_operator(Permission.START_STRATEGIES),
-            )
+        with (patch(self._ENFORCE, new_callable=AsyncMock) as denied_scope,):
+            error_arg_3 = self._body()
+            error_principal = _scoped_operator(Permission.START_STRATEGIES)
+            with pytest.raises(HTTPException) as exc_info:
+                await self._invoke(
+                    "strategy_x",
+                    factory,
+                    error_arg_3,
+                    principal=error_principal,
+                )
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Permission 'configure:strategies' required"
         denied_scope.assert_not_awaited()
@@ -4831,9 +4938,10 @@ class TestUpdateProcessScopeConfig:
         with (
             patch(self._ENFORCE, new_callable=AsyncMock, side_effect=rejection),
             patch(self._REF_LOOKUP, return_value={}),
-            pytest.raises(HTTPException) as exc,
         ):
-            await self._invoke("p7_rsi_eth_1h", factory, self._body(operator="op-foreign"))
+            error_arg_3 = self._body(operator="op-foreign")
+            with pytest.raises(HTTPException) as exc:
+                await self._invoke("p7_rsi_eth_1h", factory, error_arg_3)
         assert exc.value.status_code == 403
         factory.update_process_config_parameters.assert_not_awaited()
 
@@ -4845,13 +4953,14 @@ class TestUpdateProcessScopeConfig:
         with (
             patch(self._ENFORCE, new_callable=AsyncMock) as mock_enforce,
             patch(self._REF_LOOKUP, return_value={"ai_review_user_public_id": "user"}),
-            pytest.raises(HTTPException) as exc,
         ):
-            await self._invoke(
-                "p7_rsi_eth_1h",
-                factory,
-                self._body(reference={"entry_threshold": "999"}),
-            )
+            error_arg_3 = self._body(reference={"entry_threshold": "999"})
+            with pytest.raises(HTTPException) as exc:
+                await self._invoke(
+                    "p7_rsi_eth_1h",
+                    factory,
+                    error_arg_3,
+                )
         assert exc.value.status_code == 400
         assert "entry_threshold" in exc.value.detail
         mock_enforce.assert_not_awaited()
@@ -4861,8 +4970,9 @@ class TestUpdateProcessScopeConfig:
     async def test_executor_instance_is_404(self) -> None:
         """A per-wallet executor instance has no editable config -> 404."""
         factory = self._factory(None)
+        error_arg_3 = self._body(wallet="wal-1")
         with pytest.raises(HTTPException) as exc:
-            await self._invoke("executor_kraken_w1234567890ab", factory, self._body(wallet="wal-1"))
+            await self._invoke("executor_kraken_w1234567890ab", factory, error_arg_3)
         assert exc.value.status_code == 404
         factory.update_process_config_parameters.assert_not_awaited()
 
@@ -4870,8 +4980,9 @@ class TestUpdateProcessScopeConfig:
     async def test_unknown_process_is_404(self) -> None:
         """No active config for the name -> 404."""
         factory = self._factory(None)
+        error_arg_3 = self._body(wallet="wal-1")
         with pytest.raises(HTTPException) as exc:
-            await self._invoke("nope_strategy", factory, self._body(wallet="wal-1"))
+            await self._invoke("nope_strategy", factory, error_arg_3)
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -4879,8 +4990,9 @@ class TestUpdateProcessScopeConfig:
         """A non-strategy config is not scope-editable -> 400."""
         config = self._config("kraken_feed_publisher", role=ProcessRoleEnum.CORE)
         factory = self._factory(config)
+        error_arg_3 = self._body(wallet="wal-1")
         with pytest.raises(HTTPException) as exc:
-            await self._invoke("kraken_feed_publisher", factory, self._body(wallet="wal-1"))
+            await self._invoke("kraken_feed_publisher", factory, error_arg_3)
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -4891,14 +5003,15 @@ class TestUpdateProcessScopeConfig:
         with (
             patch(self._ENFORCE, new_callable=AsyncMock),
             patch(self._REF_LOOKUP, return_value={}),
-            pytest.raises(HTTPException) as exc,
         ):
-            await self._invoke(
-                "p7_rsi_eth_1h",
-                factory,
-                self._body(operator="op-mine"),
-                operator_public_ids=["op-mine"],
-            )
+            error_arg_3 = self._body(operator="op-mine")
+            with pytest.raises(HTTPException) as exc:
+                await self._invoke(
+                    "p7_rsi_eth_1h",
+                    factory,
+                    error_arg_3,
+                    operator_public_ids=["op-mine"],
+                )
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio

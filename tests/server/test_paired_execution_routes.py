@@ -222,9 +222,11 @@ class TestListIncidents:
         When: incidents are listed,
         Then: HTTP 503 with the paired_execution_unavailable error code.
         """
+        error_request = _make_request()
+        error_repo = AsyncMock()
         with pytest.raises(HTTPException) as exc:
             await list_paired_execution_incidents(
-                request=_make_request(), principal=_ADMIN, repo=AsyncMock()
+                request=error_request, principal=_ADMIN, repo=error_repo
             )
         assert exc.value.status_code == 503
 
@@ -300,9 +302,10 @@ class TestTerminalize:
         """
         repo = _sql_repo()
         repo.get_current_paired_execution_group = AsyncMock(return_value=None)
+        error_request = _make_request()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-x",
                 principal=_ADMIN,
                 _csrf=None,
@@ -327,9 +330,10 @@ class TestTerminalize:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[cast(Any, {"public_id": "w-1"})]
         )
+        error_request = _make_request()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-1",
                 principal=_OPERATOR,
                 _csrf=None,
@@ -360,9 +364,10 @@ class TestTerminalize:
         repo = _sql_repo()
         repo.get_current_paired_execution_group = AsyncMock(return_value=_group_row("grp-1"))
         repo.terminalize_paired_execution_group = AsyncMock(return_value=outcome)
+        error_request = _make_request()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-1",
                 principal=_ADMIN,
                 _csrf=None,
@@ -387,9 +392,10 @@ class TestTerminalize:
         repo.terminalize_paired_execution_group = AsyncMock(
             return_value=PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
         )
+        error_request = _make_request()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-1",
                 principal=_ADMIN,
                 _csrf=None,
@@ -412,9 +418,10 @@ class TestTerminalize:
         repo.terminalize_paired_execution_group = AsyncMock(
             return_value=PairedGroupTerminalizeOutcome.TERMINALIZED
         )
+        error_request = _make_request()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-1",
                 principal=_ADMIN,
                 _csrf=None,
@@ -430,13 +437,15 @@ class TestTerminalize:
         When: terminalize is posted,
         Then: HTTP 503.
         """
+        error_request = _make_request()
+        error_repo = AsyncMock()
         with pytest.raises(HTTPException) as exc:
             await terminalize_paired_execution_group(
-                request=_make_request(),
+                request=error_request,
                 group_public_id="grp-1",
                 principal=_ADMIN,
                 _csrf=None,
-                repo=AsyncMock(),
+                repo=error_repo,
             )
         assert exc.value.status_code == 503
 

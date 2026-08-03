@@ -243,11 +243,13 @@ class TestDeleteDevice:
         )
         repo.deactivate_notification_device_scd2 = AsyncMock(return_value=True)
 
+        error_request = _make_request()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await delete_device(
-                request=_make_request(),
+                request=error_request,
                 device_public_id="dev-other",
-                principal=_principal(),
+                principal=error_principal,
                 _csrf=None,
                 repo=repo,
             )
@@ -319,12 +321,15 @@ class TestUpdateDevicePref:
         )
         repo.upsert_device_alert_pref = AsyncMock()
 
+        error_request = _make_request()
+        error_command = self._pref_command()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await update_device_pref(
-                request=_make_request(),
+                request=error_request,
                 device_public_id="dev-other",
-                command=self._pref_command(),
-                principal=_principal(),
+                command=error_command,
+                principal=error_principal,
                 _csrf=None,
                 repo=repo,
             )
@@ -422,11 +427,13 @@ class TestListDevicePrefs:
         )
         repo.list_device_alert_prefs_for_user = AsyncMock()
 
+        error_request = _make_request()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await list_device_prefs(
-                request=_make_request(),
+                request=error_request,
                 device_public_id="dev-other",
-                principal=_principal(),
+                principal=error_principal,
                 repo=repo,
             )
 
@@ -484,13 +491,16 @@ class TestRevokeDevicePref:
         )
         repo.deactivate_device_alert_pref_scd2 = AsyncMock()
 
+        error_request = _make_request()
+        error_command = _revoke_command()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await revoke_device_pref(
-                request=_make_request(),
+                request=error_request,
                 device_public_id="dev-other",
                 pref_public_id="pref-1",
-                command=_revoke_command(),
-                principal=_principal(),
+                command=error_command,
+                principal=error_principal,
                 _csrf=None,
                 repo=repo,
             )
@@ -507,13 +517,16 @@ class TestRevokeDevicePref:
         )
         repo.deactivate_device_alert_pref_scd2 = AsyncMock(return_value=None)
 
+        error_request = _make_request()
+        error_command = _revoke_command()
+        error_principal = _principal()
         with pytest.raises(HTTPException) as exc:
             await revoke_device_pref(
-                request=_make_request(),
+                request=error_request,
                 device_public_id="dev-own",
                 pref_public_id="pref-already-closed",
-                command=_revoke_command(),
-                principal=_principal(),
+                command=error_command,
+                principal=error_principal,
                 _csrf=None,
                 repo=repo,
             )

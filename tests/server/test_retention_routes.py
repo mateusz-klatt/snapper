@@ -132,10 +132,12 @@ class TestGetRetentionMetricsHandler:
     @pytest.mark.asyncio
     async def test_returns_503_when_scheduler_attribute_missing(self) -> None:
         """No scheduler attached → 503 with the unavailable detail."""
+        error_request = _make_request_with_scheduler(None)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_retention_metrics(
-                request=_make_request_with_scheduler(None),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _RETENTION_UNAVAILABLE_DETAIL
@@ -145,10 +147,12 @@ class TestGetRetentionMetricsHandler:
         """Scheduler in disabled state → 503 with the disabled detail."""
         scheduler = SimpleNamespace(disabled=True, last_run_summary=None)
 
+        error_request = _make_request_with_scheduler(scheduler)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_retention_metrics(
-                request=_make_request_with_scheduler(scheduler),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _RETENTION_DISABLED_DETAIL
@@ -158,10 +162,12 @@ class TestGetRetentionMetricsHandler:
         """Scheduler attached but cold-start window → 503 distinct detail."""
         scheduler = SimpleNamespace(disabled=False, last_run_summary=None)
 
+        error_request = _make_request_with_scheduler(scheduler)
+        error_principal = _viewer_principal()
         with pytest.raises(HTTPException) as exc:
             await get_retention_metrics(
-                request=_make_request_with_scheduler(scheduler),
-                _principal=_viewer_principal(),
+                request=error_request,
+                _principal=error_principal,
             )
         assert exc.value.status_code == 503
         assert exc.value.detail == _RETENTION_NOT_YET_RUN_DETAIL
