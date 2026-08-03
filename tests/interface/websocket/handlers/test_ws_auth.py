@@ -6073,7 +6073,8 @@ class TestUserManagementCoverage:
         When: Comparing with ==,
         Then: Same values are equal.
         """
-        assert UserRole.ADMIN == UserRole.ADMIN
+        parsed_role = UserRole("admin")
+        assert parsed_role == UserRole.ADMIN
 
     def test_user_role_string_representation(self) -> None:
         """UserRole enum has proper string representation.

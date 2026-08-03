@@ -134,11 +134,6 @@ class TestInstrumentKindClassification:
         kind = _classify_kind(last_trading_time, expiry_dt)
         assert kind == expected_kind
 
-    def test_spot_exchanges_always_spot(self) -> None:
-        """Given spot exchanges (kraken, walutomat), When classifying, Then spot."""
-        for exchange in ("kraken", "walutomat"):
-            assert "spot" == "spot", f"Expected spot for {exchange}"
-
     def test_polygon_crypto_is_spot(self) -> None:
         """Given Polygon crypto ticker, When classifying, Then spot."""
         asset_type = AssetTypeEnum.CRYPTO
