@@ -241,6 +241,18 @@ class TestFindWorkflowFiles:
         """
         assert find_workflow_files([tmp_path]) == []
 
+    def test_skips_workflow_path_that_is_not_a_directory(self, tmp_path: Path) -> None:
+        """Verify a file cannot masquerade as the workflows directory.
+
+        Given: The canonical ``.github/workflows`` path is a regular file,
+        When: Workflow discovery inspects the project root,
+        Then: It returns no workflow files.
+        """
+        github_dir = tmp_path / ".github"
+        github_dir.mkdir()
+        (github_dir / "workflows").write_text("not a directory", encoding="utf-8")
+        assert find_workflow_files([tmp_path]) == []
+
     def test_skips_subdirectories_inside_workflows(self, tmp_path: Path) -> None:
         """Verify find_workflow_files only returns files (not directories).
 
@@ -441,7 +453,7 @@ class TestRefreshWorkflowFile:
         )
 
         with patch("scripts.refresh_github_actions.latest_release_tag", return_value="v6.0.5"):
-            count = refresh_workflow_file(wf)
+            count = refresh_workflow_file(wf, tmp_path)
 
         assert count == 1
         assert "actions/checkout@v6.0.5" in wf.read_text(encoding="utf-8")
@@ -459,10 +471,44 @@ class TestRefreshWorkflowFile:
         original_bytes = wf.read_bytes()
 
         with patch("scripts.refresh_github_actions.latest_release_tag", return_value="v6.0.5"):
-            count = refresh_workflow_file(wf)
+            count = refresh_workflow_file(wf, tmp_path)
 
         assert count == 0
         assert wf.read_bytes() == original_bytes
+
+    def test_refuses_workflow_outside_workspace(self, tmp_path: Path) -> None:
+        """A rewrite target outside the declared workspace is refused."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "ci.yml"
+        outside.write_text("uses: actions/checkout@v1\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="escapes trusted directory"):
+            refresh_workflow_file(outside, workspace)
+        assert outside.read_text(encoding="utf-8") == "uses: actions/checkout@v1\n"
+
+    @pytest.mark.parametrize(
+        ("name", "is_directory"),
+        [("notes.txt", False), ("invalid.yml", True)],
+    )
+    def test_refuses_non_yaml_file_targets(
+        self,
+        tmp_path: Path,
+        name: str,
+        is_directory: bool,
+    ) -> None:
+        """Verify rewrite targets must be regular YAML files.
+
+        Given: An in-scope path that is either non-YAML or not a regular file,
+        When: The workflow refresher validates the target,
+        Then: It refuses the rewrite before reading or changing content.
+        """
+        target = tmp_path / name
+        if is_directory:
+            target.mkdir()
+        else:
+            target.write_text("unchanged", encoding="utf-8")
+        with pytest.raises(ValueError, match="not a YAML file"):
+            refresh_workflow_file(target, tmp_path)
 
 
 class TestRefreshGithubActions:

@@ -43,6 +43,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
+from snapper.infrastructure.security.path_validation import UnsafePathError
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
+
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 XCSTRINGS_PATH: Final[Path] = REPO_ROOT / "ios/Snapper/Resources/Localization/Localizable.xcstrings"
 FRONTEND_LOCALES_DIR: Final[Path] = REPO_ROOT / "frontend/src/locales"
@@ -279,7 +283,7 @@ def build_locale_payload(
     return nest_keys(flat)
 
 
-def upsert_nav_alerts(common_path: Path, nav_label: str) -> None:
+def upsert_nav_alerts(common_path: Path, nav_label: str, locales_root: Path) -> None:
     """Insert / update ``nav.alerts`` in a locale's ``common.json``.
 
     Loads the existing file (must exist), ensures the top-level ``nav``
@@ -289,23 +293,32 @@ def upsert_nav_alerts(common_path: Path, nav_label: str) -> None:
     Args:
         common_path: Path to ``src/locales/<dir>/common.json``.
         nav_label: Localized label for the Alerts tab.
+        locales_root: Canonical frontend locales directory bounding the write.
     """
-    if not common_path.exists():
+    try:
+        safe_common_path = resolve_path_within_root(
+            common_path,
+            locales_root,
+            must_exist=False,
+        )
+    except UnsafePathError as exc:
+        raise SystemExit(f"common.json path is unsafe: {common_path}") from exc
+    if safe_common_path.name != COMMON_FILENAME or not safe_common_path.is_file():
         raise SystemExit(f"common.json missing for locale at {common_path}")
-    raw = json.loads(common_path.read_text(encoding="utf-8"))
+    raw = json.loads(safe_common_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise SystemExit(f"{common_path} is not a JSON object")
+        raise SystemExit(f"{safe_common_path} is not a JSON object")
     nav = raw.get("nav")
     if nav is None:
         nav = {}
         raw["nav"] = nav
     if not isinstance(nav, dict):
-        raise SystemExit(f"{common_path}: 'nav' is not a dict")
+        raise SystemExit(f"{safe_common_path}: 'nav' is not a dict")
     nav["alerts"] = nav_label
     sorted_nav = dict(sorted(nav.items()))
     raw["nav"] = sorted_nav
     rendered = json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
-    common_path.write_text(rendered, encoding="utf-8")
+    safe_common_path.write_text(rendered, encoding="utf-8")
 
 
 def _merge_preserving_frontend_keys(
@@ -356,7 +369,7 @@ def generate(locales_dir: Path | None = None) -> None:
             ``frontend/src/locales/`` path). Tests + the drift checker
             override this to point at a scratch tmpdir.
     """
-    target_root = locales_dir if locales_dir is not None else FRONTEND_LOCALES_DIR
+    requested_root = locales_dir if locales_dir is not None else FRONTEND_LOCALES_DIR
     if not XCSTRINGS_PATH.exists():
         raise SystemExit(f"xcstrings not found at {XCSTRINGS_PATH}")
     raw = json.loads(XCSTRINGS_PATH.read_text(encoding="utf-8"))
@@ -368,25 +381,41 @@ def generate(locales_dir: Path | None = None) -> None:
     if NAV_LABEL_KEY not in keys:
         raise SystemExit(f"xcstrings missing the {NAV_LABEL_KEY!r} key")
     ios_locales = collect_ios_locales(raw, keys)
-    if not target_root.exists():
-        raise SystemExit(f"frontend locales dir not found at {target_root}")
+    try:
+        target_root = canonical_directory(requested_root)
+    except UnsafePathError as exc:
+        raise SystemExit(f"frontend locales dir not found at {requested_root}") from exc
     written: list[Path] = []
     for ios_locale in ios_locales:
         frontend_dir_name = map_locale(ios_locale)
-        target_dir = target_root / frontend_dir_name
-        if not target_dir.exists():
+        try:
+            target_dir = resolve_path_within_root(
+                Path(frontend_dir_name),
+                target_root,
+                must_exist=False,
+            )
+        except UnsafePathError as exc:
+            raise SystemExit(
+                f"frontend locale path is unsafe for iOS locale {ios_locale!r}: "
+                f"{frontend_dir_name!r}"
+            ) from exc
+        if not target_dir.is_dir():
             raise SystemExit(
                 f"frontend locale dir missing for iOS locale {ios_locale!r} "
                 f"(mapped to {frontend_dir_name!r}): {target_dir}"
             )
         payload = build_locale_payload(raw, keys, ios_locale)
-        alerts_path = target_dir / ALERTS_FILENAME
+        alerts_path = resolve_path_within_root(
+            target_dir / ALERTS_FILENAME,
+            target_root,
+            must_exist=False,
+        )
         merged = _merge_preserving_frontend_keys(alerts_path, payload)
         rendered = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
         alerts_path.write_text(rendered, encoding="utf-8")
         nav_label_raw = extract_value(raw, NAV_LABEL_KEY, ios_locale)
         nav_label = rewrite_placeholders(nav_label_raw)
-        upsert_nav_alerts(target_dir / COMMON_FILENAME, nav_label)
+        upsert_nav_alerts(target_dir / COMMON_FILENAME, nav_label, target_root)
         written.append(alerts_path)
     print(
         f"Wrote {len(written)} alerts.json + {len(written)} common.json nav.alerts updates "

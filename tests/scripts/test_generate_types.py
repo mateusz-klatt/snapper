@@ -658,7 +658,7 @@ class TestStripEslintDisableFile:
         """Removes eslint-disable header from a file that starts with it."""
         target = tmp_path / "ws.generated.ts"
         target.write_text("/* eslint-disable */\nexport const x = 1;\n", encoding="utf-8")
-        strip_eslint_disable_file(target)
+        strip_eslint_disable_file(target, tmp_path)
         assert target.read_text(encoding="utf-8") == "export const x = 1;\n"
 
     def test_leaves_file_without_header(self, tmp_path: Path) -> None:
@@ -666,12 +666,22 @@ class TestStripEslintDisableFile:
         target = tmp_path / "ws.generated.ts"
         original = "export const x = 1;\n"
         target.write_text(original, encoding="utf-8")
-        strip_eslint_disable_file(target)
+        strip_eslint_disable_file(target, tmp_path)
         assert target.read_text(encoding="utf-8") == original
 
     def test_skips_missing_file(self, tmp_path: Path) -> None:
         """Does nothing when the file does not exist."""
-        strip_eslint_disable_file(tmp_path / "nonexistent.ts")
+        strip_eslint_disable_file(tmp_path / "nonexistent.ts", tmp_path)
+
+    def test_refuses_file_outside_allowed_root(self, tmp_path: Path) -> None:
+        """The postprocessor cannot rewrite a generated file outside its root."""
+        allowed_root = tmp_path / "root"
+        allowed_root.mkdir()
+        outside = tmp_path / "ws.generated.ts"
+        outside.write_text("/* eslint-disable */\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="escapes trusted directory"):
+            strip_eslint_disable_file(outside, allowed_root)
+        assert outside.read_text(encoding="utf-8") == "/* eslint-disable */\n"
 
 
 class TestRunStripEslintDisable:

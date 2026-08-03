@@ -26,10 +26,6 @@
     "scripts/backfill_synth_candles.py": {
       "_process_instrument": {
         "PLR0913": 11
-      },
-      "run": {
-        "C901": 15,
-        "PLR0915": 67
       }
     },
     "scripts/check_docstrings.py": {

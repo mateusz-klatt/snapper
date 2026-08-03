@@ -17,6 +17,8 @@ from typing import cast
 
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
 
 PLACEHOLDER = "__SNAPPER_REPO_ROOT__"
 PLUGIN_DIR_NAME = "snapper-mcp-local-plugin"
@@ -57,6 +59,53 @@ def _replace_placeholder(value: JsonValue, replacement: str) -> JsonValue:
     return value
 
 
+def _plugin_roots(repo_root: Path) -> tuple[Path, Path]:
+    """Return canonical source and output roots for the local plugin.
+
+    Args:
+        repo_root: Snapper checkout containing ``integrations`` and ``data``.
+
+    Returns:
+        Canonical ``(source_root, output_root)`` paths confined to the checkout.
+    """
+    safe_repo_root = canonical_directory(repo_root)
+    integrations_root = resolve_path_within_root(
+        safe_repo_root / "integrations",
+        safe_repo_root,
+        must_exist=True,
+    )
+    source_root = resolve_path_within_root(
+        integrations_root / PLUGIN_DIR_NAME,
+        integrations_root,
+        must_exist=True,
+    )
+    data_root = safe_repo_root / "data"
+    data_root.mkdir(exist_ok=True)
+    safe_data_root = resolve_path_within_root(
+        data_root,
+        safe_repo_root,
+        must_exist=True,
+    )
+    output_root = safe_data_root / PLUGIN_DIR_NAME
+    output_root.mkdir(exist_ok=True)
+    safe_output_root = resolve_path_within_root(
+        output_root,
+        safe_data_root,
+        must_exist=True,
+    )
+    return source_root, safe_output_root
+
+
+def _validate_source_tree(source_root: Path) -> None:
+    """Reject links or escapes anywhere below a plugin source tree."""
+    for source_path in sorted(source_root.rglob("*")):
+        resolve_path_within_root(
+            source_path,
+            source_root,
+            must_exist=True,
+        )
+
+
 def render_plugin(repo_root: Path) -> Path:
     """Render all templated JSON files into the gitignored output directory.
 
@@ -68,18 +117,37 @@ def render_plugin(repo_root: Path) -> Path:
         ``.claude-plugin``), suitable as the ``directory`` source path for
         Claude Code's ``extraKnownMarketplaces`` entry.
     """
-    template_dir = repo_root / "integrations" / PLUGIN_DIR_NAME / CLAUDE_PLUGIN_SUBDIR
-    output_root = repo_root / "data" / PLUGIN_DIR_NAME
+    source_root, output_root = _plugin_roots(repo_root)
+    template_dir = resolve_path_within_root(
+        source_root / CLAUDE_PLUGIN_SUBDIR,
+        source_root,
+        must_exist=True,
+    )
     output_dir = output_root / CLAUDE_PLUGIN_SUBDIR
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
+    safe_output_dir = resolve_path_within_root(
+        output_dir,
+        output_root,
+        must_exist=True,
+    )
 
     repo_root_str = str(repo_root)
     for src in sorted(template_dir.glob("*.json")):
-        template = cast(JsonValue, json.loads(src.read_text(encoding="utf-8")))
+        safe_src = resolve_path_within_root(
+            src,
+            template_dir,
+            must_exist=True,
+        )
+        template = cast(JsonValue, json.loads(safe_src.read_text(encoding="utf-8")))
         rendered = _replace_placeholder(template, repo_root_str)
         if isinstance(rendered, dict):
             qualify_skill_triggers(rendered)
-        (output_dir / src.name).write_text(
+        output_path = resolve_path_within_root(
+            safe_output_dir / safe_src.name,
+            safe_output_dir,
+            must_exist=False,
+        )
+        output_path.write_text(
             json.dumps(rendered, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -144,20 +212,43 @@ def render_skills(repo_root: Path) -> None:
     Args:
         repo_root: Absolute path of the snapper checkout.
     """
-    template_skills = repo_root / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
-    output_skills = repo_root / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
-    if output_skills.exists():
-        shutil.rmtree(output_skills)
-    if not template_skills.is_dir():
+    source_root, output_root = _plugin_roots(repo_root)
+    template_skills = source_root / SKILLS_SUBDIR
+    safe_template_skills: Path | None = None
+    if template_skills.exists() or template_skills.is_symlink():
+        safe_template_skills = resolve_path_within_root(
+            template_skills,
+            source_root,
+            must_exist=True,
+        )
+        if not safe_template_skills.is_dir():
+            raise ValueError(f"plugin skills source is not a directory: {safe_template_skills}")
+        _validate_source_tree(safe_template_skills)
+
+    output_skills = output_root / SKILLS_SUBDIR
+    if output_skills.exists() or output_skills.is_symlink():
+        safe_output_skills = resolve_path_within_root(
+            output_skills,
+            output_root,
+            must_exist=True,
+        )
+        if not safe_output_skills.is_dir():
+            raise ValueError(f"rendered skills target is not a directory: {safe_output_skills}")
+        shutil.rmtree(safe_output_skills)
+    if safe_template_skills is None:
         return
-    shutil.copytree(template_skills, output_skills)
+    shutil.copytree(safe_template_skills, output_skills)
     repo_root_str = str(repo_root)
     for path in sorted(output_skills.rglob("*")):
         if path.is_file():
-            _substitute_placeholder_in_file(path, repo_root_str)
+            _substitute_placeholder_in_file(path, repo_root_str, output_skills)
 
 
-def _substitute_placeholder_in_file(path: Path, replacement: str) -> None:
+def _substitute_placeholder_in_file(
+    path: Path,
+    replacement: str,
+    allowed_root: Path,
+) -> None:
     """Replace the repo-root placeholder in one rendered text file in place.
 
     Binary files, which cannot carry the placeholder, are left untouched.
@@ -165,13 +256,22 @@ def _substitute_placeholder_in_file(path: Path, replacement: str) -> None:
     Args:
         path: File inside the rendered skills tree.
         replacement: Absolute repo-root path to substitute for the placeholder.
+        allowed_root: Rendered skills directory bounding the file operation.
+
+    Raises:
+        UnsafePathError: If the file cannot be proven to stay below the rendered root.
     """
+    safe_path = resolve_path_within_root(
+        path,
+        allowed_root,
+        must_exist=True,
+    )
     try:
-        text = path.read_text(encoding="utf-8")
+        text = safe_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return
     if PLACEHOLDER in text:
-        path.write_text(text.replace(PLACEHOLDER, replacement), encoding="utf-8")
+        safe_path.write_text(text.replace(PLACEHOLDER, replacement), encoding="utf-8")
 
 
 def update_claude_settings(settings_path: Path, plugin_dir: Path) -> bool:

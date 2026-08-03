@@ -37,6 +37,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from collections.abc import Sequence
+from functools import cache
 from pathlib import Path
 
 _COMPOSE_FILE = str(Path(__file__).resolve().parent.parent / "docker-compose.yml")
@@ -76,6 +77,7 @@ window the query returns NULL, which the caller treats as not-yet-fresh and
 keeps polling — exactly the wanted semantics."""
 
 _Runner = Callable[[Sequence[str]], tuple[int, str]]
+_DOCKER_BRIDGE_GATEWAY_FORMAT = "{{(index .IPAM.Config 0).Gateway}}"
 
 
 def run_helper(argv: Sequence[str]) -> tuple[int, str]:
@@ -89,6 +91,40 @@ def run_helper(argv: Sequence[str]) -> tuple[int, str]:
     """
     completed = subprocess.run(list(argv), check=False, capture_output=True, text=True)
     return completed.returncode, completed.stdout
+
+
+@cache
+def _cached_docker_bridge_gateway() -> str:
+    """Resolve and cache a proven default Docker bridge gateway.
+
+    Returns:
+        The non-empty gateway reported by Docker.
+
+    Raises:
+        RuntimeError: If Docker cannot currently prove the bridge gateway.
+    """
+    rc, output = run_helper(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            _DOCKER_BRIDGE_GATEWAY_FORMAT,
+        ]
+    )
+    gateway = output.strip()
+    if rc != 0 or not gateway:
+        raise RuntimeError("default Docker bridge gateway is unavailable")
+    return gateway
+
+
+def _docker_bridge_gateway() -> str | None:
+    """Return a cached gateway while allowing transient discovery retries."""
+    try:
+        return _cached_docker_bridge_gateway()
+    except RuntimeError:
+        return None
 
 
 def _build_helper_image() -> int:
@@ -339,10 +375,11 @@ def restore(
 def _psql_connection() -> tuple[list[str], dict[str, str]]:
     """Build a psql base argv and environment from ``DB_URL``.
 
-    Strips the SQLAlchemy ``+asyncpg`` driver suffix and rewrites the
-    docker-bridge host to loopback so the harness can reach a host-native
-    Postgres. The password is carried in ``PGPASSWORD`` and never placed on
-    the command line.
+    Strips the SQLAlchemy ``+asyncpg`` driver suffix, discovers the current
+    default Docker bridge gateway, and rewrites that gateway to ``localhost``
+    so the harness can reach a host-native Postgres without pinning a network
+    address in source. The password is carried in ``PGPASSWORD`` and never
+    placed on the command line.
 
     Returns:
         A ``(argv_prefix, env)`` pair; ``argv_prefix`` lacks the ``-c SQL``
@@ -355,9 +392,10 @@ def _psql_connection() -> tuple[list[str], dict[str, str]]:
     if not raw:
         raise RuntimeError("DB_URL is not set")
     parsed = urllib.parse.urlparse(raw.replace("+asyncpg", "").replace("+aiosqlite", ""))
-    host = parsed.hostname or "127.0.0.1"
-    if host == "172.17.0.1":
-        host = "127.0.0.1"
+    host = parsed.hostname or "localhost"
+    bridge_gateway = _docker_bridge_gateway()
+    if bridge_gateway is not None and host == bridge_gateway:
+        host = "localhost"
     env = dict(os.environ)
     env["PGPASSWORD"] = urllib.parse.unquote(parsed.password or "")
     argv = [

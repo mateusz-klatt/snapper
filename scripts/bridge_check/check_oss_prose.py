@@ -26,6 +26,9 @@ import sys
 from pathlib import Path
 
 from scripts.generate_types import _BRIDGE_OUTPUT_DEFAULT
+from snapper.infrastructure.security.path_validation import UnsafePathError
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
 
 _FORBIDDEN_PATTERNS: dict[str, re.Pattern[str]] = {
     "plan-letter": re.compile(r"Plan [A-Z]"),
@@ -47,12 +50,13 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
-def scan_forbidden_tokens(target_path: Path) -> list[tuple[int, str, str]]:
+def scan_forbidden_tokens(target_path: Path, project_root: Path) -> list[tuple[int, str, str]]:
     """Scan a TypeScript file for forbidden internal-jargon tokens.
 
     Args:
         target_path: Working-tree path to scan. Usually the generated
             ``wire-contract.ts`` file.
+        project_root: Canonical repository root bounding the read.
 
     Returns:
         A list of ``(line_number, pattern_name, line_content)``
@@ -61,15 +65,20 @@ def scan_forbidden_tokens(target_path: Path) -> list[tuple[int, str, str]]:
     Raises:
         FileNotFoundError: When ``target_path`` does not exist.
     """
-    if not target_path.is_file():
+    safe_target_path = resolve_path_within_root(
+        target_path,
+        project_root,
+        must_exist=False,
+    )
+    if not safe_target_path.is_file():
         raise FileNotFoundError(
-            f"Bridge wire-contract not found at {target_path}; "
+            f"Bridge wire-contract not found at {safe_target_path}; "
             "run `make ts-bridge` to generate it before checking OSS prose."
         )
 
     findings: list[tuple[int, str, str]] = []
     for line_number, line in enumerate(
-        target_path.read_text(encoding="utf-8").splitlines(),
+        safe_target_path.read_text(encoding="utf-8").splitlines(),
         start=1,
     ):
         for name, pattern in _FORBIDDEN_PATTERNS.items():
@@ -98,25 +107,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.target is not None:
-        target_path = Path(args.target)
-        if not target_path.is_absolute():
-            target_path = (_project_root() / target_path).resolve()
-    else:
-        target_path = (_project_root() / _BRIDGE_OUTPUT_DEFAULT).resolve()
-
     try:
-        findings = scan_forbidden_tokens(target_path)
-    except FileNotFoundError as exc:
+        project_root = canonical_directory(_project_root())
+        target_path = Path(args.target) if args.target is not None else _BRIDGE_OUTPUT_DEFAULT
+        safe_target_path = resolve_path_within_root(
+            target_path,
+            project_root,
+            must_exist=False,
+        )
+        findings = scan_forbidden_tokens(safe_target_path, project_root)
+    except (FileNotFoundError, UnsafePathError) as exc:
         print(f"bridge-check oss-prose: {exc}", file=sys.stderr)
         return 2
 
     if not findings:
-        print(f"bridge-check oss-prose: OK — {target_path} contains no forbidden tokens")
+        print(f"bridge-check oss-prose: OK — {safe_target_path} contains no forbidden tokens")
         return 0
 
     print(
-        f"bridge-check oss-prose: FAIL — {len(findings)} forbidden token(s) found in {target_path}",
+        f"bridge-check oss-prose: FAIL — {len(findings)} forbidden token(s) found in "
+        f"{safe_target_path}",
         file=sys.stderr,
     )
     for line_number, name, line in findings:

@@ -20,7 +20,7 @@ from scripts.generate_types import generate_bridge_wire_contract
 def fresh_wire_contract(tmp_path: Path) -> Path:
     """Generate a fresh wire-contract file for the drift script to compare against."""
     target = tmp_path / "wire-contract.ts"
-    generate_bridge_wire_contract(target)
+    generate_bridge_wire_contract(target, tmp_path)
     return target
 
 
@@ -29,7 +29,10 @@ class TestComputeDrift:
 
     def test_match_returns_true_and_empty_diff(self, fresh_wire_contract: Path) -> None:
         """A freshly-generated file matches itself byte-for-byte."""
-        matches, diff = check_drift.compute_drift(fresh_wire_contract)
+        matches, diff = check_drift.compute_drift(
+            fresh_wire_contract,
+            fresh_wire_contract.parent,
+        )
         assert matches is True
         assert diff == ""
 
@@ -37,7 +40,10 @@ class TestComputeDrift:
         """A modified working-tree file produces a unified diff."""
         original = fresh_wire_contract.read_text(encoding="utf-8")
         fresh_wire_contract.write_text(original + "\n// stray manual edit\n", encoding="utf-8")
-        matches, diff = check_drift.compute_drift(fresh_wire_contract)
+        matches, diff = check_drift.compute_drift(
+            fresh_wire_contract,
+            fresh_wire_contract.parent,
+        )
         assert matches is False
         assert "stray manual edit" in diff
         assert "<regenerated>" in diff
@@ -45,7 +51,7 @@ class TestComputeDrift:
     def test_missing_target_raises_file_not_found(self, tmp_path: Path) -> None:
         """A missing working-tree file raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError, match="not found"):
-            check_drift.compute_drift(tmp_path / "missing.ts")
+            check_drift.compute_drift(tmp_path / "missing.ts", tmp_path)
 
 
 class TestCheckDriftCli:
@@ -55,7 +61,8 @@ class TestCheckDriftCli:
         self, fresh_wire_contract: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Exit 0 prints OK + the target path."""
-        exit_code = check_drift.main(["--target", str(fresh_wire_contract)])
+        with patch.object(check_drift, "_project_root", return_value=fresh_wire_contract.parent):
+            exit_code = check_drift.main(["--target", str(fresh_wire_contract)])
         captured = capsys.readouterr()
         assert exit_code == 0
         assert "OK" in captured.out
@@ -69,7 +76,8 @@ class TestCheckDriftCli:
         fresh_wire_contract.write_text(
             original + "\nexport interface ManuallyAdded {}\n", encoding="utf-8"
         )
-        exit_code = check_drift.main(["--target", str(fresh_wire_contract)])
+        with patch.object(check_drift, "_project_root", return_value=fresh_wire_contract.parent):
+            exit_code = check_drift.main(["--target", str(fresh_wire_contract)])
         captured = capsys.readouterr()
         assert exit_code == 1
         assert "FAIL" in captured.err
@@ -80,7 +88,8 @@ class TestCheckDriftCli:
     ) -> None:
         """Exit 2 surfaces the FileNotFoundError to stderr."""
         target = tmp_path / "missing.ts"
-        exit_code = check_drift.main(["--target", str(target)])
+        with patch.object(check_drift, "_project_root", return_value=tmp_path):
+            exit_code = check_drift.main(["--target", str(target)])
         captured = capsys.readouterr()
         assert exit_code == 2
         assert "not found" in captured.err
@@ -115,13 +124,28 @@ class TestCheckDriftCli:
         called_with = mock_compute.call_args[0][0]
         assert called_with == (tmp_path / "relative/wire.ts").resolve()
 
+    def test_exit_two_when_target_escapes_project(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An explicit target outside the active project fails closed."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        with patch.object(check_drift, "_project_root", return_value=project_root):
+            exit_code = check_drift.main(["--target", str(tmp_path / "outside.ts")])
+        captured = capsys.readouterr()
+        assert exit_code == 2
+        assert "escapes trusted directory" in captured.err
+
 
 class TestScanForbiddenTokens:
     """Unit tests for ``check_oss_prose.scan_forbidden_tokens``."""
 
     def test_clean_file_returns_empty_findings(self, fresh_wire_contract: Path) -> None:
         """The autogenerator's output contains no forbidden tokens by construction."""
-        findings = check_oss_prose.scan_forbidden_tokens(fresh_wire_contract)
+        findings = check_oss_prose.scan_forbidden_tokens(
+            fresh_wire_contract,
+            fresh_wire_contract.parent,
+        )
         assert findings == []
 
     @pytest.mark.parametrize(
@@ -149,7 +173,7 @@ class TestScanForbiddenTokens:
         """Every forbidden pattern surfaces as a finding when present."""
         target = tmp_path / "wire-contract.ts"
         target.write_text(f"// header\n{snippet}\nexport interface X {{}}\n", encoding="utf-8")
-        findings = check_oss_prose.scan_forbidden_tokens(target)
+        findings = check_oss_prose.scan_forbidden_tokens(target, tmp_path)
         assert any(
             name == pattern_name for _, name, _ in findings
         ), f"expected pattern {pattern_name} to fire on {snippet!r}; got {findings}"
@@ -157,7 +181,7 @@ class TestScanForbiddenTokens:
     def test_missing_target_raises_file_not_found(self, tmp_path: Path) -> None:
         """A missing target file raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError, match="not found"):
-            check_oss_prose.scan_forbidden_tokens(tmp_path / "missing.ts")
+            check_oss_prose.scan_forbidden_tokens(tmp_path / "missing.ts", tmp_path)
 
 
 class TestCheckOssProseCli:
@@ -167,7 +191,12 @@ class TestCheckOssProseCli:
         self, fresh_wire_contract: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Exit 0 prints OK on a clean working-tree file."""
-        exit_code = check_oss_prose.main(["--target", str(fresh_wire_contract)])
+        with patch.object(
+            check_oss_prose,
+            "_project_root",
+            return_value=fresh_wire_contract.parent,
+        ):
+            exit_code = check_oss_prose.main(["--target", str(fresh_wire_contract)])
         captured = capsys.readouterr()
         assert exit_code == 0
         assert "OK" in captured.out
@@ -178,7 +207,8 @@ class TestCheckOssProseCli:
         """Exit 1 prints FAIL + per-finding lines to stderr."""
         target = tmp_path / "wire-contract.ts"
         target.write_text("// header\n// Plan A reference here\n", encoding="utf-8")
-        exit_code = check_oss_prose.main(["--target", str(target)])
+        with patch.object(check_oss_prose, "_project_root", return_value=tmp_path):
+            exit_code = check_oss_prose.main(["--target", str(target)])
         captured = capsys.readouterr()
         assert exit_code == 1
         assert "FAIL" in captured.err
@@ -189,7 +219,8 @@ class TestCheckOssProseCli:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Exit 2 surfaces the FileNotFoundError to stderr."""
-        exit_code = check_oss_prose.main(["--target", str(tmp_path / "missing.ts")])
+        with patch.object(check_oss_prose, "_project_root", return_value=tmp_path):
+            exit_code = check_oss_prose.main(["--target", str(tmp_path / "missing.ts")])
         captured = capsys.readouterr()
         assert exit_code == 2
         assert "not found" in captured.err

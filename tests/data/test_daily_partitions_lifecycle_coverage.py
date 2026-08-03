@@ -866,6 +866,48 @@ def test_partitioned_relation_shapes_runs_all_local_and_manifest_checks() -> Non
     local.assert_called_once_with(connection, spec, "trades_legacy")
 
 
+@pytest.mark.parametrize(
+    ("table", "expected_names"),
+    [
+        ("ticks", ("ticks_pkey", "ix_tick_instrument_ts")),
+        (
+            "candles",
+            (
+                "candles_pkey",
+                "ix_candle_instrument_open",
+                "ix_candles_public_id",
+                "uq_candle_itf_open",
+            ),
+        ),
+        (
+            "trades",
+            (
+                "trades_pkey",
+                "ix_trade_instrument_ts",
+                "ix_trades_executed_at",
+                "ix_trades_public_id",
+                "ix_trades_timestamp",
+                "uq_trade_instrument_trade_id",
+            ),
+        ),
+    ],
+)
+def test_ordinary_index_contracts_preserve_exact_tuple_manifests(
+    table: lifecycle.MarketDataTable,
+    expected_names: tuple[str, ...],
+) -> None:
+    """Verify every ordinary index manifest retains its exact tuple contract.
+
+    Given: Each supported partitioned market-data table and its ordered index names,
+    When: The ordinary index contract is constructed,
+    Then: Its tuple type and ordered names exactly match the table-specific manifest.
+    """
+    contracts = lifecycle._ordinary_index_contract(lifecycle._spec(table))
+
+    assert isinstance(contracts, tuple)
+    assert tuple(contract.name for contract in contracts) == expected_names
+
+
 @pytest.mark.parametrize("table", ["ticks", "trades"])
 def test_legacy_index_manifest_accepts_the_exact_table_specific_names(
     table: lifecycle.MarketDataTable,
@@ -926,6 +968,9 @@ def test_legacy_parent_index_contracts_cover_each_table_shape() -> None:
     candle_names = lifecycle._legacy_parent_index_contracts(lifecycle._spec("candles"))
     trade_names = lifecycle._legacy_parent_index_contracts(lifecycle._spec("trades"))
 
+    assert isinstance(tick_names, tuple)
+    assert isinstance(candle_names, tuple)
+    assert isinstance(trade_names, tuple)
     assert [(item[0].name, item[1]) for item in tick_names] == [
         ("ix_tick_instrument_ts", "ticks_p_ix_instr_ts")
     ]

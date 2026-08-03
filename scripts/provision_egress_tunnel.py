@@ -45,6 +45,8 @@ from pathlib import Path
 
 from snapper.application.services.settings import get_settings_service
 from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
+from snapper.infrastructure.security.path_validation import UnsafePathError
+from snapper.infrastructure.security.path_validation import resolve_operator_file
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -92,6 +94,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _read_private_key(path: Path) -> str:
+    """Read an existing private-key file after canonical path validation."""
+    safe_path = resolve_operator_file(path, must_exist=True)
+    return safe_path.read_text(encoding="utf-8").strip()
+
+
 async def _amain(args: argparse.Namespace) -> int:
     """Async core that validates input, writes settings, and merges the pool route.
 
@@ -104,7 +112,11 @@ async def _amain(args: argparse.Namespace) -> int:
     db_url = os.environ["DB_URL"]
     zmq_broker = os.environ.get("ZMQ_BROKER_XSUB", "tcp://snapper-zmq-broker:7500")
 
-    private_key = Path(args.private_key_file).read_text().strip()
+    try:
+        private_key = await asyncio.to_thread(_read_private_key, Path(args.private_key_file))
+    except (OSError, UnsafePathError) as exc:
+        print(f"!! private key file is unsafe or unreadable: {exc}", file=sys.stderr)
+        return 2
     if len(private_key) != 44 or not private_key.endswith("="):
         print(f"!! private key length={len(private_key)} (expected 44) — aborting", file=sys.stderr)
         return 2

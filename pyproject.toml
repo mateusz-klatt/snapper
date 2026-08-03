@@ -185,7 +185,7 @@ max-statements = 50
 # Adopted debt only; exact symbol and metric limits live in the baseline. Narrow entries only.
 "proprietary/tests/strategies/test_parlay_cascade.py" = ["C901", "PLR0913"]
 "proprietary/tests/strategies/test_spy_btc_momentum.py" = ["C901"]
-"scripts/backfill_synth_candles.py" = ["C901", "PLR0913", "PLR0915"]
+"scripts/backfill_synth_candles.py" = ["PLR0913"]
 "scripts/check_docstrings.py" = ["PLR0913"]
 "scripts/generate_types.py" = ["PLR0915"]
 "scripts/pnl_uat_fixture.py" = ["PLR0913"]

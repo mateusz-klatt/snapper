@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import BaseModel
 
+import scripts.generate_types as generate_types_module
 from scripts.generate_types import _BRIDGE_HEADER
 from scripts.generate_types import _BRIDGE_OUTPUT_DEFAULT
 from scripts.generate_types import GenerateTypesArgs
@@ -310,7 +311,7 @@ class TestGenerateBridgeWireContract:
     def test_emits_20_interfaces_in_alphabetical_order(self, tmp_path: Path) -> None:
         """The full file emits 20 interfaces sorted alphabetically after FrameEnvelope."""
         output_path = tmp_path / "wire-contract.ts"
-        content = generate_bridge_wire_contract(output_path)
+        content = generate_bridge_wire_contract(output_path, tmp_path)
         interface_lines = [
             line for line in content.splitlines() if line.startswith("export interface ")
         ]
@@ -326,22 +327,22 @@ class TestGenerateBridgeWireContract:
         """Two consecutive regenerations produce byte-identical output."""
         first = tmp_path / "first.ts"
         second = tmp_path / "second.ts"
-        content_first = generate_bridge_wire_contract(first)
-        content_second = generate_bridge_wire_contract(second)
+        content_first = generate_bridge_wire_contract(first, tmp_path)
+        content_second = generate_bridge_wire_contract(second, tmp_path)
         assert content_first == content_second
         assert first.read_bytes() == second.read_bytes()
 
     def test_header_is_canonical_and_no_per_interface_jsdoc(self, tmp_path: Path) -> None:
         """File begins with the canonical header and never opens a JSDoc block."""
         output_path = tmp_path / "wire-contract.ts"
-        content = generate_bridge_wire_contract(output_path)
+        content = generate_bridge_wire_contract(output_path, tmp_path)
         assert content.startswith(_BRIDGE_HEADER)
         assert "/**" not in content, "v1 generator must NOT emit per-interface JSDoc"
 
     def test_envelope_interface_includes_derived_fields(self, tmp_path: Path) -> None:
         """The emitted envelope block matches the dynamically-derived spec exactly."""
         output_path = tmp_path / "wire-contract.ts"
-        content = generate_bridge_wire_contract(output_path)
+        content = generate_bridge_wire_contract(output_path, tmp_path)
         _, envelope_declaration = _bridge_envelope_spec()
         assert envelope_declaration in content
         envelope_block = content.split("export interface FrameEnvelope {")[1].split("}", 1)[0]
@@ -350,7 +351,7 @@ class TestGenerateBridgeWireContract:
     def test_creates_parent_directory(self, tmp_path: Path) -> None:
         """The emitter creates the output directory tree if missing."""
         output_path = tmp_path / "deep" / "nested" / "wire-contract.ts"
-        generate_bridge_wire_contract(output_path)
+        generate_bridge_wire_contract(output_path, tmp_path)
         assert output_path.is_file()
 
 
@@ -382,7 +383,7 @@ class TestBridgeRunner:
         assert called_path == (tmp_path / "custom/path/out.ts").resolve()
 
     def test_runner_honours_absolute_override(self, tmp_path: Path) -> None:
-        """Absolute --bridge-output paths are passed through verbatim."""
+        """Absolute --bridge-output paths inside the project root are accepted."""
         absolute = tmp_path / "absolute" / "out.ts"
         args = _make_args(bridge=True, bridge_output=str(absolute))
         with patch("scripts.generate_types.generate_bridge_wire_contract") as mock_gen:
@@ -390,11 +391,23 @@ class TestBridgeRunner:
         called_path = mock_gen.call_args[0][0]
         assert called_path == absolute
 
+    def test_runner_rejects_absolute_override_outside_root(self, tmp_path: Path) -> None:
+        """An absolute bridge output cannot target another worktree."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        args = _make_args(bridge=True, bridge_output=str(tmp_path / "outside.ts"))
+        with pytest.raises(ValueError, match="escapes trusted directory"):
+            _run_bridge_generator(args, project_root)
+
     def test_main_with_bridge_flag_writes_file(self, tmp_path: Path) -> None:
         """Running ``main()`` with --bridge end-to-end writes the file to disk."""
         target = tmp_path / "wire-contract.ts"
         argv = ["scripts/generate_types.py", "--bridge", "--bridge-output", str(target)]
-        with patch("sys.argv", argv):
+        synthetic_script = tmp_path / "scripts" / "generate_types.py"
+        with (
+            patch("sys.argv", argv),
+            patch.object(generate_types_module, "__file__", str(synthetic_script)),
+        ):
             exit_code = main()
         assert exit_code == 0
         assert target.is_file()

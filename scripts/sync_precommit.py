@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
+
 PRECOMMIT_CONFIG_FILENAME = ".pre-commit-config.yaml"
 DEFAULT_PYPROJECT_PATH = Path("pyproject.toml")
 DEFAULT_CONFIG_PATH = Path(PRECOMMIT_CONFIG_FILENAME)
@@ -89,8 +92,13 @@ def _precommit_config_path() -> Path:
     Raises:
         FileNotFoundError: If config file does not exist.
     """
-    resolved = Path.cwd().resolve() / PRECOMMIT_CONFIG_FILENAME
-    if not resolved.exists():
+    root = canonical_directory(Path.cwd())
+    resolved = resolve_path_within_root(
+        Path(PRECOMMIT_CONFIG_FILENAME),
+        root,
+        must_exist=False,
+    )
+    if not resolved.is_file():
         raise FileNotFoundError(f"{PRECOMMIT_CONFIG_FILENAME} not found")
     return resolved
 

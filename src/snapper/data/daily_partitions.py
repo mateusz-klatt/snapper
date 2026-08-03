@@ -1428,7 +1428,7 @@ def _ordinary_index_contract(
         True,
     )
     if spec.table == "ticks":
-        return (
+        contracts = [
             primary,
             OrdinaryIndexContract(
                 "ix_tick_instrument_ts",
@@ -1437,9 +1437,9 @@ def _ordinary_index_contract(
                 False,
                 False,
             ),
-        )
-    if spec.table == "candles":
-        return (
+        ]
+    elif spec.table == "candles":
+        contracts = [
             primary,
             OrdinaryIndexContract(
                 "ix_candle_instrument_open",
@@ -1462,45 +1462,47 @@ def _ordinary_index_contract(
                 True,
                 False,
             ),
-        )
-    return (
-        primary,
-        OrdinaryIndexContract(
-            "ix_trade_instrument_ts",
-            ("instrument_public_id", "timestamp"),
-            False,
-            False,
-            False,
-        ),
-        OrdinaryIndexContract(
-            "ix_trades_executed_at",
-            ("executed_at",),
-            False,
-            False,
-            False,
-        ),
-        OrdinaryIndexContract(
-            "ix_trades_public_id",
-            ("public_id",),
-            True,
-            True,
-            False,
-        ),
-        OrdinaryIndexContract(
-            "ix_trades_timestamp",
-            ("timestamp",),
-            False,
-            False,
-            False,
-        ),
-        OrdinaryIndexContract(
-            "uq_trade_instrument_trade_id",
-            ("instrument_public_id", "trade_id"),
-            True,
-            False,
-            True,
-        ),
-    )
+        ]
+    else:
+        contracts = [
+            primary,
+            OrdinaryIndexContract(
+                "ix_trade_instrument_ts",
+                ("instrument_public_id", "timestamp"),
+                False,
+                False,
+                False,
+            ),
+            OrdinaryIndexContract(
+                "ix_trades_executed_at",
+                ("executed_at",),
+                False,
+                False,
+                False,
+            ),
+            OrdinaryIndexContract(
+                "ix_trades_public_id",
+                ("public_id",),
+                True,
+                True,
+                False,
+            ),
+            OrdinaryIndexContract(
+                "ix_trades_timestamp",
+                ("timestamp",),
+                False,
+                False,
+                False,
+            ),
+            OrdinaryIndexContract(
+                "uq_trade_instrument_trade_id",
+                ("instrument_public_id", "trade_id"),
+                True,
+                False,
+                True,
+            ),
+        ]
+    return tuple(contracts)
 
 
 def _verify_sequence_owner(connection: Connection, spec: TableSpec) -> None:
@@ -2820,9 +2822,9 @@ def _legacy_parent_index_contracts(
     """
     contracts = {contract.name: contract for contract in _ordinary_index_contract(spec)}
     if spec.table == "ticks":
-        return ((contracts["ix_tick_instrument_ts"], "ticks_p_ix_instr_ts"),)
-    if spec.table == "candles":
-        return (
+        parent_contracts = [(contracts["ix_tick_instrument_ts"], "ticks_p_ix_instr_ts")]
+    elif spec.table == "candles":
+        parent_contracts = [
             (
                 contracts["uq_candle_itf_open"],
                 "candles_p_uq_itf_open",
@@ -2831,25 +2833,27 @@ def _legacy_parent_index_contracts(
                 contracts["ix_candle_instrument_open"],
                 "candles_p_ix_instr_open",
             ),
-        )
-    return (
-        (
-            _trade_u3_contract(),
-            "trades_p_uq_instr_tid_exec",
-        ),
-        (
-            contracts["ix_trade_instrument_ts"],
-            "trades_p_ix_instr_ts",
-        ),
-        (
-            contracts["ix_trades_timestamp"],
-            "trades_p_ix_ts",
-        ),
-        (
-            contracts["ix_trades_executed_at"],
-            "trades_p_ix_exec",
-        ),
-    )
+        ]
+    else:
+        parent_contracts = [
+            (
+                _trade_u3_contract(),
+                "trades_p_uq_instr_tid_exec",
+            ),
+            (
+                contracts["ix_trade_instrument_ts"],
+                "trades_p_ix_instr_ts",
+            ),
+            (
+                contracts["ix_trades_timestamp"],
+                "trades_p_ix_ts",
+            ),
+            (
+                contracts["ix_trades_executed_at"],
+                "trades_p_ix_exec",
+            ),
+        ]
+    return tuple(parent_contracts)
 
 
 def _verify_parent_indexes(connection: Connection, spec: TableSpec) -> None:

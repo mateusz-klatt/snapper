@@ -1,8 +1,11 @@
 """Tests for the synthesized higher-timeframe candle backfill script."""
 
 import argparse
+import asyncio
+import threading
 from datetime import UTC
 from datetime import datetime
+from io import StringIO
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -236,6 +239,23 @@ def test_load_done_reads_pairs_and_skips_malformed(tmp_path: Path) -> None:
     assert backfill._load_done(progress) == {("kraken", "BTC-USD")}
 
 
+def test_load_done_rejects_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a progress path that traverses outside the current directory.
+
+    Given: A child working directory and a parent-relative progress path.
+    When: The resume log loader resolves the operator-selected path.
+    Then: Validation refuses the noncanonical target before reading it.
+    """
+    child = tmp_path / "child"
+    child.mkdir()
+    monkeypatch.chdir(child)
+    with pytest.raises(ValueError, match="canonical child"):
+        backfill._load_done(Path("../progress.jsonl"))
+
+
 def test_roll_up_folds_window_and_excludes_open() -> None:
     """Verify OHLCV folding and that the trailing open window is excluded.
 
@@ -466,6 +486,166 @@ async def test_run_write_mode_full(tmp_path: Path) -> None:
     assert ("walut", "FX") in recorded
     assert ("kraken", "EMPTY") in recorded
     repo.engine.dispose.assert_awaited_once()
+
+
+async def test_run_opens_progress_log_before_repository(tmp_path: Path) -> None:
+    """Verify an unusable progress log aborts before repository construction.
+
+    Given: A write run whose progress log cannot be opened,
+    When: run performs its filesystem preflight,
+    Then: The repository factory is never called.
+    """
+    args = _args(progress_file=str(tmp_path / "progress.tsv"))
+    with (
+        patch.object(backfill, "_open_progress_log", side_effect=OSError("read-only")),
+        patch.object(backfill, "get_repository") as repository_factory,
+        pytest.raises(OSError, match="read-only"),
+    ):
+        await backfill.run(args)
+    repository_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("with_progress_handle", [False, True])
+async def test_repository_failure_closes_optional_progress_handle(
+    with_progress_handle: bool,
+) -> None:
+    """Verify repository construction failure preserves progress resources.
+
+    Given: Repository construction fails with or without an open progress log,
+    When: The post-preflight repository helper propagates the failure,
+    Then: Any provided handle is closed and the original exception is retained.
+    """
+    progress_handle = StringIO() if with_progress_handle else None
+    with (
+        patch.object(backfill, "_resolve_db_url", return_value="postgresql://invalid"),
+        patch.object(backfill, "get_repository", side_effect=RuntimeError("unavailable")),
+        pytest.raises(RuntimeError, match="unavailable"),
+    ):
+        await backfill._repository_after_progress_preflight("", progress_handle)
+    if progress_handle is not None:
+        assert progress_handle.closed
+
+
+async def test_run_waits_for_siblings_when_progress_append_fails(tmp_path: Path) -> None:
+    """Verify progress-log failure cancels workers before resource teardown.
+
+    Given: One worker whose progress append fails while a sibling is blocked,
+    When: The exchange task group propagates the write failure,
+    Then: The sibling is cancelled and awaited before the repository is disposed.
+    """
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def process(*args: object) -> tuple[int, int, int]:
+        """Complete the first worker and hold its sibling until cancellation."""
+        symbol = str(args[2])
+        if symbol == "FAIL":
+            await slow_started.wait()
+            return 1, 1, 1
+        slow_started.set()
+        try:
+            await blocker.wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            raise
+        return 1, 1, 1
+
+    repo = _FakeRepo(
+        instruments={"kraken": ["FAIL", "SLOW"]},
+        ipids={"kraken": {"FAIL": "id1", "SLOW": "id2"}},
+    )
+    args = _args(progress_file=str(tmp_path / "progress.tsv"), concurrency=2)
+    with (
+        patch.object(backfill, "get_settings", return_value=SimpleNamespace(db_url="x")),
+        patch.object(backfill, "get_repository", return_value=repo),
+        patch.object(backfill, "_process_instrument", side_effect=process),
+        patch.object(backfill, "_append_progress", side_effect=OSError("disk full")),
+        pytest.raises(ExceptionGroup) as exc_info,
+    ):
+        await backfill.run(args)
+    assert any(isinstance(exc, OSError) for exc in exc_info.value.exceptions)
+    assert slow_cancelled.is_set()
+    repo.engine.dispose.assert_awaited_once()
+
+
+async def test_run_waits_for_inflight_progress_append_before_teardown(tmp_path: Path) -> None:
+    """Verify cancellation cannot orphan an in-flight progress write.
+
+    Given: A worker whose offloaded progress append is blocked in a real thread.
+    When: The enclosing run is cancelled while that append is active.
+    Then: Repository teardown waits until the append finishes before propagating cancellation.
+    """
+    append_started = threading.Event()
+    append_release = threading.Event()
+    original_append = backfill._append_progress
+
+    def blocking_append(handle: StringIO, exchange: str, symbol: str) -> None:
+        """Hold the append thread until the test permits safe teardown."""
+        append_started.set()
+        append_release.wait(5.0)
+        original_append(handle, exchange, symbol)
+
+    progress_handle = StringIO()
+    repo = _FakeRepo(
+        instruments={"kraken": ["BTC"]},
+        ipids={"kraken": {"BTC": "id1"}},
+    )
+    args = _args(progress_file=str(tmp_path / "progress.tsv"))
+    with (
+        patch.object(backfill, "get_settings", return_value=SimpleNamespace(db_url="x")),
+        patch.object(backfill, "get_repository", return_value=repo),
+        patch.object(backfill, "_open_progress_log", return_value=progress_handle),
+        patch.object(backfill, "_process_instrument", return_value=(1, 1, 1)),
+        patch.object(backfill, "_append_progress", side_effect=blocking_append),
+    ):
+        run_task = asyncio.create_task(backfill.run(args))
+        assert await asyncio.to_thread(append_started.wait, 2.0)
+        run_task.cancel()
+        await asyncio.sleep(0)
+        completed_before_release = run_task.done()
+        disposed_before_release = repo.engine.dispose.await_count
+        append_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    assert not completed_before_release
+    assert disposed_before_release == 0
+    repo.engine.dispose.assert_awaited_once()
+
+
+async def test_append_progress_safely_rethrows_cancellation_after_write() -> None:
+    """Verify the offloaded append itself finishes before cancellation escapes.
+
+    Given: An append blocked inside its worker thread.
+    When: The async append wrapper is cancelled and the thread is then released.
+    Then: The write completes before the original cancellation is rethrown.
+    """
+    append_started = threading.Event()
+    append_release = threading.Event()
+    original_append = backfill._append_progress
+
+    def blocking_append(handle: StringIO, exchange: str, symbol: str) -> None:
+        """Hold the write until cancellation is known to have arrived."""
+        append_started.set()
+        append_release.wait(5.0)
+        original_append(handle, exchange, symbol)
+
+    progress_handle = StringIO()
+    with patch.object(backfill, "_append_progress", side_effect=blocking_append):
+        append_task = asyncio.create_task(
+            backfill._append_progress_safely(progress_handle, "kraken", "BTC")
+        )
+        assert await asyncio.to_thread(append_started.wait, 2.0)
+        append_task.cancel()
+        await asyncio.sleep(0)
+        completed_before_release = append_task.done()
+        append_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await append_task
+
+    assert not completed_before_release
+    assert progress_handle.getvalue() == "kraken\tBTC\n"
 
 
 async def test_run_dry_run_filters_and_error(tmp_path: Path) -> None:

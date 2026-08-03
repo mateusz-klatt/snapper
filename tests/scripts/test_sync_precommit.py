@@ -1,6 +1,7 @@
 """Tests for pre-commit config synchronizer."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -301,6 +302,22 @@ class TestUpdateConfig:
         monkeypatch.chdir(tmp_path)
 
         with pytest.raises(FileNotFoundError, match=".pre-commit-config.yaml not found"):
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
+
+    def test_raises_for_symlinked_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fixed root config target cannot be redirected through a symlink."""
+        config = _write_local_config(tmp_path, monkeypatch, "repos: []\n")
+
+        def fake_is_symlink(path: Path) -> bool:
+            """Report only the root config as a symlink."""
+            return path == config
+
+        with (
+            patch.object(Path, "is_symlink", fake_is_symlink),
+            pytest.raises(ValueError, match="must not contain symlinks"),
+        ):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
     def test_raises_for_path_traversal(

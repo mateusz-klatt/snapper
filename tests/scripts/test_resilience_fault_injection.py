@@ -11,6 +11,8 @@ import pytest
 from scripts.resilience_fault_injection import _COMPOSE_FILE
 from scripts.resilience_fault_injection import _HELPER_DOCKERFILE
 from scripts.resilience_fault_injection import _build_helper_image
+from scripts.resilience_fault_injection import _cached_docker_bridge_gateway
+from scripts.resilience_fault_injection import _docker_bridge_gateway
 from scripts.resilience_fault_injection import _parse_args
 from scripts.resilience_fault_injection import _psql_connection
 from scripts.resilience_fault_injection import await_recovery
@@ -281,22 +283,66 @@ class TestPsqlConnection:
 
     def test_parses_url_and_rewrites_bridge_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify driver-suffix strip, bridge-host rewrite, and password env."""
-        monkeypatch.setenv("DB_URL", "postgresql+asyncpg://snapper:secret@172.17.0.1:5433/snapper")
-        argv, env = _psql_connection()
-        assert "172.17.0.1" not in argv
+        gateway = "bridge.gateway.invalid"
+        monkeypatch.setenv(
+            "DB_URL",
+            f"postgresql+asyncpg://snapper:secret@{gateway}:5433/snapper",
+        )
+        with patch(f"{_MODULE}._docker_bridge_gateway", return_value=gateway):
+            argv, env = _psql_connection()
+        assert gateway not in argv
         assert "secret" not in argv
         assert env["PGPASSWORD"] == "secret"
-        assert "127.0.0.1" in argv
+        assert "localhost" in argv
         assert "5433" in argv
         assert "snapper" in argv
 
     def test_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify host/port/db defaults when the URL omits them."""
         monkeypatch.setenv("DB_URL", "postgresql://user:pw@")
-        argv, _env = _psql_connection()
-        assert "127.0.0.1" in argv
+        with patch(f"{_MODULE}._docker_bridge_gateway", return_value=None):
+            argv, _env = _psql_connection()
+        assert "localhost" in argv
         assert "5432" in argv
         assert "snapper" in argv
+
+
+class TestDockerBridgeGateway:
+    """Tests for runtime Docker bridge discovery."""
+
+    def test_returns_trimmed_gateway_from_docker(self) -> None:
+        """A successful inspect supplies the exact bridge rewrite witness.
+
+        Given: Docker reports a gateway with trailing whitespace.
+        When: The cached gateway resolver runs.
+        Then: It returns the trimmed value without embedding an address in source.
+        """
+        _cached_docker_bridge_gateway.cache_clear()
+        with patch(
+            f"{_MODULE}.run_helper",
+            return_value=(0, "bridge.gateway.invalid\n"),
+        ):
+            assert _docker_bridge_gateway() == "bridge.gateway.invalid"
+        _cached_docker_bridge_gateway.cache_clear()
+
+    def test_retries_after_docker_inspect_failure(self) -> None:
+        """A failed Docker inspection is not cached across later attempts.
+
+        Given: Docker cannot inspect the bridge once and then recovers.
+        When: The gateway resolver is called twice.
+        Then: The second call retries discovery and returns the proven gateway.
+        """
+        _cached_docker_bridge_gateway.cache_clear()
+        with patch(
+            f"{_MODULE}.run_helper",
+            side_effect=[
+                (1, "unavailable"),
+                (0, "bridge.gateway.invalid\n"),
+            ],
+        ):
+            assert _docker_bridge_gateway() is None
+            assert _docker_bridge_gateway() == "bridge.gateway.invalid"
+        _cached_docker_bridge_gateway.cache_clear()
 
 
 class TestQuerySecondsSinceFresh:

@@ -15,8 +15,8 @@
 FROM python:3.14-slim AS build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY requirements.lock /tmp/requirements.lock
+RUN python -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/requirements.lock
 
 FROM python:3.14-slim AS runtime
 RUN useradd --uid 888 --create-home --shell /usr/sbin/nologin delegate

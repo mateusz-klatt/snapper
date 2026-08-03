@@ -32,6 +32,7 @@ pretending to support one it cannot serialize allocations against.
 
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -1191,19 +1192,22 @@ def _seed_ai_delegate_review(
     operator: str,
     wallet: str,
     instrument: str,
-) -> None:
+) -> str:
     """Seed one ``ai_delegate`` user + pending ``ai_review`` row.
 
-    Creates an ``ai_demo`` login (password ``DemoSnapper2026!``), the
-    matching ``ai_delegates`` row, an operator membership, an instrument
-    scope grant, and a pending review on the supplied instrument with a
-    Strait-of-Hormuz oil-volatility rationale embedded in the signal
-    envelope. Lets the AI Reviews tab render real data instead of the
-    "Reserved for AI delegates" empty state.
+    Creates an ``ai_demo`` login with a fresh random password, the matching
+    ``ai_delegates`` row, an operator membership, an instrument scope grant,
+    and a pending review on the supplied instrument with a Strait-of-Hormuz
+    oil-volatility rationale embedded in the signal envelope. The caller
+    reports the once-shown demo credential only after the transaction commits.
+
+    Returns:
+        The freshly generated demo password stored by this transaction.
     """
     now = datetime.now(tz=UTC)
     delegate_user_pid = str(uuid7())
-    pwd_hash = bcrypt.hashpw(b"DemoSnapper2026!", bcrypt.gensalt()).decode()
+    password = secrets.token_urlsafe(24)
+    pwd_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     conn.execute(
         text(
             "INSERT INTO users "
@@ -1221,7 +1225,6 @@ def _seed_ai_delegate_review(
             "seq": tracker.next_sequence("users"),
         },
     )
-
     delegate_pid = str(uuid7())
     conn.execute(
         text(
@@ -1360,6 +1363,31 @@ def _seed_ai_delegate_review(
             "ts": str(fanout_after),
         },
     )
+    return password
+
+
+def _report_demo_ai_login(password: str | None) -> None:
+    """Print a freshly committed demo credential when the optional user exists."""
+    if password is not None:
+        print(f"demo AI login: ai_demo / {password}")
+
+
+def _report_existing_demo_ai_login_recovery() -> None:
+    """Explain how to rotate a demo credential that cannot be reprinted."""
+    print(
+        "demo AI login password was shown once; "
+        "run `snapper reset-password ai_demo` to rotate it"
+    )
+
+
+def _finish_existing_demo_seed(conn: Connection, seed_state: _DemoPnlSeedState) -> int:
+    """Commit an idempotent rerun and report credential recovery guidance."""
+    conn.commit()
+    print(f"demo seed already inserted ({seed_state.orders} demo orders), skipping")
+    if _lookup_seeded_user(conn, "ai_demo", "ai_delegate") is not None:
+        _report_existing_demo_ai_login_recovery()
+    conn.engine.dispose()
+    return 0
 
 
 def main() -> int:
@@ -1413,9 +1441,7 @@ def main() -> int:
             wallet,
         )
         if seed_state == _COMPLETE_DEMO_PNL_SEED:
-            conn.commit()
-            print(f"demo seed already inserted ({seed_state.orders} demo orders), skipping")
-            return 0
+            return _finish_existing_demo_seed(conn, seed_state)
 
         order1_t = datetime(2026, 4, 21, 9, 14, 32, tzinfo=UTC)
         order1 = _insert_order(
@@ -1610,7 +1636,7 @@ def main() -> int:
                 completed_at=datetime(2026, 5, 4, 21, 51, 33, tzinfo=UTC),
             )
 
-        if clm6:
+        demo_ai_password = (
             _seed_ai_delegate_review(
                 conn,
                 tracker,
@@ -1618,6 +1644,9 @@ def main() -> int:
                 wallet=wallet,
                 instrument=clm6,
             )
+            if clm6
+            else None
+        )
 
         alerts_base = datetime(2026, 5, 7, 9, 0, tzinfo=UTC)
         alerts_inserted = 0
@@ -1635,6 +1664,7 @@ def main() -> int:
 
         conn.commit()
     engine.dispose()
+    _report_demo_ai_login(demo_ai_password)
     print(
         "demo seed inserted: 4 orders, 2 executions, 2 positions, "
         f"3 backtests, {alerts_inserted} alerts"

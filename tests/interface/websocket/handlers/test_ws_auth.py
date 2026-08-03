@@ -3762,6 +3762,14 @@ def test_refresh_token_success(
     assert response.cookies.get("access_token") == "rotated-access"
     assert response.cookies.get("refresh_token") == "rotated-refresh"
     assert response.cookies.get("csrf_token") == "csrf-rot"
+    csrf_cookie_header = next(
+        header
+        for header in response.headers.get_list("set-cookie")
+        if header.startswith("csrf_token=")
+    )
+    assert "HttpOnly" not in csrf_cookie_header
+    assert "Path=/" in csrf_cookie_header
+    assert "SameSite=lax" in csrf_cookie_header
     body = response.json()
     payload = body["payload"]
     assert payload["ws_token"]
@@ -4715,6 +4723,14 @@ def test_logout_invalidates_tokens(
     assert not response.cookies.get("refresh_token")
     assert not response.cookies.get("access_token")
     assert not response.cookies.get("csrf_token")
+    csrf_cookie_header = next(
+        header
+        for header in response.headers.get_list("set-cookie")
+        if header.startswith('csrf_token=""')
+    )
+    assert "HttpOnly" in csrf_cookie_header
+    assert "Max-Age=0" in csrf_cookie_header
+    assert "Path=/" in csrf_cookie_header
 
 
 def test_logout_without_tokens_returns_success(

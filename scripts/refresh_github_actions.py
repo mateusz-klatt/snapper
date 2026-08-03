@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Final
 
 from snapper.core.json_types import JsonValue
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
 
 WORKFLOW_DIR: Final = ".github/workflows"
 SUBPROJECT_DIRS: Final[tuple[str, ...]] = (
@@ -153,12 +155,28 @@ def find_workflow_files(roots: Iterable[Path]) -> list[Path]:
     """
     files: list[Path] = []
     for root in roots:
-        wf_dir = root / WORKFLOW_DIR
+        if not root.is_dir():
+            continue
+        safe_root = canonical_directory(root)
+        workflow_candidate = safe_root / WORKFLOW_DIR
+        if not workflow_candidate.exists():
+            continue
+        wf_dir = resolve_path_within_root(
+            workflow_candidate,
+            safe_root,
+            must_exist=True,
+        )
         if not wf_dir.is_dir():
             continue
         for path in sorted(wf_dir.iterdir()):
             if path.is_file() and path.suffix in (".yml", ".yaml"):
-                files.append(path)
+                files.append(
+                    resolve_path_within_root(
+                        path,
+                        wf_dir,
+                        must_exist=True,
+                    )
+                )
     return files
 
 
@@ -258,16 +276,24 @@ def process_line(line: str) -> tuple[str, bool]:
     return new_line, True
 
 
-def refresh_workflow_file(path: Path) -> int:
+def refresh_workflow_file(path: Path, workspace_root: Path) -> int:
     """Refresh a single workflow file in place.
 
     Args:
         path: Workflow file to scan and rewrite.
+        workspace_root: Canonical workspace directory bounding the rewrite.
 
     Returns:
         Number of ``uses:`` lines bumped.
     """
-    text = path.read_text(encoding="utf-8")
+    safe_path = resolve_path_within_root(
+        path,
+        workspace_root,
+        must_exist=True,
+    )
+    if not safe_path.is_file() or safe_path.suffix not in (".yml", ".yaml"):
+        raise ValueError(f"workflow path is not a YAML file: {path}")
+    text = safe_path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     new_lines: list[str] = []
     changed_count = 0
@@ -275,10 +301,10 @@ def refresh_workflow_file(path: Path) -> int:
         new_line, changed = process_line(line)
         if changed:
             changed_count += 1
-            print(f"  {path}: {line.strip()} -> {new_line.strip()}")
+            print(f"  {safe_path}: {line.strip()} -> {new_line.strip()}")
         new_lines.append(new_line)
     if changed_count > 0:
-        path.write_text("".join(new_lines), encoding="utf-8")
+        safe_path.write_text("".join(new_lines), encoding="utf-8")
     return changed_count
 
 
@@ -294,14 +320,15 @@ def refresh_github_actions(root: Path | None = None) -> int:
     """
     if root is None:
         root = Path(__file__).parent.parent
+    safe_root = canonical_directory(root)
     ensure_gh_authenticated()
 
-    sub_roots = [root / d for d in SUBPROJECT_DIRS]
+    sub_roots = [safe_root / d for d in SUBPROJECT_DIRS]
     files = find_workflow_files(sub_roots)
     print(f"Scanning {len(files)} workflow file(s) across {len(SUBPROJECT_DIRS)} project(s)...")
     total = 0
     for path in files:
-        total += refresh_workflow_file(path)
+        total += refresh_workflow_file(path, safe_root)
     print(f"GitHub Actions refresh complete - bumped {total} reference(s).")
     return total
 

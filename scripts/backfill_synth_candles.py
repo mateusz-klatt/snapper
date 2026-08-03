@@ -31,6 +31,8 @@ async driver suffix (+asyncpg) is preserved.
 import argparse
 import asyncio
 import sys
+from collections.abc import Callable
+from collections.abc import Coroutine
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC
@@ -38,6 +40,8 @@ from datetime import datetime
 from datetime import timedelta
 from itertools import count
 from pathlib import Path
+from typing import Any
+from typing import TextIO
 from typing import cast
 from uuid import uuid7
 
@@ -50,6 +54,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.infrastructure.security.path_validation import resolve_operator_file
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 
 _TF_SECONDS: dict[str, int] = {
@@ -102,6 +107,50 @@ class _Totals:
     windows: int = 0
     written: int = 0
     errors: int = 0
+
+
+_InstrumentWorker = Callable[[str, str, str], Coroutine[Any, Any, None]]
+
+
+@dataclass(frozen=True)
+class _ExchangeScheduler:
+    """Resolve and schedule one exchange's eligible instruments."""
+
+    repository: Repository
+    now: datetime
+    symbol_filter: set[str] | None
+    limit_instruments: int | None
+    done: set[tuple[str, str]]
+    totals: _Totals
+    worker: _InstrumentWorker
+
+    async def process(self, exchange: str) -> None:
+        """Schedule every eligible instrument for one exchange.
+
+        Args:
+            exchange: Exchange whose native symbols should be processed.
+        """
+        symbols = await self.repository.get_exchange_instruments(exchange, self.now)
+        symbols = _select_exchange_symbols(
+            symbols,
+            self.symbol_filter,
+            self.limit_instruments,
+        )
+        public_ids = await self.repository.get_instrument_public_ids_by_symbols(
+            set(symbols),
+            exchange,
+            self.now,
+        )
+        logger.info(f"[{exchange}] {len(symbols)} symbols, {len(public_ids)} resolved")
+        async with asyncio.TaskGroup() as task_group:
+            for symbol in symbols:
+                if (exchange, symbol) in self.done:
+                    continue
+                instrument_public_id = public_ids.get(symbol)
+                if instrument_public_id is None:
+                    self.totals.skipped_no_instrument += 1
+                    continue
+                task_group.create_task(self.worker(exchange, symbol, instrument_public_id))
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -187,6 +236,65 @@ def _resolve_db_url(rewrite: str) -> str:
     return db_url
 
 
+def _requested_timeframes(raw_timeframes: str) -> tuple[list[str], dict[str, int]]:
+    """Validate requested timeframe names and return their widths.
+
+    Args:
+        raw_timeframes: Comma-separated timeframe names from the CLI.
+
+    Returns:
+        The normalized names and their duration in seconds.
+
+    Raises:
+        SystemExit: If any requested timeframe is unsupported.
+    """
+    timeframes = [tf.strip() for tf in raw_timeframes.split(",") if tf.strip()]
+    unknown = [tf for tf in timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES]
+    if unknown:
+        logger.error(
+            f"unsupported timeframes {unknown}; supported {sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)}"
+        )
+        raise SystemExit(2)
+    return timeframes, {tf: _TF_SECONDS[tf] for tf in timeframes}
+
+
+def _requested_symbols(raw_symbols: str | None) -> set[str] | None:
+    """Normalize an optional comma-separated symbol restriction.
+
+    Args:
+        raw_symbols: Symbol list from the CLI, or None for every symbol.
+
+    Returns:
+        The normalized symbol set, or None when no filter was requested.
+    """
+    if not raw_symbols:
+        return None
+    return {symbol.strip() for symbol in raw_symbols.split(",") if symbol.strip()}
+
+
+def _select_exchange_symbols(
+    symbols: list[str],
+    symbol_filter: set[str] | None,
+    limit: int | None,
+) -> list[str]:
+    """Apply optional symbol and count restrictions for one exchange.
+
+    Args:
+        symbols: Native symbols advertised by the exchange.
+        symbol_filter: Explicit symbols requested by the operator.
+        limit: Maximum number of matching instruments to process.
+
+    Returns:
+        Symbols retained in their original exchange order.
+    """
+    selected = symbols
+    if symbol_filter is not None:
+        selected = [symbol for symbol in selected if symbol in symbol_filter]
+    if limit is not None:
+        selected = selected[:limit]
+    return selected
+
+
 def _load_done(progress_file: Path) -> set[tuple[str, str]]:
     """Load already-completed (exchange, symbol) pairs from the progress file.
 
@@ -197,14 +305,86 @@ def _load_done(progress_file: Path) -> set[tuple[str, str]]:
     Returns:
         The set of completed (exchange, symbol) pairs.
     """
+    safe_progress_file = resolve_operator_file(progress_file, must_exist=False)
     done: set[tuple[str, str]] = set()
-    if not progress_file.exists():
+    if not safe_progress_file.exists():
         return done
-    for line in progress_file.read_text(encoding="utf-8").splitlines():
+    for line in safe_progress_file.read_text(encoding="utf-8").splitlines():
         ex, _, sym = line.partition("\t")
         if ex and sym:
             done.add((ex, sym))
     return done
+
+
+def _open_progress_log(progress_file: Path) -> TextIO:
+    """Open the canonical progress log for durable append operations.
+
+    Args:
+        progress_file: Operator-selected path validated before database access.
+
+    Returns:
+        An open text handle owned by the caller.
+    """
+    safe_progress_file = resolve_operator_file(progress_file, must_exist=False)
+    return safe_progress_file.open("a", encoding="utf-8")
+
+
+def _append_progress(handle: TextIO, exchange: str, symbol: str) -> None:
+    """Append one completed instrument to an already-open progress log."""
+    handle.write(f"{exchange}\t{symbol}\n")
+    handle.flush()
+
+
+async def _append_progress_safely(handle: TextIO, exchange: str, symbol: str) -> None:
+    """Complete an offloaded append before propagating cancellation.
+
+    Args:
+        handle: Shared progress log owned by the run.
+        exchange: Exchange recorded as complete.
+        symbol: Native symbol recorded as complete.
+    """
+    append_task = asyncio.create_task(asyncio.to_thread(_append_progress, handle, exchange, symbol))
+    try:
+        await asyncio.shield(append_task)
+    except asyncio.CancelledError as cancellation:
+        await append_task
+        raise cancellation
+
+
+async def _prepare_progress_log(progress_file: Path, dry_run: bool) -> TextIO | None:
+    """Open the write-mode progress log before repository construction.
+
+    Args:
+        progress_file: Canonical operator-selected progress path.
+        dry_run: Whether the run must avoid creating or modifying the log.
+
+    Returns:
+        An open append handle for write mode, otherwise None.
+    """
+    if dry_run:
+        return None
+    return await asyncio.to_thread(_open_progress_log, progress_file)
+
+
+async def _repository_after_progress_preflight(
+    db_host_rewrite: str,
+    progress_handle: TextIO | None,
+) -> Repository:
+    """Construct the repository after filesystem preflight succeeds.
+
+    Args:
+        db_host_rewrite: Optional host rewrite applied to the configured DB URL.
+        progress_handle: Open progress log to close if construction fails.
+
+    Returns:
+        The repository used by the backfill run.
+    """
+    try:
+        return get_repository(_resolve_db_url(db_host_rewrite))
+    except Exception:
+        if progress_handle is not None:
+            await asyncio.to_thread(progress_handle.close)
+        raise
 
 
 def _roll_up(
@@ -428,23 +608,18 @@ async def run(args: argparse.Namespace) -> _Totals:
     Returns:
         The aggregate run counters.
     """
-    timeframes = [tf.strip() for tf in args.timeframes.split(",") if tf.strip()]
-    unknown = [tf for tf in timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES]
-    if unknown:
-        logger.error(
-            f"unsupported timeframes {unknown}; supported {sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)}"
-        )
-        raise SystemExit(2)
-    tf_secs = {tf: _TF_SECONDS[tf] for tf in timeframes}
+    timeframes, tf_secs = _requested_timeframes(args.timeframes)
     exchanges = [ex.strip() for ex in args.exchanges.split(",") if ex.strip()]
-    symbol_filter = (
-        {s.strip() for s in args.symbols.split(",") if s.strip()} if args.symbols else None
-    )
+    symbol_filter = _requested_symbols(args.symbols)
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=args.since_days)
     close_before_ts = int(now.timestamp()) - args.settle_minutes * 60
-    progress_file = Path(args.progress_file)
-    done = _load_done(progress_file)
+    progress_file = resolve_operator_file(
+        Path(args.progress_file),
+        must_exist=False,
+    )
+    done = await asyncio.to_thread(_load_done, progress_file)
+    progress_handle = await _prepare_progress_log(progress_file, args.dry_run)
     session_id = str(uuid7())
     totals = _Totals()
     mode = "DRY-RUN" if args.dry_run else "WRITE"
@@ -452,8 +627,10 @@ async def run(args: argparse.Namespace) -> _Totals:
         f"[{mode}] exchanges={exchanges} timeframes={timeframes} concurrency={args.concurrency} "
         f"window={cutoff.isoformat()}..{now.isoformat()} resume_skip={len(done)} session={session_id}"
     )
-    repo = get_repository(_resolve_db_url(args.db_host_rewrite))
-    progress_handle = None if args.dry_run else progress_file.open("a", encoding="utf-8")
+    repo = await _repository_after_progress_preflight(
+        args.db_host_rewrite,
+        progress_handle,
+    )
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     bookkeeping = asyncio.Lock()
 
@@ -487,35 +664,28 @@ async def run(args: argparse.Namespace) -> _Totals:
                 totals.skipped_no_1m += 1
             logger.info(f"[{exchange}] {symbol}: 1m={n_1m} windows={n_windows} wrote={n_written}")
             if progress_handle is not None:
-                progress_handle.write(f"{exchange}\t{symbol}\n")
-                progress_handle.flush()
+                await _append_progress_safely(progress_handle, exchange, symbol)
 
+    scheduler = _ExchangeScheduler(
+        repository=repo,
+        now=now,
+        symbol_filter=symbol_filter,
+        limit_instruments=args.limit_instruments,
+        done=done,
+        totals=totals,
+        worker=worker,
+    )
     try:
         for exchange in exchanges:
-            symbols = await repo.get_exchange_instruments(exchange, now)
-            if symbol_filter is not None:
-                symbols = [s for s in symbols if s in symbol_filter]
-            if args.limit_instruments is not None:
-                symbols = symbols[: args.limit_instruments]
-            ipid_map = await repo.get_instrument_public_ids_by_symbols(set(symbols), exchange, now)
-            logger.info(f"[{exchange}] {len(symbols)} symbols, {len(ipid_map)} resolved")
-            tasks: list[asyncio.Task[None]] = []
-            for symbol in symbols:
-                if (exchange, symbol) in done:
-                    continue
-                instrument_public_id = ipid_map.get(symbol)
-                if instrument_public_id is None:
-                    totals.skipped_no_instrument += 1
-                    continue
-                tasks.append(asyncio.create_task(worker(exchange, symbol, instrument_public_id)))
-            if tasks:
-                await asyncio.gather(*tasks)
+            await scheduler.process(exchange)
     finally:
-        if progress_handle is not None:
-            progress_handle.close()
-        engine = getattr(repo, "engine", None)
-        if engine is not None:
-            await engine.dispose()
+        try:
+            engine = getattr(repo, "engine", None)
+            if engine is not None:
+                await engine.dispose()
+        finally:
+            if progress_handle is not None:
+                await asyncio.to_thread(progress_handle.close)
     logger.info(
         f"[{mode}] DONE instruments={totals.instruments} windows={totals.windows} "
         f"wrote={totals.written} no_instrument={totals.skipped_no_instrument} "

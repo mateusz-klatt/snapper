@@ -30,6 +30,8 @@ from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS as BACKEND_RESO
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS as BACKEND_ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.infrastructure.security.path_validation import canonical_directory
+from snapper.infrastructure.security.path_validation import resolve_path_within_root
 from snapper.interface.websocket import schemas as ws_schemas
 from snapper.interface.websocket.schemas import WSAuthCompleteResponse
 from snapper.interface.websocket.schemas import WSAuthenticateRequest
@@ -2287,7 +2289,7 @@ def _bridge_render_class(
     return "".join(lines)
 
 
-def generate_bridge_wire_contract(output_path: Path) -> str:
+def generate_bridge_wire_contract(output_path: Path, allowed_root: Path) -> str:
     """Generate the bridge wire-contract TypeScript file.
 
     Emits a header-only TS module containing a shared ``FrameEnvelope``
@@ -2301,19 +2303,30 @@ def generate_bridge_wire_contract(output_path: Path) -> str:
         output_path: Absolute path to the generated TS file. The
             parent directory is created if missing. The file is
             overwritten unconditionally.
+        allowed_root: Existing directory that bounds the generated artifact.
 
     Returns:
         The generated content (also written to disk).
     """
+    safe_output_path = resolve_path_within_root(
+        output_path,
+        allowed_root,
+        must_exist=False,
+    )
     envelope_fields, envelope_declaration = _bridge_envelope_spec()
     blocks: list[str] = [_BRIDGE_HEADER, "", envelope_declaration]
     for name, model in _bridge_allowlist():
         blocks.append("")
         blocks.append(_bridge_render_class(name, model, envelope_fields))
     content = "\n".join(blocks)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(content, encoding="utf-8")
-    print(f"Generated {output_path}")
+    safe_output_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_output_path = resolve_path_within_root(
+        safe_output_path,
+        allowed_root,
+        must_exist=False,
+    )
+    safe_output_path.write_text(content, encoding="utf-8")
+    print(f"Generated {safe_output_path}")
     print(f"  - {len(_bridge_allowlist())} bridge interfaces")
     return content
 
@@ -2776,30 +2789,42 @@ def _run_bridge_generator(args: GenerateTypesArgs, project_root: Path) -> None:
     if not args.bridge:
         return
     print("\n=== Generating Bridge Wire-Contract ===")
+    safe_root = canonical_directory(project_root)
     if args.bridge_output is not None:
         output_path = Path(args.bridge_output)
         if not output_path.is_absolute():
-            output_path = (project_root / output_path).resolve()
+            output_path = safe_root / output_path
     else:
-        output_path = (project_root / _BRIDGE_OUTPUT_DEFAULT).resolve()
-    generate_bridge_wire_contract(output_path)
+        output_path = safe_root / _BRIDGE_OUTPUT_DEFAULT
+    safe_output_path = resolve_path_within_root(
+        output_path,
+        safe_root,
+        must_exist=False,
+    )
+    generate_bridge_wire_contract(safe_output_path, safe_root)
 
 
-def strip_eslint_disable_file(file_path: Path) -> None:
+def strip_eslint_disable_file(file_path: Path, allowed_root: Path) -> None:
     """Remove the eslint-disable header + JSDoc noise from a generated TS file.
 
     Args:
         file_path: Path to the generated file.
+        allowed_root: Existing directory that bounds the generated artifact.
     """
-    if not file_path.is_file():
+    safe_file_path = resolve_path_within_root(
+        file_path,
+        allowed_root,
+        must_exist=False,
+    )
+    if not safe_file_path.is_file():
         return
 
-    content = file_path.read_text(encoding="utf-8")
+    content = safe_file_path.read_text(encoding="utf-8")
     updated = content.replace("/* eslint-disable */\n", "")
     updated = _strip_jsdoc_blocks(updated)
 
     if updated != content:
-        file_path.write_text(updated, encoding="utf-8")
+        safe_file_path.write_text(updated, encoding="utf-8")
 
 
 def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> None:
@@ -2807,8 +2832,13 @@ def _run_strip_eslint_disable(args: GenerateTypesArgs, project_root: Path) -> No
     if not args.strip_eslint_disable:
         return
 
-    file_path = project_root.resolve() / _STRIP_ESLINT_DISABLE_TARGET
-    strip_eslint_disable_file(file_path)
+    safe_root = canonical_directory(project_root)
+    file_path = resolve_path_within_root(
+        _STRIP_ESLINT_DISABLE_TARGET,
+        safe_root,
+        must_exist=False,
+    )
+    strip_eslint_disable_file(file_path, safe_root)
 
 
 def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: Path) -> None:

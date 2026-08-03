@@ -388,6 +388,12 @@ default desk, then idempotently gives that desk an instrument scope on the
 required paper BTC demo market. The script fails on a missing membership or a
 scope owned by another desk; it never creates a personal read grant.
 
+The first successful demo insert also creates the local `ai_demo` delegate with
+a cryptographically random password and prints that credential once, only after
+the database transaction commits. Treat the command output as sensitive. An
+idempotent rerun cannot recover the original password; rotate it with
+`snapper reset-password ai_demo` instead.
+
 If the profile has no wallets, the loader falls back to a single `default`
 paper wallet with a `10000.0` initial balance. Re-running seed on an
 established database does not repair or merge multi-tenant state: if any

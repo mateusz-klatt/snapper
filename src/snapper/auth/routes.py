@@ -1055,7 +1055,7 @@ async def logout(
     response.set_cookie(
         key="csrf_token",
         value="",
-        httponly=False,
+        httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
         path="/",

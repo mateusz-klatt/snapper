@@ -14,12 +14,14 @@ from scripts.render_local_plugin import SKILLS_SUBDIR
 from scripts.render_local_plugin import _default_repo_root
 from scripts.render_local_plugin import _default_settings_path
 from scripts.render_local_plugin import _replace_placeholder
+from scripts.render_local_plugin import _substitute_placeholder_in_file
 from scripts.render_local_plugin import main
 from scripts.render_local_plugin import qualify_skill_triggers
 from scripts.render_local_plugin import render_plugin
 from scripts.render_local_plugin import render_skills
 from scripts.render_local_plugin import update_claude_settings
 from snapper.core.json_types import JsonValue
+from snapper.infrastructure.security.path_validation import UnsafePathError
 
 
 def _write_template(repo_root: Path, name: str, content: str) -> Path:
@@ -38,6 +40,14 @@ def _write_skill(repo_root: Path, skill_name: str, content: str) -> Path:
     target = skill_dir / "SKILL.md"
     target.write_text(content, encoding="utf-8")
     return target
+
+
+def _symlink_or_skip(link_path: Path, target: Path) -> None:
+    """Create a real file symlink or skip where the platform forbids it."""
+    try:
+        link_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
 
 
 def _claude_settings_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -100,6 +110,19 @@ class TestRenderPlugin:
         rendered_files = sorted(p.name for p in (plugin_dir / CLAUDE_PLUGIN_SUBDIR).iterdir())
         assert rendered_files == ["marketplace.json", "plugin.json"]
 
+    def test_rejects_a_symlinked_json_template(self, tmp_path: Path) -> None:
+        """A plugin manifest symlink cannot import content from outside its source root."""
+        template_dir = tmp_path / "integrations" / PLUGIN_DIR_NAME / CLAUDE_PLUGIN_SUBDIR
+        template_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.json"
+        outside.write_text(json.dumps({"secret": "outside"}), encoding="utf-8")
+        _symlink_or_skip(template_dir / "plugin.json", outside)
+
+        with pytest.raises(UnsafePathError, match="must not contain symlinks"):
+            render_plugin(tmp_path)
+
+        assert outside.read_text(encoding="utf-8") == json.dumps({"secret": "outside"})
+
     def test_renders_a_top_level_json_array_without_manifest_rewrite(self, tmp_path: Path) -> None:
         """A non-object JSON template bypasses manifest trigger qualification."""
         _write_template(tmp_path, "catalog.json", json.dumps([PLACEHOLDER, "stable"]))
@@ -142,6 +165,25 @@ class TestRenderPlugin:
 
         assert not (plugin_dir / SKILLS_SUBDIR).exists()
 
+    def test_render_skills_rejects_source_file_in_place_of_directory(self, tmp_path: Path) -> None:
+        """A regular file cannot stand in for the template skills directory."""
+        source_skills = tmp_path / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
+        source_skills.parent.mkdir(parents=True)
+        source_skills.write_text("not a directory\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="plugin skills source is not a directory"):
+            render_skills(tmp_path)
+
+    def test_render_skills_rejects_output_file_in_place_of_directory(self, tmp_path: Path) -> None:
+        """A regular file cannot stand in for the rendered skills directory."""
+        _write_template(tmp_path, "plugin.json", "{}")
+        output_skills = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
+        output_skills.parent.mkdir(parents=True)
+        output_skills.write_text("not a directory\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="rendered skills target is not a directory"):
+            render_skills(tmp_path)
+
     def test_render_skills_prunes_stale_output(self, tmp_path: Path) -> None:
         """A skill removed from the template is pruned from the rendered output."""
         _write_skill(tmp_path, "wake", "---\nname: wake\n---\n\nArmed.\n")
@@ -153,6 +195,24 @@ class TestRenderPlugin:
         render_skills(tmp_path)
 
         assert not (tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR).exists()
+
+    def test_render_skills_rejects_a_symlinked_source_asset(self, tmp_path: Path) -> None:
+        """A source skill symlink is rejected before stale rendered output is removed."""
+        _write_skill(tmp_path, "wake", "---\nname: wake\n---\n\nArmed.\n")
+        outside = tmp_path / "outside.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        source_asset = (
+            tmp_path / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake" / "outside.md"
+        )
+        _symlink_or_skip(source_asset, outside)
+        rendered_asset = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "stable.md"
+        rendered_asset.parent.mkdir(parents=True)
+        rendered_asset.write_text("stable\n", encoding="utf-8")
+
+        with pytest.raises(UnsafePathError, match="must not contain symlinks"):
+            render_skills(tmp_path)
+
+        assert rendered_asset.read_text(encoding="utf-8") == "stable\n"
 
     def test_renders_placeholder_in_skill_markdown(self, tmp_path: Path) -> None:
         """A skill body's repo-root placeholder is substituted on render."""
@@ -176,6 +236,52 @@ class TestRenderPlugin:
 
         rendered_blob = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake" / "icon.bin"
         assert rendered_blob.read_bytes() == b"\xff\xfe\x00\x01"
+
+    def test_substitution_rejects_file_outside_rendered_skills(self, tmp_path: Path) -> None:
+        """Refuse to rewrite a file outside the rendered skills boundary.
+
+        Given: A text file beside, rather than below, the rendered skills root.
+        When: Placeholder substitution receives the out-of-scope path.
+        Then: Path validation refuses the write and the file remains unchanged.
+        """
+        rendered_skills = tmp_path / "skills"
+        rendered_skills.mkdir()
+        outside_path = tmp_path / "outside.md"
+        original = f"Run {PLACEHOLDER}/command\n"
+        outside_path.write_text(original, encoding="utf-8")
+
+        with pytest.raises(UnsafePathError, match="escapes trusted directory"):
+            _substitute_placeholder_in_file(outside_path, str(tmp_path), rendered_skills)
+
+        assert outside_path.read_text(encoding="utf-8") == original
+
+    def test_substitution_rejects_symlink_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Refuse to rewrite a symlink inside the rendered skills boundary.
+
+        Given: A rendered file path reported as a symlink.
+        When: Placeholder substitution validates the file before reading it.
+        Then: Validation refuses the path and leaves its content unchanged.
+        """
+        rendered_skills = tmp_path / "skills"
+        rendered_skills.mkdir()
+        rendered_path = rendered_skills / "SKILL.md"
+        original = f"Run {PLACEHOLDER}/command\n"
+        rendered_path.write_text(original, encoding="utf-8")
+
+        def fake_is_symlink(path: Path) -> bool:
+            """Report only the rendered file as a symlink."""
+            return path == rendered_path
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+        with pytest.raises(UnsafePathError, match="must not contain symlinks"):
+            _substitute_placeholder_in_file(rendered_path, str(tmp_path), rendered_skills)
+
+        assert rendered_path.read_text(encoding="utf-8") == original
 
 
 class TestQualifySkillTriggers:

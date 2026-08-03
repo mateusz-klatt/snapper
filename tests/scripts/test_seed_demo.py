@@ -41,8 +41,10 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
+from unittest.mock import patch
 from uuid import uuid7
 
+import bcrypt
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -1209,6 +1211,7 @@ class TestMain:
         self,
         migrated_db: tuple[sa.Engine, str],
         monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Happy path inserts the full demo trajectory.
 
@@ -1227,9 +1230,19 @@ class TestMain:
             _seed_optional_commodity_instruments(conn)
             _seed_demo_users(conn, operator)
 
+        generated_password = str(uuid7())
+        password_factory = MagicMock(return_value=generated_password)
+        monkeypatch.setattr(seed_demo.secrets, "token_urlsafe", password_factory)
         monkeypatch.setenv("DB_URL", db_url)
         rc = seed_demo.main()
         assert rc == 0
+        output = capsys.readouterr().out
+        password_line = next(
+            line for line in output.splitlines() if line.startswith("demo AI login: ai_demo / ")
+        )
+        demo_password = password_line.removeprefix("demo AI login: ai_demo / ")
+        assert demo_password == generated_password
+        password_factory.assert_called_once_with(24)
 
         with engine.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == 4
@@ -1246,6 +1259,10 @@ class TestMain:
                 == 2
             )
             assert conn.execute(text("SELECT COUNT(*) FROM wallet_user_read_grants")).scalar() == 0
+            password_hash = conn.execute(
+                text("SELECT password_hash FROM users WHERE username = 'ai_demo'")
+            ).scalar_one()
+            assert bcrypt.checkpw(demo_password.encode(), password_hash.encode())
             for role in ("admin", "operator", "viewer"):
                 row_count = conn.execute(
                     text(
@@ -1929,6 +1946,7 @@ class TestMain:
         self,
         migrated_db: tuple[sa.Engine, str],
         monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Re-running after a previous demo seed run is a no-op.
 
@@ -1958,10 +1976,37 @@ class TestMain:
 
         second_rc = seed_demo.main()
         assert second_rc == 0
+        rerun_output = capsys.readouterr().out
+        assert "password was shown once" in rerun_output
+        assert "snapper reset-password ai_demo" in rerun_output
 
         with engine.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == first_orders
             assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == first_alerts
+
+    def test_complete_seed_without_ai_delegate_omits_reset_guidance(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Verify recovery guidance is emitted only for an existing demo account.
+
+        Given: A complete demo P&L seed without the optional AI delegate user,
+        When: The idempotent skip is finalized,
+        Then: It does not recommend resetting a nonexistent account.
+        """
+        conn = MagicMock()
+        with patch.object(seed_demo, "_lookup_seeded_user", return_value=None):
+            assert (
+                seed_demo._finish_existing_demo_seed(
+                    conn,
+                    seed_demo._COMPLETE_DEMO_PNL_SEED,
+                )
+                == 0
+            )
+        output = capsys.readouterr().out
+        assert "reset-password ai_demo" not in output
+        conn.commit.assert_called_once_with()
+        conn.engine.dispose.assert_called_once_with()
 
     def test_legacy_demo_seed_refuses_silent_skip(
         self,

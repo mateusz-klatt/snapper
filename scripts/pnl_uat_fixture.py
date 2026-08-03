@@ -77,6 +77,8 @@ from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.security.encryption import get_encryption_service
+from snapper.infrastructure.security.path_validation import UnsafePathError
+from snapper.infrastructure.security.path_validation import resolve_operator_file
 
 _ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 _ALEMBIC_INI: Final[Path] = _ROOT / "alembic.ini"
@@ -1836,6 +1838,19 @@ async def seed_fixture_database(
     return await _seed_fixture_database_unchecked(validated_url, anchor)
 
 
+def _validated_manifest_path(path: Path) -> Path:
+    """Return a canonical new manifest path or fail before database access."""
+    try:
+        safe_path = resolve_operator_file(path, must_exist=False)
+    except UnsafePathError as exc:
+        raise PnlUatFixtureError(
+            "manifest parent directory does not exist or manifest path is unsafe"
+        ) from exc
+    if safe_path.exists():
+        raise PnlUatFixtureError("manifest path already exists; refusing to overwrite it")
+    return safe_path
+
+
 def write_manifest(path: Path, manifest: PnlUatManifest) -> None:
     """Create a manifest without overwriting an existing artifact.
 
@@ -1846,12 +1861,9 @@ def write_manifest(path: Path, manifest: PnlUatManifest) -> None:
     Raises:
         PnlUatFixtureError: If the path is unsafe or cannot be created.
     """
-    if path.exists():
-        raise PnlUatFixtureError("manifest path already exists; refusing to overwrite it")
-    if not path.parent.is_dir():
-        raise PnlUatFixtureError("manifest parent directory does not exist")
+    safe_path = _validated_manifest_path(path)
     try:
-        with path.open("x", encoding="utf-8") as handle:
+        with safe_path.open("x", encoding="utf-8") as handle:
             handle.write(manifest.model_dump_json(indent=2))
             handle.write("\n")
     except OSError as exc:
@@ -1871,13 +1883,10 @@ async def run_fixture(db_url: str, anchor: datetime, manifest_path: Path) -> Pnl
     Returns:
         The committed fixture manifest.
     """
-    if manifest_path.exists():
-        raise PnlUatFixtureError("manifest path already exists; refusing to seed")
-    if not manifest_path.parent.is_dir():
-        raise PnlUatFixtureError("manifest parent directory does not exist")
+    safe_manifest_path = _validated_manifest_path(manifest_path)
     validated_url = validate_target_database(db_url)
     manifest = await seed_fixture_database(validated_url, anchor)
-    write_manifest(manifest_path, manifest)
+    write_manifest(safe_manifest_path, manifest)
     return manifest
 
 

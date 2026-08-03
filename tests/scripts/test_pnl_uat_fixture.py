@@ -481,6 +481,30 @@ def test_write_manifest_wraps_creation_errors(
         )
 
 
+def test_write_manifest_refuses_symlink_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a manifest target that redirects the exclusive write.
+
+    Given: A new manifest path reported as a symlink.
+    When: The fixture attempts to create the manifest exclusively.
+    Then: Path validation refuses the target before any file is written.
+    """
+    manifest_path = tmp_path / "manifest.json"
+
+    def fake_is_symlink(path: Path) -> bool:
+        """Report only the selected manifest as a symlink."""
+        return path == manifest_path
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+    with pytest.raises(pnl_uat_fixture.PnlUatFixtureError, match="path is unsafe"):
+        pnl_uat_fixture.write_manifest(
+            manifest_path,
+            pnl_uat_fixture.build_manifest(_ANCHOR),
+        )
+
+
 @pytest.mark.asyncio
 async def test_seed_fixture_database_revalidates_and_preserves_the_exact_url(
     monkeypatch: pytest.MonkeyPatch,

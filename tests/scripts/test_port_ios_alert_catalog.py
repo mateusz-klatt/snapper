@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,29 @@ from unittest.mock import patch
 import pytest
 
 import scripts.port_ios_alert_catalog as port
+
+
+def test_help_supports_direct_and_module_execution() -> None:
+    """Support direct and module execution with the shared path helper.
+
+    Given: The direct-script and package-module alert catalog commands.
+    When: Each command requests its CLI help output in a subprocess.
+    Then: Both invocation modes exit successfully without an import failure.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    commands = (
+        [sys.executable, "scripts/port_ios_alert_catalog.py", "--help"],
+        [sys.executable, "-m", "scripts.port_ios_alert_catalog", "--help"],
+    )
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
 
 
 class TestRewritePlaceholders:
@@ -329,7 +353,7 @@ class TestUpsertNavAlerts:
         """Locale common.json without a 'nav' map gains one."""
         p = tmp_path / "common.json"
         p.write_text('{"chrome": {"brand": "Snapper"}}\n', encoding="utf-8")
-        port.upsert_nav_alerts(p, "Alerts")
+        port.upsert_nav_alerts(p, "Alerts", tmp_path)
         loaded = json.loads(p.read_text(encoding="utf-8"))
         assert loaded["nav"] == {"alerts": "Alerts"}
         assert loaded["chrome"] == {"brand": "Snapper"}
@@ -341,7 +365,7 @@ class TestUpsertNavAlerts:
             json.dumps({"nav": {"overview": "Overview", "settings": "Settings"}}) + "\n",
             encoding="utf-8",
         )
-        port.upsert_nav_alerts(p, "Alerty")
+        port.upsert_nav_alerts(p, "Alerty", tmp_path)
         loaded = json.loads(p.read_text(encoding="utf-8"))
         assert list(loaded["nav"].keys()) == ["alerts", "overview", "settings"]
         assert loaded["nav"]["alerts"] == "Alerty"
@@ -349,21 +373,31 @@ class TestUpsertNavAlerts:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         """common.json must exist; we never create a new locale dir."""
         with pytest.raises(SystemExit, match="common.json missing"):
-            port.upsert_nav_alerts(tmp_path / "nope.json", "Alerts")
+            port.upsert_nav_alerts(tmp_path / "nope.json", "Alerts", tmp_path)
 
     def test_non_object_root_raises(self, tmp_path: Path) -> None:
         """Defensive: JSON array at root fails fast."""
         p = tmp_path / "common.json"
         p.write_text("[]\n", encoding="utf-8")
         with pytest.raises(SystemExit, match="not a JSON object"):
-            port.upsert_nav_alerts(p, "Alerts")
+            port.upsert_nav_alerts(p, "Alerts", tmp_path)
 
     def test_non_dict_nav_raises(self, tmp_path: Path) -> None:
         """Defensive: nav field present but wrong type fails fast."""
         p = tmp_path / "common.json"
         p.write_text('{"nav": "broken"}\n', encoding="utf-8")
         with pytest.raises(SystemExit, match="'nav' is not a dict"):
-            port.upsert_nav_alerts(p, "Alerts")
+            port.upsert_nav_alerts(p, "Alerts", tmp_path)
+
+    def test_refuses_common_path_outside_locales_root(self, tmp_path: Path) -> None:
+        """A caller cannot redirect the common catalog write outside its root."""
+        locales_root = tmp_path / "locales"
+        locales_root.mkdir()
+        outside = tmp_path / "common.json"
+        outside.write_text('{"nav": {}}\n', encoding="utf-8")
+        with pytest.raises(SystemExit, match="path is unsafe"):
+            port.upsert_nav_alerts(outside, "Alerts", locales_root)
+        assert outside.read_text(encoding="utf-8") == '{"nav": {}}\n'
 
 
 class TestGenerateIntegration:
@@ -480,6 +514,20 @@ class TestGenerateIntegration:
             pytest.raises(SystemExit, match="frontend locale dir missing"),
         ):
             port.generate()
+
+    def test_generate_rejects_traversing_locale_mapping(self, tmp_path: Path) -> None:
+        """A catalog locale cannot traverse outside the frontend locale root."""
+        xcstrings_path, locales_dir = self._fixture(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "common.json").write_text('{"nav": {}}\n', encoding="utf-8")
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "map_locale", return_value="../outside"),
+            pytest.raises(SystemExit, match="locale path is unsafe"),
+        ):
+            port.generate(locales_dir=locales_dir)
+        assert not (outside / "alerts.json").exists()
 
 
 class TestGenerateExtraGuards:

@@ -190,6 +190,24 @@ class TestAmainInvalidKey:
         rc = await provision._amain(ns)
         assert rc == 2
 
+    @pytest.mark.asyncio
+    async def test_rejects_symlinked_private_key(
+        self,
+        privkey_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A private-key path cannot redirect the secret read through a symlink."""
+        monkeypatch.setenv("DB_URL", "sqlite+aiosqlite:///:memory:")
+
+        def fake_is_symlink(path: Path) -> bool:
+            """Report only the selected private-key file as a symlink."""
+            return path == privkey_file
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+        ns = provision._parse_args(_required_args(privkey_file))
+        rc = await provision._amain(ns)
+        assert rc == 2
+
 
 class TestAmainLiveWrite:
     """Happy-path live write — descriptor + private key + pool merge."""
