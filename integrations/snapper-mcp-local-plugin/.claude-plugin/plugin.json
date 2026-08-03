@@ -1,7 +1,7 @@
 {
   "name": "snapper-mcp-local",
   "version": "0.0.0-local",
-  "description": "Local-build Snapper MCP bridge pointing at localhost:8000. Uses the in-repo dist (integrations/snapper-mcp/dist/index.js) so changes to bridge source apply after `npm run build`. Reads credentials from data/dev-pat.json — mint via `snapper dev-mint-pat`. Rendered by `make local-plugin` — do not edit the rendered copy in data/.",
+  "description": "Local-build Snapper MCP bridge pointing at localhost:8000. Uses the in-repo dist (integrations/snapper-mcp/dist/index.js) so changes to bridge source apply after `npm run build`. Reads credentials from data/dev-pat.json \u2014 mint via `snapper dev-mint-pat`. Rendered by `make local-plugin` \u2014 do not edit the rendered copy in data/.",
   "mcpServers": {
     "snapper": {
       "type": "stdio",
