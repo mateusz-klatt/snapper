@@ -40,9 +40,10 @@ class RegisterDeviceBody(StrictBody):
 
     Attributes:
         device_token: 64-hex APNs device token (lowercase hex).
-        device_id: Stable device identifier from ``identifierForVendor``
-            (UUID-like, 36 chars). Used for diagnostics; independent
-            of ``device_token`` which can rotate.
+        device_id: App-generated random UUID persisted in iOS
+            ``UserDefaults`` for the lifetime of the installation. It
+            resets when the app's local data is removed and is used for
+            diagnostics independently of ``device_token``, which can rotate.
         env: APNs environment the token was issued for
             (``sandbox`` for TestFlight / debug builds; ``prod`` for
             App Store builds). Determines which ``ApnsClientPool`` pool
@@ -76,7 +77,7 @@ class NotificationDeviceInfo(StrictDataSchema[Literal["notification_device_info"
         user_public_id: Owner user UUID7 — the caller's own id on the
             list endpoint, scoped server-side.
         device_token: 64-hex APNs token (current active).
-        device_id: Stable device identifier (see
+        device_id: Installation-scoped device identifier (see
             ``RegisterDeviceBody.device_id``).
         platform: Always ``ios`` for the current mobile API.
         env: APNs environment this token was issued for.
