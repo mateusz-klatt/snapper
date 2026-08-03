@@ -153,6 +153,44 @@ class ReviewInbox:
             review_id = self._ready.popleft()
             return self._entries.pop(review_id).context
 
+    async def drain_pending(self) -> int:
+        """Drop queued and held work while keeping the inbox usable.
+
+        This is the hold contract's no-new half: a runner that loses consult
+        duty must stop answering anything it has not already started, and a
+        request left sitting here would otherwise be answered late — after the
+        operator believed the delegate was paused.
+
+        Discarding an entry also forgets the request version it was seen at.
+        Keeping that watermark would make the review unanswerable: the catch-up
+        sweep after resume re-offers it at the same version, dedup would call
+        that a replay, and work nobody ever performed would be dropped for good
+        unless the server happened to bump its dispatch version. Acknowledgement
+        watermarks are kept, because a decision already sent stays sent.
+
+        Returns:
+            How many pending reviews were discarded.
+        """
+        async with self._condition:
+            if self._closed:
+                return 0
+            tasks = [
+                entry.release_task
+                for entry in self._entries.values()
+                if entry.release_task is not None
+            ]
+            discarded = len(self._entries)
+            for task in tasks:
+                task.cancel()
+            for review_id in self._entries:
+                self._highest_request_versions.pop(review_id, None)
+            self._entries.clear()
+            self._ready.clear()
+            self._condition.notify_all()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return discarded
+
     async def close(self) -> None:
         """Cancel held releases, discard pending work, and wake blocked consumers."""
         async with self._condition:

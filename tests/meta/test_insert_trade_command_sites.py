@@ -31,6 +31,9 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "snapper"
 
+_INSERT_METHOD = "insert_trade_command"
+"""Command-plane write these scans exist to enumerate every call site of."""
+
 CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/application/engine/service.py", "_insert_strategy_trade_command"),
     ("src/snapper/application/plans/service.py", "_emit_trade_command"),
@@ -112,8 +115,18 @@ def _collect_insert_sites(
     Only direct attribute-access calls are matched; indirect calls via
     ``getattr`` are out of scope because ``insert_trade_command`` is
     always called directly in this codebase.
+
+    Files that never mention the method are rejected on the raw text before
+    being parsed. A match requires an attribute of exactly this name, so the
+    identifier has to appear literally in the source, and the substring test
+    therefore cannot hide a site that parsing would have found. It is worth
+    doing because three whole-repository scans in this module each parsed every
+    module in the tree, which grew into the per-test timeout as the codebase
+    grew rather than because any one of them became slow.
     """
     source = path.read_text(encoding="utf-8")
+    if _INSERT_METHOD not in source:
+        return []
     tree = ast.parse(source, filename=str(path))
     rel = path.relative_to(SRC_ROOT.parents[1]).as_posix()
     results: list[tuple[str, str, int, ast.Call]] = []
@@ -123,7 +136,7 @@ def _collect_insert_sites(
         func = node.func
         if not isinstance(func, ast.Attribute):
             continue
-        if func.attr != "insert_trade_command":
+        if func.attr != _INSERT_METHOD:
             continue
         enclosing = _find_enclosing_function(tree, node.lineno)
         fn_name = enclosing.name if enclosing is not None else "<module>"

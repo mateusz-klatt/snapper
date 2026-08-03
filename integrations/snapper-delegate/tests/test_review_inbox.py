@@ -346,6 +346,43 @@ async def test_expired_and_naive_requests_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_draining_drops_pending_work_and_forgets_only_its_request_versions() -> None:
+    """A drained review can be offered again, while an answered one stays answered.
+
+    Given ready work, held foreign work, and a review whose decision was acknowledged,
+    When the inbox is drained because consult duty was lost,
+    Then pending work is discarded with its timer and can be re-offered at the
+    same dispatch version after a resume, while the acknowledged review stays
+    cancelled because a decision already sent stays sent.
+    """
+    sleeper = _BlockingSleeper()
+    inbox = ReviewInbox("delegate-own", 3, clock=lambda: _NOW, sleeper=sleeper)
+    ready = _context()
+    held = _context().model_copy(
+        update={
+            "review_public_id": "review-foreign",
+            "selected_delegate_public_id": "delegate-foreign",
+        }
+    )
+    answered = _context().model_copy(update={"review_public_id": "review-answered"})
+
+    assert await inbox.offer(ready) is InboxOfferOutcome.QUEUED
+    assert await inbox.offer(held) is InboxOfferOutcome.HELD
+    assert await inbox.offer(answered) is InboxOfferOutcome.QUEUED
+    assert await inbox.acknowledge("review-answered", 1) is InboxOfferOutcome.CANCELLED
+    await asyncio.wait_for(sleeper.started.wait(), timeout=0.1)
+
+    assert await inbox.drain_pending() == 2
+    assert sleeper.cancelled == 1
+    assert await inbox.offer(ready) is InboxOfferOutcome.QUEUED
+    assert await inbox.offer(answered) is InboxOfferOutcome.CANCELLED
+    assert await inbox.get() == ready
+
+    await inbox.close()
+    assert await inbox.drain_pending() == 0
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_holds_discards_ready_and_wakes_getters() -> None:
     """Closure promptly cancels all pending forms and unblocks empty consumers.
 

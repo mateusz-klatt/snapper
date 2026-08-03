@@ -1,0 +1,305 @@
+{
+  "version": "delegate-control-v1",
+  "purpose": "Canonical wire cases for delegate consult-duty control. Generated wire types protect the frame shape but cannot prove behaviour, so every implementation of this protocol - the Python runner, the TypeScript plugin, and the backend contract tests - replays this corpus and must agree on all of it.",
+  "rules": {
+    "held_is_the_boot_state": "A gate that has applied nothing refuses consults. Every case therefore starts from a fresh gate, replays applied_before in order, and only then processes the case frame.",
+    "applied_before": "Directives already adopted by the gate, oldest first. They are trusted history, not wire input: replay them directly rather than parsing them.",
+    "payload_source": "Where the directive body lives for this transport. 'auth_complete.control' is the nested control block of the auth frame and is absent on a pre-control server. 'control_frame' means the directive fields ride on the delegate.control frame itself alongside its envelope. 'client_echo' cases carry no server payload at all: nothing is received, so expect.parsed is false and the case pins only the frame the client must emit for the state already in force.",
+    "refusal_is_not_an_error": "An unreadable payload parses to nothing. It never grants duty and never revokes a state already applied, so noise can neither start nor pause a runner.",
+    "control_moves_forward_only": "A directive whose revision is not strictly newer than the applied one is ignored, so a replayed or reordered frame cannot resurrect a superseded state.",
+    "echo_reports_what_was_applied": "The client echoes the state in force AFTER processing, never the frame it just saw. Echoing a refused revision would announce a superseded state as applied and, under the server's applied-equals-current eligibility predicate, would misreport a current runner as stale. When nothing has been applied, nothing is echoed.",
+    "echo_envelope": "The client mints its own session_id, sequence_id, public_id, timestamp and topic on every frame it sends. That provenance is outside this contract, so expect.echo pins the control body only.",
+    "reset_before": "Whether a reconnect happened between the replayed history and the case frame. A reconnect forgets the applied directive entirely, so the runner is held again and the server's current revision governs whatever it is - including one lower than the revision that was in force before the socket dropped. Implementations that treat revisions as globally monotonic rather than per-session will disagree here."
+  },
+  "cases": [
+    {
+      "name": "boot_directive_in_auth_complete",
+      "intent": "A restarted runner learns its duty from the connect handshake rather than waiting for a push that may never come.",
+      "payload_source": "auth_complete.control",
+      "applied_before": [],
+      "frame": {
+        "type": "auth_complete",
+        "session_id": "server-session",
+        "sequence_id": 1,
+        "public_id": "server-frame-1",
+        "timestamp": "2026-08-03T12:00:00+00:00",
+        "topic": null,
+        "control": {
+          "state": "active",
+          "revision": 4
+        }
+      },
+      "expect": {
+        "parsed": true,
+        "directive": {
+          "state": "active",
+          "revision": 4
+        },
+        "accepts_consults": true,
+        "applied_revision": 4,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "active",
+          "applied_revision": 4
+        }
+      }
+    },
+    {
+      "name": "live_hold_push",
+      "intent": "An operator pausing a working runner must stop new consult duty on the live socket, without waiting for a reconnect.",
+      "payload_source": "control_frame",
+      "applied_before": [
+        {
+          "state": "active",
+          "revision": 4
+        }
+      ],
+      "frame": {
+        "type": "delegate.control",
+        "session_id": "server-session",
+        "sequence_id": 2,
+        "public_id": "server-frame-2",
+        "timestamp": "2026-08-03T12:01:00+00:00",
+        "topic": "delegates.019f3e12.control",
+        "state": "on_hold",
+        "revision": 5
+      },
+      "expect": {
+        "parsed": true,
+        "directive": {
+          "state": "on_hold",
+          "revision": 5
+        },
+        "accepts_consults": false,
+        "applied_revision": 5,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "on_hold",
+          "applied_revision": 5
+        }
+      }
+    },
+    {
+      "name": "live_resume_push",
+      "intent": "Resuming is a push like any other, so a held runner returns to duty within one frame instead of one reconnect.",
+      "payload_source": "control_frame",
+      "applied_before": [
+        {
+          "state": "on_hold",
+          "revision": 5
+        }
+      ],
+      "frame": {
+        "type": "delegate.control",
+        "session_id": "server-session",
+        "sequence_id": 3,
+        "public_id": "server-frame-3",
+        "timestamp": "2026-08-03T12:02:00+00:00",
+        "topic": "delegates.019f3e12.control",
+        "state": "active",
+        "revision": 6
+      },
+      "expect": {
+        "parsed": true,
+        "directive": {
+          "state": "active",
+          "revision": 6
+        },
+        "accepts_consults": true,
+        "applied_revision": 6,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "active",
+          "applied_revision": 6
+        }
+      }
+    },
+    {
+      "name": "malformed_boot_without_revision",
+      "intent": "A boot state with no revision cannot be ordered against later frames, so it resolves to held rather than to work.",
+      "payload_source": "auth_complete.control",
+      "applied_before": [],
+      "frame": {
+        "type": "auth_complete",
+        "session_id": "server-session",
+        "sequence_id": 1,
+        "public_id": "server-frame-1",
+        "timestamp": "2026-08-03T12:00:00+00:00",
+        "topic": null,
+        "control": {
+          "state": "active"
+        }
+      },
+      "expect": {
+        "parsed": false,
+        "directive": null,
+        "accepts_consults": false,
+        "applied_revision": null,
+        "echo": null
+      }
+    },
+    {
+      "name": "unknown_state_is_refused",
+      "intent": "A state this version does not implement is noise: it must neither be guessed at nor allowed to revoke a state already proven.",
+      "payload_source": "control_frame",
+      "applied_before": [
+        {
+          "state": "active",
+          "revision": 7
+        }
+      ],
+      "frame": {
+        "type": "delegate.control",
+        "session_id": "server-session",
+        "sequence_id": 4,
+        "public_id": "server-frame-4",
+        "timestamp": "2026-08-03T12:03:00+00:00",
+        "topic": "delegates.019f3e12.control",
+        "state": "draining",
+        "revision": 8
+      },
+      "expect": {
+        "parsed": false,
+        "directive": null,
+        "accepts_consults": true,
+        "applied_revision": 7,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "active",
+          "applied_revision": 7
+        }
+      }
+    },
+    {
+      "name": "negative_revision_is_refused",
+      "intent": "Revisions are monotonic counters, so a negative one is corrupt input and must not open the gate.",
+      "payload_source": "control_frame",
+      "applied_before": [],
+      "frame": {
+        "type": "delegate.control",
+        "session_id": "server-session",
+        "sequence_id": 5,
+        "public_id": "server-frame-5",
+        "timestamp": "2026-08-03T12:04:00+00:00",
+        "topic": "delegates.019f3e12.control",
+        "state": "active",
+        "revision": -1
+      },
+      "expect": {
+        "parsed": false,
+        "directive": null,
+        "accepts_consults": false,
+        "applied_revision": null,
+        "echo": null
+      }
+    },
+    {
+      "name": "stale_revision_after_hold",
+      "intent": "A replayed or reordered grant is well formed but superseded. It must not resume the runner, and the echo must keep reporting the hold that is really in force so the server is never told a superseded revision was applied.",
+      "payload_source": "control_frame",
+      "applied_before": [
+        {
+          "state": "on_hold",
+          "revision": 9
+        }
+      ],
+      "frame": {
+        "type": "delegate.control",
+        "session_id": "server-session",
+        "sequence_id": 6,
+        "public_id": "server-frame-6",
+        "timestamp": "2026-08-03T12:05:00+00:00",
+        "topic": "delegates.019f3e12.control",
+        "state": "active",
+        "revision": 8
+      },
+      "expect": {
+        "parsed": true,
+        "directive": {
+          "state": "active",
+          "revision": 8
+        },
+        "accepts_consults": false,
+        "applied_revision": 9,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "on_hold",
+          "applied_revision": 9
+        }
+      }
+    },
+    {
+      "name": "client_applied_echo",
+      "intent": "The server cannot infer from silence whether a directive arrived, so eligibility is gated on this echo rather than on the server's own last write. It reports the state and revision the client has actually applied.",
+      "payload_source": "client_echo",
+      "applied_before": [
+        {
+          "state": "on_hold",
+          "revision": 7
+        }
+      ],
+      "frame": {
+        "type": "delegate.control_applied",
+        "protocol": "delegate-control-v1",
+        "state": "on_hold",
+        "applied_revision": 7
+      },
+      "expect": {
+        "parsed": false,
+        "directive": null,
+        "accepts_consults": false,
+        "applied_revision": 7,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "on_hold",
+          "applied_revision": 7
+        }
+      }
+    },
+    {
+      "name": "reconnect_resets_to_held",
+      "intent": "A fresh socket is not an accepting delegate. After a reconnect the gate has applied nothing, so it holds until the server re-states control, and it must then accept that restatement even though its revision is lower than the one it had applied before the drop.",
+      "payload_source": "auth_complete.control",
+      "applied_before": [
+        {
+          "state": "active",
+          "revision": 9
+        }
+      ],
+      "reset_before": true,
+      "frame": {
+        "type": "auth_complete",
+        "session_id": "server-session-2",
+        "sequence_id": 1,
+        "public_id": "server-frame-7",
+        "timestamp": "2026-08-03T12:10:00+00:00",
+        "topic": null,
+        "control": {
+          "state": "active",
+          "revision": 1
+        }
+      },
+      "expect": {
+        "parsed": true,
+        "directive": {
+          "state": "active",
+          "revision": 1
+        },
+        "accepts_consults": true,
+        "applied_revision": 1,
+        "echo": {
+          "type": "delegate.control_applied",
+          "protocol": "delegate-control-v1",
+          "state": "active",
+          "applied_revision": 1
+        }
+      }
+    }
+  ]
+}

@@ -17,6 +17,8 @@ from pydantic import TypeAdapter
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.delegate_control import ControlDirective
+from snapper_delegate.delegate_control import ControlState
 from snapper_delegate.wake_client import AiReviewDecisionAckFrame
 from snapper_delegate.wake_client import AiReviewRequestFrame
 from snapper_delegate.wake_client import EnvelopeMinter
@@ -167,25 +169,37 @@ class _FakeConnector:
 class _CallbackRecorder:
     """Collect wake callbacks and expose deterministic failure hooks."""
 
-    def __init__(self) -> None:
+    def __init__(self, applied: ControlDirective | None = None) -> None:
         self.connections: list[bool] = []
         self.subscriptions = 0
         self.frames: list[WakeFrame] = []
         self.heartbeats = 0
+        self.directives: list[ControlDirective | None] = []
+        self.applied = applied
         self.connection_failures = 0
         self.subscription_failures = 0
         self.frame_failures = 0
+        self.frame_declines = 0
         self.heartbeat_failures = 0
         self.subscription_hook: Callable[[], Awaitable[None]] | None = None
         self.heartbeat_hook: Callable[[], Awaitable[None]] | None = None
 
-    def bundle(self) -> WakeCallbacks:
-        """Build the callback bundle consumed by the client."""
+    def bundle(self, with_control: bool = True) -> WakeCallbacks:
+        """Build the callback bundle consumed by the client.
+
+        Args:
+            with_control: Whether this consumer understands control directives,
+                which a client older than the control protocol does not.
+
+        Returns:
+            The lifecycle hooks a wake session drives.
+        """
         return WakeCallbacks(
             connection_state=self.connection_state,
             subscribed=self.subscribed,
             frame=self.frame,
             heartbeat=self.heartbeat,
+            control=self.control if with_control else None,
         )
 
     async def connection_state(self, connected: bool) -> None:
@@ -204,12 +218,35 @@ class _CallbackRecorder:
             self.subscription_failures -= 1
             raise RuntimeError("subscription callback")
 
-    async def frame(self, frame: WakeFrame) -> None:
-        """Record a delivered frame or raise one requested callback failure."""
+    async def frame(self, frame: WakeFrame) -> bool:
+        """Record a delivered frame, or fail or decline one requested delivery.
+
+        Args:
+            frame: The wake handed over by the client.
+
+        Returns:
+            Whether this consumer took responsibility for the frame.
+        """
         if self.frame_failures > 0:
             self.frame_failures -= 1
             raise RuntimeError("frame callback")
+        if self.frame_declines > 0:
+            self.frame_declines -= 1
+            return False
         self.frames.append(frame)
+        return True
+
+    async def control(self, directive: ControlDirective | None) -> ControlDirective | None:
+        """Record one received directive and report the state now in force.
+
+        Args:
+            directive: The parsed directive, or ``None`` when unreadable.
+
+        Returns:
+            The directive this consumer has actually applied.
+        """
+        self.directives.append(directive)
+        return self.applied
 
     async def heartbeat(self) -> None:
         """Record an application heartbeat and invoke its optional hook."""
@@ -1243,6 +1280,227 @@ async def test_delivery_callback_failure_is_retryable() -> None:
 
     assert recorder.frames == [frame]
     assert client._dedup["ai_review.request:review-one"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_declined_wake_leaves_no_deduplication_trace() -> None:
+    """A wake the runner refused stays deliverable at the same version.
+
+    Given: A held consumer that declines one delivery before accepting the next,
+    When: The server re-pushes the identical review version after a resume,
+    Then: The re-push still reaches the consumer, because remembering a refusal
+        would strand the review until its dispatch version happened to change.
+    """
+    client = _client()
+    recorder = _CallbackRecorder()
+    recorder.frame_declines = 1
+    frame = _decode_frame(_request_frame())
+    assert isinstance(frame, AiReviewRequestFrame)
+
+    await client._deliver(frame, recorder.bundle())
+    declined_state = dict(client._dedup)
+    await client._deliver(frame, recorder.bundle())
+
+    assert declined_state == {}
+    assert recorder.frames == [frame]
+    assert client._dedup["ai_review.request:review-one"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_live_control_frame_reaches_the_runner_mid_stream() -> None:
+    """A hold pushed during a live session takes effect without a reconnect.
+
+    Given: A streaming session and a delegate control frame carrying a hold,
+    When: That frame arrives between ordinary protocol frames,
+    Then: The directive reaches the consumer and the applied revision is echoed
+        on the same socket, which is what an operator pausing a busy delegate
+        depends on.
+    """
+    client = _client()
+    socket = _FakeSocket()
+    recorder = _CallbackRecorder(applied=ControlDirective(ControlState.ON_HOLD, 2))
+    task = asyncio.create_task(client._stream(socket, recorder.bundle()))
+
+    socket.incoming.put_nowait(_control_frame("delegate.control", state="on_hold", revision=2))
+    await _wait_until(lambda: len(socket.sent) == 1)
+    socket.incoming.put_nowait(_control_frame("auth_expired"))
+
+    with pytest.raises(WakeSessionError, match="authentication expired"):
+        await task
+
+    assert recorder.directives == [ControlDirective(ControlState.ON_HOLD, 2)]
+    assert socket.decoded_sent()[0]["applied_revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_control_echo_reports_the_state_actually_applied() -> None:
+    """The echo states local reality rather than the frame that just arrived.
+
+    Given: A consumer holding at revision six and a replayed grant from revision five,
+    When: The client hands that directive over and echoes the outcome,
+    Then: It reports the hold that is really in force, so a superseded revision
+        is never announced as applied.
+    """
+    client = _client()
+    socket = _FakeSocket()
+    recorder = _CallbackRecorder(applied=ControlDirective(ControlState.ON_HOLD, 6))
+    replayed: JsonValue = {"state": "active", "revision": 5}
+
+    await client._apply_control(socket, replayed, recorder.bundle())
+
+    assert recorder.directives == [ControlDirective(ControlState.ACTIVE, 5)]
+    assert socket.decoded_sent() == [
+        {
+            "type": "delegate.control_applied",
+            "protocol": "delegate-control-v1",
+            "state": "on_hold",
+            "applied_revision": 6,
+            "session_id": socket.decoded_sent()[0]["session_id"],
+            "sequence_id": 1,
+            "public_id": socket.decoded_sent()[0]["public_id"],
+            "timestamp": socket.decoded_sent()[0]["timestamp"],
+            "topic": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_echoed_without_an_applied_state_or_a_consumer() -> None:
+    """The client never claims a revision the runner has not applied.
+
+    Given: An unreadable directive and then a consumer that predates control,
+    When: The client applies each of them,
+    Then: Nothing is echoed either time, because an echo would assert a local
+        state that does not exist.
+    """
+    client = _client()
+    socket = _FakeSocket()
+    unreadable: JsonValue = {"state": "paused"}
+    readable: JsonValue = {"state": "active", "revision": 1}
+    held = _CallbackRecorder()
+    legacy = _CallbackRecorder(applied=ControlDirective(ControlState.ACTIVE, 1))
+
+    await client._apply_control(socket, unreadable, held.bundle())
+    await client._apply_control(socket, readable, legacy.bundle(with_control=False))
+
+    assert held.directives == [None]
+    assert legacy.directives == []
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_echo_stays_inside_the_transport_boundary() -> None:
+    """A lost echo never breaks the session that carries the wakes.
+
+    Given: A socket that fails the send carrying the applied-revision echo,
+    When: The client applies one directive,
+    Then: The directive still reaches the runner and the session survives, so
+        recovery is the server's re-push rather than a dropped connection.
+    """
+    client = _client()
+    socket = _FakeSocket(send_failures=[ConnectionError("echo failed")])
+    recorder = _CallbackRecorder(applied=ControlDirective(ControlState.ACTIVE, 2))
+    directive: JsonValue = {"state": "active", "revision": 2}
+
+    await client._apply_control(socket, directive, recorder.bundle())
+
+    assert recorder.directives == [ControlDirective(ControlState.ACTIVE, 2)]
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_boot_state_is_trusted_only_when_control_was_granted() -> None:
+    """A session that cannot hear a hold must not accept a grant either.
+
+    Given: An auth_complete carrying an active boot state,
+    When: The subscribe acknowledgement grants and then denies the control topic,
+    Then: The grant is passed on and echoed while the denial is reported as an
+        unknown state, so a runner nobody can pause is never produced.
+    """
+    client = _client()
+    granted_socket = _FakeSocket()
+    denied_socket = _FakeSocket()
+    auth = _decode_frame(
+        _control_frame("auth_complete", control={"state": "active", "revision": 3})
+    )
+    assert auth is not None
+    granted = _CallbackRecorder(applied=ControlDirective(ControlState.ACTIVE, 3))
+    denied = _CallbackRecorder()
+
+    await client._announce_boot_control(granted_socket, auth, granted.bundle(), True)
+    await client._announce_boot_control(denied_socket, auth, denied.bundle(), False)
+
+    assert granted.directives == [ControlDirective(ControlState.ACTIVE, 3)]
+    assert granted_socket.decoded_sent()[0]["applied_revision"] == 3
+    assert denied.directives == [None]
+    assert denied_socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_handshake_subscribes_to_control_once_identity_is_bound() -> None:
+    """Control frames only arrive on the topic the delegate identity addresses.
+
+    Given: A client that learns its delegate identity after construction,
+    When: It completes a handshake whose acknowledgement lists that topic,
+    Then: It subscribes to the delegate control topic and reports the grant,
+        which is what lets the caller trust a boot state at all.
+    """
+    client = _client()
+    client.bind_delegate_identity(" delegate-one ")
+    socket = _FakeSocket(
+        [
+            _control_frame("auth_required"),
+            _control_frame("auth_complete"),
+            _subscription_frame(topics=["ai_reviews.", "delegates.delegate-one.control"]),
+        ]
+    )
+
+    auth, control_granted = await client._handshake(socket, SecretStr("ws-secret"))
+
+    assert auth.type == "auth_complete"
+    assert control_granted is True
+    assert socket.decoded_sent()[1]["topics"] == [
+        "ai_reviews.",
+        "delegates.delegate-one.control",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unaddressable_or_denied_control_topic_is_reported_as_absent() -> None:
+    """A runner only trusts control when this session can actually receive it.
+
+    Given: A client with a blank identity and then one whose topic is denied,
+    When: Each completes a handshake that is otherwise healthy,
+    Then: Both report no control grant, so wakes keep flowing while the runner
+        stays held rather than trusting a state it cannot hear changed.
+    """
+    client = _client()
+    client.bind_delegate_identity("   ")
+    unaddressed = _FakeSocket(
+        [
+            _control_frame("auth_required"),
+            _control_frame("auth_complete"),
+            _subscription_frame(),
+        ]
+    )
+
+    _, unaddressed_grant = await client._handshake(unaddressed, SecretStr("ws-secret"))
+    client.bind_delegate_identity("delegate-one")
+    denied = _FakeSocket(
+        [
+            _control_frame("auth_required"),
+            _control_frame("auth_complete"),
+            _subscription_frame(status="partial"),
+        ]
+    )
+    _, denied_grant = await client._handshake(denied, SecretStr("ws-secret"))
+    auth_frame = _decode_frame(_control_frame("auth_complete"))
+    assert auth_frame is not None
+
+    assert unaddressed_grant is False
+    assert unaddressed.decoded_sent()[1]["topics"] == ["ai_reviews."]
+    assert denied_grant is False
+    assert client._control_topic_granted(auth_frame) is False
 
 
 @pytest.mark.asyncio

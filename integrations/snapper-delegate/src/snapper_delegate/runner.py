@@ -29,6 +29,9 @@ from snapper_delegate.control_plane import ControlPlaneError
 from snapper_delegate.control_plane import PendingReview
 from snapper_delegate.control_plane import SnapperControlClient
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.delegate_control import ControlDirective
+from snapper_delegate.delegate_control import ControlGate
+from snapper_delegate.delegate_control import ControlState
 from snapper_delegate.json_types import JsonValue
 from snapper_delegate.mcp_bridge import MCPBridge
 from snapper_delegate.mcp_bridge import MCPBridgeClient
@@ -209,6 +212,7 @@ class DelegateRunner:
         self._consult_runner: BoundedConsultRunner | None = None
         self._inbox: ReviewInbox | None = None
         self._startup_sweep_task: asyncio.Task[None] | None = None
+        self._control = ControlGate()
         self._signal_close_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -243,11 +247,16 @@ class DelegateRunner:
         await asyncio.sleep(0)
 
     def get_status(self) -> dict[str, object]:
-        """Return JSON-compatible lifecycle, liveness, and consult counters.
+        """Return JSON-compatible lifecycle, liveness, control, and consult counters.
+
+        Control state is reported because held-versus-active is the fact an
+        operator most needs after pausing a runner, and reading it out of logs
+        is not a check anyone can make quickly during an incident.
 
         Returns:
             A snapshot of externally visible runner state and counters.
         """
+        applied = self._control.applied
         return {
             "state": self._state.value,
             "running": self._running,
@@ -257,6 +266,9 @@ class DelegateRunner:
             "consults_processed": self._consults_processed,
             "consults_skipped": self._consults_skipped,
             "quota_degraded": self._quota_degraded,
+            "accepts_consults": self._control.accepts_consults,
+            "control_state": applied.state.value if applied is not None else None,
+            "control_revision": applied.revision if applied is not None else None,
         }
 
     async def _configured_loop(self) -> None:
@@ -266,6 +278,7 @@ class DelegateRunner:
         delegate_public_id = await self._resolve_delegate_identity()
         if delegate_public_id is None:
             return
+        self._bind_control_identity(delegate_public_id)
         inbox = ReviewInbox(
             delegate_public_id,
             self._runtime.tuning.inbox_capacity,
@@ -278,8 +291,8 @@ class DelegateRunner:
             subscribed=self._on_subscribed,
             frame=self._on_wake_frame,
             heartbeat=self._on_heartbeat,
+            control=self._on_control,
         )
-        self._startup_sweep_task = asyncio.create_task(self._sweep_pending())
         try:
             await self._run_wake_until_stopped(callbacks)
         finally:
@@ -288,6 +301,23 @@ class DelegateRunner:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
             self._inbox = None
+
+    def _bind_control_identity(self, delegate_public_id: str) -> None:
+        """Give the wake client the identity that addresses its control topic.
+
+        Identity is only known after the control plane answers, but the wake
+        client is built before that so it can be injected in tests. Rebuilding
+        it here would discard an injected double, and leaving it unbound would
+        silently drop the delegate-scoped subscription: the runner would take
+        its boot state and then never hear a live hold. So the identity is
+        pushed into the existing client instead.
+
+        Args:
+            delegate_public_id: Identity this runner authenticated as.
+        """
+        client = self._wake_client
+        if isinstance(client, WakeClient):
+            client.bind_delegate_identity(delegate_public_id)
 
     def _initialize_clients(self) -> None:
         """Build only missing production clients without reading credential files."""
@@ -366,11 +396,20 @@ class DelegateRunner:
             await self._offer_context(_pending_context(item))
 
     async def _consult_worker(self, inbox: ReviewInbox) -> None:
-        """Process eligible consults serially without blocking WebSocket liveness."""
+        """Process eligible consults serially without blocking WebSocket liveness.
+
+        Duty is re-checked after the queue hands work over, not only before it
+        was queued. A hold can land while a context sits waiting, and starting
+        it then would spend a model call the operator had already stopped.
+        """
         while not self._stop_event.is_set():
             context = await inbox.get()
             if context is None:
                 return
+            if not self._control.accepts_consults:
+                self._consults_skipped += 1
+                logger.info("Delegate was held before this consult started; dropping it")
+                continue
             try:
                 await self._process_consult(context)
             except Exception:
@@ -441,39 +480,128 @@ class DelegateRunner:
         return self._consult_runner
 
     async def _on_connection_state(self, connected: bool) -> None:
-        """Reflect physical WebSocket state without overriding quota degradation."""
+        """Reflect physical WebSocket state without overriding quota degradation.
+
+        Losing the socket also forgets the applied directive: the state may
+        change while the runner is not listening, so the next session must
+        re-learn it before any consult is accepted. Forgetting the directive is
+        not enough on its own, though — work already queued would still be
+        waiting for a worker that no longer knows it is held. So the drop drains
+        that queue too, which makes the returned-to-held state mean the same
+        thing as an ordered hold rather than a weaker version of it.
+        """
         self._ws_connected = connected
+        if not connected:
+            self._control.reset_for_reconnect()
+            await self._cancel_startup_sweep()
+            inbox = self._inbox
+            if inbox is not None:
+                await inbox.drain_pending()
         if self._running and not self._quota_degraded:
             self._state = RunnerState.CONNECTING
         await asyncio.sleep(0)
 
+    async def _on_control(self, directive: ControlDirective | None) -> ControlDirective | None:
+        """Adopt one server directive and start or stop consult duty.
+
+        The return value is what the client echoes, and it is deliberately the
+        directive now in force rather than the one just received. A stale or
+        replayed revision is refused here, and echoing it would announce a
+        superseded revision as applied; reporting the real applied state instead
+        keeps the echo honest and lets any later frame repair an echo that was
+        lost in transit.
+
+        Gaining duty runs the catch-up sweep that subscription no longer runs,
+        so pending work is picked up exactly when the runner is allowed to do
+        it. That sweep is an owned background task rather than an inline await:
+        catch-up is a network call on the same task that delivers wakes and
+        heartbeats, and a slow control plane must never make a live runner look
+        dead. Losing duty cancels that catch-up and clears queued work, because
+        the hold contract is drain-current and accept-nothing-new: anything
+        merely waiting is dropped rather than answered late.
+        """
+        changed = self._control.apply(directive)
+        applied = self._control.applied
+        if directive is None:
+            logger.warning("Delegate control state unknown; remaining held")
+            return applied
+        if not changed:
+            return applied
+        if directive.state is ControlState.ACTIVE:
+            logger.info("Delegate control state active at revision {}", directive.revision)
+            await self._start_catch_up_sweep()
+            return applied
+        logger.warning("Delegate held at revision {}; declining new consults", directive.revision)
+        await self._cancel_startup_sweep()
+        inbox = self._inbox
+        if inbox is not None:
+            await inbox.drain_pending()
+        return applied
+
+    async def _start_catch_up_sweep(self) -> None:
+        """Own one background catch-up sweep, replacing any earlier one.
+
+        Duty can be granted again after a hold or a reconnect, so an earlier
+        sweep is superseded rather than left to race the new one.
+        """
+        await self._cancel_startup_sweep()
+        self._startup_sweep_task = asyncio.create_task(self._sweep_pending())
+
     async def _on_subscribed(self) -> None:
-        """Mark a healthy subscription and catch up after every reconnect."""
+        """Mark a healthy subscription without assuming consult duty is granted.
+
+        A fresh socket is not an accepting delegate. The catch-up sweep is the
+        first thing that would spend tokens on work, so it waits for a control
+        directive rather than riding on subscription alone.
+        """
         self._ws_connected = True
         self._set_operational_state()
-        await self._sweep_pending()
 
     async def _on_heartbeat(self) -> None:
         """Count one successfully sent application liveness ping."""
         self._heartbeat_count += 1
         await asyncio.sleep(0)
 
-    async def _on_wake_frame(self, frame: WakeFrame) -> None:
-        """Route request wakes and decision acknowledgements through the inbox."""
+    async def _on_wake_frame(self, frame: WakeFrame) -> bool:
+        """Route request wakes and acknowledgements, reporting what was taken on.
+
+        The boolean is what decides whether the client remembers this wake as
+        delivered. Anything the runner refused — because it is held, or because
+        the inbox had no room for it — is reported as not taken, so an identical
+        re-push from the server is treated as a fresh chance rather than as a
+        replay of work that was never actually done.
+
+        Args:
+            frame: One decoded server wake.
+
+        Returns:
+            Whether the runner accepted responsibility for this frame.
+        """
         self._last_wake_at = self._runtime.clock().isoformat()
         inbox = self._inbox
         if inbox is None:
-            return
+            return False
         if isinstance(frame, AiReviewDecisionAckFrame):
             await inbox.acknowledge(frame.review_public_id, frame.dispatch_version)
-            return
-        await self._offer_context(_wake_context(frame, self._runtime.tuning))
+            return True
+        if not self._control.accepts_consults:
+            self._consults_skipped += 1
+            logger.info("Delegate is held; declining consult wake")
+            return False
+        return await self._offer_context(_wake_context(frame, self._runtime.tuning))
 
-    async def _offer_context(self, context: ReviewConsultContext) -> None:
-        """Offer one normalized context and count terminal local drops."""
+    async def _offer_context(self, context: ReviewConsultContext) -> bool:
+        """Offer one normalized context and count terminal local drops.
+
+        Args:
+            context: Normalized consultation context to queue.
+
+        Returns:
+            Whether the inbox took the context on rather than dropping it.
+        """
         inbox = self._inbox
         if inbox is None:
-            return
+            return False
         outcome = await inbox.offer(context)
         if outcome in (
             InboxOfferOutcome.EXPIRED,
@@ -481,6 +609,8 @@ class DelegateRunner:
             InboxOfferOutcome.CLOSED,
         ):
             self._consults_skipped += 1
+            return False
+        return True
 
     def _set_operational_state(self) -> None:
         """Select subscribed or degraded state from current quota status."""

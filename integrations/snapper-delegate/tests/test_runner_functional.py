@@ -35,6 +35,8 @@ from snapper_delegate.control_plane import ControlPlaneError
 from snapper_delegate.control_plane import ControlPlaneErrorKind
 from snapper_delegate.control_plane import PendingReview
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.delegate_control import ControlDirective
+from snapper_delegate.delegate_control import ControlState
 from snapper_delegate.mcp_bridge import MCPToolCallResult
 from snapper_delegate.mcp_bridge import MCPToolCallSuccess
 from snapper_delegate.mcp_bridge import MCPToolCatalogResult
@@ -421,14 +423,43 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
     raise AssertionError("condition did not become true")
 
 
+async def _open_session_with_duty(callbacks: WakeCallbacks, revision: int) -> None:
+    """Subscribe one session and grant it consult duty at one revision.
+
+    Args:
+        callbacks: Lifecycle hooks the runner supplied to the wake boundary.
+        revision: Monotonic control revision the server states for this grant.
+    """
+    await callbacks.connection_state(True)
+    await callbacks.subscribed()
+    assert callbacks.control is not None
+    await callbacks.control(ControlDirective(ControlState.ACTIVE, revision))
+
+
+def _submitted_contexts(chat: _SubmittingChatClient) -> dict[str, ReviewConsultContext]:
+    """Return every consult context submitted through the model boundary.
+
+    Args:
+        chat: The recording chat-completions double used by one runner.
+
+    Returns:
+        Submitted contexts keyed by review public identifier.
+    """
+    contexts = [
+        ReviewConsultContext.model_validate_json(request.messages[1].content or "{}")
+        for request in chat.requests
+    ]
+    return {context.review_public_id: context for context in contexts}
+
+
 @pytest.mark.asyncio
 async def test_configured_runner_sweeps_wakes_submits_and_routes_foreign_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Configured startup and reconnect work reaches bounded MCP submission.
+    """Granted consult duty reaches bounded MCP submission across a reconnect.
 
     Given a configured runner with pending, selected, foreign, and acknowledged work,
-    When startup sweep and WebSocket wake turns execute before a controlled stop,
+    When consult duty is granted on one session and again after a reconnect,
     Then eligible reviews submit once and lifecycle state and counters remain coherent.
     """
     first = _pending("review-startup")
@@ -441,17 +472,22 @@ async def test_configured_runner_sweeps_wakes_submits_and_routes_foreign_ack(
     chat = _SubmittingChatClient()
     foreign = _request("review-foreign", "delegate-other")
 
-    async def _session(callbacks: WakeCallbacks) -> None:
-        """Emit one subscribed wake session and wait for lifecycle closure."""
-        await callbacks.connection_state(True)
-        await callbacks.subscribed()
+    async def _granted_session(callbacks: WakeCallbacks) -> None:
+        """Grant consult duty, deliver one wake turn, then lose the connection."""
+        await _open_session_with_duty(callbacks, 1)
         await callbacks.heartbeat()
         await callbacks.frame(_request())
         await callbacks.frame(foreign)
         await callbacks.frame(_ack())
+        await _wait_until(lambda: runner.get_status()["consults_processed"] == 2)
+        await callbacks.connection_state(False)
+
+    async def _regranted_session(callbacks: WakeCallbacks) -> None:
+        """Re-grant consult duty on the next session and wait for closure."""
+        await _open_session_with_duty(callbacks, 2)
         await wake.closed.wait()
 
-    wake = _FakeWakeClient([_session])
+    wake = _FakeWakeClient([_granted_session, _regranted_session])
     runtime = RunnerRuntime(
         control_client=control,
         wake_client=wake,
@@ -475,11 +511,7 @@ async def test_configured_runner_sweeps_wakes_submits_and_routes_foreign_ack(
     assert control.pending_calls == 2
     assert len(chat.requests) == 3
     assert len(bridge.calls) == 3
-    contexts = [
-        ReviewConsultContext.model_validate_json(request.messages[1].content or "{}")
-        for request in chat.requests
-    ]
-    contexts_by_id = {context.review_public_id: context for context in contexts}
+    contexts_by_id = _submitted_contexts(chat)
     assert set(contexts_by_id) == {"review-startup", "review-reconnect", "review-wake"}
     assert contexts_by_id["review-startup"].signal_envelope == {}
     assert contexts_by_id["review-startup"].instrument_metadata == {}
@@ -621,14 +653,25 @@ async def test_identity_stop_wins_when_fetch_completes_concurrently() -> None:
 async def test_blocked_startup_sweep_runs_with_wake_and_is_cancelled_on_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup catch-up cannot delay connection and is drained during shutdown.
+    """Duty catch-up cannot delay the session and is drained during shutdown.
 
-    Given the initial pending-review sweep blocks indefinitely,
-    When wake processing starts and the runner is stopped,
-    Then the connection remains live and the sweep is cancelled and drained.
+    Given the pending-review sweep started by a duty grant blocks indefinitely,
+    When the granting session keeps running and the runner is stopped,
+    Then heartbeats still arrive and the sweep is cancelled and drained.
     """
+    initial_tasks = asyncio.all_tasks()
     control = _BlockingSweepControlClient()
-    wake = _FakeWakeClient()
+
+    async def _granting_session(callbacks: WakeCallbacks) -> None:
+        """Grant consult duty, then keep proving liveness until closure."""
+        await callbacks.connection_state(True)
+        await callbacks.subscribed()
+        assert callbacks.control is not None
+        await callbacks.control(ControlDirective(ControlState.ACTIVE, 1))
+        await callbacks.heartbeat()
+        await wake.closed.wait()
+
+    wake = _FakeWakeClient([_granting_session])
     runner = _runner(
         RunnerRuntime(
             control_client=control,
@@ -640,16 +683,16 @@ async def test_blocked_startup_sweep_runs_with_wake_and_is_cancelled_on_stop(
     monkeypatch.setattr(DelegateRunner, "_install_stop_signal_handlers", lambda self: ())
     task = asyncio.create_task(runner.start())
     await control.sweep_started.wait()
-    await _wait_until(lambda: wake.run_calls == 1)
+    await _wait_until(lambda: runner.get_status()["heartbeat_count"] == 1)
 
-    assert runner._startup_sweep_task is not None
+    assert runner.get_status()["ws_connected"] is True
     async with asyncio.timeout(0.5):
         await runner.stop()
         await task
 
     assert control.sweep_cancelled.is_set()
-    assert runner._startup_sweep_task is None
     assert runner.get_status()["state"] == "stopped"
+    assert asyncio.all_tasks() == initial_tasks
 
 
 @pytest.mark.asyncio
@@ -700,9 +743,17 @@ async def _noop_callback() -> None:
     """Provide one inert asynchronous callback."""
 
 
-async def _noop_frame(frame: WakeFrame) -> None:
-    """Accept one unused wake frame."""
+async def _noop_frame(frame: WakeFrame) -> bool:
+    """Accept one unused wake frame.
+
+    Args:
+        frame: The wake this inert consumer ignores.
+
+    Returns:
+        Whether responsibility was taken, which is never for an inert consumer.
+    """
     del frame
+    return False
 
 
 @pytest.mark.asyncio
@@ -782,6 +833,7 @@ async def test_wake_callbacks_cover_missing_inbox_ack_and_status_transitions() -
 
     inbox = ReviewInbox("delegate-own", 2, clock=lambda: _NOW)
     runner._inbox = inbox
+    await runner._on_control(ControlDirective(ControlState.ACTIVE, 1))
     await runner._on_wake_frame(_request("review-foreign", "delegate-other"))
     assert "review-foreign" in inbox._entries
     await runner._on_wake_frame(_ack())
@@ -928,6 +980,8 @@ async def test_consult_worker_contains_factory_bug_and_processes_later_context()
         )
     )
     inbox = ReviewInbox("delegate-own", 2, clock=lambda: _NOW)
+    runner._inbox = inbox
+    await runner._on_control(ControlDirective(ControlState.ACTIVE, 1))
     worker = asyncio.create_task(runner._consult_worker(inbox))
     await inbox.offer(_context("review-factory-error"))
     await inbox.offer(_context("review-after-error"))
@@ -1165,8 +1219,10 @@ def test_default_client_initialization_and_chat_factory(
     def _wake_factory(
         base_url: str,
         credentials: RunnerControlClient,
+        *,
+        delegate_public_id: str | None = None,
     ) -> RunnerWakeClient:
-        """Record default wake construction."""
+        """Record default wake construction including the control identity."""
         assert credentials is control
         calls.append(("wake", base_url))
         return wake

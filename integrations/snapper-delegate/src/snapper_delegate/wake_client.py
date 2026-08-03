@@ -25,6 +25,11 @@ from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
 from snapper_delegate.control_plane import WsToken
+from snapper_delegate.delegate_control import ControlDirective
+from snapper_delegate.delegate_control import applied_echo
+from snapper_delegate.delegate_control import control_topic
+from snapper_delegate.delegate_control import is_control_frame
+from snapper_delegate.delegate_control import parse_control_directive
 from snapper_delegate.json_types import JsonObject
 from snapper_delegate.json_types import JsonValue
 
@@ -181,8 +186,27 @@ class WakeCallbacks:
 
     connection_state: Callable[[bool], Awaitable[None]]
     subscribed: Callable[[], Awaitable[None]]
-    frame: Callable[[WakeFrame], Awaitable[None]]
+    frame: Callable[[WakeFrame], Awaitable[bool]]
+    """Receive one wake and report whether the runner took responsibility for it.
+
+    A runner that declines — because it is held — must answer ``False``, so the
+    wake is not remembered as delivered. Remembering it would make the server's
+    identical re-push look like a replay and silently strand the review until
+    its dispatch version changed."""
+
     heartbeat: Callable[[], Awaitable[None]]
+    control: Callable[[ControlDirective | None], Awaitable[ControlDirective | None]] | None = None
+    """Receive each server control directive and return the one now in force.
+
+    A session that yields no directive at all still calls this once with
+    ``None`` on connect, so the runner learns that its state is unknown and
+    stays held rather than waiting forever on a frame that is not coming.
+
+    The return value is what gets echoed, and it is the runner's applied state
+    rather than the frame just seen: a stale or replayed revision is refused
+    locally, and echoing it would tell the server a superseded revision is in
+    force. Answering with the applied state instead keeps the echo a true
+    statement of local reality and lets any control frame repair a lost echo."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +282,14 @@ class WakeClient:
         config: WakeClientConfig | None = None,
         envelope_minter: EnvelopeMinter | None = None,
     ) -> None:
-        """Initialize an inert reconnecting client with injectable network seams."""
+        """Initialize an inert reconnecting client with injectable network seams.
+
+        The client starts without a delegate identity because identity resolves
+        against the control plane after construction. Until it is bound, no
+        control topic can be addressed, so the runner hears no directive and
+        stays held — the safe direction.
+        """
+        self._delegate_public_id: str | None = None
         self._url = _websocket_url(snapper_base_url)
         self._credentials = credentials
         self._connect_factory = connect_factory or default_wake_connect
@@ -272,6 +303,19 @@ class WakeClient:
         self._dedup: OrderedDict[str, int] = OrderedDict()
         self._reconnect_attempt = 0
         self._running = False
+
+    def bind_delegate_identity(self, delegate_public_id: str) -> None:
+        """Adopt the identity that addresses this runner's control topic.
+
+        Identity resolves after construction, so it is pushed in rather than
+        passed to the constructor: rebuilding the client at that point would
+        discard an injected test double, and staying unbound would silently
+        drop the control subscription.
+
+        Args:
+            delegate_public_id: Identity this runner authenticated as.
+        """
+        self._delegate_public_id = delegate_public_id.strip() or None
 
     async def run(self, callbacks: WakeCallbacks) -> None:
         """Reconnect until a clean close while containing session failures.
@@ -340,8 +384,9 @@ class WakeClient:
         self._active_socket = socket
         await self._notify_connection(callbacks, True)
         try:
-            await self._handshake(socket, ws_token.value)
+            auth, control_granted = await self._handshake(socket, ws_token.value)
             self._reconnect_attempt = 0
+            await self._announce_boot_control(socket, auth, callbacks, control_granted)
             subscription_task = asyncio.create_task(self._notify_subscribed(callbacks))
             try:
                 await self._stream(socket, callbacks)
@@ -354,19 +399,51 @@ class WakeClient:
             await _safe_socket_close(socket)
             await self._notify_connection(callbacks, False)
 
-    async def _handshake(self, socket: WakeSocket, ws_token: SecretStr) -> None:
-        """Complete auth only on auth_complete and require a healthy subscribe ack."""
+    async def _handshake(
+        self,
+        socket: WakeSocket,
+        ws_token: SecretStr,
+    ) -> tuple[_DecodedFrame, bool]:
+        """Complete auth only on auth_complete and require a healthy subscribe ack.
+
+        Returns:
+            The ``auth_complete`` frame, which carries the control state a
+            freshly restarted runner must learn before it does any work, paired
+            with whether the delegate-scoped control topic was actually granted.
+        """
         async with asyncio.timeout(self._config.handshake_timeout_seconds):
             await self._wait_for_type(socket, "auth_required")
             await self._send(
                 socket,
                 {"type": "authenticate", "ws_token": ws_token.get_secret_value()},
             )
-            await self._wait_for_type(socket, "auth_complete")
-            await self._send(socket, {"type": "subscribe", "topics": _TOPICS})
+            auth = await self._wait_for_type(socket, "auth_complete")
+            await self._send(socket, {"type": "subscribe", "topics": self._subscribe_topics()})
             subscription = await self._wait_for_type(socket, "subscription_success")
         if not _healthy_subscription(subscription):
             raise WakeSessionError("subscription rejected")
+        return auth, self._control_topic_granted(subscription)
+
+    def _control_topic_granted(self, subscription: _DecodedFrame) -> bool:
+        """Return whether the session can actually receive live control frames.
+
+        A partial subscription is accepted as healthy so a denied auxiliary
+        topic never costs the runner its wakes, but the control topic is not
+        auxiliary: without it the runner would take its boot state and then be
+        unable to hear the hold that revokes it. So a denial is reported rather
+        than assumed away, and the caller declines to trust the boot state.
+
+        Args:
+            subscription: The validated subscribe acknowledgement.
+
+        Returns:
+            Whether the delegate-scoped control topic was granted.
+        """
+        if self._delegate_public_id is None:
+            return False
+        if not isinstance(subscription, _SubscriptionFrame):
+            return False
+        return control_topic(self._delegate_public_id) in subscription.topics
 
     async def _wait_for_type(self, socket: WakeSocket, expected: str) -> _DecodedFrame:
         """Wait for one control type while ignoring malformed and future frames."""
@@ -398,6 +475,9 @@ class WakeClient:
                 if frame.type == "reauth_ok":
                     reauth_ok.set()
                     continue
+                if is_control_frame(frame.type):
+                    await self._apply_control(socket, _frame_extra(frame), callbacks)
+                    continue
                 if isinstance(frame, AiReviewRequestFrame | AiReviewDecisionAckFrame):
                     await self._deliver(frame, callbacks)
         finally:
@@ -407,6 +487,78 @@ class WakeClient:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _subscribe_topics(self) -> list[JsonValue]:
+        """List the topics this session needs, including its own control topic.
+
+        A client with no resolved identity subscribes to wakes only. It then
+        never hears a control frame, which the runner reads as unknown state and
+        therefore holds — the safe direction.
+
+        Returns:
+            Topics to request in the subscribe frame.
+        """
+        if self._delegate_public_id is None:
+            return list(_TOPICS)
+        return [*_TOPICS, control_topic(self._delegate_public_id)]
+
+    async def _announce_boot_control(
+        self,
+        socket: WakeSocket,
+        auth: _DecodedFrame,
+        callbacks: WakeCallbacks,
+        control_granted: bool,
+    ) -> None:
+        """Deliver the control state the server stated at connect, or its absence.
+
+        Reporting absence matters as much as reporting a state: a runner that
+        heard nothing must learn so on THIS connect rather than waiting for a
+        frame a pre-control server will never send.
+
+        A boot state is only passed on when this session can also receive the
+        live frames that would later change it. Accepting an ``active`` boot
+        state on a session with no control topic would produce a runner nobody
+        can pause for as long as the socket survives, so the absence is reported
+        instead and the runner stays held.
+
+        Args:
+            socket: The live session socket, used to echo the applied revision.
+            auth: The ``auth_complete`` frame.
+            callbacks: Runner hooks receiving the directive.
+            control_granted: Whether the control topic was actually subscribed.
+        """
+        if not control_granted:
+            logger.warning("Delegate control topic was not granted; remaining held")
+            await self._apply_control(socket, None, callbacks)
+            return
+        await self._apply_control(socket, _frame_extra(auth).get("control"), callbacks)
+
+    async def _apply_control(
+        self,
+        socket: WakeSocket,
+        payload: JsonValue,
+        callbacks: WakeCallbacks,
+    ) -> None:
+        """Parse one directive, hand it to the runner, and echo what was applied.
+
+        The echo is sent only for a directive the runner could actually parse;
+        echoing an unreadable one would tell the server a revision is in force
+        when nothing was applied.
+
+        Args:
+            socket: The live session socket.
+            payload: Raw control body from a frame or the auth payload.
+            callbacks: Runner hooks receiving the directive.
+        """
+        if callbacks.control is None:
+            return
+        applied = await callbacks.control(parse_control_directive(payload))
+        if applied is None:
+            return
+        try:
+            await self._send(socket, applied_echo(applied))
+        except Exception:
+            logger.warning("Delegate control echo failed; server may re-send")
 
     async def _reauthenticate(self, socket: WakeSocket, reauth_ok: asyncio.Event) -> None:
         """Mint and send one in-socket reauthentication or close on failure."""
@@ -441,13 +593,20 @@ class WakeClient:
                     return
 
     async def _deliver(self, frame: WakeFrame, callbacks: WakeCallbacks) -> None:
-        """Deliver only newer review frame versions and commit dedup afterward."""
+        """Deliver only newer review frames and remember only what was taken on.
+
+        Dedup exists to suppress replays of work already in hand, so it is
+        committed for frames the runner accepted and withheld for frames it
+        refused. A held runner declining a wake leaves no trace here, which is
+        what lets the server's identical re-push after resume still arrive.
+        """
         key = f"{frame.type}:{frame.review_public_id}"
         previous = self._dedup.get(key)
         if previous is not None and frame.dispatch_version <= previous:
             return
         try:
-            await callbacks.frame(frame)
+            if not await callbacks.frame(frame):
+                return
         except Exception:
             logger.warning(
                 "Delegate wake delivery failed for review_id={}",
@@ -531,6 +690,22 @@ def _healthy_subscription(frame: _DecodedFrame) -> bool:
         and frame.status in ("subscribed", "partial")
         and bool(frame.topics)
     )
+
+
+def _frame_extra(frame: _DecodedFrame) -> dict[str, JsonValue]:
+    """Return the frame's non-schema fields.
+
+    Control bodies ride as extension fields rather than declared ones so a
+    pre-control client keeps parsing frames it does not understand instead of
+    dropping the session.
+
+    Args:
+        frame: One decoded server frame.
+
+    Returns:
+        The extension fields, empty when the frame declared none.
+    """
+    return frame.model_extra or {}
 
 
 def _decode_frame(raw: str | bytes) -> _DecodedFrame | None:

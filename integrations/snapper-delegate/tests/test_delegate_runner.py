@@ -325,6 +325,9 @@ async def test_delegate_runner_idles_and_stops_cleanly(
         "consults_processed": 0,
         "consults_skipped": 0,
         "quota_degraded": False,
+        "accepts_consults": False,
+        "control_state": None,
+        "control_revision": None,
     }
     task = asyncio.create_task(runner.start())
     async with asyncio.timeout(1.0):
