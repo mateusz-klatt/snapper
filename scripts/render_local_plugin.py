@@ -22,6 +22,7 @@ PLACEHOLDER = "__SNAPPER_REPO_ROOT__"
 PLUGIN_DIR_NAME = "snapper-mcp-local-plugin"
 CLAUDE_PLUGIN_SUBDIR = ".claude-plugin"
 SKILLS_SUBDIR = "skills"
+SKILL_TRIGGER_PREFIX = "on-skill-invoke:"
 MARKETPLACE_KEY = "snapper-mcp-local"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
 
@@ -76,6 +77,8 @@ def render_plugin(repo_root: Path) -> Path:
     for src in sorted(template_dir.glob("*.json")):
         template = cast(JsonValue, json.loads(src.read_text(encoding="utf-8")))
         rendered = _replace_placeholder(template, repo_root_str)
+        if isinstance(rendered, dict):
+            qualify_skill_triggers(rendered)
         (output_dir / src.name).write_text(
             json.dumps(rendered, indent=2) + "\n",
             encoding="utf-8",
@@ -83,6 +86,46 @@ def render_plugin(repo_root: Path) -> Path:
 
     render_skills(repo_root)
     return output_root
+
+
+def qualify_skill_triggers(manifest: JsonObject) -> bool:
+    """Rewrite bare ``on-skill-invoke`` monitor triggers to the qualified key.
+
+    Claude Code arms a plugin monitor by comparing ``when`` against
+    ``on-skill-invoke:<key>``, where ``<key>`` is the skill-usage key — and for
+    a plugin skill that key is ``<plugin name>:<skill>``. The reference docs say
+    "the named skill in this plugin", which reads as the bare name; a bare name
+    never matches and the monitor silently never arms. Verified both ways on
+    Claude Code 2.1.220.
+
+    Templates therefore declare the readable bare form and this step qualifies
+    it with the manifest's own ``name``, so the rendered plugin carries what the
+    host actually matches. An already-qualified trigger (one containing a second
+    colon) and ``when: "always"`` are left alone.
+
+    Args:
+        manifest: Parsed plugin manifest, mutated in place.
+
+    Returns:
+        True when at least one trigger was rewritten.
+    """
+    name = manifest.get("name")
+    monitors = manifest.get("monitors")
+    if not isinstance(name, str) or not isinstance(monitors, list):
+        return False
+    changed = False
+    for monitor in monitors:
+        if not isinstance(monitor, dict):
+            continue
+        when = monitor.get("when")
+        if not isinstance(when, str) or not when.startswith(SKILL_TRIGGER_PREFIX):
+            continue
+        skill = when[len(SKILL_TRIGGER_PREFIX) :]
+        if not skill or ":" in skill:
+            continue
+        monitor["when"] = f"{SKILL_TRIGGER_PREFIX}{name}:{skill}"
+        changed = True
+    return changed
 
 
 def render_skills(repo_root: Path) -> None:

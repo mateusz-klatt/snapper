@@ -15,9 +15,11 @@ from scripts.render_local_plugin import _default_repo_root
 from scripts.render_local_plugin import _default_settings_path
 from scripts.render_local_plugin import _replace_placeholder
 from scripts.render_local_plugin import main
+from scripts.render_local_plugin import qualify_skill_triggers
 from scripts.render_local_plugin import render_plugin
 from scripts.render_local_plugin import render_skills
 from scripts.render_local_plugin import update_claude_settings
+from snapper.core.json_types import JsonValue
 
 
 def _write_template(repo_root: Path, name: str, content: str) -> Path:
@@ -164,6 +166,68 @@ class TestRenderPlugin:
 
         rendered_blob = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake" / "icon.bin"
         assert rendered_blob.read_bytes() == b"\xff\xfe\x00\x01"
+
+
+class TestQualifySkillTriggers:
+    """Coverage for rewriting bare on-skill-invoke triggers to the qualified key."""
+
+    def _manifest(self, when: str) -> dict[str, JsonValue]:
+        """Return a minimal manifest carrying one monitor with the given trigger."""
+        return {"name": "snapper-mcp-local", "monitors": [{"name": "w", "when": when}]}
+
+    def test_qualifies_a_bare_skill_name(self) -> None:
+        """A bare trigger gains the manifest's own plugin name, which the host matches."""
+        manifest = self._manifest("on-skill-invoke:wake")
+
+        assert qualify_skill_triggers(manifest) is True
+
+        monitors = manifest["monitors"]
+        assert isinstance(monitors, list)
+        monitor = monitors[0]
+        assert isinstance(monitor, dict)
+        assert monitor["when"] == "on-skill-invoke:snapper-mcp-local:wake"
+
+    def test_leaves_an_already_qualified_trigger_alone(self) -> None:
+        """A trigger that already names its plugin is not double-qualified."""
+        manifest = self._manifest("on-skill-invoke:snapper-mcp-local:wake")
+
+        assert qualify_skill_triggers(manifest) is False
+
+        monitors = manifest["monitors"]
+        assert isinstance(monitors, list)
+        monitor = monitors[0]
+        assert isinstance(monitor, dict)
+        assert monitor["when"] == "on-skill-invoke:snapper-mcp-local:wake"
+
+    def test_leaves_always_and_unknown_triggers_alone(self) -> None:
+        """Only the on-skill-invoke form is rewritten."""
+        manifest = self._manifest("always")
+
+        assert qualify_skill_triggers(manifest) is False
+
+    def test_ignores_a_manifest_without_monitors(self) -> None:
+        """A manifest declaring no monitors is a no-op, not an error."""
+        assert qualify_skill_triggers({"name": "snapper-mcp-local"}) is False
+
+    def test_render_qualifies_the_rendered_manifest(self, tmp_path: Path) -> None:
+        """The rendered plugin carries the qualified trigger, the template the bare one."""
+        _write_template(
+            tmp_path,
+            "plugin.json",
+            json.dumps(
+                {
+                    "name": "snapper-mcp-local",
+                    "monitors": [{"name": "w", "when": "on-skill-invoke:wake"}],
+                }
+            ),
+        )
+
+        plugin_dir = render_plugin(tmp_path)
+
+        rendered = json.loads(
+            (plugin_dir / CLAUDE_PLUGIN_SUBDIR / "plugin.json").read_text(encoding="utf-8")
+        )
+        assert rendered["monitors"][0]["when"] == "on-skill-invoke:snapper-mcp-local:wake"
 
 
 class TestUpdateClaudeSettings:
