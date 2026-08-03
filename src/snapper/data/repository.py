@@ -9643,9 +9643,9 @@ class SQLAlchemyRepository(Repository):
         """Validate structured outcome reasons and exact partial missing minutes."""
         state = election["completeness_state"]
         reason_json = election["refusal_reason_json"]
-        if state == "complete":
+        if state in ("complete", "carried"):
             if reason_json is not None:
-                raise ValueError("complete FX elections must not carry a reason")
+                raise ValueError("fully resolved FX elections must not carry a reason")
             return
         if reason_json is None:
             raise ValueError("partial and refused FX elections require a structured reason")
@@ -9674,9 +9674,9 @@ class SQLAlchemyRepository(Repository):
         required_minutes: set[datetime],
         proof_minutes: set[datetime],
     ) -> None:
-        """Enforce complete, partial, and refused proof-set semantics."""
-        if state == "complete" and proof_minutes != required_minutes:
-            raise ValueError("complete FX elections require the whole manifest")
+        """Enforce resolved, partial, and refused proof-set semantics."""
+        if state in ("complete", "carried") and proof_minutes != required_minutes:
+            raise ValueError("fully resolved FX elections require the whole manifest")
         if state == "partial" and not (proof_minutes and proof_minutes < required_minutes):
             raise ValueError("partial FX elections require a nonempty proper manifest subset")
         if state == "refused" and proof_minutes:
@@ -9791,7 +9791,7 @@ class SQLAlchemyRepository(Repository):
         if (
             winner is not None
             and winner["election"]["completeness_state"] == "partial"
-            and election["completeness_state"] == "complete"
+            and election["completeness_state"] in ("complete", "carried")
         ):
             raise FxConversionArtifactUpgradeRequiredError(winner)
         if winner is not None and self._fx_artifacts_equivalent(winner, election, proofs):

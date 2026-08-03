@@ -1732,11 +1732,11 @@ class FxConversionElection(TemporalMixin, Base):
             name="ck_fx_elections_scope_owner",
         ),
         CheckConstraint(
-            "completeness_state IN ('complete', 'partial', 'refused')",
+            "completeness_state IN ('complete', 'carried', 'partial', 'refused')",
             name="ck_fx_elections_completeness",
         ),
         CheckConstraint(
-            "(completeness_state = 'complete' AND refusal_reason_json IS NULL AND "
+            "(completeness_state IN ('complete', 'carried') AND refusal_reason_json IS NULL AND "
             "refusal_reason_digest IS NULL AND "
             "selected_source_exchange IS NOT NULL AND selected_source_instrument_public_id IS NOT NULL "
             "AND selected_native_symbol IS NOT NULL AND selected_base IS NOT NULL "

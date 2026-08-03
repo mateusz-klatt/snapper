@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql import select
 from sqlalchemy.sql.expression import Executable
 
+from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_proof_digest
 from snapper.data.fx_conversion_digests import build_refusal_reason_digest
@@ -816,3 +817,58 @@ def test_postgresql_trigger_ddl_covers_install_and_drop_shapes() -> None:
     statements.clear()
     drop_fx_conversion_immutability_triggers(connection)
     assert len(statements) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_carried_proof_pins_with_its_recorded_distance(tmp_path: Path) -> None:
+    """A mark carried into a gap persists with the distance it travelled.
+
+    Given a proof whose conversion minute sits four minutes past its candle
+    When the artifact is pinned
+    Then the database accepts it and returns the recorded distance
+    """
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000060")
+    election["completeness_state"] = "carried"
+    election["required_minutes"] = (_MINUTE + timedelta(minutes=4),)
+    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000061")
+    proof["conversion_minute"] = _MINUTE + timedelta(minutes=4)
+    proof["carried_minutes"] = 4
+
+    artifact = await repository.pin_fx_conversion_artifact(election, [proof])
+
+    assert artifact["proofs"][0]["carried_minutes"] == 4
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("conversion_offset", "carried"),
+    [
+        pytest.param(4, 3, id="distance_understates_the_gap"),
+        pytest.param(1, 4, id="distance_overstates_the_gap"),
+        pytest.param(MAX_CARRIED_MINUTES + 2, MAX_CARRIED_MINUTES + 1, id="beyond_the_bound"),
+    ],
+)
+async def test_the_database_refuses_a_proof_whose_distance_disagrees(
+    tmp_path: Path, conversion_offset: int, carried: int
+) -> None:
+    """The recorded distance cannot drift from the two minutes it spans.
+
+    Given a proof whose carried distance contradicts its own minutes, or
+        exceeds the admissible bound
+    When the artifact is pinned
+    Then the database rejects it rather than storing unverifiable evidence
+    """
+    repository = await _repository(tmp_path)
+    election = _election("00000000-0000-7000-8000-000000000062")
+    election["completeness_state"] = "carried"
+    election["required_minutes"] = (_MINUTE + timedelta(minutes=conversion_offset),)
+    proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000063")
+    proof["conversion_minute"] = _MINUTE + timedelta(minutes=conversion_offset)
+    proof["carried_minutes"] = carried
+
+    with pytest.raises(IntegrityError):
+        await repository.pin_fx_conversion_artifact(election, [proof])
+
+    await repository.engine.dispose()

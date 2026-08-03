@@ -21,6 +21,8 @@ from snapper.application.portfolio.fx_conversion_shadow import _artifact_matches
 from snapper.application.portfolio.fx_conversion_shadow import _build_artifact
 from snapper.application.portfolio.fx_conversion_shadow import _log_once
 from snapper.application.portfolio.fx_conversion_shadow import canonical_candidate_planes
+from snapper.application.portfolio.fx_conversion_shadow import carried_minutes_for
+from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_evaluation_completeness
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
@@ -464,3 +466,101 @@ async def test_same_horizon_upgrade_metric_and_impossible_plane_guard(tmp_path: 
     malformed = cast(FxConversionElectionInsertRow, {**election, "selected_base": None})
     assert not _artifact_matches_raw(artifact, malformed, proofs, evaluation)
     await repository.engine.dispose()
+
+
+def _gap_evaluation(gap_minutes: int, mark_minutes: tuple[int, ...] = (0,)) -> FxShadowEvaluation:
+    """Build an election needing a minute that only earlier marks can cover.
+
+    Args:
+        gap_minutes: Offset of the required minute that has no own mark.
+        mark_minutes: Offsets of the minutes that DO carry a mark.
+
+    Returns:
+        One shared-pair evaluation whose gap minute has no exact evidence.
+    """
+    gap = _MINUTE + timedelta(minutes=gap_minutes)
+    rows = tuple(_row(_MINUTE + timedelta(minutes=offset)) for offset in mark_minutes)
+    return _evaluation(frozenset({gap}), rows=rows)
+
+
+def test_carry_resolves_a_gap_within_the_bound() -> None:
+    """A minute with no mark takes the last one observed before it.
+
+    Given a required minute five minutes past its only mark
+    When the raw election is classified and built
+    Then it resolves as carried and records the distance it travelled
+    """
+    evaluation = _gap_evaluation(5)
+
+    assert fx_shadow_evaluation_completeness(evaluation) == "carried"
+
+    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+    assert len(proofs) == 1
+    assert proofs[0]["carried_minutes"] == 5
+    assert proofs[0]["conversion_minute"] == _MINUTE + timedelta(minutes=5)
+    assert proofs[0]["candle_open_minute"] == _MINUTE - timedelta(minutes=1)
+
+
+def test_carry_stops_at_the_bound() -> None:
+    """The furthest admissible carry still resolves, one minute more does not.
+
+    Given gaps exactly at and one minute beyond the bound
+    When each raw election is classified
+    Then the bound is inclusive and the next minute refuses
+    """
+    assert fx_shadow_evaluation_completeness(_gap_evaluation(MAX_CARRIED_MINUTES)) == "carried"
+    assert fx_shadow_evaluation_completeness(_gap_evaluation(MAX_CARRIED_MINUTES + 1)) == "refused"
+
+
+def test_exact_minute_is_complete_and_carries_nothing() -> None:
+    """An observed minute stays complete so audits keep the distinction.
+
+    Given a required minute that has its own mark
+    When the raw election is classified and built
+    Then it is complete and its proof records a zero carry
+    """
+    evaluation = _evaluation()
+
+    assert fx_shadow_evaluation_completeness(evaluation) == "complete"
+
+    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+    assert proofs[0]["carried_minutes"] == 0
+
+
+def test_carry_takes_the_nearest_earlier_mark() -> None:
+    """Freshness wins: the closest preceding mark supplies the rate.
+
+    Given two marks before the gap
+    When the gap is resolved
+    Then the later of them is carried, not the older one
+    """
+    evaluation = _gap_evaluation(6, mark_minutes=(0, 4))
+
+    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+
+    assert proofs[0]["carried_minutes"] == 2
+
+
+def test_carry_never_looks_forward() -> None:
+    """A later mark cannot value an earlier conversion.
+
+    Given the only mark arrives after the required minute
+    When the raw election is classified
+    Then it refuses rather than borrowing a future rate
+    """
+    evaluation = _gap_evaluation(0, mark_minutes=(3,))
+
+    assert fx_shadow_evaluation_completeness(evaluation) == "refused"
+
+
+def test_carried_minutes_for_counts_whole_minutes_from_the_close() -> None:
+    """The recorded distance is measured from the mark's own close minute.
+
+    Given a row whose close minute precedes the conversion
+    When the carried distance is derived
+    Then it counts whole minutes between the two
+    """
+    row = _row()
+
+    assert carried_minutes_for(_MINUTE, row) == 0
+    assert carried_minutes_for(_MINUTE + timedelta(minutes=7), row) == 7
