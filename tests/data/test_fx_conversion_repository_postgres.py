@@ -82,6 +82,7 @@ def _artifact() -> tuple[FxConversionElectionInsertRow, FxConversionProofInsertR
         "timestamp": horizon,
         "election_public_id": election_id,
         "conversion_minute": minute,
+        "carried_minutes": 0,
         "candle_open_minute": minute - timedelta(minutes=1),
         "candle_id": 42,
         "candle_public_id": str(uuid4()),

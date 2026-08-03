@@ -1,6 +1,7 @@
 """Allow bounded carry-forward of an FX mark into a gap minute."""
 
 from collections.abc import Sequence
+from typing import Literal
 
 import sqlalchemy as sa
 from alembic import op
@@ -64,7 +65,7 @@ _OUTCOME_AFTER = (
 )
 
 
-def _recreate_mode() -> str:
+def _recreate_mode() -> Literal["auto", "always", "never"]:
     """Return the batch recreate mode this dialect actually needs.
 
     SQLite cannot alter a CHECK constraint in place, so its table must be

@@ -12,6 +12,7 @@ from datetime import UTC
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol
 from typing import cast
 from unittest.mock import MagicMock
@@ -23,6 +24,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from sqlalchemy.sql.elements import TextClause
 
 _ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -163,9 +165,23 @@ def _revision(engine: sa.Engine) -> str | None:
     return None if value is None else str(value)
 
 
+def _head_revision() -> str:
+    """Return the chain head declared by the migration scripts themselves.
+
+    Derived rather than written down: a literal goes stale the moment a
+    revision is added and then fails as a regression that never happened.
+
+    Returns:
+        The single head revision of the configured script directory.
+    """
+    head = ScriptDirectory.from_config(Config(str(_ALEMBIC_INI))).get_current_head()
+    assert head is not None
+    return head
+
+
 def _assert_head_artifacts(engine: sa.Engine) -> None:
     """Require every compact migration artifact that lacks a direct test."""
-    assert _revision(engine) == "0044"
+    assert _revision(engine) == _head_revision()
     assert "ix_venue_events_cid_event_type" in _indexes(engine, "venue_events")
     assert "ix_trade_commands_client_order_id" in _indexes(engine, "trade_commands")
     assert "ix_peg_status_timestamp" in _indexes(engine, "paired_execution_groups")
@@ -565,3 +581,208 @@ def test_trigger_migrations_refuse_offline_rendering_before_any_ddl(revision: st
         migration.upgrade()
 
     assert output.getvalue() == ""
+
+
+class _SequenceRepairMigration(_ReversibleMigration, Protocol):
+    """Typed helper surface specific to revision 0046."""
+
+    def _rename_temporary_sequence(self, table: str) -> None:
+        """Restore one table's canonical identity sequence."""
+
+
+class _ScalarResult:
+    """Minimal result exposing a single scalar to a migration probe."""
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    def scalar_one(self) -> object:
+        """Return the configured scalar."""
+        return self._value
+
+
+class _RegclassConnection:
+    """Answer ``to_regclass`` probes from a fixed set of existing relations."""
+
+    def __init__(self, dialect_name: str, existing: set[str]) -> None:
+        self.dialect = SimpleNamespace(name=dialect_name)
+        self._existing = existing
+
+    def execute(
+        self, _statement: object, parameters: dict[str, str] | None = None
+    ) -> _ScalarResult:
+        """Report whether the probed relation name exists."""
+        name = "" if parameters is None else parameters.get("name", "")
+        return _ScalarResult(name in self._existing)
+
+
+class _SequenceOperations:
+    """Record the DDL revision 0046 emits against a PostgreSQL bind."""
+
+    def __init__(self, dialect_name: str, existing: set[str]) -> None:
+        self._bind = _RegclassConnection(dialect_name, existing)
+        self.statements: list[str] = []
+
+    def get_bind(self) -> _RegclassConnection:
+        """Return the probe connection."""
+        return self._bind
+
+    def execute(self, statement: object) -> None:
+        """Record one emitted statement."""
+        self.statements.append(str(statement))
+
+
+class _CarriedCountConnection:
+    """Report how many proofs carry a mark, for the revision 0045 guard."""
+
+    def __init__(self, carried: int) -> None:
+        self._carried = carried
+
+    def execute(self, _statement: object) -> _ScalarResult:
+        """Return the configured carried-proof count."""
+        return _ScalarResult(self._carried)
+
+
+class _CarriedCountOperations:
+    """Expose only the bind revision 0045's downgrade guard reads."""
+
+    def __init__(self, carried: int) -> None:
+        self._bind = _CarriedCountConnection(carried)
+
+    def get_bind(self) -> _CarriedCountConnection:
+        """Return the counting connection."""
+        return self._bind
+
+
+def _expected_rename_ddl(table: str) -> tuple[str, str, str]:
+    """Return the three statements a canonical sequence restore must emit.
+
+    Args:
+        table: Table whose identity sequence is restored.
+
+    Returns:
+        Rename, ownership and column-default statements, in emission order.
+    """
+    temporary = f'"_alembic_tmp_{table}_id_seq"'
+    canonical = f'"{table}_id_seq"'
+    return (
+        f"ALTER SEQUENCE {temporary} RENAME TO {canonical}",
+        f'ALTER SEQUENCE {canonical} OWNED BY "{table}".id',
+        f"ALTER TABLE \"{table}\" ALTER COLUMN id SET DEFAULT nextval('{canonical}')",
+    )
+
+
+def _sequence_repair() -> _SequenceRepairMigration:
+    """Import revision 0046 through its typed helper surface."""
+    module = importlib.import_module(
+        "snapper.data.migrations.versions.0046_fx_conversion_sequence_repair"
+    )
+    return cast(_SequenceRepairMigration, module)
+
+
+def test_sequence_repair_is_inert_off_postgresql() -> None:
+    """SQLite has no sequences, so the repair must emit nothing there.
+
+    Given: A bind reporting a non-PostgreSQL dialect
+    When: Revision 0046 upgrades
+    Then: No DDL is emitted at all
+    """
+    migration = _sequence_repair()
+    operations = _SequenceOperations("sqlite", set())
+
+    with patch.object(migration, "op", operations):
+        migration.upgrade()
+
+    assert operations.statements == []
+
+
+def test_sequence_repair_renames_every_surviving_temporary_sequence() -> None:
+    """Both rebuilt tables regain a canonically named, owned sequence.
+
+    Given: A PostgreSQL bind where only the temporary sequences exist
+    When: Revision 0046 upgrades
+    Then: Each table is renamed, re-owned and repointed, in that order
+    """
+    migration = _sequence_repair()
+    existing = {
+        "_alembic_tmp_fx_conversion_elections_id_seq",
+        "_alembic_tmp_fx_conversion_proofs_id_seq",
+    }
+    operations = _SequenceOperations("postgresql", existing)
+
+    with patch.object(migration, "op", operations):
+        migration.upgrade()
+
+    assert operations.statements == [
+        statement
+        for table in ("fx_conversion_elections", "fx_conversion_proofs")
+        for statement in _expected_rename_ddl(table)
+    ]
+
+
+def test_sequence_repair_skips_a_database_that_never_lost_the_name() -> None:
+    """A database whose 0045 run kept canonical names is left untouched.
+
+    Given: A PostgreSQL bind with no temporary sequence present
+    When: One table is repaired
+    Then: Nothing is emitted
+    """
+    migration = _sequence_repair()
+    operations = _SequenceOperations("postgresql", set())
+
+    with patch.object(migration, "op", operations):
+        migration._rename_temporary_sequence("fx_conversion_proofs")
+
+    assert operations.statements == []
+
+
+def test_sequence_repair_refuses_to_clobber_an_occupied_canonical_name() -> None:
+    """A canonical name already in use is never renamed over.
+
+    Given: Both the temporary and the canonical sequence exist
+    When: One table is repaired
+    Then: The repair declines rather than colliding
+    """
+    migration = _sequence_repair()
+    operations = _SequenceOperations(
+        "postgresql",
+        {"_alembic_tmp_fx_conversion_proofs_id_seq", "fx_conversion_proofs_id_seq"},
+    )
+
+    with patch.object(migration, "op", operations):
+        migration._rename_temporary_sequence("fx_conversion_proofs")
+
+    assert operations.statements == []
+
+
+def test_sequence_repair_downgrade_keeps_the_canonical_names() -> None:
+    """Reintroducing a temporary name has no value, so downgrade is inert.
+
+    Given: Revision 0046 applied
+    When: It is reversed
+    Then: The reversal completes without emitting DDL
+    """
+    migration = _sequence_repair()
+    operations = _SequenceOperations("postgresql", set())
+
+    with patch.object(migration, "op", operations):
+        migration.downgrade()
+
+    assert operations.statements == []
+
+
+def test_carry_forward_downgrade_refuses_to_orphan_carried_evidence() -> None:
+    """Restoring the exact-minute rule must not drop carried proofs.
+
+    Given: A database holding proofs that carry a mark across a gap
+    When: Revision 0045 is reversed
+    Then: It refuses, naming how much evidence a replay would lose
+    """
+    module = importlib.import_module(
+        "snapper.data.migrations.versions.0045_fx_conversion_carry_forward"
+    )
+    migration = cast(_ReversibleMigration, module)
+    operations = _CarriedCountOperations(3)
+
+    with patch.object(module, "op", operations), pytest.raises(RuntimeError, match="3 proof"):
+        migration.downgrade()
