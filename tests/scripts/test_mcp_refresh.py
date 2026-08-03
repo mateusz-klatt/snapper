@@ -13,42 +13,7 @@ from scripts.mcp_refresh import PROTECTED_DEPENDENCIES
 from scripts.mcp_refresh import install_dependencies_npm
 from scripts.mcp_refresh import main
 from scripts.mcp_refresh import refresh_mcp
-from scripts.mcp_refresh import remove_npm_lock_file
 from scripts.mcp_refresh import upgrade_dependencies_npm
-
-
-class TestRemoveNpmLockFile:
-    """Test suite for RemoveNpmLockFile functionality."""
-
-    def test_removes_existing_lock_file(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Verify remove_npm_lock_file deletes existing package-lock.json.
-
-        Given: A package-lock.json exists in the snapper-mcp directory,
-        When: remove_npm_lock_file is called with that directory,
-        Then: The file is deleted, True is returned, and removal message is printed.
-        """
-        lock_file = tmp_path / "package-lock.json"
-        lock_file.write_text("{}")
-
-        result = remove_npm_lock_file(tmp_path)
-
-        assert result is True
-        assert not lock_file.exists()
-        captured = capsys.readouterr()
-        assert "Removing package-lock.json" in captured.out
-
-    def test_returns_false_when_no_lock_file(self, tmp_path: Path) -> None:
-        """Verify remove_npm_lock_file returns False when no lock file exists.
-
-        Given: An empty directory with no package-lock.json,
-        When: remove_npm_lock_file is called with that directory,
-        Then: False is returned indicating nothing was removed.
-        """
-        result = remove_npm_lock_file(tmp_path)
-
-        assert result is False
 
 
 class TestUpgradeDependenciesNpm:
@@ -203,14 +168,12 @@ class TestRefreshMcp:
         """
         with (
             patch("scripts.mcp_refresh.upgrade_dependencies_npm") as mock_upgrade,
-            patch("scripts.mcp_refresh.remove_npm_lock_file") as mock_lock,
             patch("scripts.mcp_refresh.remove_node_modules") as mock_nm,
             patch("scripts.mcp_refresh.install_dependencies_npm") as mock_install,
         ):
             refresh_mcp(tmp_path)
 
             mock_upgrade.assert_not_called()
-            mock_lock.assert_not_called()
             mock_nm.assert_not_called()
             mock_install.assert_not_called()
         captured = capsys.readouterr()
@@ -221,7 +184,7 @@ class TestRefreshMcp:
 
         Given: A project root with integrations/snapper-mcp/package.json + lock + node_modules,
         When: refresh_mcp is called with that root,
-        Then: Lock file and node_modules are removed before npm install runs.
+        Then: node_modules is removed, the lock is preserved, and npm install runs.
         """
         mcp_dir = tmp_path / "integrations" / "snapper-mcp"
         mcp_dir.mkdir(parents=True)
@@ -236,7 +199,7 @@ class TestRefreshMcp:
 
             refresh_mcp(tmp_path)
 
-            assert not lock_file.exists()
+            assert lock_file.exists()
             assert not node_modules.exists()
             assert mock_run.call_args_list == [
                 call(
@@ -263,7 +226,6 @@ class TestRefreshMcp:
         """
         with (
             patch("scripts.mcp_refresh.upgrade_dependencies_npm"),
-            patch("scripts.mcp_refresh.remove_npm_lock_file"),
             patch("scripts.mcp_refresh.remove_node_modules"),
             patch("scripts.mcp_refresh.install_dependencies_npm"),
         ):

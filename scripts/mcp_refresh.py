@@ -2,13 +2,22 @@
 
 Upgrades direct dependencies of the snapper-mcp integration package to their
 latest versions while keeping selected protected dependencies at their existing
-version ranges, then removes node_modules and the npm lock file and performs a
-clean install.
+version ranges, then removes node_modules while PRESERVING
+``package-lock.json`` and reinstalls against that lock.
 
 Mirrors scripts/ui_refresh.py but uses npm (snapper-mcp's package manager of
 record) and npm-check-updates for the latest-version bump, since snapper-mcp
 ships its own ``package-lock.json`` and is published as a standalone npm
 package.
+
+The lock is deliberately kept rather than wiped: npm regenerating a lock from
+scratch on a single platform drops the per-platform optional binaries of
+transitive native packages (for example rolldown's ``@rolldown/binding-*``
+set), so a later ``npm ci`` on another OS or in CI fails with a "missing from
+lock file" error. Reifying with ``npm install`` against the existing complete
+lock preserves those cross-platform entries while still updating any dependency
+whose ``package.json`` range the upgrade widened. ``ui_refresh.py`` does wipe
+its lock because pnpm's lockfile records every platform regardless of the host.
 
 ``PROTECTED_DEPENDENCIES`` are held at their current ranges rather than bumped
 to ``latest`` because a newer major would break an ``npm install`` peer
@@ -29,25 +38,7 @@ from scripts.ui_refresh import run_cmd
 from scripts.ui_refresh import write_package_json
 
 MCP_DIR_NAME = "integrations/snapper-mcp"
-NPM_LOCK_FILE = "package-lock.json"
 PROTECTED_DEPENDENCIES: tuple[str, ...] = ("eslint", "@eslint/js", "typescript")
-
-
-def remove_npm_lock_file(mcp_dir: Path) -> bool:
-    """Remove package-lock.json if it exists.
-
-    Args:
-        mcp_dir: Path to the snapper-mcp directory containing the lock file.
-
-    Returns:
-        True if the lock file was removed, False otherwise.
-    """
-    lock_file = mcp_dir / NPM_LOCK_FILE
-    if lock_file.exists():
-        print(f"Removing {NPM_LOCK_FILE}")
-        lock_file.unlink()
-        return True
-    return False
 
 
 def upgrade_dependencies_npm(mcp_dir: Path) -> None:
@@ -61,8 +52,8 @@ def upgrade_dependencies_npm(mcp_dir: Path) -> None:
     a dist-tag pointing at an older release can rewrite a dependency below the
     committed version. The same downgrade guard used by the UI refresh restores
     any such regression, keeping the snapper-mcp refresh monotonic. The
-    subsequent clean ``npm install`` re-resolves the lock file from the
-    corrected package.json, so no interim re-resolve step is needed.
+    subsequent ``npm install`` re-resolves the lock file from the corrected
+    package.json, so no interim re-resolve step is needed.
 
     Args:
         mcp_dir: Path to the snapper-mcp directory containing package.json.
@@ -107,7 +98,11 @@ def install_dependencies_npm(mcp_dir: Path) -> None:
 
 
 def refresh_mcp(root: Path | None = None) -> None:
-    """Run full snapper-mcp refresh - bump deps, wipe lock + node_modules, reinstall.
+    """Run full snapper-mcp refresh - bump deps, wipe node_modules, reinstall.
+
+    The lock file is preserved (see the module docstring) so the per-platform
+    optional binaries of transitive native packages survive the refresh; only
+    node_modules is removed before ``npm install`` reifies against the lock.
 
     Args:
         root: Project root directory. Defaults to the parent of the script
@@ -122,7 +117,6 @@ def refresh_mcp(root: Path | None = None) -> None:
         return
 
     upgrade_dependencies_npm(mcp_dir)
-    remove_npm_lock_file(mcp_dir)
     remove_node_modules(mcp_dir)
     install_dependencies_npm(mcp_dir)
 
