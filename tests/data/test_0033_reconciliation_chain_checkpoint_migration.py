@@ -178,6 +178,7 @@ def test_0033_rejects_a_degraded_chain_tip(
     config = _config(db_url)
     command.upgrade(config, "0033")
     engine = sa.create_engine(db_url)
+    s5778_value_1 = _row_values(table, tip)
     with pytest.raises(sa.exc.IntegrityError):
-        _insert(engine, table, _row_values(table, tip))
+        _insert(engine, table, s5778_value_1)
     engine.dispose()

@@ -644,10 +644,9 @@ async def test_a_second_annulment_of_one_execution_conflicts_with_its_winner(
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
     winner = await _record_annulment(repository, _request(digest))
 
+    s5778_value_1 = _request(digest, sequence_id=2, correction_time=_CORRECTION_AT)
     with pytest.raises(ExecutionAnnulmentConflictError) as conflict:
-        await repository.record_execution_annulment(
-            _request(digest, sequence_id=2, correction_time=_CORRECTION_AT)
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert conflict.value.winner == winner
     assert _KRAKEN_PHANTOM in str(conflict.value)
@@ -668,14 +667,13 @@ async def test_a_witnessed_execution_can_never_be_annulled(
     """
     digest = await _expected_digest(repository, _WALUTOMAT_TRADE)
 
+    s5778_value_1 = _request(
+        digest,
+        target_execution_public_id=_WALUTOMAT_TRADE,
+        exchange="walutomat",
+    )
     with pytest.raises(ExecutionAnnulmentWitnessedError, match="witnessed_execution_target"):
-        await repository.record_execution_annulment(
-            _request(
-                digest,
-                target_execution_public_id=_WALUTOMAT_TRADE,
-                exchange="walutomat",
-            )
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
@@ -739,15 +737,14 @@ async def test_an_unrelated_witness_does_not_block_an_unwitnessed_phantom(
         ),
     )
 
+    s5778_value_1 = _request(
+        witnessed_digest,
+        target_execution_public_id=_PAPER_WITNESSED,
+        scope_sequence=3,
+        **common,
+    )
     with pytest.raises(ExecutionAnnulmentWitnessedError):
-        await repository.record_execution_annulment(
-            _request(
-                witnessed_digest,
-                target_execution_public_id=_PAPER_WITNESSED,
-                scope_sequence=3,
-                **common,
-            )
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_PAPER_WALLET, "live") == [row]
 
@@ -762,13 +759,12 @@ async def test_an_unknown_target_is_refused(repository: SQLAlchemyRepository) ->
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
+    s5778_value_1 = _request(
+        digest,
+        target_execution_public_id="00000000-0000-7000-8000-0000000009ff",
+    )
     with pytest.raises(ExecutionAnnulmentTargetError, match="unknown_execution_target"):
-        await repository.record_execution_annulment(
-            _request(
-                digest,
-                target_execution_public_id="00000000-0000-7000-8000-0000000009ff",
-            )
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
@@ -797,8 +793,9 @@ async def test_a_target_in_a_different_scope_is_refused(
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
+    s5778_value_1 = _request(digest, **overrides)
     with pytest.raises(ExecutionAnnulmentTargetError, match="crossed_execution_annulment_scope"):
-        await repository.record_execution_annulment(_request(digest, **overrides))
+        await repository.record_execution_annulment(s5778_value_1)
 
 
 async def test_a_target_with_an_unparseable_stored_wallet_fails_closed(
@@ -823,14 +820,13 @@ async def test_a_target_with_an_unparseable_stored_wallet_fails_closed(
         )
         await s.commit()
 
+    s5778_value_1 = _request(
+        "c" * 64,
+        target_execution_public_id=corrupt,
+        scope_sequence=2,
+    )
     with pytest.raises(ExecutionAnnulmentTargetError, match="crossed_execution_annulment_scope"):
-        await repository.record_execution_annulment(
-            _request(
-                "c" * 64,
-                target_execution_public_id=corrupt,
-                scope_sequence=2,
-            )
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
 
 async def test_a_target_that_cannot_be_canonicalized_fails_closed(
@@ -857,14 +853,13 @@ async def test_a_target_that_cannot_be_canonicalized_fails_closed(
         )
         await s.commit()
 
+    s5778_value_1 = _request(
+        "c" * 64,
+        target_execution_public_id=uncanonical,
+        scope_sequence=3,
+    )
     with pytest.raises(ExecutionAnnulmentTargetError, match="uncanonicalizable_execution_target"):
-        await repository.record_execution_annulment(
-            _request(
-                "c" * 64,
-                target_execution_public_id=uncanonical,
-                scope_sequence=3,
-            )
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
 
 async def test_a_wrong_expected_digest_is_refused(repository: SQLAlchemyRepository) -> None:
@@ -880,8 +875,9 @@ async def test_a_wrong_expected_digest_is_refused(repository: SQLAlchemyReposito
     """
     other_digest = await _expected_digest(repository, _WALUTOMAT_TRADE)
 
+    s5778_value_1 = _request(other_digest)
     with pytest.raises(ExecutionAnnulmentTargetError, match="execution_digest_mismatch"):
-        await repository.record_execution_annulment(_request(other_digest))
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
@@ -920,10 +916,9 @@ async def test_an_acting_user_no_row_resolves_is_refused(
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
+    s5778_value_1 = _request(digest, annulled_by_user_public_id=_ABSENT_USER)
     with pytest.raises(ExecutionAnnulmentActorError, match="unknown_annulment_actor"):
-        await repository.record_execution_annulment(
-            _request(digest, annulled_by_user_public_id=_ABSENT_USER)
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
@@ -942,10 +937,9 @@ async def test_a_deactivated_acting_user_is_refused(
     """
     digest = await _expected_digest(repository, _KRAKEN_PHANTOM)
 
+    s5778_value_1 = _request(digest, annulled_by_user_public_id=_DEACTIVATED_USER)
     with pytest.raises(ExecutionAnnulmentActorError, match="inactive_annulment_actor"):
-        await repository.record_execution_annulment(
-            _request(digest, annulled_by_user_public_id=_DEACTIVATED_USER)
-        )
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 
@@ -968,8 +962,9 @@ async def test_a_superseded_acting_user_version_authorizes_nothing(
         await s.execute(update(User).where(User.public_id == _USER).values(known_to=_CORRECTION_AT))
         await s.commit()
 
+    s5778_value_1 = _request(digest)
     with pytest.raises(ExecutionAnnulmentActorError, match="unknown_annulment_actor"):
-        await repository.record_execution_annulment(_request(digest))
+        await repository.record_execution_annulment(s5778_value_1)
 
 
 async def test_the_unobserved_count_is_independent_of_the_discovery_page(
@@ -1043,8 +1038,9 @@ async def test_a_scope_slot_collision_without_a_target_winner_reraises(
         )
         await s.commit()
 
+    s5778_value_1 = _request(digest)
     with pytest.raises(IntegrityError):
-        await repository.record_execution_annulment(_request(digest))
+        await repository.record_execution_annulment(s5778_value_1)
 
 
 @pytest.mark.parametrize(
@@ -1072,8 +1068,9 @@ async def test_a_malformed_request_is_refused_before_any_database_work(
         malformed operator command never reaches the fence, the ledger, or the
         witness probe.
     """
+    s5778_value_1 = _request("e" * 64, **overrides)
     with pytest.raises(ValueError):
-        await repository.record_execution_annulment(_request("e" * 64, **overrides))
+        await repository.record_execution_annulment(s5778_value_1)
 
     assert await repository.get_execution_annulments(_MAIN_WALLET, "live") == []
 

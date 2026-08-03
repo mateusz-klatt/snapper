@@ -370,10 +370,11 @@ async def test_rerunning_a_completed_retirement_refuses_instead_of_closing_twice
     """
     await repository.retire_execution_annulment_derived_projections(_request())
 
+    s5778_value_1 = _request()
     with pytest.raises(
         DerivedProjectionRetirementError, match="already_retired_derived_projection"
     ):
-        await repository.retire_execution_annulment_derived_projections(_request())
+        await repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
     assert await _known_to(repository, _CHECKPOINT) == _KNOWN_AT
 
@@ -390,8 +391,9 @@ async def test_a_scope_with_no_applied_correction_has_nothing_to_retire(
         closed. Retiring here would bake into the projections an effect history
         still denies.
     """
+    s5778_value_1 = _request()
     with pytest.raises(DerivedProjectionRetirementError, match="no_applied_execution_annulment"):
-        await unobserved_repository.retire_execution_annulment_derived_projections(_request())
+        await unobserved_repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
     assert await _known_to(unobserved_repository, _CHECKPOINT) == KNOWN_TO_MAX
 
@@ -407,10 +409,9 @@ async def test_an_asserted_row_that_does_not_exist_here_is_refused(
         the already-retired case because the two mistakes call for opposite
         actions.
     """
+    s5778_value_1 = _request(expected_trade_projection_checkpoint_public_ids=[_ABSENT])
     with pytest.raises(DerivedProjectionRetirementError, match="unknown_derived_projection"):
-        await repository.retire_execution_annulment_derived_projections(
-            _request(expected_trade_projection_checkpoint_public_ids=[_ABSENT])
-        )
+        await repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
     assert await _known_to(repository, _CHECKPOINT) == KNOWN_TO_MAX
 
@@ -426,14 +427,13 @@ async def test_an_active_row_the_operator_did_not_assert_refuses_the_whole_act(
         unasserted row, so the improvised blast radius this writer exists to
         remove cannot reappear as an omission.
     """
+    s5778_value_1 = _request(expected_trade_projection_checkpoint_public_ids=[])
     with pytest.raises(
         DerivedProjectionRetirementError,
         match=f"unexpected_derived_projection_set: plane=trade_projection_checkpoints "
         f"unasserted_active={_CHECKPOINT}",
     ):
-        await repository.retire_execution_annulment_derived_projections(
-            _request(expected_trade_projection_checkpoint_public_ids=[])
-        )
+        await repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
     assert await _known_to(repository, _CHECKPOINT) == KNOWN_TO_MAX
 
@@ -466,10 +466,11 @@ async def test_a_version_that_started_after_the_correction_is_refused(
         checkpoint.timestamp = _OBSERVED_AT
         await s.commit()
 
+    s5778_value_1 = _request()
     with pytest.raises(
         DerivedProjectionRetirementError, match="derived_projection_postdates_correction"
     ):
-        await repository.retire_execution_annulment_derived_projections(_request())
+        await repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
     assert await _known_to(repository, _CHECKPOINT) == KNOWN_TO_MAX
 
@@ -535,10 +536,9 @@ async def test_the_retirement_refuses_a_malformed_wallet_identity(
     When: The retirement is attempted.
     Then: It refuses before any database work.
     """
+    s5778_value_1 = _request(wallet_public_id="not-a-uuid")
     with pytest.raises(ValueError, match="wallet_public_id is not a valid uuid"):
-        await repository.retire_execution_annulment_derived_projections(
-            _request(wallet_public_id="not-a-uuid")
-        )
+        await repository.retire_execution_annulment_derived_projections(s5778_value_1)
 
 
 async def test_a_version_closed_between_the_proof_and_the_close_is_refused(

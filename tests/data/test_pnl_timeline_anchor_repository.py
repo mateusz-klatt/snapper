@@ -642,10 +642,11 @@ def test_atomic_write_evidence_refuses_every_scope_and_cut_mismatch(
     else:
         _apply_atomic_cut_mismatch(mismatch, anchor, runtime_evidence)
 
+    s5778_value_1 = cast(PortfolioPnlAnchorWriteEvidence, runtime_evidence)
     with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match="does not match"):
         SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
             anchor,
-            cast(PortfolioPnlAnchorWriteEvidence, runtime_evidence),
+            s5778_value_1,
         )
 
 
@@ -654,9 +655,10 @@ def test_atomic_write_evidence_wraps_malformed_wallet_identity() -> None:
     evidence = _empty_anchor_write_evidence()
     evidence["wallet_public_id"] = "not-a-wallet"
 
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match="malformed"):
         SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 
@@ -763,13 +765,15 @@ async def test_atomic_anchor_writer_rolls_back_changed_sqlite_bundle(
     ):
         session_context.return_value.__aenter__.return_value = session
         session_context.return_value.__aexit__.return_value = None
+        s5778_value_1 = _atomic_anchor()
+        s5778_value_2 = _empty_anchor_write_evidence()
         with pytest.raises(
             PnlTimelineAnchorEvidenceMismatchError,
             match="changed before anchor persistence",
         ):
             await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-                _atomic_anchor(),
-                _empty_anchor_write_evidence(),
+                s5778_value_1,
+                s5778_value_2,
             )
 
     first_statement = session.execute.await_args_list[0].args[0]
@@ -794,10 +798,11 @@ async def test_atomic_transaction_and_fence_refuse_unknown_dialect(
     ):
         with pytest.raises(NotImplementedError, match="write transaction"):
             await repository._begin_portfolio_pnl_anchor_write_transaction(session)
+        s5778_value_1 = _atomic_anchor()
         with pytest.raises(NotImplementedError, match="evidence fence"):
             await repository._acquire_portfolio_pnl_anchor_evidence_fence(
                 session,
-                _atomic_anchor(),
+                s5778_value_1,
             )
     session.execute.assert_not_awaited()
 
@@ -937,10 +942,12 @@ async def test_atomic_writer_rolls_back_unprovable_or_inconsistent_current_bundl
         fail_reload,
     )
     message = "cannot be proven" if failure == "unproven" else "inconsistent"
+    s5778_value_1 = _atomic_anchor()
+    s5778_value_2 = _empty_anchor_write_evidence()
     with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match=message):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(),
-            _empty_anchor_write_evidence(),
+            s5778_value_1,
+            s5778_value_2,
         )
 
     async with repository.session() as s:
@@ -1004,10 +1011,11 @@ async def test_atomic_writer_reraises_integrity_failure_without_winner(
         },
     )
 
+    s5778_value_1 = _empty_anchor_write_evidence()
     with pytest.raises(IntegrityError):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
             invalid,
-            _empty_anchor_write_evidence(),
+            s5778_value_1,
         )
 
     async with repository.session() as s:
@@ -1040,12 +1048,13 @@ async def test_sqlite_atomic_writer_refuses_append_committed_after_initial_bundl
 
     evidence = _empty_anchor_write_evidence()
     evidence["execution_prefix_bundle"] = initial
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="changed before anchor persistence",
     ):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 
@@ -1071,12 +1080,13 @@ async def test_sqlite_atomic_writer_refuses_orphan_fill_after_clean_bundle(
     evidence = _empty_anchor_write_evidence()
     evidence["execution_prefix_bundle"] = initial
 
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="unconsumed fill evidence",
     ):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 
@@ -1216,12 +1226,13 @@ async def test_postgresql_atomic_writer_refuses_append_after_initial_bundle(
     evidence = _empty_anchor_write_evidence()
     evidence["execution_prefix_bundle"] = initial
 
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="changed before anchor persistence",
     ):
         await postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 
@@ -1250,12 +1261,13 @@ async def test_postgresql_atomic_writer_refuses_orphan_fill_after_clean_bundle(
     evidence = _empty_anchor_write_evidence()
     evidence["execution_prefix_bundle"] = initial
 
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="unconsumed fill evidence",
     ):
         await postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 
@@ -1685,12 +1697,13 @@ async def test_atomic_writer_refuses_a_backdated_bundle_offered_as_current_truth
         execution_prefix_bundle=forged,
     )
 
+    s5778_value_1 = _atomic_anchor(point_time=backdated, timestamp=backdated)
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="changed before anchor persistence",
     ):
         await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
-            _atomic_anchor(point_time=backdated, timestamp=backdated),
+            s5778_value_1,
             evidence,
         )
 
@@ -2059,8 +2072,9 @@ async def test_anchor_pre_read_does_not_accept_a_noncanonical_identity(
         s.add(PortfolioPnlPoint(**existing, known_to=KNOWN_TO_MAX))
         await s.commit()
 
+    s5778_value_1 = _anchor()
     with pytest.raises(ValueError, match="public_id"):
-        await repository.record_portfolio_pnl_anchor(_anchor())
+        await repository.record_portfolio_pnl_anchor(s5778_value_1)
 
 
 async def test_anchor_read_rejects_a_structurally_incomplete_stored_row(
@@ -2117,8 +2131,9 @@ async def test_anchor_race_winner_is_validated_before_return(
         hide_winner_from_pre_read,
     )
 
+    s5778_value_1 = _anchor()
     with pytest.raises(ValueError, match="valuation_status"):
-        await repository.record_portfolio_pnl_anchor(_anchor())
+        await repository.record_portfolio_pnl_anchor(s5778_value_1)
 
 
 async def test_anchor_read_rejects_nonfinite_optional_component(
@@ -2185,8 +2200,9 @@ async def test_anchor_writer_rejects_non_strict_json_before_insert(
     message: str,
 ) -> None:
     """Every anchor JSON field rejects non-standard or lossy numeric input."""
+    s5778_value_1 = _malformed_anchor(**{field_name: raw})
     with pytest.raises(ValueError, match=message):
-        await repository.record_portfolio_pnl_anchor(_malformed_anchor(**{field_name: raw}))
+        await repository.record_portfolio_pnl_anchor(s5778_value_1)
 
     async with repository.session() as s:
         count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
@@ -2258,8 +2274,9 @@ async def test_anchor_writer_rejects_malformed_structure_before_insert(
     message: str,
 ) -> None:
     """Malformed anchor contracts fail before they can poison the active scope."""
+    s5778_value_1 = _malformed_anchor(**overrides)
     with pytest.raises(ValueError, match=message):
-        await repository.record_portfolio_pnl_anchor(_malformed_anchor(**overrides))
+        await repository.record_portfolio_pnl_anchor(s5778_value_1)
 
     async with repository.session() as s:
         count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
@@ -2287,12 +2304,13 @@ def test_atomic_write_evidence_refuses_a_claimed_horizon_its_prefix_lacks(
     runtime_evidence = cast(dict[str, object], evidence)
     runtime_evidence[field_name] = _T0 + timedelta(minutes=5)
 
+    s5778_value_1 = _atomic_anchor()
     with pytest.raises(
         PnlTimelineAnchorEvidenceMismatchError,
         match="claims a horizon its prefix was not read at",
     ):
         SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
-            _atomic_anchor(),
+            s5778_value_1,
             evidence,
         )
 

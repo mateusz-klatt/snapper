@@ -625,12 +625,13 @@ async def test_valid_unclassified_history_accepts_first_config_then_freezes(
     )
     state = await _active_state(repository)
     assert state.method == "futures_position"
+    s5778_value_1 = timedelta(seconds=1)
     with pytest.raises(ReconciliationMethodImmutableError):
         await _configure(
             repository,
             "spot_execution_replay",
             sequence_id=6,
-            timestamp=_NOW + timedelta(seconds=1),
+            timestamp=_NOW + s5778_value_1,
         )
 
 
@@ -639,10 +640,9 @@ async def test_real_evaluation_must_match_active_config(tmp_path: Path) -> None:
     repository = await _make_repo(tmp_path, "config-mismatch.db")
     await _seed_wallet(repository)
     await _configure(repository, "futures_position")
+    s5778_value_1 = _evaluation("spot_execution_replay", "incomplete", sequence_id=3)
     with pytest.raises(RuntimeError, match="conflicts with active method config"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("spot_execution_replay", "incomplete", sequence_id=3)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
 
 
 async def test_unclassified_evaluation_rejects_existing_config(tmp_path: Path) -> None:
@@ -650,10 +650,9 @@ async def test_unclassified_evaluation_rejects_existing_config(tmp_path: Path) -
     repository = await _make_repo(tmp_path, "configured-unclassified.db")
     await _seed_wallet(repository)
     await _configure(repository, "futures_position")
+    s5778_value_1 = _evaluation("unclassified", "incomplete", sequence_id=3)
     with pytest.raises(RuntimeError, match="unclassified reconciliation conflicts"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("unclassified", "incomplete", sequence_id=3)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
 
 
 async def test_stale_unclassified_evaluation_after_classification_drops_idempotently(
@@ -735,10 +734,9 @@ async def test_unclassified_cannot_replace_real_state_without_config(
         )
         is None
     )
+    s5778_value_1 = _evaluation("unclassified", "incomplete", sequence_id=4)
     with pytest.raises(RuntimeError, match="method transition is invalid"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("unclassified", "incomplete", sequence_id=4)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
     after = await _active_state(repository)
     assert after.id == before.id
     assert after.method == "futures_position"
@@ -760,10 +758,9 @@ async def test_real_method_cannot_replace_different_real_state(tmp_path: Path) -
             .values(method="spot_execution_replay")
         )
         await session.commit()
+    s5778_value_1 = _evaluation("spot_execution_replay", "incomplete", sequence_id=4)
     with pytest.raises(RuntimeError, match="method transition is invalid"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("spot_execution_replay", "incomplete", sequence_id=4)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
     state = await _active_state(repository)
     assert state.method == "futures_position"
 
@@ -775,14 +772,12 @@ async def test_margin_method_accepts_only_error_and_retains_no_evidence(
     repository = await _make_repo(tmp_path, "margin-error-only.db")
     await _seed_wallet(repository)
     await _configure(repository, "margin_ledger_replay")
+    s5778_value_1 = _evaluation("margin_ledger_replay", "error", sequence_id=2, full=True)
     with pytest.raises(RuntimeError, match="cannot carry full evidence"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("margin_ledger_replay", "error", sequence_id=2, full=True)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
+    s5778_value_1 = _evaluation("margin_ledger_replay", "incomplete", sequence_id=3)
     with pytest.raises(RuntimeError, match="permits only error status"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("margin_ledger_replay", "incomplete", sequence_id=3)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
     await repository.record_portfolio_reconciliation(
         _evaluation("margin_ledger_replay", "error", sequence_id=4)
     )
@@ -836,10 +831,9 @@ async def test_both_locked_writers_fail_closed_without_active_wallet(
     repository = await _make_repo(tmp_path, "absent-wallet.db")
     with pytest.raises(RuntimeError, match="active wallet is absent or ambiguous"):
         await _configure(repository, "futures_position")
+    s5778_value_1 = _evaluation("unclassified", "incomplete", sequence_id=2)
     with pytest.raises(RuntimeError, match="active wallet is absent or ambiguous"):
-        await repository.record_portfolio_reconciliation(
-            _evaluation("unclassified", "incomplete", sequence_id=2)
-        )
+        await repository.record_portfolio_reconciliation(s5778_value_1)
 
 
 async def test_active_config_lookup_fails_closed_on_duplicate_rows(tmp_path: Path) -> None:

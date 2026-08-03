@@ -114,6 +114,7 @@ class TestCreateWalletCredential:
             reconciliation_method="unclassified",
         )
 
+        s5778_value_1 = timedelta(microseconds=1)
         with pytest.raises(CredentialConflictError) as excinfo:
             await repo.create_wallet_credential(
                 wallet_public_id=wallet_id,
@@ -123,7 +124,7 @@ class TestCreateWalletCredential:
                 label=None,
                 session_id="test-session",
                 sequence_id=11,
-                timestamp=base_ts + timedelta(microseconds=1),
+                timestamp=base_ts + s5778_value_1,
                 reconciliation_method="unclassified",
             )
 
@@ -212,6 +213,7 @@ class TestRotateWalletCredential:
     @pytest.mark.asyncio
     async def test_missing_credential_raises_not_found(self, repo: SQLAlchemyRepository) -> None:
         """Rotating a non-existent credential raises ``CredentialNotFoundError``."""
+        s5778_value_1 = datetime.now(UTC)
         with pytest.raises(CredentialNotFoundError):
             await repo.rotate_wallet_credential(
                 credential_public_id="00000000-0000-7000-8000-000000000000",
@@ -219,7 +221,7 @@ class TestRotateWalletCredential:
                 label=None,
                 session_id="test-session",
                 sequence_id=99,
-                timestamp=datetime.now(UTC),
+                timestamp=s5778_value_1,
             )
 
     @pytest.mark.asyncio

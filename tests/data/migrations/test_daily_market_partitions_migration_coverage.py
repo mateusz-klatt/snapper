@@ -123,10 +123,12 @@ def test_inferred_anchor_requires_one_utc_midnight_bound() -> None:
 
     assert migration._infer_parent_anchor(bind, ticks) == _ANCHOR
 
+    s5778_value_1 = _bind(None)
     with pytest.raises(RuntimeError, match="upper bound is unavailable"):
-        migration._infer_parent_anchor(_bind(None), ticks)
+        migration._infer_parent_anchor(s5778_value_1, ticks)
+    s5778_value_1 = _bind(_ANCHOR + timedelta(minutes=1))
     with pytest.raises(RuntimeError, match="not UTC midnight"):
-        migration._infer_parent_anchor(_bind(_ANCHOR + timedelta(minutes=1)), ticks)
+        migration._infer_parent_anchor(s5778_value_1, ticks)
 
 
 def test_resolve_anchor_prefers_explicit_then_consistent_inference() -> None:
@@ -170,8 +172,10 @@ def test_relation_and_requirement_catalog_guards() -> None:
     assert migration._relation_kind(bind, "ticks") == "p:false"
     migration._require(_bind(True), MagicMock(), "unused")
 
+    s5778_value_1 = _bind(False)
+    s5778_value_2 = MagicMock()
     with pytest.raises(RuntimeError, match="catalog drift"):
-        migration._require(_bind(False), MagicMock(), "catalog drift")
+        migration._require(s5778_value_1, s5778_value_2, "catalog drift")
 
 
 def test_column_and_constraint_contract_renderers_cover_all_roles() -> None:
@@ -426,8 +430,9 @@ def test_sqlite_tightening_refuses_nulls_and_emits_exact_batch_contract() -> Non
         unique=True,
     )
 
+    s5778_value_1 = _bind(True, dialect="sqlite")
     with pytest.raises(RuntimeError, match="contains NULL"):
-        migration._upgrade_sqlite(_bind(True, dialect="sqlite"))
+        migration._upgrade_sqlite(s5778_value_1)
 
 
 def test_public_upgrade_routes_supported_dialects_and_adopts_only_ordinary() -> None:

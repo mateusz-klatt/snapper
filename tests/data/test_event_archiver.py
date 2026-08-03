@@ -489,11 +489,13 @@ def test_event_archiver_export_unknown_table(tmp_path: Path) -> None:
     """
     repo = _EventStubRepo()
     archiver = EventArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ValueError, match="(?i)unknown"):
         archiver.export(
             table="unknown",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
         )
 
 
@@ -1504,11 +1506,13 @@ def test_event_archiver_purge_executions_refused_and_delete_unreachable(
     """
     repo = _execution_stub_repo()
     archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ExecutionPurgeUnsupportedError, match="execution archive purge is refused"):
         archiver.export(
             table="executions",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
     assert repo.deleted_ids == []
@@ -1526,11 +1530,13 @@ def test_event_archiver_purge_executions_refused_before_any_side_effect(
     """
     repo = _execution_stub_repo()
     archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ExecutionPurgeUnsupportedError):
         archiver.export(
             table="executions",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
     assert repo.read_calls == 0
@@ -1548,11 +1554,13 @@ def test_event_archiver_purge_executions_refused_in_dry_run(tmp_path: Path) -> N
     """
     repo = _execution_stub_repo()
     archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ExecutionPurgeUnsupportedError):
         archiver.export(
             table="executions",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             dry_run=True,
             purge=True,
         )
@@ -1805,11 +1813,13 @@ def test_event_archiver_integration_purge_executions_refused_with_live_anchor(
     Base.metadata.create_all(repo.engine)
     _seed_execution_scopes(repo, with_anchor=True)
     archiver = EventArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ExecutionPurgeUnsupportedError):
         archiver.export(
             table="executions",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
     assert _surviving_execution_public_ids(repo) == _ALL_EXECUTION_PUBLIC_IDS
@@ -1900,11 +1910,13 @@ def test_event_archiver_purge_executions_refuses_anchor_commit_race(
     Base.metadata.create_all(repo.engine)
     _seed_execution_scopes(repo, with_anchor=False)
     archiver = EventArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ExecutionPurgeUnsupportedError):
         archiver.export(
             table="executions",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
     assert repo.delete_calls == 0

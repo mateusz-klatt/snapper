@@ -717,11 +717,13 @@ async def test_a_horizon_before_the_correction_keeps_failing(
         repository, _request(digest, correction_time=datetime(2020, 1, 1, tzinfo=UTC))
     )
 
+    s5778_value_1 = await _observed_at(repository, correction["public_id"])
+    s5778_value_2 = timedelta(seconds=1)
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            await _observed_at(repository, correction["public_id"]) - timedelta(seconds=1),
+            s5778_value_1 - s5778_value_2,
         )
 
     proven = await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
@@ -848,11 +850,13 @@ async def test_a_witness_beyond_the_read_horizon_still_contradicts(
         )
         await s.commit()
 
+    s5778_value_1 = await _observed_at(repository, correction["public_id"])
+    s5778_value_2 = timedelta(seconds=1)
     with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            await _observed_at(repository, correction["public_id"]) + timedelta(seconds=1),
+            s5778_value_1 + s5778_value_2,
         )
 
 
@@ -902,10 +906,11 @@ async def test_a_manifest_row_naming_a_row_outside_its_slot_is_dangling(
     Then: The fold refuses by name instead of ignoring the row, because a
         correction that binds to nothing must never be silently discarded.
     """
+    s5778_value_1 = _manifest_row(target_execution_public_id=_ABSENT_EXECUTION)
     with pytest.raises(ExecutionChainError, match="dangling_annulment_binding"):
         await _certify_main_live_with(
             repository,
-            [_manifest_row(target_execution_public_id=_ABSENT_EXECUTION)],
+            [s5778_value_1],
         )
 
 
@@ -921,8 +926,9 @@ async def test_a_manifest_row_crossing_its_target_scope_refuses(
         otherwise a coordinate typo would silently fail to exclude a booking the
         operator did repudiate.
     """
+    s5778_value_1 = _manifest_row(scope_sequence=9)
     with pytest.raises(ExecutionChainError, match="crossed_annulment_scope"):
-        await _certify_main_live_with(repository, [_manifest_row(scope_sequence=9)])
+        await _certify_main_live_with(repository, [s5778_value_1])
 
 
 async def test_a_manifest_row_beyond_the_cut_is_simply_not_this_fold(
@@ -936,15 +942,14 @@ async def test_a_manifest_row_beyond_the_cut_is_simply_not_this_fold(
     Then: The row is ignored as belonging to a later cut, and the certification
         returns to its uncorrected verdict — the Kraken phantom still blocks it.
     """
+    s5778_value_1 = _manifest_row(
+        target_execution_public_id=_ABSENT_EXECUTION,
+        scope_sequence=9,
+    )
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await _certify_main_live_with(
             repository,
-            [
-                _manifest_row(
-                    target_execution_public_id=_ABSENT_EXECUTION,
-                    scope_sequence=9,
-                )
-            ],
+            [s5778_value_1],
         )
 
 
@@ -961,8 +966,9 @@ async def test_a_manifest_row_whose_digest_disagrees_refuses(
         refuses, so a repudiation can only ever suppress the exact content an
         operator inspected.
     """
+    s5778_value_1 = _manifest_row()
     with pytest.raises(ExecutionChainError, match="annulment_digest_mismatch"):
-        await _certify_main_live_with(repository, [_manifest_row()])
+        await _certify_main_live_with(repository, [s5778_value_1])
 
 
 def test_two_manifest_rows_for_one_target_refuse_defensively() -> None:
@@ -986,26 +992,25 @@ def test_two_manifest_rows_for_one_target_refuse_defensively() -> None:
         ),
     ]
 
-    with pytest.raises(ExecutionChainError, match="duplicate_annulment_binding"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _PnlTimelineExecutionPrefixSource(
-                wallet_public_id=_MAIN_WALLET,
-                mode="live",
-                watermarks={"kraken": 1},
-                source_rows=[
-                    (
-                        execution,
-                        _order(_KRAKEN_ORDER, _KRAKEN_CID, _MAIN_WALLET, _KRAKEN_INSTRUMENT),
-                        _instrument(_KRAKEN_INSTRUMENT, "kraken", _BTCUSD_SYMBOL),
-                    )
-                ],
-                fill_rows=[],
-                native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
-                order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
-                annulment_rows=manifest,
-                annulment_witnesses={},
+    s5778_value_1 = _PnlTimelineExecutionPrefixSource(
+        wallet_public_id=_MAIN_WALLET,
+        mode="live",
+        watermarks={"kraken": 1},
+        source_rows=[
+            (
+                execution,
+                _order(_KRAKEN_ORDER, _KRAKEN_CID, _MAIN_WALLET, _KRAKEN_INSTRUMENT),
+                _instrument(_KRAKEN_INSTRUMENT, "kraken", _BTCUSD_SYMBOL),
             )
-        )
+        ],
+        fill_rows=[],
+        native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
+        order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
+        annulment_rows=manifest,
+        annulment_witnesses={},
+    )
+    with pytest.raises(ExecutionChainError, match="duplicate_annulment_binding"):
+        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(s5778_value_1)
 
 
 def test_an_uncanonicalizable_target_refuses_instead_of_crashing() -> None:
@@ -1021,26 +1026,25 @@ def test_an_uncanonicalizable_target_refuses_instead_of_crashing() -> None:
     execution = _kraken_phantom()
     execution.timestamp = datetime(2026, 7, 19, 21, 54)
 
-    with pytest.raises(ExecutionChainError, match="uncanonicalizable_annulled_execution"):
-        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(
-            _PnlTimelineExecutionPrefixSource(
-                wallet_public_id=_MAIN_WALLET,
-                mode="live",
-                watermarks={"kraken": 1},
-                source_rows=[
-                    (
-                        execution,
-                        _order(_KRAKEN_ORDER, _KRAKEN_CID, _MAIN_WALLET, _KRAKEN_INSTRUMENT),
-                        _instrument(_KRAKEN_INSTRUMENT, "kraken", _BTCUSD_SYMBOL),
-                    )
-                ],
-                fill_rows=[],
-                native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
-                order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
-                annulment_rows=[_manifest_row()],
-                annulment_witnesses={},
+    s5778_value_1 = _PnlTimelineExecutionPrefixSource(
+        wallet_public_id=_MAIN_WALLET,
+        mode="live",
+        watermarks={"kraken": 1},
+        source_rows=[
+            (
+                execution,
+                _order(_KRAKEN_ORDER, _KRAKEN_CID, _MAIN_WALLET, _KRAKEN_INSTRUMENT),
+                _instrument(_KRAKEN_INSTRUMENT, "kraken", _BTCUSD_SYMBOL),
             )
-        )
+        ],
+        fill_rows=[],
+        native_symbols_by_symbol_public_id={_BTCUSD_SYMBOL: {"BTC-USD"}},
+        order_instrument_ids_by_scope={_KRAKEN_CID: {_KRAKEN_INSTRUMENT}},
+        annulment_rows=[_manifest_row()],
+        annulment_witnesses={},
+    )
+    with pytest.raises(ExecutionChainError, match="uncanonicalizable_annulled_execution"):
+        SQLAlchemyRepository._validate_pnl_timeline_execution_prefix(s5778_value_1)
 
 
 async def test_an_annulled_row_needs_no_lineage_to_be_excluded(
@@ -1144,11 +1148,12 @@ async def test_a_correction_is_not_folded_historically_before_it_was_observed(
     observed_at = datetime.now(UTC) - timedelta(hours=1)
     await _store_bound_manifest_row(repository, observed_at)
 
+    s5778_value_1 = timedelta(seconds=1)
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            observed_at - timedelta(seconds=1),
+            observed_at - s5778_value_1,
         )
 
     proven = await repository.get_pnl_timeline_execution_prefix(
@@ -1177,11 +1182,13 @@ async def test_a_correction_with_no_observation_is_never_folded_historically(
     """
     await _store_bound_manifest_row(repository)
 
+    s5778_value_1 = datetime.now(UTC)
+    s5778_value_2 = timedelta(hours=1)
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            datetime.now(UTC) - timedelta(hours=1),
+            s5778_value_1 - s5778_value_2,
         )
 
 
@@ -1227,11 +1234,12 @@ async def test_an_explicitly_requested_present_horizon_gets_no_exemption(
     """
     await _store_bound_manifest_row(repository)
 
+    s5778_value_1 = datetime.now(UTC)
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix(
             _MAIN_WALLET,
             "live",
-            datetime.now(UTC),
+            s5778_value_1,
         )
 
 
@@ -1666,12 +1674,14 @@ async def test_a_supplied_activation_cut_never_folds_an_unobserved_correction(
     """
     await _store_bound_manifest_row(repository)
 
+    s5778_value_1 = datetime.now(UTC)
+    s5778_value_2 = timedelta(hours=1)
     with pytest.raises(ExecutionChainError, match="missing_execution_shard_lineage"):
         await repository.get_pnl_timeline_execution_prefix_bundle(
             _MAIN_WALLET,
             "live",
             None,
-            datetime.now(UTC) - timedelta(hours=1),
+            s5778_value_1 - s5778_value_2,
         )
 
 

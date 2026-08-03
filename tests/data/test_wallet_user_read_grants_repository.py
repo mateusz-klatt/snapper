@@ -248,12 +248,11 @@ class TestGrantWalletUserReadAccess:
             _read_grant_request(_VIEWER_USER, ids["wallet_paper"], base_ts)
         )
 
+        s5778_value_1 = _read_grant_request(
+            _VIEWER_USER, ids["wallet_paper"], base_ts + timedelta(seconds=1)
+        )
         with pytest.raises(WalletUserReadGrantConflictError) as excinfo:
-            await repo.grant_wallet_user_read_access(
-                _read_grant_request(
-                    _VIEWER_USER, ids["wallet_paper"], base_ts + timedelta(seconds=1)
-                )
-            )
+            await repo.grant_wallet_user_read_access(s5778_value_1)
 
         assert excinfo.value.user_public_id == _VIEWER_USER
         assert excinfo.value.wallet_public_id == ids["wallet_paper"]
@@ -384,11 +383,12 @@ class TestRevokeWalletUserReadGrant:
         """
         ids = await _seed_world(repo)
 
+        s5778_value_1 = datetime.now(UTC)
         with pytest.raises(WalletUserReadGrantNotFoundError, match="no active wallet read grant"):
             await repo.revoke_wallet_user_read_grant(
                 user_public_id=_VIEWER_USER,
                 wallet_public_id=ids["wallet_paper"],
-                revoked_at=datetime.now(UTC),
+                revoked_at=s5778_value_1,
             )
 
     async def test_double_revoke_raises_not_found(self, repo: SQLAlchemyRepository) -> None:
@@ -410,11 +410,12 @@ class TestRevokeWalletUserReadGrant:
             revoked_at=base_ts + timedelta(minutes=1),
         )
 
+        s5778_value_1 = timedelta(minutes=2)
         with pytest.raises(WalletUserReadGrantNotFoundError):
             await repo.revoke_wallet_user_read_grant(
                 user_public_id=_VIEWER_USER,
                 wallet_public_id=ids["wallet_paper"],
-                revoked_at=base_ts + timedelta(minutes=2),
+                revoked_at=base_ts + s5778_value_1,
             )
 
     async def test_regrant_after_revoke_succeeds(self, repo: SQLAlchemyRepository) -> None:

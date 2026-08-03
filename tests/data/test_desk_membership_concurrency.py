@@ -329,10 +329,11 @@ async def test_desk_directory_rejects_inactive_identity(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Directory reads reject an unknown or inactive desk identity."""
+    s5778_value_1 = datetime.now(UTC)
     with pytest.raises(DeskMembershipNotFoundError, match="desk"):
         await repository.list_human_desk_members(
             "00000000-0000-7000-8000-000000000199",
-            datetime.now(UTC),
+            s5778_value_1,
         )
 
 

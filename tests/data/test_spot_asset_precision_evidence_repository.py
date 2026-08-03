@@ -441,9 +441,10 @@ async def test_batched_read_rejects_overlapping_duplicate_evidence(
         )
         await session.commit()
 
+    s5778_value_1 = timedelta(minutes=90)
     with pytest.raises(RuntimeError, match="duplicate spot asset precision evidence"):
         await repository.get_spot_asset_precision_evidence(
-            "walutomat", ["EUR"], _NOW + timedelta(minutes=90)
+            "walutomat", ["EUR"], _NOW + s5778_value_1
         )
 
 
@@ -472,10 +473,11 @@ def test_sync_upsert_is_atomic_caller_owned_scd2(tmp_path: Path) -> None:
             DatabaseRepository.upsert_spot_asset_precision_evidence_sync(session, second)
             == "updated"
         )
+        s5778_value_1 = _evidence(replace_balance=False, replace_fee=False)
         with pytest.raises(ValueError, match="at least one"):
             DatabaseRepository.upsert_spot_asset_precision_evidence_sync(
                 session,
-                _evidence(replace_balance=False, replace_fee=False),
+                s5778_value_1,
             )
         session.commit()
         rows = (
@@ -692,10 +694,9 @@ async def test_upsert_rejects_payload_without_an_observed_plane(
     repository: SQLAlchemyRepository,
 ) -> None:
     """An all-preserve payload cannot create an evidence-free row."""
+    s5778_value_1 = _evidence(replace_balance=False, replace_fee=False)
     with pytest.raises(ValueError, match="at least one"):
-        await repository.upsert_spot_asset_precision_evidence(
-            _evidence(replace_balance=False, replace_fee=False)
-        )
+        await repository.upsert_spot_asset_precision_evidence(s5778_value_1)
 
 
 @pytest.mark.asyncio
@@ -842,8 +843,9 @@ async def test_absent_key_nonunique_integrity_error_is_not_retried(
 
     monkeypatch.setattr(AsyncSession, "commit", fail_commit)
 
+    s5778_value_1 = _evidence()
     with pytest.raises(IntegrityError, match="check constraint failed"):
-        await repository.upsert_spot_asset_precision_evidence(_evidence())
+        await repository.upsert_spot_asset_precision_evidence(s5778_value_1)
 
     assert commit_calls == 1
 
@@ -864,15 +866,14 @@ async def test_existing_key_integrity_error_is_not_retried(
         raise IntegrityError("update", {}, RuntimeError("replacement conflict"))
 
     monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+    s5778_value_1 = _evidence(
+        timestamp=_NOW + timedelta(hours=1),
+        balance_decimals=5,
+        balance_version="balance-v2",
+        replace_fee=False,
+    )
     with pytest.raises(IntegrityError, match="replacement conflict"):
-        await repository.upsert_spot_asset_precision_evidence(
-            _evidence(
-                timestamp=_NOW + timedelta(hours=1),
-                balance_decimals=5,
-                balance_version="balance-v2",
-                replace_fee=False,
-            )
-        )
+        await repository.upsert_spot_asset_precision_evidence(s5778_value_1)
     assert commit_calls == 1
 
 

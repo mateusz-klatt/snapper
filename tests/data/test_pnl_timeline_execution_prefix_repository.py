@@ -1522,12 +1522,16 @@ def test_prefix_rejects_reusing_one_exact_fill_for_two_executions() -> None:
     fill.exec_id = "shared-exec"
     fill.trade_id = "shared-trade"
 
+    s5778_value_1 = _order()
+    s5778_value_2 = _instrument()
+    s5778_value_3 = _order()
+    s5778_value_4 = _instrument()
     with pytest.raises(ExecutionChainError, match="reused_execution_fill_lineage"):
         _certified_prefix(
             {"kraken": 2},
             [
-                (first, _order(), _instrument()),
-                (second, _order(), _instrument()),
+                (first, s5778_value_1, s5778_value_2),
+                (second, s5778_value_3, s5778_value_4),
             ],
             [fill],
             {_SYMBOL: {"BTC-USD"}},
@@ -1615,26 +1619,28 @@ def test_prefix_exact_precompute_rejects_conflicting_same_symbol_lineages() -> N
         fill.trade_id = "shared-trade"
     order = _order()
 
+    s5778_value_1 = _PnlTimelineExecutionCandidate(
+        execution=first_execution,
+        order=order,
+        client_order_id=_CLIENT_ORDER,
+        symbol_public_id=_SYMBOL,
+        allowed_native_symbols=frozenset({"FIRST-USD"}),
+    )
+    s5778_value_2 = _PnlTimelineExecutionCandidate(
+        execution=second_execution,
+        order=order,
+        client_order_id=_CLIENT_ORDER,
+        symbol_public_id=_SYMBOL,
+        allowed_native_symbols=frozenset({"SECOND-USD"}),
+    )
     with pytest.raises(
         ExecutionChainError,
         match="ambiguous_execution_fill_instrument_lineage",
     ):
         SQLAlchemyRepository._resolve_pnl_timeline_execution_shards(
             [
-                _PnlTimelineExecutionCandidate(
-                    execution=first_execution,
-                    order=order,
-                    client_order_id=_CLIENT_ORDER,
-                    symbol_public_id=_SYMBOL,
-                    allowed_native_symbols=frozenset({"FIRST-USD"}),
-                ),
-                _PnlTimelineExecutionCandidate(
-                    execution=second_execution,
-                    order=order,
-                    client_order_id=_CLIENT_ORDER,
-                    symbol_public_id=_SYMBOL,
-                    allowed_native_symbols=frozenset({"SECOND-USD"}),
-                ),
+                s5778_value_1,
+                s5778_value_2,
             ],
             [first_fill, second_fill],
             {_CLIENT_ORDER: {_INSTRUMENT}},
@@ -2822,6 +2828,17 @@ def test_prefix_fallback_rejects_actual_overlap_between_symbol_lineages() -> Non
     fill.exec_id = None
     fill.trade_id = None
 
+    s5778_value_1 = _order(exchange_order_id="overlap-order")
+    s5778_value_2 = _instrument()
+    s5778_value_3 = _order(
+        _COLLIDING_ORDER,
+        instrument_public_id=_COLLIDING_INSTRUMENT,
+        exchange_order_id="overlap-order",
+    )
+    s5778_value_4 = _instrument(
+        public_id=_COLLIDING_INSTRUMENT,
+        symbol_public_id=_COLLIDING_SYMBOL,
+    )
     with pytest.raises(
         ExecutionChainError,
         match="ambiguous_execution_order_instrument_lineage",
@@ -2831,20 +2848,13 @@ def test_prefix_fallback_rejects_actual_overlap_between_symbol_lineages() -> Non
             [
                 (
                     first_execution,
-                    _order(exchange_order_id="overlap-order"),
-                    _instrument(),
+                    s5778_value_1,
+                    s5778_value_2,
                 ),
                 (
                     second_execution,
-                    _order(
-                        _COLLIDING_ORDER,
-                        instrument_public_id=_COLLIDING_INSTRUMENT,
-                        exchange_order_id="overlap-order",
-                    ),
-                    _instrument(
-                        public_id=_COLLIDING_INSTRUMENT,
-                        symbol_public_id=_COLLIDING_SYMBOL,
-                    ),
+                    s5778_value_3,
+                    s5778_value_4,
                 ),
             ],
             [fill],
@@ -3188,20 +3198,24 @@ def test_prefix_validator_rejects_out_of_range_and_empty_resolved_shard() -> Non
 
     invalid_wallet_execution = _execution("kraken", 1)
     invalid_wallet_execution.wallet_public_id = "not-a-wallet-uuid"
+    invalid_order = _order()
+    invalid_instrument = _instrument()
+    invalid_fill = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD)
     with pytest.raises(ExecutionChainError, match="invalid_execution_fill_identity"):
         _certified_prefix(
             {"kraken": 1},
-            [(invalid_wallet_execution, _order(), _instrument())],
-            [_fill_event(_CLIENT_ORDER, _KRAKEN_SHARD)],
+            [(invalid_wallet_execution, invalid_order, invalid_instrument)],
+            [invalid_fill],
             {_SYMBOL: {"BTC-USD"}},
             {_CLIENT_ORDER: {_INSTRUMENT}},
         )
 
+    shardless_fill = _fill_event(_CLIENT_ORDER, "")
     with pytest.raises(ExecutionChainError, match="ambiguous_execution_shard_lineage"):
         _certified_prefix(
             {"kraken": 1},
             source_rows,
-            [ignored_fill, _fill_event(_CLIENT_ORDER, "")],
+            [ignored_fill, shardless_fill],
             {_SYMBOL: {"BTC-USD"}},
             {_CLIENT_ORDER: {_INSTRUMENT}},
         )

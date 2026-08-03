@@ -515,10 +515,12 @@ class TestDialectAwareTotalEstimate:
 
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
         monkeypatch.setattr(type(repo), "dialect_name", "mysql")
+        s5778_value_1 = _StubSession()
         with pytest.raises(NotImplementedError, match="dialect=mysql"):
-            await repo._count_total_estimate(_StubSession(), Telemetry)
+            await repo._count_total_estimate(s5778_value_1, Telemetry)
+        s5778_value_1 = _StubSession()
         with pytest.raises(NotImplementedError, match="dialect=mysql"):
-            await repo._count_index_estimate(_StubSession(), Candle, "uq_candle_itf_open")
+            await repo._count_index_estimate(s5778_value_1, Candle, "uq_candle_itf_open")
 
     @pytest.mark.asyncio
     async def test_total_clamps_to_current_when_estimate_below_current(

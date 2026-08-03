@@ -295,6 +295,7 @@ class TestCreateWallet:
             timestamp=base_ts,
         )
 
+        s5778_value_1 = timedelta(seconds=1)
         with pytest.raises(WalletConflictError) as excinfo:
             await repo.create_wallet(
                 label="default",
@@ -302,7 +303,7 @@ class TestCreateWallet:
                 is_paper=False,
                 session_id="test-session",
                 sequence_id=2,
-                timestamp=base_ts + timedelta(seconds=1),
+                timestamp=base_ts + s5778_value_1,
             )
 
         assert excinfo.value.label == "default"
@@ -420,13 +421,14 @@ class TestCreateOperator:
             timestamp=base_ts,
         )
 
+        s5778_value_1 = timedelta(seconds=1)
         with pytest.raises(OperatorConflictError) as excinfo:
             await repo.create_operator(
                 label="firm-desk",
                 description=None,
                 session_id="test-session",
                 sequence_id=2,
-                timestamp=base_ts + timedelta(seconds=1),
+                timestamp=base_ts + s5778_value_1,
             )
 
         assert excinfo.value.label == "firm-desk"

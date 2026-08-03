@@ -911,10 +911,9 @@ async def test_conflicting_same_evaluation_key_fails_closed(tmp_path: Path) -> N
     """
     repo = await _make_repo(tmp_path)
     await repo.record_portfolio_reconciliation(_evaluation(_T0, "mismatched"))
+    s5778_value_1 = _evaluation(_T0, "mismatched", expected_json='{"quantity": 999}')
     with pytest.raises(RuntimeError, match="conflicting reconciliation evaluation replay"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0, "mismatched", expected_json='{"quantity": 999}')
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 1
     assert len(await _states(repo)) == 1
 
@@ -1036,10 +1035,9 @@ async def test_missing_active_predecessor_with_prior_observations_fails_closed(
         else:
             active.known_to = _T0 + timedelta(seconds=2)
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
     with pytest.raises(RuntimeError, match="predecessor is missing for prior observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 2
     assert await _episodes(repo) == []
 
@@ -1071,10 +1069,9 @@ async def test_newer_observation_than_predecessor_fails_closed(tmp_path: Path) -
             "timestamp": evaluation["bus_time"],
         },
     )
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
     with pytest.raises(RuntimeError, match="does not reference the latest observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 2
 
 
@@ -1116,10 +1113,9 @@ async def test_coherent_state_rewind_to_older_observation_fails_closed(
             )
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
     with pytest.raises(RuntimeError, match="does not reference the latest observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 2
     assert await _episodes(repo) == []
 
@@ -1148,10 +1144,9 @@ async def test_newly_appended_lower_key_observation_fails_closed(tmp_path: Path)
             "drift_episode_public_id": None,
         },
     )
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=3)
     with pytest.raises(RuntimeError, match="does not reference the latest observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=3)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 2
 
 
@@ -1203,14 +1198,13 @@ async def test_transaction_failure_leaves_no_orphan_rows(
             )
         )
         await session.commit()
+    s5778_value_1 = _evaluation(
+        _T0 + timedelta(seconds=prepare_count + 1),
+        "mismatched",
+        sequence_id=prepare_count + 1,
+    )
     with pytest.raises(IntegrityError):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(
-                _T0 + timedelta(seconds=prepare_count + 1),
-                "mismatched",
-                sequence_id=prepare_count + 1,
-            )
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     after = (len(await _observations(repo)), len(await _states(repo)), len(await _episodes(repo)))
     assert after == before
 
@@ -1364,8 +1358,9 @@ async def test_paper_evaluation_rolls_back_without_entering_storage(tmp_path: Pa
         episode row survives either transaction attempt.
     """
     repo = await _make_repo(tmp_path)
+    s5778_value_1 = _evaluation(_T0, "mismatched", mode="paper")
     with pytest.raises(RuntimeError, match="identity is invalid"):
-        await repo.record_portfolio_reconciliation(_evaluation(_T0, "mismatched", mode="paper"))
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert await _observations(repo) == []
     assert await _states(repo) == []
     assert await _episodes(repo) == []
@@ -1683,10 +1678,9 @@ async def test_missing_or_non_open_episode_fails_closed(
             episode.closed_at = _T0 + timedelta(seconds=4)
             episode.resolution_reason = "matched"
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=5), "mismatched", sequence_id=5)
     with pytest.raises(RuntimeError, match="no open drift episode"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "mismatched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 3
 
 
@@ -1722,10 +1716,9 @@ async def test_forged_predecessor_observation_lineage_fails_closed(
             "open_drift_episode_public_id": None,
         },
     )
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
     with pytest.raises(RuntimeError, match=f"{lineage} observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _states(repo)) == 1
 
 
@@ -1748,10 +1741,9 @@ async def test_cross_account_episode_identity_mutation_fails_closed(tmp_path: Pa
             .values(wallet_public_id=_OTHER_WALLET)
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=4), "mismatched", sequence_id=4)
     with pytest.raises(RuntimeError, match="episode identity"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=4), "mismatched", sequence_id=4)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 3
 
 
@@ -1782,10 +1774,9 @@ async def test_tampered_episode_opened_at_fails_closed_on_next_write(
             .values(opened_at=_T0)
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=4), next_status, sequence_id=4)
     with pytest.raises(RuntimeError, match="opened_at is inconsistent"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=4), next_status, sequence_id=4)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 3
     assert len(await _episodes(repo)) == 1
 
@@ -1902,10 +1893,9 @@ async def test_forged_episode_observation_lineage_fails_closed(
         await session.commit()
     observation_count = len(await _observations(repo))
     episode_count = len(await _episodes(repo))
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
     with pytest.raises(RuntimeError, match=message):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == observation_count
     assert len(await _episodes(repo)) == episode_count
 
@@ -1962,14 +1952,13 @@ async def test_retained_non_full_episode_lineage_fails_closed(
         await session.commit()
     observation_count = len(await _observations(repo))
     episode_count = len(await _episodes(repo))
+    s5778_value_1 = _evaluation(
+        _T0 + timedelta(seconds=next_sequence),
+        "matched",
+        sequence_id=next_sequence,
+    )
     with pytest.raises(RuntimeError, match=f"{lineage} observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(
-                _T0 + timedelta(seconds=next_sequence),
-                "matched",
-                sequence_id=next_sequence,
-            )
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == observation_count
     assert len(await _episodes(repo)) == episode_count
 
@@ -2052,10 +2041,9 @@ async def test_self_consistent_older_episode_lineage_fails_state_cross_validatio
         )
         await session.commit()
     episode_count = len(await _episodes(repo))
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
     with pytest.raises(RuntimeError, match="lineage does not match reconciliation state"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 4
     assert len(await _episodes(repo)) == episode_count
 
@@ -2120,10 +2108,9 @@ async def test_forged_current_observation_metadata_fails_closed(tmp_path: Path) 
             .values(session_id=_OTHER_SESSION)
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
     with pytest.raises(RuntimeError, match="current observation metadata"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 1
 
 
@@ -2155,10 +2142,9 @@ async def test_forged_last_full_outcome_fails_closed(tmp_path: Path) -> None:
         state.consecutive_full_mismatches = 0
         state.last_full_outcome = "matched"
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
     with pytest.raises(RuntimeError, match="last-full observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=2), "mismatched", sequence_id=3)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 2
 
 
@@ -2199,10 +2185,9 @@ async def test_forged_retained_full_lineage_fails_closed(
             .values(tampering)
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=5), "mismatched", sequence_id=5)
     with pytest.raises(RuntimeError, match="last-full observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=5), "mismatched", sequence_id=5)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 4
     assert len(await _episodes(repo)) == 1
 
@@ -2223,10 +2208,9 @@ async def test_forged_detail_observation_payload_fails_closed(tmp_path: Path) ->
             .values(expected_json='{"quantity": 999}')
         )
         await session.commit()
+    s5778_value_1 = _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
     with pytest.raises(RuntimeError, match="detail observation"):
-        await repo.record_portfolio_reconciliation(
-            _evaluation(_T0 + timedelta(seconds=1), "mismatched", sequence_id=2)
-        )
+        await repo.record_portfolio_reconciliation(s5778_value_1)
     assert len(await _observations(repo)) == 1
 
 

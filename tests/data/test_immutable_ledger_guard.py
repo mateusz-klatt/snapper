@@ -370,10 +370,11 @@ def test_delete_rows_by_id_refuses_aliased_execution(tmp_path: Path) -> None:
     Then: ``ExecutionPhysicalMutationError`` is raised and the row survives.
     """
     repo, row_id = _make_sync_repo_with_one_execution(tmp_path)
+    s5778_value_1 = cast(type[object], aliased(Execution))
     with pytest.raises(
         ExecutionPhysicalMutationError, match="physical execution deletion is refused"
     ):
-        repo.delete_rows_by_id(cast(type[object], aliased(Execution)), [row_id])
+        repo.delete_rows_by_id(s5778_value_1, [row_id])
     with repo.get_session() as session:
         surviving = session.execute(select(func.count()).select_from(Execution)).scalar_one()
     assert surviving == 1
@@ -388,10 +389,11 @@ def test_delete_rows_by_id_refuses_execution_table_object(tmp_path: Path) -> Non
     Then: ``ExecutionPhysicalMutationError`` is raised and the row survives.
     """
     repo, row_id = _make_sync_repo_with_one_execution(tmp_path)
+    s5778_value_1 = cast(type[object], Execution.__table__)
     with pytest.raises(
         ExecutionPhysicalMutationError, match="physical execution deletion is refused"
     ):
-        repo.delete_rows_by_id(cast(type[object], Execution.__table__), [row_id])
+        repo.delete_rows_by_id(s5778_value_1, [row_id])
     with repo.get_session() as session:
         surviving = session.execute(select(func.count()).select_from(Execution)).scalar_one()
     assert surviving == 1
@@ -406,12 +408,12 @@ def test_bulk_insert_from_archive_refuses_aliased_execution(tmp_path: Path) -> N
     Then: ``ExecutionPhysicalMutationError`` is raised and no row is added.
     """
     repo, _row_id = _make_sync_repo_with_one_execution(tmp_path)
+    s5778_value_1 = cast(type[object], aliased(Execution))
+    s5778_value_2 = _archive_candidate()
     with pytest.raises(
         ExecutionPhysicalMutationError, match="physical execution reintroduction is refused"
     ):
-        repo.bulk_insert_from_archive(
-            cast(type[object], aliased(Execution)), [_archive_candidate()]
-        )
+        repo.bulk_insert_from_archive(s5778_value_1, [s5778_value_2])
     with repo.get_session() as session:
         count = session.execute(select(func.count()).select_from(Execution)).scalar_one()
     assert count == 1
@@ -430,12 +432,12 @@ def test_bulk_insert_from_archive_refuses_execution_table_object(tmp_path: Path)
     Then: ``ExecutionPhysicalMutationError`` is raised and no row is added.
     """
     repo, _row_id = _make_sync_repo_with_one_execution(tmp_path)
+    s5778_value_1 = cast(type[object], Execution.__table__)
+    s5778_value_2 = _archive_candidate()
     with pytest.raises(
         ExecutionPhysicalMutationError, match="physical execution reintroduction is refused"
     ):
-        repo.bulk_insert_from_archive(
-            cast(type[object], Execution.__table__), [_archive_candidate()]
-        )
+        repo.bulk_insert_from_archive(s5778_value_1, [s5778_value_2])
     with repo.get_session() as session:
         count = session.execute(select(func.count()).select_from(Execution)).scalar_one()
     assert count == 1
@@ -495,12 +497,14 @@ async def test_upsert_batch_refuses_every_execution_spelling(
         ledger under any target shape.
     """
     for target in (Execution, aliased(Execution), cast(Table, Execution.__table__)):
+        s5778_value_1 = cast(type[Execution], target)
+        s5778_value_2 = _archive_candidate()
         with pytest.raises(
             ExecutionPhysicalMutationError, match="physical execution upsert is refused"
         ):
             await async_repo._upsert_batch(
-                cast(type[Execution], target),
-                [_archive_candidate()],
+                s5778_value_1,
+                [s5778_value_2],
                 ["wallet_public_id", "exchange", "mode", "scope_sequence"],
             )
 

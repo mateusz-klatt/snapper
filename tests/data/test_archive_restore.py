@@ -431,8 +431,9 @@ def test_restore_refuses_transposed_trade_header(tmp_path: Path) -> None:
     repository.get_existing_archive_keys.return_value = set()
     repository.bulk_insert_from_archive.return_value = 1
 
+    s5778_value_1 = ArchiveRestorer(repository)
     with pytest.raises(ValueError, match="CSV header mismatch"):
-        ArchiveRestorer(repository).restore(table="trades", paths=[csv_path])
+        s5778_value_1.restore(table="trades", paths=[csv_path])
 
     repository.get_existing_archive_keys.assert_not_called()
     repository.bulk_insert_from_archive.assert_not_called()
@@ -449,8 +450,9 @@ def test_restore_refuses_unsupported_archive_extension(tmp_path: Path) -> None:
     archive_path.write_text(",".join(EVENT_TABLES["ticks"].columns), encoding="utf-8")
     repository = MagicMock(spec=DatabaseRepository)
 
+    s5778_value_1 = ArchiveRestorer(repository)
     with pytest.raises(ValueError, match="Unsupported archive extension"):
-        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+        s5778_value_1.restore(table="ticks", paths=[archive_path])
 
     repository.get_existing_archive_keys.assert_not_called()
     repository.bulk_insert_from_archive.assert_not_called()
@@ -478,8 +480,9 @@ def test_restore_refuses_row_with_wrong_field_count(tmp_path: Path) -> None:
     repository = MagicMock(spec=DatabaseRepository)
     expected_message = f"CSV row 2 has 3 fields; expected {len(header)}"
 
+    s5778_value_1 = ArchiveRestorer(repository)
     with pytest.raises(ValueError, match=expected_message):
-        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+        s5778_value_1.restore(table="ticks", paths=[archive_path])
 
     repository.get_existing_archive_keys.assert_not_called()
     repository.bulk_insert_from_archive.assert_not_called()
@@ -520,8 +523,9 @@ def test_restore_refuses_empty_temporal_identity(
         writer.writerow(row)
     repository = MagicMock(spec=DatabaseRepository)
 
+    s5778_value_1 = ArchiveRestorer(repository)
     with pytest.raises(ValueError, match="CSV temporal identity fields must be non-empty"):
-        ArchiveRestorer(repository).restore(table="ticks", paths=[archive_path])
+        s5778_value_1.restore(table="ticks", paths=[archive_path])
 
     repository.get_existing_archive_keys.assert_not_called()
     repository.bulk_insert_from_archive.assert_not_called()

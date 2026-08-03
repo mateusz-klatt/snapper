@@ -150,8 +150,9 @@ class TestUpsertInstrumentFeedHealth:
     @pytest.mark.asyncio
     async def test_uppercase_exchange_rejected(self, _repo: SQLAlchemyRepository) -> None:
         """The lowercase-exchange CHECK rejects a mixed-case exchange."""
+        s5778_value_1 = _row(exchange="Kraken")
         with pytest.raises(IntegrityError):
-            await _repo.upsert_instrument_feed_health([_row(exchange="Kraken")])
+            await _repo.upsert_instrument_feed_health([s5778_value_1])
 
 
 class TestListInstrumentFeedHealth:

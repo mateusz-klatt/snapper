@@ -266,11 +266,12 @@ def test_manual_cutover_refuses_to_drop_every_ordinary_check() -> None:
     When: The independent runtime cutover planner is asked to render DDL.
     Then: It refuses before emitting a parent or renaming the source table.
     """
+    s5778_value_1 = lifecycle._spec("ticks")
     with pytest.raises(
         lifecycle.DailyPartitionError,
         match="no ordinary CHECK constraints to preserve",
     ):
-        lifecycle._cutover_statements(lifecycle._spec("ticks"), _ANCHOR, ())
+        lifecycle._cutover_statements(s5778_value_1, _ANCHOR, ())
 
 
 def test_parent_unique_indexes_are_standalone_and_keep_the_exact_keys() -> None:
@@ -345,11 +346,12 @@ def test_sequence_preflight_refuses_parameter_drift() -> None:
     connection = _connection_double()
     connection.scalar.return_value = False
 
+    s5778_value_1 = lifecycle._spec("ticks")
     with pytest.raises(
         lifecycle.DailyPartitionError,
         match="ticks_id_seq parameters or ownership are not exact",
     ):
-        lifecycle._verify_sequence_owner(connection, lifecycle._spec("ticks"))
+        lifecycle._verify_sequence_owner(connection, s5778_value_1)
 
     statement = str(connection.scalar.call_args.args[0])
     assert "sequence_parameters.seqcache = 1" in statement
@@ -366,10 +368,11 @@ def test_adoption_refuses_target_name_collisions_before_preparation() -> None:
     connection = _connection_double()
     connection.execute.return_value.scalars.return_value = iter(("ticks_legacy",))
 
+    s5778_value_1 = lifecycle._spec("ticks")
     with pytest.raises(lifecycle.DailyPartitionError) as error:
         lifecycle._verify_adoption_names_available(
             connection,
-            lifecycle._spec("ticks"),
+            s5778_value_1,
             _ANCHOR,
         )
 
@@ -676,8 +679,9 @@ def test_partitioned_noop_refuses_a_nested_or_foreign_direct_child() -> None:
     )
     report = _partitioned_report("ticks", (valid, nested))
 
+    s5778_value_1 = lifecycle._spec("ticks")
     with pytest.raises(lifecycle.DailyPartitionError) as error:
-        lifecycle._verify_direct_partition_shapes(lifecycle._spec("ticks"), report)
+        lifecycle._verify_direct_partition_shapes(s5778_value_1, report)
 
     assert str(error.value) == (
         "refused: ticks direct child partition_probe.ticks_d20260801 "

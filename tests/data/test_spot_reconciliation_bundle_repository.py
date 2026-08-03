@@ -579,9 +579,10 @@ async def test_bundle_refuses_an_unprovable_manifest_binding(
     repo = await _anchored_replay_scope(tmp_path)
     await _annul_replay_execution(repo, 4, **options)
 
+    s5778_value_1 = frozenset({"EUR"})
     with pytest.raises(ExecutionChainError, match=reason):
         await repo.get_spot_reconciliation_bundle(
-            _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+            _WALLET, "kraken", "live", _AS_OF, 4, s5778_value_1
         )
     await repo.engine.dispose()
 
@@ -642,9 +643,10 @@ async def test_bundle_refuses_a_contradicted_annulment(
         )
         await session.commit()
 
+    s5778_value_1 = frozenset({"EUR"})
     with pytest.raises(ExecutionChainError, match="annulled_execution_witnessed"):
         await repo.get_spot_reconciliation_bundle(
-            _WALLET, "kraken", "live", _AS_OF, 4, frozenset({"EUR"})
+            _WALLET, "kraken", "live", _AS_OF, 4, s5778_value_1
         )
     await repo.engine.dispose()
 

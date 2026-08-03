@@ -187,8 +187,9 @@ def test_0031_refuses_a_degraded_anchor(tmp_path: Path, override: dict[str, obje
     config = _config(db_url)
     command.upgrade(config, "0031")
     engine = sa.create_engine(db_url)
+    s5778_value_1 = _anchor_values(**override)
     with pytest.raises(sa.exc.IntegrityError):
-        _insert(engine, _anchor_values(**override))
+        _insert(engine, s5778_value_1)
     engine.dispose()
 
 

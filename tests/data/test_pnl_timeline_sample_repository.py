@@ -333,8 +333,9 @@ def test_complete_sample_refuses_a_diagnostics_key() -> None:
     audit = json.loads(sample["audit_json"])
     audit["diagnostics"] = []
     sample["audit_json"] = json.dumps(audit)
+    s5778_value_1 = _scope()
     with pytest.raises(ValueError, match="must carry no diagnostics"):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, s5778_value_1)
 
 
 @pytest.mark.parametrize(
@@ -358,8 +359,9 @@ def test_diagnostic_record_rejects_invalid_shape(record: object) -> None:
     audit = json.loads(sample["audit_json"])
     audit["diagnostics"] = [record]
     sample["audit_json"] = json.dumps(audit)
+    s5778_value_1 = _scope()
     with pytest.raises(ValueError):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, s5778_value_1)
 
 
 def test_diagnostics_must_explain_exactly_the_reason_codes() -> None:
@@ -368,8 +370,9 @@ def test_diagnostics_must_explain_exactly_the_reason_codes() -> None:
     audit = json.loads(sample["audit_json"])
     audit["diagnostics"] = []
     sample["audit_json"] = json.dumps(audit)
+    s5778_value_1 = _scope()
     with pytest.raises(ValueError, match="must explain exactly"):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, s5778_value_1)
 
 
 def test_diagnostics_are_capped() -> None:
@@ -380,8 +383,9 @@ def test_diagnostics_are_capped() -> None:
         {"stage": "test", "cause": str(index), "reason_code": "missing_mark"} for index in range(65)
     ]
     sample["audit_json"] = json.dumps(audit)
+    s5778_value_1 = _scope()
     with pytest.raises(ValueError, match="exceed the maximum"):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, _scope())
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(sample, s5778_value_1)
 
 
 def test_diagnostic_record_accepts_an_unknown_cause() -> None:
@@ -498,10 +502,10 @@ def test_diagnostic_record_accepts_an_unknown_cause() -> None:
 )
 def test_validator_rejects_complete_row_shapes(overrides: dict[str, object], message: str) -> None:
     """Every complete-branch and scope guard rejects its malformed field."""
+    s5778_value_1 = _mutate(_complete_sample(), **overrides)
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match=message):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(
-            _mutate(_complete_sample(), **overrides), _scope()
-        )
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, s5778_value_2)
 
 
 @pytest.mark.parametrize(
@@ -567,10 +571,10 @@ def test_validator_rejects_incomplete_row_shapes(
     overrides: dict[str, object], message: str
 ) -> None:
     """Every incomplete-branch guard rejects its malformed field."""
+    s5778_value_1 = _mutate(_incomplete_sample(), **overrides)
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match=message):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(
-            _mutate(_incomplete_sample(), **overrides), _scope()
-        )
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, s5778_value_2)
 
 
 @pytest.mark.parametrize(
@@ -586,8 +590,9 @@ def test_validator_rejects_incomplete_row_shapes(
 )
 def test_validator_rejects_scope_mismatch(scope: PortfolioPnlSampleScope) -> None:
     """A sample whose identity diverges from its write scope is refused."""
+    s5778_value_1 = _complete_sample()
     with pytest.raises(ValueError, match="does not match its write scope"):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(_complete_sample(), scope)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, scope)
 
 
 @pytest.mark.parametrize(
@@ -717,10 +722,10 @@ def test_validator_rejects_complete_audit_records(audit: dict[str, object], mess
         "valuation": audit.get("valuation", [dict(_VALID_VALUATION)]),
         "observations": audit.get("observations", [dict(_VALID_OBSERVATION)]),
     }
+    s5778_value_1 = _mutate(_complete_sample(), audit_json=json.dumps(envelope))
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match=message):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(
-            _mutate(_complete_sample(), audit_json=json.dumps(envelope)), _scope()
-        )
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, s5778_value_2)
 
 
 def test_validator_accepts_empty_basket_zero_equity_complete() -> None:
@@ -757,8 +762,9 @@ def test_validator_rejects_non_finite_audit_numbers() -> None:
         _complete_sample(),
         audit_json='{"valuation": [{"rate": 1e400}], "observations": []}',
     )
+    s5778_value_1 = _scope()
     with pytest.raises(ValueError, match="must be finite"):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(poisoned, _scope())
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(poisoned, s5778_value_1)
 
 
 async def test_writer_inserts_complete_and_incomplete_through_db_checks(
@@ -787,10 +793,11 @@ async def test_writer_rejects_a_repeated_minute_in_one_chunk(
     repository: SQLAlchemyRepository,
 ) -> None:
     """A chunk repeating a minute is refused before any row is written."""
+    s5778_value_1 = _complete_sample(_M1)
+    s5778_value_2 = _incomplete_sample(_M1)
+    s5778_value_3 = _scope()
     with pytest.raises(ValueError, match="must not repeat a minute"):
-        await repository.record_portfolio_pnl_samples(
-            [_complete_sample(_M1), _incomplete_sample(_M1)], _scope()
-        )
+        await repository.record_portfolio_pnl_samples([s5778_value_1, s5778_value_2], s5778_value_3)
     assert await _active_samples(repository) == []
 
 
@@ -799,8 +806,10 @@ async def test_writer_rejects_the_whole_chunk_on_one_invalid_row(
 ) -> None:
     """One invalid row rolls back the whole chunk (batch atomicity)."""
     invalid = _mutate(_complete_sample(_M2), drawdown=2.0)
+    s5778_value_1 = _complete_sample(_M1)
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match="drawdown must be finite within"):
-        await repository.record_portfolio_pnl_samples([_complete_sample(_M1), invalid], _scope())
+        await repository.record_portfolio_pnl_samples([s5778_value_1, invalid], s5778_value_2)
     assert await _active_samples(repository) == []
 
 
@@ -879,12 +888,14 @@ async def test_supersede_refuses_a_non_derived_write(
     await repository.record_portfolio_pnl_samples(
         [_complete_sample(_M1, public_id=_ORIG)], _scope()
     )
+    s5778_value_1 = _scope()
+    s5778_value_2 = _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5))
     with pytest.raises(
         PortfolioPnlSampleSupersedeError, match="requires a derived suffix reconciliation"
     ):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=False,
             expected_public_id=_ORIG,
         )
@@ -911,10 +922,12 @@ async def test_supersede_refuses_when_no_active_sample_exists(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Superseding a minute with no active sample is refused."""
+    s5778_value_1 = _scope()
+    s5778_value_2 = _complete_sample(_M1)
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="no active row"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _complete_sample(_M1),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
@@ -950,10 +963,12 @@ async def test_supersede_refuses_a_cross_epoch_active_row(
             )
         )
         await s.commit()
+    s5778_value_1 = _scope()
+    s5778_value_2 = _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5))
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="within the same epoch"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=5)),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
@@ -964,10 +979,12 @@ async def test_supersede_validates_the_replacement(
 ) -> None:
     """The replacement row is validated before any active row is touched."""
     await repository.record_portfolio_pnl_samples([_complete_sample(_M1)], _scope())
+    s5778_value_1 = _scope()
+    s5778_value_2 = _mutate(_complete_sample(_M1), drawdown=3.0)
     with pytest.raises(ValueError, match="drawdown must be finite within"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _mutate(_complete_sample(_M1), drawdown=3.0),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
@@ -977,8 +994,10 @@ async def test_writer_refuses_a_scope_without_an_active_anchor(
     bare_repository: SQLAlchemyRepository,
 ) -> None:
     """A scope whose anchor was never created cannot be sampled (B1)."""
+    s5778_value_1 = _complete_sample(_M1)
+    s5778_value_2 = _scope()
     with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
-        await bare_repository.record_portfolio_pnl_samples([_complete_sample(_M1)], _scope())
+        await bare_repository.record_portfolio_pnl_samples([s5778_value_1], s5778_value_2)
     async with bare_repository.session() as s:
         assert (await s.execute(select(PortfolioPnlPoint))).scalars().all() == []
 
@@ -987,10 +1006,12 @@ async def test_supersede_refuses_a_scope_without_an_active_anchor(
     bare_repository: SQLAlchemyRepository,
 ) -> None:
     """Supersede also refuses an unsampleable scope before touching a row."""
+    s5778_value_1 = _scope()
+    s5778_value_2 = _complete_sample(_M1)
     with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
         await bare_repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _complete_sample(_M1),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=True,
             expected_public_id=_ORIG,
         )
@@ -1012,8 +1033,9 @@ async def test_writer_refuses_a_scope_t0_the_anchor_disowns(
 ) -> None:
     """A scope t0 that disagrees with the persisted anchor is refused."""
     scope = _scope(anchor_point_time=_T0 - timedelta(minutes=1))
+    s5778_value_1 = _complete_sample(_M1)
     with pytest.raises(PortfolioPnlSampleScopeError, match="does not match the active anchor"):
-        await repository.record_portfolio_pnl_samples([_complete_sample(_M1)], scope)
+        await repository.record_portfolio_pnl_samples([s5778_value_1], scope)
     assert await _active_samples(repository) == []
 
 
@@ -1338,10 +1360,10 @@ async def test_collision_read_short_circuits_on_no_minutes(
 )
 def test_validator_rejects_bad_watermarks(watermarks_json: str, message: str) -> None:
     """Every sample requires a present, valid, canonical watermark map (B2)."""
+    s5778_value_1 = _mutate(_complete_sample(), watermarks_json=watermarks_json)
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match=message):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(
-            _mutate(_complete_sample(), watermarks_json=watermarks_json), _scope()
-        )
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, s5778_value_2)
 
 
 def test_validator_accepts_a_nonempty_watermark_map() -> None:
@@ -1372,10 +1394,10 @@ def test_validator_accepts_a_nonempty_watermark_map() -> None:
 )
 def test_validator_rejects_bad_coverage(coverage: object, message: str) -> None:
     """The self-describing coverage disclosure enforces its schema (A4)."""
+    s5778_value_1 = _mutate(_complete_sample(), audit_json=_complete_audit(coverage=coverage))
+    s5778_value_2 = _scope()
     with pytest.raises(ValueError, match=message):
-        SQLAlchemyRepository._validate_portfolio_pnl_sample(
-            _mutate(_complete_sample(), audit_json=_complete_audit(coverage=coverage)), _scope()
-        )
+        SQLAlchemyRepository._validate_portfolio_pnl_sample(s5778_value_1, s5778_value_2)
 
 
 def test_validator_accepts_a_disclosed_leveraged_exclusion() -> None:
@@ -1393,10 +1415,12 @@ async def test_supersede_conflict_on_a_stale_public_id(
     await repository.record_portfolio_pnl_samples(
         [_complete_sample(_M1, public_id=_ORIG)], _scope()
     )
+    s5778_value_1 = _scope()
+    s5778_value_2 = _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=3))
     with pytest.raises(PortfolioPnlSampleConflictError, match="lost its optimistic CAS"):
         await repository.supersede_portfolio_pnl_sample(
-            _scope(),
-            _mutate(_complete_sample(_M1), timestamp=_M1 + timedelta(minutes=3)),
+            s5778_value_1,
+            s5778_value_2,
             derived_suffix_reconciliation=True,
             expected_public_id="99999999-0000-7000-8000-000000000009",
         )
@@ -1451,17 +1475,19 @@ async def test_retract_drops_the_row_from_the_causal_peak(
 
 async def test_retract_refuses_the_anchor(repository: SQLAlchemyRepository) -> None:
     """Retracting the anchor minute is refused (N1)."""
+    s5778_value_1 = _scope()
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="must not target the anchor"):
         await repository.retract_portfolio_pnl_sample(
-            _scope(), _T0, expected_public_id=_ORIG, bus_time=_M1
+            s5778_value_1, _T0, expected_public_id=_ORIG, bus_time=_M1
         )
 
 
 async def test_retract_refuses_when_no_active_row(repository: SQLAlchemyRepository) -> None:
     """Retracting a minute with no active sample is refused (N1)."""
+    s5778_value_1 = _scope()
     with pytest.raises(PortfolioPnlSampleSupersedeError, match="no active row"):
         await repository.retract_portfolio_pnl_sample(
-            _scope(), _M1, expected_public_id=_ORIG, bus_time=_M2
+            s5778_value_1, _M1, expected_public_id=_ORIG, bus_time=_M2
         )
 
 
@@ -1472,12 +1498,14 @@ async def test_retract_conflict_on_a_stale_public_id(
     await repository.record_portfolio_pnl_samples(
         [_complete_sample(_M1, public_id=_ORIG)], _scope()
     )
+    s5778_value_1 = _scope()
+    s5778_value_2 = timedelta(minutes=5)
     with pytest.raises(PortfolioPnlSampleConflictError, match="retract lost its optimistic CAS"):
         await repository.retract_portfolio_pnl_sample(
-            _scope(),
+            s5778_value_1,
             _M1,
             expected_public_id="99999999-0000-7000-8000-000000000009",
-            bus_time=_M1 + timedelta(minutes=5),
+            bus_time=_M1 + s5778_value_2,
         )
 
 
@@ -1485,7 +1513,8 @@ async def test_retract_refuses_a_scope_without_an_active_anchor(
     bare_repository: SQLAlchemyRepository,
 ) -> None:
     """Retract also refuses an unsampleable scope before touching a row (N1)."""
+    s5778_value_1 = _scope()
     with pytest.raises(PortfolioPnlSampleScopeError, match="no active anchor"):
         await bare_repository.retract_portfolio_pnl_sample(
-            _scope(), _M1, expected_public_id=_ORIG, bus_time=_M2
+            s5778_value_1, _M1, expected_public_id=_ORIG, bus_time=_M2
         )

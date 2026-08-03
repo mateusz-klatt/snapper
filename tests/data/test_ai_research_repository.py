@@ -220,9 +220,10 @@ async def test_round_transition_rejects_non_lifecycle_requests(
     repository: SQLAlchemyRepository,
 ) -> None:
     """Only expiry and supersession may bypass artifact insertion."""
+    s5778_value_1 = str(uuid7())
     with pytest.raises(ValueError, match="only from pending"):
         await repository.transition_ai_research_round_status(
-            str(uuid7()),
+            s5778_value_1,
             expected_status="completed",
             new_status="expired",
             transitioned_at=_T0,
@@ -325,22 +326,27 @@ async def test_market_view_insert_rejects_missing_sources_and_oversize_rationale
     """Repository invariants reject incomplete artifacts before persistence."""
     round_id = await repository.create_ai_research_round(_round_row("periodic", _T0))
     valid_until = _T0 + timedelta(hours=2)
+    s5778_value_1 = _view_row(round_id, as_of=_T0, valid_until=valid_until)
+    s5778_value_2 = timedelta(minutes=1)
     with pytest.raises(ValueError, match="at least one source"):
         await repository.insert_market_view(
-            _view_row(round_id, as_of=_T0, valid_until=valid_until),
+            s5778_value_1,
             [],
-            submitted_at=_T0 + timedelta(minutes=1),
+            submitted_at=_T0 + s5778_value_2,
         )
+    s5778_value_1 = _view_row(
+        round_id,
+        as_of=_T0,
+        valid_until=valid_until,
+        rationale="ą" * 1024 + "x",
+    )
+    s5778_value_2 = _sources(_T0)
+    s5778_value_3 = timedelta(minutes=1)
     with pytest.raises(ValueError, match="2048 UTF-8 bytes"):
         await repository.insert_market_view(
-            _view_row(
-                round_id,
-                as_of=_T0,
-                valid_until=valid_until,
-                rationale="ą" * 1024 + "x",
-            ),
-            _sources(_T0),
-            submitted_at=_T0 + timedelta(minutes=1),
+            s5778_value_1,
+            s5778_value_2,
+            submitted_at=_T0 + s5778_value_3,
         )
     pending = await repository.get_ai_research_round(round_id)
     assert pending is not None
@@ -356,14 +362,16 @@ async def test_market_view_insert_requires_a_pending_round(
 ) -> None:
     """Unknown and terminal rounds cannot acquire an artifact."""
     missing_round_id = str(uuid7())
+    s5778_value_1 = _view_row(
+        missing_round_id,
+        as_of=_T0,
+        valid_until=_T0 + timedelta(hours=1),
+    )
+    s5778_value_2 = _sources(_T0)
     with pytest.raises(ValueError, match="pending AI-research round"):
         await repository.insert_market_view(
-            _view_row(
-                missing_round_id,
-                as_of=_T0,
-                valid_until=_T0 + timedelta(hours=1),
-            ),
-            _sources(_T0),
+            s5778_value_1,
+            s5778_value_2,
             submitted_at=_T0,
         )
 
@@ -374,11 +382,14 @@ async def test_market_view_insert_requires_a_pending_round(
         new_status="expired",
         transitioned_at=_T0 + timedelta(minutes=1),
     )
+    s5778_value_1 = _view_row(round_id, as_of=_T0, valid_until=_T0 + timedelta(hours=1))
+    s5778_value_2 = _sources(_T0)
+    s5778_value_3 = timedelta(minutes=2)
     with pytest.raises(ValueError, match="pending AI-research round"):
         await repository.insert_market_view(
-            _view_row(round_id, as_of=_T0, valid_until=_T0 + timedelta(hours=1)),
-            _sources(_T0),
-            submitted_at=_T0 + timedelta(minutes=2),
+            s5778_value_1,
+            s5778_value_2,
+            submitted_at=_T0 + s5778_value_3,
         )
 
 

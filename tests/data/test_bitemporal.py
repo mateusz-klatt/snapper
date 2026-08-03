@@ -638,11 +638,12 @@ class TestExecutionDedup:
             exec_id="E1",
         )
 
+        s5778_value_1 = timedelta(seconds=15)
         with pytest.raises(IntegrityError):
             await repo.insert_execution(
                 order_public_id=order_public_id,
                 wallet_public_id="00000000-0000-7000-8000-000000000001",
-                timestamp=base_ts + timedelta(seconds=15),
+                timestamp=base_ts + s5778_value_1,
                 side="buy",
                 status="filled",
                 price=50000.0,
@@ -1111,8 +1112,9 @@ class TestCandlePolicyBitemporal:
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
         await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
+        s5778_value_1 = _candle_row(inst_public_id, open_at, t1, close=100.0)
         with pytest.raises(IntegrityError):
-            await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+            await repo.upsert_candles([s5778_value_1])
 
 
 async def _create_user(
@@ -1945,6 +1947,7 @@ class TestReviseInstrument:
     async def test_revise_nonexistent_raises(self, tmp_path: Path) -> None:
         """Revising a non-existent instrument raises ValueError."""
         repo, _, _ = await _create_repo_with_instrument(tmp_path)
+        s5778_value_1 = datetime(2024, 6, 1, tzinfo=UTC)
         with pytest.raises(ValueError, match="No active Instrument"):
             await repo.revise_instrument(
                 instrument_public_id="nonexistent-pid",
@@ -1952,7 +1955,7 @@ class TestReviseInstrument:
                 exchange="kraken",
                 session_id="rev-session",
                 sequence_id=1,
-                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+                timestamp=s5778_value_1,
             )
 
     @pytest.mark.asyncio
@@ -1983,6 +1986,7 @@ class TestReviseInstrument:
             sequence_id=2,
             timestamp=seed_time,
         )
+        s5778_value_1 = datetime(2024, 6, 1, tzinfo=UTC)
         with pytest.raises(ValueError, match="already occupied"):
             await repo.revise_instrument(
                 instrument_public_id=inst_a_pid,
@@ -1990,7 +1994,7 @@ class TestReviseInstrument:
                 exchange="kraken",
                 session_id="rev-session",
                 sequence_id=1,
-                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+                timestamp=s5778_value_1,
             )
 
     @pytest.mark.asyncio

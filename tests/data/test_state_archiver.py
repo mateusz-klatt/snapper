@@ -257,11 +257,13 @@ def test_state_archiver_purge_without_closed_only_raises(tmp_path: Path) -> None
     """
     repo = _StateStubRepo()
     archiver = StateArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ValueError, match="closed_only"):
         archiver.export(
             table="settings",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
 
@@ -275,8 +277,10 @@ def test_state_archiver_unknown_table_raises(tmp_path: Path) -> None:
     """
     repo = _StateStubRepo()
     archiver = StateArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ValueError, match="(?i)unknown"):
-        archiver.export(table="bogus", day_start=date(2024, 1, 1), day_end=date(2024, 1, 1))
+        archiver.export(table="bogus", day_start=s5778_value_1, day_end=s5778_value_2)
 
 
 def test_state_archiver_export_no_rows(tmp_path: Path) -> None:

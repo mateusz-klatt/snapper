@@ -2581,19 +2581,18 @@ class TestConcurrencyInvariants:
 
         monkeypatch.setattr(AsyncSession, "execute", patched_execute)
 
+        s5778_value_1 = NotificationDeviceUpsertRow(
+            user_public_id="u-exhaust",
+            device_token="exhaust-token",
+            device_id="dev-never",
+            env="sandbox",
+            registered_at=_ts(2),
+            session_id="s-never",
+            sequence_id=2,
+            timestamp=_ts(2),
+        )
         with pytest.raises(RuntimeError, match="close-race"):
-            await repo.upsert_notification_device(
-                NotificationDeviceUpsertRow(
-                    user_public_id="u-exhaust",
-                    device_token="exhaust-token",
-                    device_id="dev-never",
-                    env="sandbox",
-                    registered_at=_ts(2),
-                    session_id="s-never",
-                    sequence_id=2,
-                    timestamp=_ts(2),
-                )
-            )
+            await repo.upsert_notification_device(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_upsert_notification_device_integrityerror_retry(
@@ -2754,17 +2753,16 @@ class TestConcurrencyInvariants:
 
         monkeypatch.setattr(AsyncSession, "execute", patched_execute)
 
+        s5778_value_1 = DeviceAlertPrefUpsertRow(
+            session_id="s-never",
+            sequence_id=2,
+            timestamp=_ts(2),
+            device_public_id=device_pid,
+            alert_type="order_fill_full",
+            enabled=False,
+        )
         with pytest.raises(RuntimeError, match="close-race"):
-            await repo.upsert_device_alert_pref(
-                DeviceAlertPrefUpsertRow(
-                    session_id="s-never",
-                    sequence_id=2,
-                    timestamp=_ts(2),
-                    device_public_id=device_pid,
-                    alert_type="order_fill_full",
-                    enabled=False,
-                )
-            )
+            await repo.upsert_device_alert_pref(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_upsert_device_alert_pref_integrityerror_retry(
@@ -2854,17 +2852,16 @@ class TestConcurrencyInvariants:
 
         monkeypatch.setattr(AsyncSession, "execute", patched_execute)
 
+        s5778_value_1 = UserAlertDefaultUpsertRow(
+            session_id="s-never",
+            sequence_id=2,
+            timestamp=_ts(2),
+            user_public_id="u-def-exhaust",
+            alert_type="order_fill_full",
+            enabled=False,
+        )
         with pytest.raises(RuntimeError, match="close-race"):
-            await repo.upsert_user_alert_default(
-                UserAlertDefaultUpsertRow(
-                    session_id="s-never",
-                    sequence_id=2,
-                    timestamp=_ts(2),
-                    user_public_id="u-def-exhaust",
-                    alert_type="order_fill_full",
-                    enabled=False,
-                )
-            )
+            await repo.upsert_user_alert_default(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_upsert_user_alert_default_integrityerror_retry(

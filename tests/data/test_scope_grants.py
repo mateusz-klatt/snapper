@@ -223,17 +223,16 @@ class TestCreateScopeGrant:
                 underlying_public_id=ids["underlying_btc"],
             )
         )
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["bob"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="underlying",
+            underlying_public_id=ids["underlying_btc"],
+            sequence_id=200,
+        )
         with pytest.raises(ScopeGrantConflictError) as excinfo:
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["bob"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="underlying",
-                    underlying_public_id=ids["underlying_btc"],
-                    sequence_id=200,
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
         assert excinfo.value.conflicting_grant_public_id == first["public_id"]
         assert excinfo.value.conflicting_operator_public_id == ids["alice"]
 
@@ -259,17 +258,16 @@ class TestCreateScopeGrant:
                 underlying_public_id=ids["underlying_btc"],
             )
         )
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["bob"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="instrument",
+            instrument_public_id=ids["btc_perp"],
+            sequence_id=200,
+        )
         with pytest.raises(ScopeGrantConflictError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["bob"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="instrument",
-                    instrument_public_id=ids["btc_perp"],
-                    sequence_id=200,
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_cross_scope_instrument_then_underlying_409(
@@ -292,17 +290,16 @@ class TestCreateScopeGrant:
                 instrument_public_id=ids["btc_perp"],
             )
         )
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="underlying",
+            underlying_public_id=ids["underlying_btc"],
+            sequence_id=200,
+        )
         with pytest.raises(ScopeGrantConflictError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="underlying",
-                    underlying_public_id=ids["underlying_btc"],
-                    sequence_id=200,
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_same_underlying_duplicate_with_no_mappings_409(
@@ -350,17 +347,16 @@ class TestCreateScopeGrant:
                 underlying_public_id=lonely_underlying_public_id,
             )
         )
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["bob"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="underlying",
+            underlying_public_id=lonely_underlying_public_id,
+            sequence_id=250,
+        )
         with pytest.raises(ScopeGrantConflictError) as excinfo:
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["bob"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="underlying",
-                    underlying_public_id=lonely_underlying_public_id,
-                    sequence_id=250,
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
         assert excinfo.value.conflicting_grant_public_id == first["public_id"]
 
     @pytest.mark.asyncio
@@ -406,17 +402,16 @@ class TestCreateScopeGrant:
         Then: ScopeGrantValidationError is raised before any DB write.
         """
         ids = await _seed_world(repo)
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="underlying",
+            underlying_public_id=ids["underlying_btc"],
+            instrument_public_id=ids["btc_perp"],
+        )
         with pytest.raises(ScopeGrantValidationError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="underlying",
-                    underlying_public_id=ids["underlying_btc"],
-                    instrument_public_id=ids["btc_perp"],
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_unknown_scope_kind_raises_validation_error(
@@ -429,15 +424,14 @@ class TestCreateScopeGrant:
         Then: ScopeGrantValidationError is raised.
         """
         ids = await _seed_world(repo)
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="wallet",
+        )
         with pytest.raises(ScopeGrantValidationError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="wallet",
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
 
 class TestHandoverGrant:
@@ -503,6 +497,7 @@ class TestHandoverGrant:
                 underlying_public_id=ids["underlying_btc"],
             )
         )
+        s5778_value_1 = datetime.now(UTC)
         with pytest.raises(ScopeGrantValidationError):
             await repo.handover_grant(
                 from_grant_public_id=original["public_id"],
@@ -511,7 +506,7 @@ class TestHandoverGrant:
                 reason=None,
                 session_id="test-session",
                 sequence_id=301,
-                timestamp=datetime.now(UTC),
+                timestamp=s5778_value_1,
             )
 
     @pytest.mark.asyncio
@@ -523,6 +518,7 @@ class TestHandoverGrant:
         Then: ScopeGrantNotFoundError is raised.
         """
         ids = await _seed_world(repo)
+        s5778_value_1 = datetime.now(UTC)
         with pytest.raises(ScopeGrantNotFoundError):
             await repo.handover_grant(
                 from_grant_public_id="00000000-0000-7000-8000-0000000000ff",
@@ -531,7 +527,7 @@ class TestHandoverGrant:
                 reason=None,
                 session_id="test-session",
                 sequence_id=302,
-                timestamp=datetime.now(UTC),
+                timestamp=s5778_value_1,
             )
 
     @pytest.mark.asyncio
@@ -553,6 +549,8 @@ class TestHandoverGrant:
                 underlying_public_id=ids["underlying_btc"],
             )
         )
+        s5778_value_1 = datetime.now(UTC)
+        s5778_value_2 = timedelta(minutes=1)
         with pytest.raises(ScopeGrantNotFoundError, match="destination operator"):
             await repo.handover_grant(
                 from_grant_public_id=original["public_id"],
@@ -561,7 +559,7 @@ class TestHandoverGrant:
                 reason=None,
                 session_id="test-session",
                 sequence_id=303,
-                timestamp=datetime.now(UTC) + timedelta(minutes=1),
+                timestamp=s5778_value_1 + s5778_value_2,
             )
 
 
@@ -622,17 +620,16 @@ class TestValidateScopeXor:
         Then: ScopeGrantValidationError is raised from the XOR checker.
         """
         ids = await _seed_world(repo)
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="instrument",
+            underlying_public_id=ids["underlying_btc"],
+            instrument_public_id=ids["btc_perp"],
+        )
         with pytest.raises(ScopeGrantValidationError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="instrument",
-                    underlying_public_id=ids["underlying_btc"],
-                    instrument_public_id=ids["btc_perp"],
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
     @pytest.mark.asyncio
     async def test_instrument_kind_missing_instrument_raises(
@@ -646,15 +643,14 @@ class TestValidateScopeXor:
         Then: ScopeGrantValidationError is raised from the XOR checker.
         """
         ids = await _seed_world(repo)
+        s5778_value_1 = _make_request(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            granted_by=ids["user_admin"],
+            scope_kind="instrument",
+        )
         with pytest.raises(ScopeGrantValidationError):
-            await repo.create_scope_grant(
-                _make_request(
-                    operator_public_id=ids["alice"],
-                    wallet_public_id=ids["wallet"],
-                    granted_by=ids["user_admin"],
-                    scope_kind="instrument",
-                )
-            )
+            await repo.create_scope_grant(s5778_value_1)
 
 
 class TestHandoverIntegrityError:
@@ -1416,11 +1412,13 @@ class TestRevokeScopeGrant:
             revoked_at=datetime.now(UTC),
             reason=None,
         )
+        s5778_value_1 = datetime.now(UTC)
+        s5778_value_2 = timedelta(seconds=1)
         with pytest.raises(ScopeGrantNotFoundError):
             await repo.revoke_scope_grant(
                 grant_public_id=original["public_id"],
                 revoked_by_user_public_id=ids["user_admin"],
-                revoked_at=datetime.now(UTC) + timedelta(seconds=1),
+                revoked_at=s5778_value_1 + s5778_value_2,
                 reason=None,
             )
 
@@ -1430,11 +1428,12 @@ class TestRevokeScopeGrant:
     ) -> None:
         """Revoke on a fabricated grant public_id raises NotFound."""
         await _seed_world(repo)
+        s5778_value_1 = datetime.now(UTC)
         with pytest.raises(ScopeGrantNotFoundError):
             await repo.revoke_scope_grant(
                 grant_public_id="00000000-0000-7000-8000-0000000000ff",
                 revoked_by_user_public_id="00000000-0000-7000-8000-00000000aaaa",
-                revoked_at=datetime.now(UTC),
+                revoked_at=s5778_value_1,
                 reason=None,
             )
 

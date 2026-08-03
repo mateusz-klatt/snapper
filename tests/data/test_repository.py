@@ -2790,13 +2790,14 @@ class TestSQLAlchemyRepositoryDialects:
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
+            s5778_value_1 = datetime(2024, 1, 1, tzinfo=UTC)
             with pytest.raises(IntegrityError):
                 await mock_postgres_repo.ensure_instrument(
                     symbol_public_id="fake-spid",
                     exchange="kraken",
                     session_id="test-session",
                     sequence_id=1,
-                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                    timestamp=s5778_value_1,
                 )
             mock_session.rollback.assert_called_once()
 
@@ -6852,9 +6853,10 @@ async def test_retire_trade_projection_checkpoint_refuses_a_changed_preview(
         }
     )
 
+    s5778_value_1 = timedelta(minutes=1)
     with pytest.raises(ValueError, match="checkpoint set changed after preview"):
         await repository.retire_trade_projection_checkpoints(
-            None, ["stale-preview-id"], created_at + timedelta(minutes=1)
+            None, ["stale-preview-id"], created_at + s5778_value_1
         )
 
     active = await repository.get_all_checkpoints(created_at + timedelta(minutes=1))
@@ -6892,11 +6894,12 @@ async def test_retire_trade_projection_checkpoint_rolls_back_a_count_mismatch(
 
     monkeypatch.setattr(SQLAlchemyRepository, "session", mocked_session)
 
+    s5778_value_1 = datetime(2026, 7, 28, 1, 1, tzinfo=UTC)
     with pytest.raises(ValueError, match="previewed=1 closed=0"):
         await repository.retire_trade_projection_checkpoints(
             None,
             ["00000000-0000-7000-8000-000000000007"],
-            datetime(2026, 7, 28, 1, 1, tzinfo=UTC),
+            s5778_value_1,
         )
 
     session.commit.assert_not_awaited()
@@ -9341,8 +9344,9 @@ async def test_flip_position_cycle_raises_on_shard_mismatch(tmp_path: Path) -> N
         opened_at=now + timedelta(seconds=5),
         timestamp=now + timedelta(seconds=5),
     )
+    s5778_value_1 = timedelta(seconds=5)
     with pytest.raises(ValueError, match="shard_key mismatch"):
-        await r.flip_position_cycle(pid, mismatch, now + timedelta(seconds=5), "s1", 2)
+        await r.flip_position_cycle(pid, mismatch, now + s5778_value_1, "s1", 2)
 
 
 @pytest.mark.asyncio

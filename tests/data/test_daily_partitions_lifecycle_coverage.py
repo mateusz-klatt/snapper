@@ -991,10 +991,12 @@ def test_parent_index_verifier_refuses_a_manifest_name_mismatch() -> None:
     connection = MagicMock(spec=Connection)
     connection.execute.return_value = [("unexpected_parent",)]
 
+    s5778_value_1 = cast(Connection, connection)
+    s5778_value_2 = lifecycle._spec("ticks")
     with pytest.raises(lifecycle.DailyPartitionError, match="parent index manifest"):
         lifecycle._verify_parent_indexes(
-            cast(Connection, connection),
-            lifecycle._spec("ticks"),
+            s5778_value_1,
+            s5778_value_2,
         )
 
 

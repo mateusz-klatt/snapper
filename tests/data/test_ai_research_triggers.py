@@ -130,8 +130,9 @@ def test_sqlite_physically_rejects_update_and_delete_on_both_tables(
         "DELETE FROM market_view_sources",
     )
     for statement in mutations:
+        s5778_value_1 = text(statement)
         with pytest.raises(DBAPIError, match="insert-only"):
-            sqlite_artifact_connection.execute(text(statement))
+            sqlite_artifact_connection.execute(s5778_value_1)
         sqlite_artifact_connection.rollback()
 
     assert (

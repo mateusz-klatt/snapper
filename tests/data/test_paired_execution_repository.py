@@ -1158,10 +1158,9 @@ async def test_ensure_reraises_non_collision_integrity_error(
         'already exists', so a malformed group can never silently leave its
         legs' commands to dispatch ungrouped (naked).
     """
+    s5778_value_1 = _group_insert_row(public_id=_pid(100), policy="bogus-policy")
     with pytest.raises(IntegrityError):
-        await _repo.ensure_paired_execution_group(
-            _group_insert_row(public_id=_pid(100), policy="bogus-policy")
-        )
+        await _repo.ensure_paired_execution_group(s5778_value_1)
 
 
 @pytest.mark.asyncio
@@ -1217,10 +1216,9 @@ async def test_ensure_halt_reraises_non_collision_integrity_error(
     Then: the IntegrityError propagates rather than being swallowed as 'already
         exists', so a malformed halt can never be silently dropped.
     """
+    s5778_value_1 = _halt_insert_row(public_id=_pid(100), mode="bogus-mode")
     with pytest.raises(IntegrityError):
-        await _repo.ensure_paired_execution_halt(
-            _halt_insert_row(public_id=_pid(100), mode="bogus-mode")
-        )
+        await _repo.ensure_paired_execution_halt(s5778_value_1)
 
 
 @pytest.mark.asyncio

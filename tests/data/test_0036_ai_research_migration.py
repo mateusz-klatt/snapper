@@ -146,8 +146,9 @@ def test_0036_enforces_single_pending_round_and_status_consistency(tmp_path: Pat
     engine = sa.create_engine(db_url)
     first_id = str(uuid7())
     _insert_round(engine, public_id=first_id)
+    s5778_value_1 = str(uuid7())
     with pytest.raises(sa.exc.IntegrityError):
-        _insert_round(engine, public_id=str(uuid7()), trigger="market_move")
+        _insert_round(engine, public_id=s5778_value_1, trigger="market_move")
 
     with engine.begin() as connection:
         connection.execute(
@@ -159,19 +160,22 @@ def test_0036_enforces_single_pending_round_and_status_consistency(tmp_path: Pat
         )
     _insert_round(engine, public_id=str(uuid7()), trigger="market_move")
 
+    s5778_value_1 = str(uuid7())
     with pytest.raises(sa.exc.IntegrityError):
-        _insert_round(engine, public_id=str(uuid7()), status="completed", resolved_at=None)
+        _insert_round(engine, public_id=s5778_value_1, status="completed", resolved_at=None)
+    s5778_value_1 = str(uuid7())
     with pytest.raises(sa.exc.IntegrityError):
         _insert_round(
             engine,
-            public_id=str(uuid7()),
+            public_id=s5778_value_1,
             status="unknown",
             resolved_at=_TS,
         )
+    s5778_value_1 = str(uuid7())
     with pytest.raises(sa.exc.IntegrityError):
         _insert_round(
             engine,
-            public_id=str(uuid7()),
+            public_id=s5778_value_1,
             trigger="   ",
             status="expired",
             resolved_at=_TS,

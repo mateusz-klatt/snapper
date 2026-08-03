@@ -254,5 +254,6 @@ async def test_monitor_rejects_unsupported_dialect() -> None:
         worklog_limit=1,
     )
 
+    s5778_value_1 = MagicMock()
     with pytest.raises(ValueError, match="unsupported trade integrity dialect"):
-        await run_trade_integrity_monitor(MagicMock(), "oracle", request)
+        await run_trade_integrity_monitor(s5778_value_1, "oracle", request)

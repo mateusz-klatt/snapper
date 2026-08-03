@@ -73,8 +73,9 @@ def test_rolled_back_restore_leaves_no_worklog_entry(tmp_path: Path) -> None:
 
     event.listen(repository.session_factory, "before_commit", force_rollback)
     try:
+        s5778_value_1 = ArchiveRestorer(repository)
         with pytest.raises(_ForcedRestoreRollbackError, match="after both inserts"):
-            ArchiveRestorer(repository).restore(table="trades", paths=[csv_path])
+            s5778_value_1.restore(table="trades", paths=[csv_path])
     finally:
         event.remove(repository.session_factory, "before_commit", force_rollback)
 

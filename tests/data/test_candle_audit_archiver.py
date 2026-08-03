@@ -202,11 +202,13 @@ def test_candle_audit_export_purge_without_closed_only_raises(tmp_path: Path) ->
     """
     repo = _AuditStubRepo(instruments={"inst-1": ("BTC-USD", "polygon")})
     archiver = CandleAuditArchiver(repo, tmp_path)
+    s5778_value_1 = date(2024, 1, 1)
+    s5778_value_2 = date(2024, 1, 1)
     with pytest.raises(ValueError, match="closed_only"):
         archiver.export(
             timeframe="1m",
-            day_start=date(2024, 1, 1),
-            day_end=date(2024, 1, 1),
+            day_start=s5778_value_1,
+            day_end=s5778_value_2,
             purge=True,
         )
 

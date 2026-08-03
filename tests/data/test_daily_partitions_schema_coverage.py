@@ -774,14 +774,16 @@ def test_live_detach_uses_the_bounded_retry_executor() -> None:
 
 def test_private_spec_rejects_a_runtime_allowlist_escape() -> None:
     """The internal resolver must retain the public allowlist boundary."""
+    s5778_value_1 = cast(lifecycle.MarketDataTable, "orders")
     with pytest.raises(ValueError, match="ticks, trades"):
-        lifecycle._spec(cast(lifecycle.MarketDataTable, "orders"))
+        lifecycle._spec(s5778_value_1)
 
 
 def test_anchor_validation_rejects_a_naive_value() -> None:
     """Anchor validation must reject values without a usable UTC offset."""
+    s5778_value_1 = datetime(2026, 8, 1)
     with pytest.raises(ValueError, match="timezone-aware UTC"):
-        lifecycle._validate_anchor(datetime(2026, 8, 1))
+        lifecycle._validate_anchor(s5778_value_1)
 
 
 def test_anchor_validation_rejects_nonutc_and_nonmidnight_values() -> None:
@@ -1374,11 +1376,12 @@ def test_sequence_owner_verifier_rejects_missing_or_wrong_ownership(
     connection = _connection_double()
     connection.scalar.return_value = exact
 
+    s5778_value_1 = lifecycle._spec("ticks")
     with pytest.raises(
         lifecycle.DailyPartitionError,
         match="ticks_id_seq parameters or ownership are not exact",
     ):
-        lifecycle._verify_sequence_owner(connection, lifecycle._spec("ticks"))
+        lifecycle._verify_sequence_owner(connection, s5778_value_1)
 
 
 @pytest.mark.parametrize("table", ["ticks", "candles", "trades"])

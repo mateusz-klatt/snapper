@@ -1876,13 +1876,15 @@ class TestSeedDefaultMultiTenant:
             primary_operator="default",
         )
         try:
+            s5778_value_1 = SequenceTracker()
+            s5778_value_2 = str(datetime.now(UTC))
             with pytest.raises(ValueError, match="no active user row exists"):
                 _seed_declared_memberships(
                     conn,
                     [viewer],
                     {"default": "operator-default"},
-                    SequenceTracker(),
-                    str(datetime.now(UTC)),
+                    s5778_value_1,
+                    s5778_value_2,
                 )
             assert (
                 conn.execute(text("SELECT COUNT(*) FROM user_operator_memberships")).scalar_one()
@@ -1920,12 +1922,13 @@ class TestSeedDefaultMultiTenant:
                 ),
                 {"now": now, "known_to": _SQLITE_KNOWN_TO_MAX},
             )
+            s5778_value_1 = SequenceTracker()
             with pytest.raises(ValueError, match="operator 'default' was not declared"):
                 _seed_declared_memberships(
                     conn,
                     [viewer],
                     {},
-                    SequenceTracker(),
+                    s5778_value_1,
                     now,
                 )
             assert (

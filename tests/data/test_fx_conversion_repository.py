@@ -287,15 +287,14 @@ async def test_identical_writers_converge_but_canonical_value_conflicts(tmp_path
             "orientation": "direct",
         },
     )
+    s5778_value_1 = _proof(
+        candidates_conflict["public_id"],
+        "00000000-0000-7000-8000-00000000006c",
+    )
     with pytest.raises(FxConversionArtifactConflictError):
         await second.pin_fx_conversion_artifact(
             candidates_conflict,
-            [
-                _proof(
-                    candidates_conflict["public_id"],
-                    "00000000-0000-7000-8000-00000000006c",
-                )
-            ],
+            [s5778_value_1],
         )
     await first.engine.dispose()
     await second.engine.dispose()
@@ -396,10 +395,11 @@ async def test_partial_reason_and_complete_upgrade_fail_closed(tmp_path: Path) -
     malformed["refusal_reason_json"] = (
         '{"reason":"missing_candle","unproven_minutes":["2026-07-26T14:55:00+00:00"]}'
     )
+    s5778_value_1 = _proof(malformed["public_id"], "00000000-0000-7000-8000-00000000003f")
     with pytest.raises(ValueError, match="exactly"):
         await repository.pin_fx_conversion_artifact(
             malformed,
-            [_proof(malformed["public_id"], "00000000-0000-7000-8000-00000000003f")],
+            [s5778_value_1],
         )
     complete = {**partial, "public_id": "00000000-0000-7000-8000-00000000004a"}
     complete["completeness_state"] = "complete"
@@ -410,11 +410,12 @@ async def test_partial_reason_and_complete_upgrade_fail_closed(tmp_path: Path) -
         "candle_open_minute": missing - timedelta(minutes=1),
         "carried_minutes": 0,
     }
+    s5778_value_1 = _proof(complete["public_id"], "00000000-0000-7000-8000-00000000004c")
     with pytest.raises(FxConversionArtifactUpgradeRequiredError):
         await repository.pin_fx_conversion_artifact(
             complete,
             [
-                _proof(complete["public_id"], "00000000-0000-7000-8000-00000000004c"),
+                s5778_value_1,
                 second_proof,
             ],
         )
@@ -567,10 +568,11 @@ async def test_structured_partial_reason_rejects_every_invalid_shape(
     election["required_minutes"] = (_MINUTE, _MINUTE + timedelta(minutes=2))
     election["completeness_state"] = "partial"
     election["refusal_reason_json"] = reason_json
+    s5778_value_1 = _proof(election["public_id"], "00000000-0000-7000-8000-000000000070")
     with pytest.raises(ValueError):
         await repository.pin_fx_conversion_artifact(
             election,
-            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000070")],
+            [s5778_value_1],
         )
     await repository.engine.dispose()
 
@@ -581,10 +583,11 @@ async def test_complete_reason_is_rejected(tmp_path: Path) -> None:
     repository = await _repository(tmp_path)
     election = _election("00000000-0000-7000-8000-000000000071")
     election["refusal_reason_json"] = '{"reason":"stale"}'
+    s5778_value_1 = _proof(election["public_id"], "00000000-0000-7000-8000-000000000072")
     with pytest.raises(ValueError, match="must not"):
         await repository.pin_fx_conversion_artifact(
             election,
-            [_proof(election["public_id"], "00000000-0000-7000-8000-000000000072")],
+            [s5778_value_1],
         )
     await repository.engine.dispose()
 
@@ -722,8 +725,9 @@ async def test_unrelated_integrity_collision_is_not_reclassified(tmp_path: Path)
     await repository.pin_fx_conversion_artifact(first, [_proof(first["public_id"], proof_id)])
     second = _election("00000000-0000-7000-8000-000000000062")
     second["resolved_knowledge_at"] = _HORIZON + timedelta(minutes=1)
+    s5778_value_1 = _proof(second["public_id"], proof_id)
     with pytest.raises(IntegrityError):
-        await repository.pin_fx_conversion_artifact(second, [_proof(second["public_id"], proof_id)])
+        await repository.pin_fx_conversion_artifact(second, [s5778_value_1])
     await repository.engine.dispose()
 
 
@@ -747,10 +751,12 @@ def test_digest_canonicalization_normalizes_instants_and_rejects_bad_minutes() -
     assert build_requirement_manifest_digest([plus_two]) == build_requirement_manifest_digest(
         [_MINUTE]
     )
+    s5778_value_1 = _MINUTE.replace(tzinfo=None)
     with pytest.raises(ValueError, match="timezone-aware"):
-        build_requirement_manifest_digest([_MINUTE.replace(tzinfo=None)])
+        build_requirement_manifest_digest([s5778_value_1])
+    s5778_value_1 = _MINUTE.replace(second=37)
     with pytest.raises(ValueError, match="minute-aligned"):
-        build_requirement_manifest_digest([_MINUTE.replace(second=37)])
+        build_requirement_manifest_digest([s5778_value_1])
     election = _election("00000000-0000-7000-8000-000000000050")
     proof = _proof(election["public_id"], "00000000-0000-7000-8000-000000000051")
     shifted: FxConversionProofInsertRow = {

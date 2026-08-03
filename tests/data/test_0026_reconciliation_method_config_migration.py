@@ -408,40 +408,46 @@ def test_0026_config_checks_and_active_uniqueness(tmp_path: Path) -> None:
         public_id=public_id,
         sequence_id=1,
     )
+    s5778_value_1 = _uuid()
     with pytest.raises(IntegrityError):
         _insert_config(
             engine,
             wallet_public_id=wallet_public_id,
             exchange="kraken",
             method="margin_ledger_replay",
-            public_id=_uuid(),
+            public_id=s5778_value_1,
             sequence_id=2,
         )
+    s5778_value_1 = _uuid()
     with pytest.raises(IntegrityError):
         _insert_config(
             engine,
-            wallet_public_id=_uuid(),
+            wallet_public_id=s5778_value_1,
             exchange="walutomat",
             method="spot_execution_replay",
             public_id=public_id,
             sequence_id=3,
         )
+    s5778_value_1 = _uuid()
+    s5778_value_2 = _uuid()
     with pytest.raises(IntegrityError):
         _insert_config(
             engine,
-            wallet_public_id=_uuid(),
+            wallet_public_id=s5778_value_1,
             exchange="kraken",
             method="unclassified",
-            public_id=_uuid(),
+            public_id=s5778_value_2,
             sequence_id=4,
         )
+    s5778_value_1 = _uuid()
+    s5778_value_2 = _uuid()
     with pytest.raises(IntegrityError):
         _insert_config(
             engine,
-            wallet_public_id=_uuid(),
+            wallet_public_id=s5778_value_1,
             exchange="Kraken",
             method="spot_execution_replay",
-            public_id=_uuid(),
+            public_id=s5778_value_2,
             sequence_id=5,
         )
     with engine.begin() as connection:

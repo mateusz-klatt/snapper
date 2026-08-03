@@ -500,8 +500,9 @@ async def test_anchor_write_refuses_when_watermark_is_below_the_committed_tip(
     """
     repo = await _repo(tmp_path)
     await _seed_scope(repo, 3)
+    s5778_value_1 = _anchor(source_watermark=2)
     with pytest.raises(RuntimeError, match="not the committed execution tip"):
-        await repo.record_spot_reconciliation_anchor(_anchor(source_watermark=2))
+        await repo.record_spot_reconciliation_anchor(s5778_value_1)
     await repo.engine.dispose()
 
 
