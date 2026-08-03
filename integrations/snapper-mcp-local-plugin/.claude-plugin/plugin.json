@@ -11,12 +11,5 @@
         "--config=__SNAPPER_REPO_ROOT__/data/dev-pat.json"
       ]
     }
-  },
-  "monitors": [
-    {
-      "name": "snapper-watch-local",
-      "command": "node __SNAPPER_REPO_ROOT__/integrations/snapper-mcp/dist/index.js watch --config=\"__SNAPPER_REPO_ROOT__/data/dev-pat.json\"",
-      "description": "Live LOCALHOST Snapper signal + order events streamed as JSONL"
-    }
-  ]
+  }
 }

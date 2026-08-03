@@ -1,6 +1,7 @@
 """Tests for the local Snapper MCP plugin renderer."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,13 @@ from scripts.render_local_plugin import CLAUDE_PLUGIN_SUBDIR
 from scripts.render_local_plugin import MARKETPLACE_KEY
 from scripts.render_local_plugin import PLACEHOLDER
 from scripts.render_local_plugin import PLUGIN_DIR_NAME
+from scripts.render_local_plugin import SKILLS_SUBDIR
 from scripts.render_local_plugin import _default_repo_root
 from scripts.render_local_plugin import _default_settings_path
 from scripts.render_local_plugin import _replace_placeholder
 from scripts.render_local_plugin import main
 from scripts.render_local_plugin import render_plugin
+from scripts.render_local_plugin import render_skills
 from scripts.render_local_plugin import update_claude_settings
 
 
@@ -22,6 +25,15 @@ def _write_template(repo_root: Path, name: str, content: str) -> Path:
     template_dir = repo_root / "integrations" / PLUGIN_DIR_NAME / CLAUDE_PLUGIN_SUBDIR
     template_dir.mkdir(parents=True, exist_ok=True)
     target = template_dir / name
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def _write_skill(repo_root: Path, skill_name: str, content: str) -> Path:
+    """Write a SKILL.md under the integrations plugin skills directory."""
+    skill_dir = repo_root / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / skill_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    target = skill_dir / "SKILL.md"
     target.write_text(content, encoding="utf-8")
     return target
 
@@ -98,6 +110,60 @@ class TestRenderPlugin:
 
         assert first == second
         assert first_content == second_content
+
+    def test_copies_skills_tree_verbatim(self, tmp_path: Path) -> None:
+        """A skill in the template is copied into the rendered plugin unchanged."""
+        _write_template(tmp_path, "plugin.json", json.dumps({"path": PLACEHOLDER}))
+        skill_body = "---\nname: wake\ndisable-model-invocation: true\n---\n\nArmed.\n"
+        _write_skill(tmp_path, "wake", skill_body)
+
+        plugin_dir = render_plugin(tmp_path)
+
+        rendered_skill = plugin_dir / SKILLS_SUBDIR / "wake" / "SKILL.md"
+        assert rendered_skill.read_text(encoding="utf-8") == skill_body
+
+    def test_render_without_skills_leaves_no_output_tree(self, tmp_path: Path) -> None:
+        """Templates without a skills directory produce no rendered skills tree."""
+        _write_template(tmp_path, "plugin.json", json.dumps({"path": PLACEHOLDER}))
+
+        plugin_dir = render_plugin(tmp_path)
+
+        assert not (plugin_dir / SKILLS_SUBDIR).exists()
+
+    def test_render_skills_prunes_stale_output(self, tmp_path: Path) -> None:
+        """A skill removed from the template is pruned from the rendered output."""
+        _write_skill(tmp_path, "wake", "---\nname: wake\n---\n\nArmed.\n")
+        render_skills(tmp_path)
+        stale = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake" / "SKILL.md"
+        assert stale.exists()
+
+        shutil.rmtree(tmp_path / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR)
+        render_skills(tmp_path)
+
+        assert not (tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR).exists()
+
+    def test_renders_placeholder_in_skill_markdown(self, tmp_path: Path) -> None:
+        """A skill body's repo-root placeholder is substituted on render."""
+        _write_template(tmp_path, "plugin.json", json.dumps({"path": PLACEHOLDER}))
+        _write_skill(tmp_path, "wake", f"Run node {PLACEHOLDER}/dist/index.js watch\n")
+
+        plugin_dir = render_plugin(tmp_path)
+
+        rendered = (plugin_dir / SKILLS_SUBDIR / "wake" / "SKILL.md").read_text(encoding="utf-8")
+        assert rendered == f"Run node {tmp_path}/dist/index.js watch\n"
+        assert PLACEHOLDER not in rendered
+
+    def test_render_skills_leaves_binary_assets_untouched(self, tmp_path: Path) -> None:
+        """Non-text skill assets are copied without raising a decode error."""
+        skill_dir = tmp_path / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("hi\n", encoding="utf-8")
+        (skill_dir / "icon.bin").write_bytes(b"\xff\xfe\x00\x01")
+
+        render_skills(tmp_path)
+
+        rendered_blob = tmp_path / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR / "wake" / "icon.bin"
+        assert rendered_blob.read_bytes() == b"\xff\xfe\x00\x01"
 
 
 class TestUpdateClaudeSettings:

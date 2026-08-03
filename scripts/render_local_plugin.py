@@ -21,6 +21,7 @@ from snapper.core.json_types import JsonValue
 PLACEHOLDER = "__SNAPPER_REPO_ROOT__"
 PLUGIN_DIR_NAME = "snapper-mcp-local-plugin"
 CLAUDE_PLUGIN_SUBDIR = ".claude-plugin"
+SKILLS_SUBDIR = "skills"
 MARKETPLACE_KEY = "snapper-mcp-local"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
 
@@ -80,7 +81,54 @@ def render_plugin(repo_root: Path) -> Path:
             encoding="utf-8",
         )
 
+    render_skills(repo_root)
     return output_root
+
+
+def render_skills(repo_root: Path) -> None:
+    """Render the local plugin's skills tree into the rendered output.
+
+    Skills live beside ``.claude-plugin`` in the plugin root, so Claude Code
+    discovers them at ``data/snapper-mcp-local-plugin/skills``. The wake skill
+    ships here so ``/snapper-mcp-local:wake`` can arm the consult watch monitor
+    for a single session. Each copied text file has ``__SNAPPER_REPO_ROOT__``
+    substituted with the checkout path — the wake skill body embeds the
+    absolute ``watch`` command it instructs Claude to run. Any stale output
+    tree is removed first so a renamed or deleted skill cannot linger; when the
+    template has no ``skills`` directory the output tree is simply cleared,
+    keeping the render deterministic.
+
+    Args:
+        repo_root: Absolute path of the snapper checkout.
+    """
+    template_skills = repo_root / "integrations" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
+    output_skills = repo_root / "data" / PLUGIN_DIR_NAME / SKILLS_SUBDIR
+    if output_skills.exists():
+        shutil.rmtree(output_skills)
+    if not template_skills.is_dir():
+        return
+    shutil.copytree(template_skills, output_skills)
+    repo_root_str = str(repo_root)
+    for path in sorted(output_skills.rglob("*")):
+        if path.is_file():
+            _substitute_placeholder_in_file(path, repo_root_str)
+
+
+def _substitute_placeholder_in_file(path: Path, replacement: str) -> None:
+    """Replace the repo-root placeholder in one rendered text file in place.
+
+    Binary files, which cannot carry the placeholder, are left untouched.
+
+    Args:
+        path: File inside the rendered skills tree.
+        replacement: Absolute repo-root path to substitute for the placeholder.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return
+    if PLACEHOLDER in text:
+        path.write_text(text.replace(PLACEHOLDER, replacement), encoding="utf-8")
 
 
 def update_claude_settings(settings_path: Path, plugin_dir: Path) -> bool:
