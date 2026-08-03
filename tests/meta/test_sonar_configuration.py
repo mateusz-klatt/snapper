@@ -34,6 +34,8 @@ _PROJECT_SCOPES = (
 )
 _PARENT_CONFIG_PATH = Path("sonar-project.properties")
 _PARENT_SUBMODULE_EXCLUSIONS = frozenset({"frontend/**", "integrations/snapper-mcp/**", "ios/**"})
+_PARENT_TEMPORARY_SOURCE_EXCLUSIONS = frozenset({"src/snapper/data/repository.py"})
+_PARENT_EXCLUSIONS = _PARENT_SUBMODULE_EXCLUSIONS | _PARENT_TEMPORARY_SOURCE_EXCLUSIONS
 _PARENT_OWNED_INTEGRATION_WITNESS = "integrations/snapper-delegate/src/snapper_delegate/runner.py"
 _SONAR_WORKFLOWS = (
     Path(".github/workflows/ci.yml"),
@@ -185,12 +187,12 @@ def test_sonar_configs_analyze_the_full_checked_out_scope(
     project_root: Path,
     expected_test_inclusions: str,
 ) -> None:
-    """Require full analysis except for public submodules owned elsewhere.
+    """Require the complete declared scope and only approved exact exclusions.
 
     Given: one of the four active Snapper Sonar project configurations,
     When: its source, test, and suppressive properties are inspected,
     Then: the complete checked-out project is analyzed with tests classified explicitly,
-        and only the parent excludes the three independently analyzed projects.
+        and only the parent carries the explicitly approved exact exclusions.
     """
     assert project_root.is_dir()
     properties = _read_properties(_REPO_ROOT / relative_path)
@@ -203,11 +205,12 @@ def test_sonar_configs_analyze_the_full_checked_out_scope(
         exclusions = frozenset(
             item.strip() for item in properties["sonar.exclusions"].split(",") if item.strip()
         )
-        assert exclusions == _PARENT_SUBMODULE_EXCLUSIONS, (
-            "only independently analyzed projects may be excluded; "
-            "integrations/snapper-delegate must remain in parent analysis"
+        assert exclusions == _PARENT_EXCLUSIONS, (
+            "only independently analyzed projects and the temporary oversized repository "
+            "module may be excluded; integrations/snapper-delegate must remain in parent analysis"
         )
         assert (_REPO_ROOT / _PARENT_OWNED_INTEGRATION_WITNESS).is_file()
+        assert (_REPO_ROOT / next(iter(_PARENT_TEMPORARY_SOURCE_EXCLUSIONS))).is_file()
         assert not any(
             fnmatchcase(_PARENT_OWNED_INTEGRATION_WITNESS, pattern) for pattern in exclusions
         )
@@ -267,6 +270,26 @@ def test_sonar_workflows_block_on_the_pinned_quality_gate(relative_path: Path) -
     environment = gate_step.get("env")
     assert isinstance(environment, dict)
     assert environment.get("SONAR_TOKEN") == "${{ secrets.SONAR_TOKEN }}"
+
+
+def test_parent_sonar_scan_has_explicit_heap_for_declared_source_analysis() -> None:
+    """Give the backend scan enough heap for its declared owned source scope.
+
+    Given: The parent project analyzes its declared owned source scope,
+    When: The pinned scanner is launched on GitHub's runner,
+    Then: Its JVM has an explicit bounded heap instead of an undersized ergonomic default.
+    """
+    action_steps = _workflow_action_steps(_REPO_ROOT / ".github/workflows/ci.yml")
+    scans = [
+        step
+        for _job, _index, step in action_steps
+        if str(step["uses"]).startswith(_SCAN_ACTION_PREFIX)
+    ]
+    assert len(scans) == 1
+    environment = scans[0].get("env")
+    assert isinstance(environment, dict)
+    assert environment.get("SONAR_SCANNER_JAVA_OPTS") == "-Xmx4g"
+    assert "SONAR_SCANNER_OPTS" not in environment
 
 
 @pytest.mark.parametrize("relative_path", _ALL_WORKFLOWS)

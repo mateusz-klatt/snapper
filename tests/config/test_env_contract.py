@@ -73,6 +73,12 @@ class TestKnownEnvKeys:
     def test_includes_delegate_profile_keys(self) -> None:
         """The optional Compose profile contributes only its host inputs."""
         assert DELEGATE_PROFILE_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        assert {
+            "SNAPPER_DELEGATE_GEMINI_BASE_URL",
+            "SNAPPER_DELEGATE_GEMINI_MODEL",
+            "SNAPPER_DELEGATE_KIMI_BASE_URL",
+            "SNAPPER_DELEGATE_KIMI_MODEL",
+        }.issubset(DELEGATE_PROFILE_ENV_VARS)
 
     def test_includes_system_metrics_keys(self) -> None:
         """The system-metrics subsystem contributes its ENV_VARS."""

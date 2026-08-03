@@ -30,15 +30,15 @@ class TestAllowlistFor:
         assert "snapper.core.types" in allowed
 
     @pytest.mark.parametrize("filename", ["runner.py", "chat_completions.py", "pid1.py"])
-    def test_agent_lifecycle_modules_get_only_json_types(self, filename: str) -> None:
-        """Dependency-light agent modules may reach only json_types.
+    def test_agent_lifecycle_modules_get_no_parent_imports(self, filename: str) -> None:
+        """Self-contained agent modules cannot import the parent package.
 
         Given: A non-registration module name,
         When: The allowlist is resolved,
-        Then: It is exactly the json_types single-entry default.
+        Then: Its first-party import allowlist is empty.
         """
         allowed = boundary.allowlist_for(filename)
-        assert allowed == frozenset({"snapper.core.json_types"})
+        assert allowed == frozenset()
 
 
 class TestForbiddenImports:

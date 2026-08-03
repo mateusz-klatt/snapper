@@ -237,7 +237,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
             await asyncio.sleep(DELAY_BETWEEN_SCENARIOS)
 
         if "passive_sell" in run:
-            logger.info("Walutomat: passive_sell ��� deep ask")
+            logger.info("Walutomat: passive_sell - deep ask")
             passive_price = round(ticker.ask * 1.05, 4)
             request = ExchangeOrderRequest(
                 symbol="EUR-PLN",

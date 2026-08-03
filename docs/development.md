@@ -574,10 +574,14 @@ used locally in additional build and smoke stages:
 6.  `make cov-xml` — Export coverage XML, consumed by the SonarCloud scan step
 7.  Docker smoke stage — `make docker-build-dev`, `make docker-migrate-dev`, `docker compose up` for the `snapper` and `snapper-web` services, then a `make server-check` health check
 
-SonarCloud analyzes all checked-out backend code, data, migrations, and tooling
-without coverage, duplication, analyzer, or issue suppressions. The parent project
-excludes only `frontend/`, `integrations/snapper-mcp/`, and `ios/` because those
-public submodules have independent SonarCloud projects. Parent-owned
+SonarCloud analyzes checked-out backend code, data, migrations, and tooling without
+coverage, duplication, or issue suppressions. The parent project excludes
+`frontend/`, `integrations/snapper-mcp/`, and `ios/` because those public submodules
+have independent SonarCloud projects. It also carries one temporary exact-file
+analyzer exception for `src/snapper/data/repository.py`: the 35,000-line module
+exhausts the scanner JVM while the rest of the project remains analyzable. Local and
+CI lint, type, test, and coverage gates still include it. The exception must be
+removed after the repository is split into bounded domain modules. Parent-owned
 `integrations/snapper-delegate/` remains in the backend analysis; each independent
 project likewise suppresses no owned sources or findings.
 `tests/meta/test_sonar_configuration.py` pins this boundary and also rejects

@@ -146,7 +146,12 @@ async def _assert_contract(
 
 @pytest.mark.asyncio
 async def test_kimi_k3_vendor_contract_round_trips_reasoning_content(tmp_path: Path) -> None:
-    """Kimi uses its origin and replays opaque reasoning content unchanged."""
+    """Kimi uses its origin and replays opaque reasoning content unchanged.
+
+    Given: A recorded Kimi K3 response with opaque reasoning content,
+    When: The vendor response is completed and replayed through the contract client,
+    Then: The reasoning content survives unchanged in the assistant message.
+    """
     result = await _assert_contract(tmp_path, _load_fixture("kimi-k3.json"))
 
     message = result.completion.choices[0].message
@@ -159,7 +164,12 @@ async def test_kimi_k3_vendor_contract_round_trips_reasoning_content(tmp_path: P
 async def test_gemini_25_pro_vendor_contract_round_trips_thought_signature(
     tmp_path: Path,
 ) -> None:
-    """Gemini uses its prefixed path and replays its tool thought signature."""
+    """Gemini uses its prefixed path and replays its tool thought signature.
+
+    Given: A recorded Gemini response containing a tool thought signature,
+    When: The vendor response is completed and replayed through the contract client,
+    Then: The signature and usage details survive unchanged.
+    """
     result = await _assert_contract(tmp_path, _load_fixture("gemini-2.5-pro.json"))
 
     message = result.completion.choices[0].message
@@ -176,7 +186,12 @@ async def test_gemini_25_pro_vendor_contract_round_trips_thought_signature(
 
 @pytest.mark.asyncio
 async def test_gpt_vendor_contract_round_trips_standard_response(tmp_path: Path) -> None:
-    """GPT uses the standard path and preserves standard opaque fields."""
+    """GPT uses the standard path and preserves standard opaque fields.
+
+    Given: A recorded GPT-compatible completion response,
+    When: The response is completed and replayed through the contract client,
+    Then: Standard message and completion extras survive unchanged.
+    """
     result = await _assert_contract(tmp_path, _load_fixture("gpt.json"))
 
     message = result.completion.choices[0].message
@@ -192,7 +207,12 @@ async def test_gpt_vendor_contract_round_trips_standard_response(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_claude_vendor_contract_round_trips_standard_response(tmp_path: Path) -> None:
-    """Claude uses the standard path and preserves compatibility extras."""
+    """Claude uses the standard path and preserves compatibility extras.
+
+    Given: A recorded Claude-compatible completion response,
+    When: The response is completed and replayed through the contract client,
+    Then: Compatibility message and completion extras survive unchanged.
+    """
     result = await _assert_contract(tmp_path, _load_fixture("claude.json"))
 
     message = result.completion.choices[0].message

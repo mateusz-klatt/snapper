@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 import yaml
 
-from snapper.config.delegate_profile import ENV_VARS as DELEGATE_PROFILE_ENV_VARS
+from snapper.config.delegate_profile import RUNNER_ENV_VARS as DELEGATE_RUNNER_ENV_VARS
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
 _COMPOSE_FILE: Final[Path] = _REPO_ROOT / "docker-compose.yml"
@@ -223,7 +223,7 @@ def test_delegate_service_environment_is_minimal_and_reference_only() -> None:
         for name, value in environment.items()
         if isinstance(value, str) and value.startswith("${")
     }
-    assert interpolated_names == DELEGATE_PROFILE_ENV_VARS
+    assert interpolated_names == DELEGATE_RUNNER_ENV_VARS
     assert set(environment) == {
         "PYTHONPATH",
         "PYTHONDONTWRITEBYTECODE",
@@ -329,9 +329,9 @@ def test_delegate_service_drops_privilege_and_caps_resources() -> None:
 def test_model_delegate_uses_blackbox_image(profile: _ModelProfile) -> None:
     """Each model runs PID1 from the minimal blackbox image, not the unified one.
 
-    The blackbox image carries no Snapper source, migrations, or seeds, so a
-    compromised model has no backend code to read; its build context is the
-    delegate directory alone.
+    Given: A model-specific delegate service in the Compose contract,
+    When: Its image, build context, and process configuration are inspected,
+    Then: It uses only the minimal blackbox image and delegate build context.
     """
     service = _model_service(profile)
     assert service["profiles"] == ["delegate"]
@@ -352,7 +352,12 @@ def test_model_delegate_uses_blackbox_image(profile: _ModelProfile) -> None:
 def test_model_delegate_environment_pins_only_reference_configuration(
     profile: _ModelProfile,
 ) -> None:
-    """Each profile carries fixed paths and references rather than credentials."""
+    """Each profile carries fixed paths and references rather than credentials.
+
+    Given: A model-specific delegate service environment,
+    When: Its configuration keys and values are inspected,
+    Then: It contains only fixed settings and secret-file references.
+    """
     service = _model_service(profile)
     assert "env_file" not in service
     environment = service["environment"]
@@ -393,7 +398,12 @@ def test_model_delegate_environment_pins_only_reference_configuration(
 def test_model_delegate_attaches_only_its_internal_control_network(
     profile: _ModelProfile,
 ) -> None:
-    """Vendor and application-plane networks remain unreachable."""
+    """Vendor and application-plane networks remain unreachable.
+
+    Given: A model-specific delegate service and its network declarations,
+    When: Its attached services and network properties are inspected,
+    Then: Only the dedicated internal control network is reachable.
+    """
     service = _model_service(profile)
     assert service["networks"] == [profile.control_network]
     assert "network_mode" not in service
@@ -416,7 +426,12 @@ def test_model_delegate_attaches_only_its_internal_control_network(
 def test_model_delegate_mounts_only_model_log_and_secret_references(
     profile: _ModelProfile,
 ) -> None:
-    """Each model sees only its writable log and read-only secret directory."""
+    """Each model sees only its writable log and read-only secret directory.
+
+    Given: A model-specific delegate service volume contract,
+    When: Its bind mounts are inspected,
+    Then: Only the model log and read-only secret directory are visible.
+    """
     service = _model_service(profile)
     assert service["volumes"] == [
         {
@@ -441,7 +456,12 @@ def test_model_delegate_mounts_only_model_log_and_secret_references(
 
 @pytest.mark.parametrize("profile", _MODEL_PROFILES, ids=("kimi", "gemini"))
 def test_model_delegate_preserves_all_runner_hardening(profile: _ModelProfile) -> None:
-    """Each model keeps the canary's privilege and resource limits."""
+    """Each model keeps the canary's privilege and resource limits.
+
+    Given: A model-specific delegate service derived from the hardened runner,
+    When: Its privilege, filesystem, and resource controls are inspected,
+    Then: Every required hardening control remains active.
+    """
     service = _model_service(profile)
     assert service["user"] == "888:888"
     assert service["read_only"] is True
@@ -471,7 +491,12 @@ def test_model_delegate_preserves_all_runner_hardening(profile: _ModelProfile) -
 
 
 def test_snapper_web_exposes_bridge_only_inside_control_networks() -> None:
-    """The web service joins both controls without publishing the bridge."""
+    """The web service joins both controls without publishing the bridge.
+
+    Given: The dashboard service and both delegate control networks,
+    When: Its network membership and published ports are inspected,
+    Then: The control bridge is exposed internally but never published to the host.
+    """
     service = _service("snapper-web")
     assert service["image"] == "klattm/snapper:latest"
     assert service["expose"] == ["8300"]
@@ -485,7 +510,12 @@ def test_snapper_web_exposes_bridge_only_inside_control_networks() -> None:
 
 
 def test_caddy_control_bridge_has_exact_source_route_and_method_allowlist() -> None:
-    """The bridge denies every source and route outside four control contracts."""
+    """The bridge denies every source and route outside four control contracts.
+
+    Given: The public and internal Caddy site blocks,
+    When: Their source, route, and method matchers are inspected,
+    Then: Only the four explicit delegate control contracts are admitted.
+    """
     public_block = _site_block(":8000")
     control_block = _site_block(":8300")
     for subnet in _CONTROL_SUBNETS:
