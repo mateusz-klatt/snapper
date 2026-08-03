@@ -3538,9 +3538,7 @@ class TestListenLoopSystemMessages:
             mock_mapper.return_value = mock_mapper_instance
             with pytest.raises(asyncio.CancelledError):
                 await strategy._listen_loop()
-                mock_mapper_instance.trigger_cache_invalidation.assert_called_once_with(
-                    fail_fast=False
-                )
+            mock_mapper_instance.trigger_cache_invalidation.assert_called_once_with(fail_fast=False)
 
     @pytest.mark.asyncio
     async def test_listen_loop_settings_update(self) -> None:
