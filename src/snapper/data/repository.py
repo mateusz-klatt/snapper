@@ -73,6 +73,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
@@ -332,6 +333,7 @@ from snapper.data.repository_types import FxConversionProofInsertRow
 from snapper.data.repository_types import FxConversionProofRow
 from snapper.data.repository_types import FxConversionScopeKind
 from snapper.data.repository_types import FxConversionSuccessfulQuery
+from snapper.data.repository_types import FxProofBackfillConsumer
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentDetailRow
 from snapper.data.repository_types import InstrumentFeedHealthRow
@@ -4436,6 +4438,22 @@ class Repository(ABC):
         non-contiguous, duplicated, lacks exactly one active Order lineage, or
         cannot prove one exact durable fill shard owned by the requested wallet.
         """
+        ...
+
+    @abstractmethod
+    async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
+        """Return every active anchor and sample with its persisted sealed cut."""
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_execution_prefix_at_watermarks(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Prove one caller-supplied durable watermark map without extending it."""
         ...
 
     @abstractmethod
@@ -18413,11 +18431,24 @@ class SQLAlchemyRepository(Repository):
             for exchange, watermark in captured_rows
             if watermark is not None
         }
+        return await self._load_pnl_timeline_execution_prefix_for_watermarks(
+            s, wallet_public_id, mode, watermarks, horizon
+        )
+
+    async def _load_pnl_timeline_execution_prefix_for_watermarks(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionPrefix:
+        """Prove and fold an exact watermark map inside one read snapshot."""
         source_rows = await self._read_pnl_timeline_execution_prefix(
             s,
             wallet_public_id,
             mode,
-            watermarks,
+            dict(watermarks),
         )
         client_order_ids = list(
             dict.fromkeys(
@@ -18462,7 +18493,7 @@ class SQLAlchemyRepository(Repository):
             _PnlTimelineExecutionPrefixSource(
                 wallet_public_id=wallet_public_id,
                 mode=mode,
-                watermarks=watermarks,
+                watermarks=dict(watermarks),
                 source_rows=source_rows,
                 fill_rows=fill_rows,
                 native_symbols_by_symbol_public_id=native_symbols_by_symbol_public_id,
@@ -18472,10 +18503,74 @@ class SQLAlchemyRepository(Repository):
             )
         )
         return {
-            "watermarks": watermarks,
+            "watermarks": dict(watermarks),
             "executions": executions,
             "annulments": annulments,
         }
+
+    async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
+        """Enumerate active P&L artifacts without including reconciliation anchors."""
+        async with self.session() as s:
+            rows = list(
+                (
+                    await s.execute(
+                        select(PortfolioPnlPoint)
+                        .where(PortfolioPnlPoint.known_to == KNOWN_TO_MAX)
+                        .order_by(
+                            PortfolioPnlPoint.wallet_public_id,
+                            PortfolioPnlPoint.mode,
+                            PortfolioPnlPoint.valuation_ccy,
+                            PortfolioPnlPoint.point_time,
+                            PortfolioPnlPoint.public_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        consumers: list[FxProofBackfillConsumer] = []
+        for row in rows:
+            raw = row.watermarks_json or "{}"
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or any(
+                not isinstance(key, str) or not isinstance(value, int) or value < 0
+                for key, value in payload.items()
+            ):
+                raise ValueError("active P&L consumer has invalid execution watermarks")
+            consumers.append(
+                FxProofBackfillConsumer(
+                    public_id=row.public_id,
+                    wallet_public_id=row.wallet_public_id,
+                    mode=cast(Literal["live", "paper"], row.mode),
+                    valuation_ccy=row.valuation_ccy,
+                    calculation_version=row.calc_version,
+                    point_kind=cast(Literal["anchor", "sample"], row.point_kind),
+                    knowledge_at=row.timestamp,
+                    watermarks=cast(dict[str, int], payload),
+                )
+            )
+        return consumers
+
+    async def get_pnl_timeline_execution_prefix_at_watermarks(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Certify a persisted cut while refusing to capture any newer execution."""
+        normalized = dict(sorted(watermarks.items()))
+        if any(not exchange or watermark < 0 for exchange, watermark in normalized.items()):
+            raise ValueError("execution watermark map is invalid")
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
+            return await self._load_pnl_timeline_execution_prefix_for_watermarks(
+                s,
+                wallet_public_id,
+                mode,
+                normalized,
+                _resolved_knowledge_horizon(as_of),
+            )
 
     async def get_pnl_timeline_execution_prefix(
         self,

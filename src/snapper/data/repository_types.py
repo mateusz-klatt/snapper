@@ -25,6 +25,20 @@ FxConversionCompleteness = Literal["complete", "partial", "refused"]
 FxConversionOperation = Literal["direct", "inverse"]
 
 
+@dataclass(frozen=True, slots=True)
+class FxProofBackfillConsumer:
+    """One active durable P&L consumer and its sealed execution cut."""
+
+    public_id: str
+    wallet_public_id: str
+    mode: Literal["live", "paper"]
+    valuation_ccy: str
+    calculation_version: str
+    point_kind: Literal["anchor", "sample"]
+    knowledge_at: datetime
+    watermarks: dict[str, int]
+
+
 class FxConversionCandidatePlane(TypedDict):
     """One normalized plane considered by exact-coverage election."""
 

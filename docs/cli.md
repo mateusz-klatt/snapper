@@ -373,6 +373,25 @@ rows. `detach` enforces the seven-day ticks or thirty-day candles/trades
 horizon, uses plain bounded-lock `DETACH`, and leaves the detached table
 intact; dropping or archiving it is a separate operator action.
 
+### `fx-proofs backfill`
+
+Reports the exact execution-minute FX conversion requirements sealed by the
+persisted watermark maps of every active P&L anchor and sample. Report mode is
+the default and performs no writes. It groups unpinned requirements by wallet,
+currency pair, and election scope and lists every unprovable requirement.
+
+```bash
+snapper fx-proofs backfill
+snapper fx-proofs backfill --apply
+snapper fx-proofs backfill --apply --checkpoint data/fx-proof-backfill-checkpoint.json
+```
+
+`--apply` pins proofs and canonical refusal audits in fixed-size batches. The
+checkpoint is advanced only after a complete batch, so rerunning an interrupted
+operation safely converges through the proof repository's canonical identity.
+The scope deliberately excludes spot-reconciliation anchors and never extends
+the persisted cuts with a newly captured execution prefix.
+
 ### `db-seed`
 
 Seeds the database with environment-specific data from TOML profiles.
