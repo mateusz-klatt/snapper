@@ -696,27 +696,6 @@ def _swift_struct_field_lines(properties: list[SwiftPropertySpec]) -> list[str]:
     return [f"    let {swift_name}: {swift_type}" for _, swift_name, swift_type, _ in properties]
 
 
-def _swift_struct_initializer_lines(properties: list[SwiftPropertySpec]) -> list[str]:
-    """Render the memberwise initializer for a generated Swift struct.
-
-    Args:
-        properties: Ordered Swift property specifications.
-
-    Returns:
-        Swift initializer lines with optional defaults.
-    """
-    lines = ["    init("]
-    last_index = len(properties) - 1
-    for index, (_, swift_name, swift_type, is_required) in enumerate(properties):
-        default = "" if is_required else " = nil"
-        comma = "," if index < last_index else ""
-        lines.append(f"        {swift_name}: {swift_type}{default}{comma}")
-    lines.append("    ) {")
-    lines.extend(f"        self.{swift_name} = {swift_name}" for _, swift_name, _, _ in properties)
-    lines.append("    }")
-    return lines
-
-
 def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[str]:
     """Render coding keys when a property name changes during camel-casing.
 
@@ -754,8 +733,6 @@ def generate_swift_struct(
     properties = _swift_struct_property_specs(schema, definitions)
     lines = [f"struct {name}: Codable, Sendable {{"]
     lines.extend(_swift_struct_field_lines(properties))
-    lines.append("")
-    lines.extend(_swift_struct_initializer_lines(properties))
     lines.extend(_swift_struct_coding_key_lines(properties))
     lines.append("}")
     return lines

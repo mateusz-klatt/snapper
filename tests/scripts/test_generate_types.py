@@ -969,6 +969,7 @@ class TestGenerateSwiftStruct:
         assert "struct User: Codable, Sendable" in result
         assert "let id: Int" in result
         assert "let name: String?" in result
+        assert "    init(" not in result
 
     def test_generates_coding_keys(self) -> None:
         """Generates CodingKeys for snake_case fields."""
@@ -994,6 +995,28 @@ class TestGenerateSwiftStruct:
         result = "\n".join(lines)
         assert "///" not in result
         assert "let id: Int?" in result
+
+    def test_required_nullable_field_has_no_default(self) -> None:
+        """Required nullable fields stay explicit in the synthesized initializer."""
+        schema = {
+            "properties": {
+                "name": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "null"},
+                    ],
+                },
+            },
+            "required": ["name"],
+        }
+        result = "\n".join(generate_swift_struct("User", schema, {}))
+        assert "let name: String?" in result
+        assert "name: String? = nil" not in result
+
+    def test_empty_struct_omits_initializer(self) -> None:
+        """Empty schemas rely on Swift's synthesized initializer."""
+        result = "\n".join(generate_swift_struct("Empty", {}, {}))
+        assert result == "struct Empty: Codable, Sendable {\n}"
 
     def test_no_coding_keys_when_camelcase_matches(self) -> None:
         """No CodingKeys when property names match camelCase."""
