@@ -541,6 +541,26 @@ def test_carry_takes_the_nearest_earlier_mark() -> None:
     assert proofs[0]["carried_minutes"] == 2
 
 
+def test_carry_uses_the_newest_duplicate_from_only_the_selected_plane() -> None:
+    """Foreign planes and older duplicate candles cannot replace the winner.
+
+    Given a foreign row and two selected-plane rows for one preceding minute
+    When the gap is resolved by carrying the selected plane forward
+    Then the selected row with the greatest durable candle id supplies proof
+    """
+    gap = _MINUTE + timedelta(minutes=5)
+    previous = _MINUTE + timedelta(minutes=4)
+    foreign = _row(previous, exchange="walutomat")
+    newest = cast(PnlFxRateRow, {**_row(previous), "candle_id": 99})
+    older = cast(PnlFxRateRow, {**_row(previous), "candle_id": 1})
+    evaluation = _evaluation(frozenset({gap}), rows=(foreign, newest, older))
+
+    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+
+    assert len(proofs) == 1
+    assert proofs[0]["candle_id"] == 99
+
+
 def test_carry_never_looks_forward() -> None:
     """A later mark cannot value an earlier conversion.
 
