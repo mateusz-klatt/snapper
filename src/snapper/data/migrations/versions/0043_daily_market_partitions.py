@@ -42,6 +42,8 @@ _ANCHOR_PATTERN = re.compile(
 )
 _SCHEMA = "public"
 _FUTURE_LEAVES = 14
+_TIMESTAMPTZ_COLUMN_TYPE = "timestamp with time zone"
+_DOUBLE_PRECISION_COLUMN_TYPE = "double precision"
 
 
 @dataclass(frozen=True)
@@ -94,8 +96,8 @@ class TableSpec:
 _TEMPORAL_TAIL = (
     ColumnSpec("session_id", "uuid", False, ""),
     ColumnSpec("sequence_id", "integer", False, ""),
-    ColumnSpec("timestamp", "timestamp with time zone", False, ""),
-    ColumnSpec("known_to", "timestamp with time zone", False, ""),
+    ColumnSpec("timestamp", _TIMESTAMPTZ_COLUMN_TYPE, False, ""),
+    ColumnSpec("known_to", _TIMESTAMPTZ_COLUMN_TYPE, False, ""),
 )
 
 _TABLES = (
@@ -106,10 +108,10 @@ _TABLES = (
             ColumnSpec("id", "bigint", False, "nextval('ticks_id_seq'::regclass)"),
             ColumnSpec("public_id", "uuid", False, ""),
             ColumnSpec("instrument_public_id", "uuid", False, ""),
-            ColumnSpec("bid", "double precision", True, ""),
-            ColumnSpec("ask", "double precision", True, ""),
-            ColumnSpec("last", "double precision", True, ""),
-            ColumnSpec("volume", "double precision", False, ""),
+            ColumnSpec("bid", _DOUBLE_PRECISION_COLUMN_TYPE, True, ""),
+            ColumnSpec("ask", _DOUBLE_PRECISION_COLUMN_TYPE, True, ""),
+            ColumnSpec("last", _DOUBLE_PRECISION_COLUMN_TYPE, True, ""),
+            ColumnSpec("volume", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
             *_TEMPORAL_TAIL,
         ),
         checks=("ck_ticks_sequence_id",),
@@ -129,13 +131,13 @@ _TABLES = (
             ColumnSpec("public_id", "uuid", False, ""),
             ColumnSpec("instrument_public_id", "uuid", False, ""),
             ColumnSpec("timeframe", "character varying(8)", False, ""),
-            ColumnSpec("open_at", "timestamp with time zone", False, ""),
-            ColumnSpec("open", "double precision", False, ""),
-            ColumnSpec("high", "double precision", False, ""),
-            ColumnSpec("low", "double precision", False, ""),
-            ColumnSpec("close", "double precision", False, ""),
-            ColumnSpec("volume", "double precision", False, ""),
-            ColumnSpec("vwap", "double precision", True, ""),
+            ColumnSpec("open_at", _TIMESTAMPTZ_COLUMN_TYPE, False, ""),
+            ColumnSpec("open", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("high", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("low", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("close", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("volume", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("vwap", _DOUBLE_PRECISION_COLUMN_TYPE, True, ""),
             ColumnSpec("trades", "integer", True, ""),
             *_TEMPORAL_TAIL,
             ColumnSpec(
@@ -172,10 +174,10 @@ _TABLES = (
             ColumnSpec("public_id", "uuid", False, ""),
             ColumnSpec("instrument_public_id", "uuid", False, ""),
             ColumnSpec("trade_id", "character varying(64)", True, ""),
-            ColumnSpec("price", "double precision", False, ""),
-            ColumnSpec("size", "double precision", False, ""),
+            ColumnSpec("price", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
+            ColumnSpec("size", _DOUBLE_PRECISION_COLUMN_TYPE, False, ""),
             ColumnSpec("side", "character varying(4)", False, ""),
-            ColumnSpec("executed_at", "timestamp with time zone", False, ""),
+            ColumnSpec("executed_at", _TIMESTAMPTZ_COLUMN_TYPE, False, ""),
             *_TEMPORAL_TAIL,
         ),
         checks=("ck_trades_sequence_id",),
@@ -616,35 +618,7 @@ def _index_shape_rows(
     """Return structural expected-index rows for one relation."""
     rows: list[str] = []
     if not parent:
-        pkey = f"{spec.name}_pkey" if legacy else f"{relation}_pkey"
-        rows.append(_index_shape_row(CatalogIndex(pkey, ("id",), True, True, False, "")))
-        if spec.legacy_u2 and legacy:
-            rows.append(
-                _index_shape_row(
-                    CatalogIndex(
-                        "uq_trade_instrument_trade_id",
-                        ("instrument_public_id", "trade_id"),
-                        True,
-                        False,
-                        False,
-                        "",
-                    )
-                )
-            )
-        if spec.active_public_id:
-            public_name = f"ix_{spec.name}_public_id" if legacy else f"{relation}_public_id"
-            rows.append(
-                _index_shape_row(
-                    CatalogIndex(
-                        public_name,
-                        ("public_id",),
-                        True,
-                        False,
-                        True,
-                        "",
-                    )
-                )
-            )
+        rows.extend(_uniqueness_index_shape_rows(spec, relation, legacy))
     for index in spec.matching_indexes:
         if parent:
             index_name = index.parent_name
@@ -663,6 +637,54 @@ def _index_shape_rows(
                     False,
                     index.partial,
                     parent_name,
+                )
+            )
+        )
+    return rows
+
+
+def _uniqueness_index_shape_rows(
+    spec: TableSpec,
+    relation: str,
+    legacy: bool,
+) -> list[str]:
+    """Return the expected uniqueness-index rows carried by one concrete relation.
+
+    The partitioned parent carries no primary key and no relation-local uniqueness
+    row of this shape, so these rows describe only the legacy table and the
+    generated partition leaves. The parent's own partitioned unique indexes are
+    declared as matching indexes and are emitted by the other loop instead.
+
+    The caller compares these rows against the live catalogue with set semantics,
+    so row order does not affect verification; it is kept stable only to keep the
+    manifest readable against the declaration order.
+    """
+    pkey = f"{spec.name}_pkey" if legacy else f"{relation}_pkey"
+    rows = [_index_shape_row(CatalogIndex(pkey, ("id",), True, True, False, ""))]
+    if spec.legacy_u2 and legacy:
+        rows.append(
+            _index_shape_row(
+                CatalogIndex(
+                    "uq_trade_instrument_trade_id",
+                    ("instrument_public_id", "trade_id"),
+                    True,
+                    False,
+                    False,
+                    "",
+                )
+            )
+        )
+    if spec.active_public_id:
+        public_name = f"ix_{spec.name}_public_id" if legacy else f"{relation}_public_id"
+        rows.append(
+            _index_shape_row(
+                CatalogIndex(
+                    public_name,
+                    ("public_id",),
+                    True,
+                    False,
+                    True,
+                    "",
                 )
             )
         )

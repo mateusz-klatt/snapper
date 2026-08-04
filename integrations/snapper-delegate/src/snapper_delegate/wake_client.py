@@ -468,7 +468,7 @@ class WakeClient:
                     continue
                 if frame.type in ("auth_expired", "auth_failed"):
                     raise WakeSessionError("authentication expired")
-                if frame.type == "reauth_required" and (reauth_task is None or reauth_task.done()):
+                if self._reauth_is_due(frame.type, reauth_task):
                     reauth_ok.clear()
                     reauth_task = asyncio.create_task(self._reauthenticate(socket, reauth_ok))
                     continue
@@ -481,12 +481,57 @@ class WakeClient:
                 if isinstance(frame, AiReviewRequestFrame | AiReviewDecisionAckFrame):
                     await self._deliver(frame, callbacks)
         finally:
-            tasks = [ping_task]
-            if reauth_task is not None:
-                tasks.append(reauth_task)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._retire_background_tasks(ping_task, reauth_task)
+
+    @staticmethod
+    def _reauth_is_due(frame_type: str, reauth_task: asyncio.Task[None] | None) -> bool:
+        """Report whether a reauthentication warning still needs a fresh cycle.
+
+        The server may repeat its warning while the previous in-socket
+        reauthentication is still awaiting its acknowledgement. Starting a
+        second cycle then would mint another one-shot token, overwrite the
+        handle of the cycle already in flight, and leave that cycle running
+        unobserved until its own timeout closed a socket that had in the
+        meantime been reauthenticated. So a warning is answered only when no
+        cycle is running, and a cycle that has finished — successfully or not —
+        no longer blocks the next one.
+
+        Args:
+            frame_type: Discriminator of the frame just received.
+            reauth_task: Handle of the reauthentication cycle last started.
+
+        Returns:
+            Whether this frame should start a new reauthentication cycle.
+        """
+        if frame_type != "reauth_required":
+            return False
+        return reauth_task is None or reauth_task.done()
+
+    @staticmethod
+    async def _retire_background_tasks(
+        ping_task: asyncio.Task[None],
+        reauth_task: asyncio.Task[None] | None,
+    ) -> None:
+        """Cancel and drain the helper tasks whose lifetime is one stream.
+
+        Both helpers write to the socket this stream owns, so they are retired
+        before the caller closes it — otherwise a surviving ping or reauth frame
+        would be sent into a dead socket and raise from an orphaned task. The
+        drain absorbs the cancellation and any failure each task was already
+        carrying, so a session ending on its own error reports that error rather
+        than an unretrieved exception from its helpers.
+
+        Args:
+            ping_task: The heartbeat task started for this stream.
+            reauth_task: The last reauthentication cycle, absent when the
+                session never received a warning.
+        """
+        tasks = [ping_task]
+        if reauth_task is not None:
+            tasks.append(reauth_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _subscribe_topics(self) -> list[JsonValue]:
         """List the topics this session needs, including its own control topic.

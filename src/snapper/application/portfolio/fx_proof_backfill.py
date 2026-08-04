@@ -597,6 +597,55 @@ def _ordered_consumers(
     return [*indexed[start:], *indexed[:start]]
 
 
+@dataclass(frozen=True, slots=True)
+class _ConsumerApplyOutcome:
+    """One consumer's applied requirements, creation counts, and abort state.
+
+    ``requirements`` stays populated when ``aborted`` is true: the run still has
+    to report the evidence that landed before the adverse batch stopped it.
+    """
+
+    requirements: tuple[FxProofBackfillRequirement, ...]
+    proof_creations: int
+    refusal_audit_creations: int
+    aborted: bool
+
+
+async def _apply_consumer_requirements(
+    repo: Repository,
+    discovered: tuple[FxProofBackfillRequirement, ...],
+) -> _ConsumerApplyOutcome:
+    """Apply one consumer's requirements in batches, stopping on adverse metrics.
+
+    The adverse check compares against the snapshot taken before the first
+    batch, so any non-convergent outcome inside this consumer aborts the run
+    even when the batch that observes it is itself clean.
+
+    Args:
+        repo: Repository providing artifact state and proof persistence.
+        discovered: Ordered requirements discovered for one consumer.
+
+    Returns:
+        Refreshed requirements, classified creation counts, and abort state.
+    """
+    applied: list[FxProofBackfillRequirement] = []
+    proof_creations = 0
+    refusal_creations = 0
+    aborted = False
+    consumer_metrics = fx_shadow_pin_metrics()
+    for batch_start in range(0, len(discovered), FX_PROOF_BACKFILL_BATCH_SIZE):
+        batch = discovered[batch_start : batch_start + FX_PROOF_BACKFILL_BATCH_SIZE]
+        for requirement in batch:
+            refreshed, proof_count, refusal_count = await _apply_requirement(repo, requirement)
+            applied.append(refreshed)
+            proof_creations += proof_count
+            refusal_creations += refusal_count
+        if _has_adverse_metric(_metric_delta(consumer_metrics, fx_shadow_pin_metrics())):
+            aborted = True
+            break
+    return _ConsumerApplyOutcome(tuple(applied), proof_creations, refusal_creations, aborted)
+
+
 async def run_fx_proof_backfill(
     repo: Repository,
     apply: bool,
@@ -641,20 +690,12 @@ async def run_fx_proof_backfill(
         reached += 1
         discovery = await _isolated_consumer_discovery(repo, consumer)
         refusals.extend(discovery.semantic_refusals)
-        consumer_requirements: list[FxProofBackfillRequirement] = []
-        consumer_metrics = fx_shadow_pin_metrics()
-        for batch_start in range(0, len(discovery.requirements), FX_PROOF_BACKFILL_BATCH_SIZE):
-            batch = discovery.requirements[batch_start : batch_start + FX_PROOF_BACKFILL_BATCH_SIZE]
-            for requirement in batch:
-                refreshed, proof_count, refusal_count = await _apply_requirement(repo, requirement)
-                consumer_requirements.append(refreshed)
-                proof_creations += proof_count
-                refusal_creations += refusal_count
-            if _has_adverse_metric(_metric_delta(consumer_metrics, fx_shadow_pin_metrics())):
-                aborted = True
-                break
-        requirements.extend(consumer_requirements)
-        if aborted:
+        outcome = await _apply_consumer_requirements(repo, discovery.requirements)
+        requirements.extend(outcome.requirements)
+        proof_creations += outcome.proof_creations
+        refusal_creations += outcome.refusal_audit_creations
+        if outcome.aborted:
+            aborted = True
             break
         processed += 1
         next_cursor = (index + 1) % max(len(consumers), 1)

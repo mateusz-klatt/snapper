@@ -40,6 +40,7 @@ from sqlalchemy import table
 from sqlalchemy import text
 from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import quoted_name
 from sqlalchemy.sql.expression import Executable
@@ -95,6 +96,18 @@ async def migration_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyReposi
         yield repository
     finally:
         await repository.engine.dispose()
+
+
+async def _execute_and_commit(session: AsyncSession, statement: Executable) -> None:
+    """Issue one raw vector and commit it on the caller's open session.
+
+    The trigger may refuse at statement execution or at commit, so both steps
+    belong to the single attack under test. Keeping them together here means the
+    surrounding ``pytest.raises`` block wraps exactly one call while the vector
+    still runs in the caller's session and its transaction, unchanged.
+    """
+    await session.execute(statement)
+    await session.commit()
 
 
 async def _seed_execution_row(repository: SQLAlchemyRepository) -> int:
@@ -161,8 +174,7 @@ async def _assert_every_mutation_is_rejected(repository: SQLAlchemyRepository) -
     for statement in _mutation_vectors(row_id).values():
         async with repository.session() as s:
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
         assert await _row_count(repository) == 1
 
 
@@ -263,8 +275,7 @@ async def _assert_replace_bypass_is_rejected(repository: SQLAlchemyRepository) -
     for statement in _replace_vectors(original_id).values():
         async with repository.session() as s:
             with pytest.raises(DBAPIError, match="append-only"):
-                await s.execute(statement)
-                await s.commit()
+                await _execute_and_commit(s, statement)
         async with repository.session() as s:
             surviving = (await s.execute(select(Execution.id, Execution.price))).all()
         assert [(int(row[0]), float(row[1])) for row in surviving] == [(original_id, 4.25)]

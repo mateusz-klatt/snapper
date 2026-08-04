@@ -1683,6 +1683,90 @@ def _assert_seeded_fill_events(
             assert event.shard_key == command.shard_key
 
 
+def _assert_seeded_trade_commands(
+    commands: list[TradeCommand],
+    manifest: pnl_uat_fixture.PnlUatManifest,
+    admin_user_public_id: str,
+) -> None:
+    """Assert the exact seed-to-column mapping of both initiating commands.
+
+    The builder projects one immutable seed value onto a much wider command
+    row, so two transposed seed fields would still yield two well-formed rows.
+    Every seeded field is therefore pinned to a distinct expected value, and
+    the two rows are chosen so the surface-dependent shard tag and the optional
+    signal lineage are each proven in both of their states.
+    """
+    commands_by_instrument = {command.instrument: command for command in commands}
+    assert set(commands_by_instrument) == {"EUR-PLN", "BTC-USD"}
+    manual = commands_by_instrument["EUR-PLN"]
+    system = commands_by_instrument["BTC-USD"]
+    assert (manual.public_id, system.public_id) == (
+        pnl_uat_fixture._MANUAL_COMMAND_ID,
+        pnl_uat_fixture._SYSTEM_COMMAND_ID,
+    )
+    assert (manual.wallet_public_id, system.wallet_public_id) == (
+        manifest.ids.happy_wallet_public_id,
+        manifest.ids.happy_wallet_public_id,
+    )
+    assert (manual.user_public_id, system.user_public_id) == (admin_user_public_id, None)
+    assert (manual.client_order_id, system.client_order_id) == (
+        "pnl-uat-manual-eur-pln",
+        "pnl-uat-system-btc-usd",
+    )
+    assert (manual.venue_client_id, system.venue_client_id) == (
+        "venue-pnl-uat-manual-eur-pln",
+        "venue-pnl-uat-system-btc-usd",
+    )
+    assert (manual.idempotency_key, system.idempotency_key) == (
+        "idempotency-pnl-uat-manual-eur-pln",
+        "idempotency-pnl-uat-system-btc-usd",
+    )
+    assert (manual.exchange_order_id, system.exchange_order_id) == (
+        "pnl-uat-exchange-manual",
+        "pnl-uat-exchange-system",
+    )
+    assert (manual.quantity, system.quantity) == (20.04, 1.0)
+    assert (manual.price, system.price) == (4.0, 100.0)
+    assert (manual.correlation_id, system.correlation_id) == (
+        pnl_uat_fixture._MANUAL_CORRELATION_ID,
+        pnl_uat_fixture._SYSTEM_CORRELATION_ID,
+    )
+    assert (manual.sequence_id, system.sequence_id) == (601, 602)
+    assert (manual.source_surface, system.source_surface) == ("rest", "strategy")
+    assert (manual.strategy_id, system.strategy_id) == ("manual", "momentum")
+    assert (manual.signal_public_id, system.signal_public_id) == (
+        None,
+        manifest.ids.executed_signal_public_id,
+    )
+    for trade_command, created_at in (
+        (manual, manifest.times.eur_pln_fill_at),
+        (system, manifest.times.anchor),
+    ):
+        assert (
+            trade_command.created_at,
+            trade_command.dispatched_at,
+            trade_command.acked_at,
+            trade_command.terminal_at,
+            trade_command.timestamp,
+        ) == (created_at, created_at, created_at, created_at, created_at)
+        assert trade_command.known_to == KNOWN_TO_MAX
+        assert trade_command.session_id == pnl_uat_fixture._SESSION_ID
+    assert manual.shard_key == compute_shard_key(
+        instrument="EUR-PLN",
+        exchange=ExchangeEnum.PAPER,
+        mode=ExecutionModeEnum.PAPER,
+        wallet_public_id=manifest.ids.happy_wallet_public_id,
+        strategy_tag=None,
+    )
+    assert system.shard_key == compute_shard_key(
+        instrument="BTC-USD",
+        exchange=ExchangeEnum.PAPER,
+        mode=ExecutionModeEnum.PAPER,
+        wallet_public_id=manifest.ids.happy_wallet_public_id,
+        strategy_tag="momentum",
+    )
+
+
 async def _build_fixture_timelines(
     db_url: URL,
     manifest: pnl_uat_fixture.PnlUatManifest,
@@ -1852,7 +1936,7 @@ async def test_fixture_produces_exact_economics_markers_and_incompleteness(
 
     Given: A fresh migrated and bundled-OSS-seeded SQLite clone,
     When: The fixture is seeded and all three complete valuations are rebuilt,
-    Then: Every minute, decomposition, marker, and incomplete point matches exactly.
+    Then: Every command field, minute, decomposition, marker, and incomplete point matches exactly.
     """
     engine_urls: list[URL] = []
 
@@ -1879,6 +1963,11 @@ async def test_fixture_produces_exact_economics_markers_and_incompleteness(
     anchors, events, commands = await _read_fixture_activation_evidence(oss_seeded_db_url)
     _assert_seeded_anchors(anchors, manifest)
     _assert_seeded_fill_events(events, commands, manifest)
+    _assert_seeded_trade_commands(
+        commands,
+        manifest,
+        await _require_admin_for_test(oss_seeded_db_url),
+    )
     as_of = datetime.now(UTC)
     timelines = await _build_fixture_timelines(oss_seeded_db_url, manifest, as_of)
     await _assert_restart_stability(

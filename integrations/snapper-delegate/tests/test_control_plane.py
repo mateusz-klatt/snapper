@@ -1,5 +1,6 @@
 """Tests for the typed delegate control-plane client."""
 
+from collections.abc import Awaitable
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -242,6 +243,10 @@ async def test_malformed_success_payloads_fail_closed(
     Given a successful status carrying an invalid endpoint-specific payload,
     When the client validates the response body,
     Then it fails closed with the common malformed-response category.
+
+    The endpoint coroutine is selected inside the try block so that a failure
+    while building it still reaches the close guard, and only the single await
+    remains under the raises context.
     """
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -261,13 +266,15 @@ async def test_malformed_success_payloads_fail_closed(
         transport=httpx.MockTransport(_handler),
     )
     try:
+        endpoint_request: Awaitable[object]
+        if endpoint.startswith("identity"):
+            endpoint_request = client.fetch_delegate_identity()
+        elif endpoint.startswith("pending"):
+            endpoint_request = client.list_pending_reviews()
+        else:
+            endpoint_request = client.mint_ws_token()
         with pytest.raises(ControlPlaneError) as caught:
-            if endpoint.startswith("identity"):
-                await client.fetch_delegate_identity()
-            elif endpoint.startswith("pending"):
-                await client.list_pending_reviews()
-            else:
-                await client.mint_ws_token()
+            await endpoint_request
     finally:
         await client.aclose()
     assert caught.value.kind is ControlPlaneErrorKind.MALFORMED_RESPONSE

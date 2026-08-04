@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -1321,73 +1322,107 @@ def _signal(
     )
 
 
-def _trade_command(
-    public_id: str,
-    wallet_public_id: str,
-    user_public_id: str | None,
-    instrument: str,
-    client_order_id: str,
-    exchange_order_id: str,
-    size: float,
-    price: float,
-    created_at: datetime,
-    source_surface: str,
-    strategy_id: str,
-    signal_public_id: str | None,
-    correlation_id: str,
-    sequence_id: int,
-) -> TradeCommand:
+@dataclass(frozen=True, slots=True)
+class _TradeCommandSeed:
+    """Deterministic inputs describing one initiating trade-command row.
+
+    Every field is a fixture decision rather than a derived value, so the
+    builder can stay a pure projection onto :class:`TradeCommand`. Grouping
+    them into one immutable value keeps call sites explicit about which
+    lineage they are seeding: ``source_surface``, ``strategy_id``, and
+    ``signal_public_id`` together decide both the accounting shard key and
+    the signal lineage the P&L timeline later resolves, and those three read
+    identically as bare positional strings.
+
+    Attributes:
+        public_id: Stable public identity of the seeded command row.
+        wallet_public_id: Paper wallet that owns the command.
+        user_public_id: Initiating user, or ``None`` for a system command.
+        instrument: Canonical instrument symbol the command trades.
+        client_order_id: Client order identity shared with the order and fill
+            rows, and the stem of the venue and idempotency identities.
+        exchange_order_id: Venue order identity shared with the fill event.
+        size: Submitted quantity, recorded as the command quantity.
+        price: Submitted price in the instrument quote currency.
+        created_at: Instant reused for every lifecycle stamp of this
+            already-terminal command and for its knowledge timestamp.
+        source_surface: Origin surface of the command. The literal
+            ``"strategy"`` is what promotes ``strategy_id`` into the shard key.
+        strategy_id: Strategy identity recorded on the command row.
+        signal_public_id: Originating signal identity, or ``None`` when the
+            command has no signal lineage.
+        correlation_id: Correlation identity linking the command to its order.
+        sequence_id: Deterministic fixture ordering key.
+    """
+
+    public_id: str
+    wallet_public_id: str
+    user_public_id: str | None
+    instrument: str
+    client_order_id: str
+    exchange_order_id: str
+    size: float
+    price: float
+    created_at: datetime
+    source_surface: str
+    strategy_id: str
+    signal_public_id: str | None
+    correlation_id: str
+    sequence_id: int
+
+
+def _trade_command(seed: _TradeCommandSeed) -> TradeCommand:
     """Build one immutable initiating-command lineage row."""
-    strategy_tag = strategy_id if source_surface == "strategy" else None
+    strategy_tag = seed.strategy_id if seed.source_surface == "strategy" else None
     return TradeCommand(
-        public_id=public_id,
+        public_id=seed.public_id,
         command_type="submit",
         shard_key=compute_shard_key(
-            instrument=instrument,
+            instrument=seed.instrument,
             exchange=ExchangeEnum.PAPER,
             mode=ExecutionModeEnum.PAPER,
-            wallet_public_id=wallet_public_id,
+            wallet_public_id=seed.wallet_public_id,
             strategy_tag=strategy_tag,
         ),
-        wallet_public_id=wallet_public_id,
+        wallet_public_id=seed.wallet_public_id,
         operator_public_id=None,
-        user_public_id=user_public_id,
+        user_public_id=seed.user_public_id,
         exchange="paper",
-        instrument=instrument,
+        instrument=seed.instrument,
         mode="paper",
-        strategy_id=strategy_id,
-        client_order_id=client_order_id,
-        venue_client_id=f"venue-{client_order_id}",
-        idempotency_key=f"idempotency-{client_order_id}",
+        strategy_id=seed.strategy_id,
+        client_order_id=seed.client_order_id,
+        venue_client_id=f"venue-{seed.client_order_id}",
+        idempotency_key=f"idempotency-{seed.client_order_id}",
         side="buy",
         order_type="market",
-        quantity=size,
-        price=price,
+        quantity=seed.size,
+        price=seed.price,
         stop_price=None,
         leverage=None,
         reduce_only=False,
         status="filled",
         attempt_count=1,
         last_error=None,
-        created_at=created_at,
-        dispatched_at=created_at,
-        acked_at=created_at,
-        terminal_at=created_at,
-        exchange_order_id=exchange_order_id,
+        created_at=seed.created_at,
+        dispatched_at=seed.created_at,
+        acked_at=seed.created_at,
+        terminal_at=seed.created_at,
+        exchange_order_id=seed.exchange_order_id,
         supersedes_command_id=None,
-        correlation_id=correlation_id,
+        correlation_id=seed.correlation_id,
         plan_public_id=None,
-        source_surface=source_surface,
-        signal_public_id=signal_public_id,
+        source_surface=seed.source_surface,
+        signal_public_id=seed.signal_public_id,
         ai_review_public_id=None,
         submitted_notional_usd=None,
         origin="live",
         replay_window_start=None,
         replay_window_end=None,
-        timestamp=created_at,
+        timestamp=seed.created_at,
         known_to=KNOWN_TO_MAX,
         session_id=_SESSION_ID,
-        sequence_id=sequence_id,
+        sequence_id=seed.sequence_id,
     )
 
 
@@ -1683,36 +1718,40 @@ def _fixture_rows(
             702,
         ),
         _trade_command(
-            _MANUAL_COMMAND_ID,
-            _HAPPY_WALLET_ID,
-            admin_user_public_id,
-            "EUR-PLN",
-            _MANUAL_CLIENT_ORDER_ID,
-            "pnl-uat-exchange-manual",
-            20.04,
-            4.0,
-            eur_fill_at,
-            "rest",
-            "manual",
-            None,
-            _MANUAL_CORRELATION_ID,
-            601,
+            _TradeCommandSeed(
+                public_id=_MANUAL_COMMAND_ID,
+                wallet_public_id=_HAPPY_WALLET_ID,
+                user_public_id=admin_user_public_id,
+                instrument="EUR-PLN",
+                client_order_id=_MANUAL_CLIENT_ORDER_ID,
+                exchange_order_id="pnl-uat-exchange-manual",
+                size=20.04,
+                price=4.0,
+                created_at=eur_fill_at,
+                source_surface="rest",
+                strategy_id="manual",
+                signal_public_id=None,
+                correlation_id=_MANUAL_CORRELATION_ID,
+                sequence_id=601,
+            )
         ),
         _trade_command(
-            _SYSTEM_COMMAND_ID,
-            _HAPPY_WALLET_ID,
-            None,
-            "BTC-USD",
-            _SYSTEM_CLIENT_ORDER_ID,
-            "pnl-uat-exchange-system",
-            1.0,
-            100.0,
-            anchor,
-            "strategy",
-            "momentum",
-            _EXECUTED_SIGNAL_ID,
-            _SYSTEM_CORRELATION_ID,
-            602,
+            _TradeCommandSeed(
+                public_id=_SYSTEM_COMMAND_ID,
+                wallet_public_id=_HAPPY_WALLET_ID,
+                user_public_id=None,
+                instrument="BTC-USD",
+                client_order_id=_SYSTEM_CLIENT_ORDER_ID,
+                exchange_order_id="pnl-uat-exchange-system",
+                size=1.0,
+                price=100.0,
+                created_at=anchor,
+                source_surface="strategy",
+                strategy_id="momentum",
+                signal_public_id=_EXECUTED_SIGNAL_ID,
+                correlation_id=_SYSTEM_CORRELATION_ID,
+                sequence_id=602,
+            )
         ),
         eur_order,
         btc_order,

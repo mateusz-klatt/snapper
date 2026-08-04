@@ -313,7 +313,13 @@ def collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[st
     """Map every direct dependency name to its (section, version spec).
 
     Walks the four standard dependency sections and records string specs only;
-    non-dict sections and non-string specs are ignored.
+    non-dict sections and non-string specs are ignored. Dependency names carry no
+    type check of their own: the production callers all pass data decoded by
+    ``read_package_json``, and ``json.loads`` yields ``str`` keys at every nesting
+    level, so a section key coming from a real package.json can never be a
+    non-string. A hand-built mapping with non-string keys would pass the
+    annotation and land in the result unchecked, which is acceptable here because
+    the only such callers are tests that construct their own fixtures.
 
     Args:
         package_data: Parsed package.json data.
@@ -327,7 +333,7 @@ def collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[st
         if not isinstance(section_data, dict):
             continue
         for name, spec in section_data.items():
-            if isinstance(name, str) and isinstance(spec, str):
+            if isinstance(spec, str):
                 collected[name] = (section, spec)
     return collected
 

@@ -507,8 +507,10 @@ def test_client_rejects_nonpositive_dedup_capacity() -> None:
     When: A wake client is constructed,
     Then: Configuration validation raises a positive-capacity error.
     """
+    config = WakeClientConfig(dedup_capacity=0)
+
     with pytest.raises(ValueError, match="dedup_capacity must be positive"):
-        _client(config=WakeClientConfig(dedup_capacity=0))
+        _client(config=config)
 
 
 @pytest.mark.parametrize(
@@ -720,8 +722,10 @@ async def test_handshake_rejects_authentication_failures(failure_type: str) -> N
     """
     client = _client()
     socket = _FakeSocket([_control_frame(failure_type)])
+    ws_secret = SecretStr("ws-secret")
+
     with pytest.raises(WakeSessionError, match="authentication failed"):
-        await client._handshake(socket, SecretStr("ws-secret"))
+        await client._handshake(socket, ws_secret)
 
 
 @pytest.mark.asyncio
@@ -733,8 +737,11 @@ async def test_handshake_times_out_without_server_progress() -> None:
     Then: The operation raises a timeout error.
     """
     client = _client(config=WakeClientConfig(handshake_timeout_seconds=0.001))
+    socket = _FakeSocket()
+    ws_secret = SecretStr("ws-secret")
+
     with pytest.raises(TimeoutError):
-        await client._handshake(_FakeSocket(), SecretStr("ws-secret"))
+        await client._handshake(socket, ws_secret)
 
 
 @pytest.mark.parametrize(
@@ -764,8 +771,11 @@ async def test_handshake_rejects_unhealthy_subscription_results(
             _subscription_frame(action, status, topics),
         ]
     )
+    client = _client()
+    ws_secret = SecretStr("ws-secret")
+
     with pytest.raises(WakeSessionError, match="subscription rejected"):
-        await _client()._handshake(socket, SecretStr("ws-secret"))
+        await client._handshake(socket, ws_secret)
 
 
 @pytest.mark.asyncio
@@ -784,9 +794,10 @@ async def test_run_session_rereads_access_token_and_reports_connection_lifecycle
     connector = _FakeConnector([socket])
     recorder = _CallbackRecorder()
     client = _client(credentials, connector)
+    callbacks = recorder.bundle()
 
     with pytest.raises(ConnectionError, match="disconnect"):
-        await client._run_session(recorder.bundle())
+        await client._run_session(callbacks)
 
     assert credentials.mint_calls == 1
     assert credentials.read_calls == 1
@@ -906,9 +917,10 @@ async def test_run_session_preserves_a_replaced_active_socket(
         raise ConnectionError("stream failed")
 
     monkeypatch.setattr(client, "_stream", _replace_then_fail)
+    callbacks = _CallbackRecorder().bundle()
 
     with pytest.raises(ConnectionError, match="stream failed"):
-        await client._run_session(_CallbackRecorder().bundle())
+        await client._run_session(callbacks)
     assert client._active_socket is replacement
 
 
@@ -970,9 +982,10 @@ async def test_run_rejects_concurrent_invocation_and_restores_state() -> None:
     client = _client(credentials, _FakeConnector([ConnectionError("unused")]))
     task = asyncio.create_task(client.run(_CallbackRecorder().bundle()))
     await credentials.started.wait()
+    duplicate_callbacks = _CallbackRecorder().bundle()
 
     with pytest.raises(RuntimeError, match="already running"):
-        await client.run(_CallbackRecorder().bundle())
+        await client.run(duplicate_callbacks)
     await client.close()
     credentials.release.set()
     await task

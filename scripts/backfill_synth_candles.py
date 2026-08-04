@@ -390,6 +390,54 @@ async def _repository_after_progress_preflight(
         raise
 
 
+def _fold_minute(
+    buckets: dict[tuple[str, int], _Bucket],
+    row: CandleRow,
+    tf_secs: dict[str, int],
+) -> None:
+    """Fold one 1m candle into every requested timeframe's open bucket.
+
+    Rows are replayed in ascending ``open_at`` order, so a bucket's ``open`` is
+    fixed when the window is first seen and ``close`` is overwritten by every
+    later minute. A missing ``vwap`` falls back to the minute's close and a
+    missing ``trades`` counts as zero, matching the live aggregator's fold.
+
+    Args:
+        buckets: Running state keyed by ``(timeframe, window start)``, mutated
+            in place.
+        row: One current 1m candle for the instrument being replayed.
+        tf_secs: Mapping of timeframe label to width in seconds.
+    """
+    ot = int(row["open_at"].timestamp())
+    close = row["close"]
+    vwap = row["vwap"] if row["vwap"] is not None else close
+    trades = row["trades"] or 0
+    volume = row["volume"]
+    for tf, width in tf_secs.items():
+        begin_ts = (ot // width) * width
+        key = (tf, begin_ts)
+        bucket = buckets.get(key)
+        if bucket is None:
+            buckets[key] = _Bucket(
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=close,
+                volume=volume,
+                trades=trades,
+                vwap_sum=vwap * volume,
+            )
+            continue
+        if row["high"] > bucket.high:
+            bucket.high = row["high"]
+        if row["low"] < bucket.low:
+            bucket.low = row["low"]
+        bucket.close = close
+        bucket.volume += volume
+        bucket.trades += trades
+        bucket.vwap_sum += vwap * volume
+
+
 def _roll_up(
     rows: list[CandleRow], tf_secs: dict[str, int], close_before_ts: int
 ) -> dict[str, list[tuple[int, _Bucket]]]:
@@ -417,34 +465,7 @@ def _roll_up(
     watermark = min(int(rows[-1]["open_at"].timestamp()), close_before_ts)
     buckets: dict[tuple[str, int], _Bucket] = {}
     for c in rows:
-        ot = int(c["open_at"].timestamp())
-        close = c["close"]
-        vwap = c["vwap"] if c["vwap"] is not None else close
-        trades = c["trades"] or 0
-        volume = c["volume"]
-        for tf, width in tf_secs.items():
-            begin_ts = (ot // width) * width
-            key = (tf, begin_ts)
-            bucket = buckets.get(key)
-            if bucket is None:
-                buckets[key] = _Bucket(
-                    open=c["open"],
-                    high=c["high"],
-                    low=c["low"],
-                    close=close,
-                    volume=volume,
-                    trades=trades,
-                    vwap_sum=vwap * volume,
-                )
-                continue
-            if c["high"] > bucket.high:
-                bucket.high = c["high"]
-            if c["low"] < bucket.low:
-                bucket.low = c["low"]
-            bucket.close = close
-            bucket.volume += volume
-            bucket.trades += trades
-            bucket.vwap_sum += vwap * volume
+        _fold_minute(buckets, c, tf_secs)
     closed: dict[str, list[tuple[int, _Bucket]]] = {tf: [] for tf in tf_secs}
     for (tf, begin_ts), bucket in buckets.items():
         if begin_ts + tf_secs[tf] > watermark:

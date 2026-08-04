@@ -29,12 +29,18 @@ Tests cover:
   operator, BTC-USD-PERP, ETH-USD-PERP) are missing.
 - Optional-instrument branches: CLM6/GCM6 absence skips their
   backtests; CLM6 absence also skips the AI-review seed.
+- Column-level field mapping for the two grouped seed values
+  (``_DemoAlertEvent``, ``_DemoBacktestRun``). Those writers take one
+  dataclass instead of a long keyword list, so a swap between two
+  same-typed fields still type-checks; only a read-back of every column
+  can refuse it.
 
 The alias-spelling constants deliberately carry ``a-f`` hex letters so
 case-change assertions exercise a REAL difference instead of passing
 tautologically.
 """
 
+import json
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
@@ -1272,6 +1278,144 @@ class TestMain:
                     {"role": role},
                 ).scalar()
                 assert row_count == 7, f"expected 7 alerts for role {role}, got {row_count}"
+
+    def test_alert_columns_carry_their_declared_fields(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every alert column holds the field the seeded alert declared.
+
+        Given: a DB pre-seeded with the paper wallet, the default desk,
+            the required perps and the three human users,
+        When: ``main()`` runs and the admin's ``order_fill_full`` and
+            ``critical_system_error`` rows are read back column by column,
+        Then: headline, body, payload, the three routing keys, priority,
+            the safety flag, both scope identities and the temporal
+            provenance each carry exactly what the demo alert declared.
+            The writer takes one grouped value, so a swap between two
+            same-typed fields (title/body, dedup/thread, wallet/operator)
+            would still type-check — only this read-back refuses it.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            wallet = _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            users = _seed_demo_users(conn, operator)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        admin = users["admin"]
+        short = admin[:8]
+        with engine.connect() as conn:
+            fill = conn.execute(
+                text(
+                    "SELECT title, body, payload, priority, is_safety_critical, "
+                    " dedup_key, thread_key, source_topic, "
+                    " operator_public_id, wallet_public_id, "
+                    " timestamp, known_to, session_id "
+                    "FROM alert_events "
+                    "WHERE user_public_id = :user AND alert_type = 'order_fill_full'"
+                ),
+                {"user": admin},
+            ).one()
+            critical = conn.execute(
+                text(
+                    "SELECT is_safety_critical, priority, timestamp FROM alert_events "
+                    "WHERE user_public_id = :user AND alert_type = 'critical_system_error'"
+                ),
+                {"user": admin},
+            ).one()
+
+        assert fill.title == "Order filled"
+        assert fill.body == "BUY 0.1421 BTC-USD-PERP @ $76,820.50 filled on kraken_futures"
+        assert json.loads(fill.payload) == {
+            "client_order_id": f"demo-{short}-1",
+            "exchange_order_id": f"demo-exch-{short}-1",
+            "instrument": "BTC-USD-PERP",
+            "exchange": "kraken_futures",
+            "side": "buy",
+            "size": 0.1421,
+            "price": 76820.50,
+        }
+        assert fill.priority == "medium"
+        assert not fill.is_safety_critical
+        assert fill.dedup_key == f"demo.{short}.order_fill_full"
+        assert fill.thread_key == f"snapper.demo.{short}"
+        assert fill.source_topic == f"alerts.{admin}.order_fill_full"
+        assert fill.operator_public_id == operator
+        assert fill.wallet_public_id == wallet
+        assert fill.timestamp == str(datetime(2026, 5, 7, 9, 0, tzinfo=UTC))
+        assert fill.known_to == KNOWN_TO_MAX_STR
+        assert fill.session_id == seed_demo._DEMO_SESSION_ID
+
+        assert critical.is_safety_critical
+        assert critical.priority == "high"
+        assert critical.timestamp == str(datetime(2026, 5, 7, 11, 30, tzinfo=UTC))
+
+    def test_backtest_columns_carry_their_declared_fields(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every backtest column holds the field the seeded run declared.
+
+        Given: a fully pre-seeded DB whose paper wallet and BTC perp
+            identities are known,
+        When: ``main()`` runs and the BTC ``RsiReversion`` run is read
+            back column by column,
+        Then: the simulated window, the wall-clock run window, timeframe,
+            strategy params, starting equity, status, venue scope and
+            temporal provenance each carry what the run declared, and the
+            row timestamp tracks the window START rather than its end.
+            Four ``datetime`` fields sit side by side in one grouped
+            value, so only this read-back can refuse a swap between them.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            wallet = _seed_paper_wallet(conn)
+            operator = _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_optional_commodity_instruments(conn)
+            _seed_demo_users(conn, operator)
+            btc_perp = seed_demo._lookup_instrument(conn, "BTC-USD-PERP", "kraken_futures")
+        assert btc_perp is not None
+
+        monkeypatch.setenv("DB_URL", db_url)
+        assert seed_demo.main() == 0
+
+        with engine.connect() as conn:
+            run = conn.execute(
+                text(
+                    "SELECT wallet_public_id, exchange, mode, timeframe, strategy_params, "
+                    " start_date, end_date, initial_cash, status, "
+                    " started_at, completed_at, timestamp, known_to, session_id "
+                    "FROM backtest_runs "
+                    "WHERE strategy_name = 'RsiReversion' AND instrument_public_id = :instrument"
+                ),
+                {"instrument": btc_perp},
+            ).one()
+
+        assert run.wallet_public_id == wallet
+        assert run.exchange == "kraken_futures"
+        assert run.mode == "paper"
+        assert run.timeframe == "1h"
+        assert json.loads(run.strategy_params) == {
+            "period": 14,
+            "oversold": 28,
+            "overbought": 72,
+        }
+        assert run.start_date == str(datetime(2025, 11, 1, tzinfo=UTC))
+        assert run.end_date == str(datetime(2026, 4, 30, tzinfo=UTC))
+        assert run.initial_cash == 10000.0
+        assert run.status == "completed"
+        assert run.started_at == str(datetime(2026, 5, 4, 21, 0, 0, tzinfo=UTC))
+        assert run.completed_at == str(datetime(2026, 5, 4, 21, 14, 32, tzinfo=UTC))
+        assert run.timestamp == run.start_date
+        assert run.known_to == KNOWN_TO_MAX_STR
+        assert run.session_id == seed_demo._DEMO_SESSION_ID
 
     def test_optional_ai_scope_refuses_cross_desk_underlying_overlap(
         self,

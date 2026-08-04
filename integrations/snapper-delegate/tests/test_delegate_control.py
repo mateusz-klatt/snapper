@@ -137,7 +137,8 @@ class TestControlGate:
         gate.apply(ControlDirective(ControlState.ACTIVE, 2))
         assert gate.apply(ControlDirective(ControlState.ACTIVE, 3)) is False
         applied = gate.applied
-        assert applied is not None and applied.revision == 3
+        assert applied is not None
+        assert applied.revision == 3
 
     def test_a_reconnect_returns_the_runner_to_held(self) -> None:
         """A new session must re-learn the state before working.

@@ -117,6 +117,85 @@ class _DemoInstrumentScope:
     note: str
 
 
+@dataclass(frozen=True, slots=True)
+class _DemoAlertEvent:
+    """One demo notification exactly as the iOS Alerts tab reads it back.
+
+    Groups the alert's own domain facts so the writer takes the row as
+    one value instead of thirteen loose keyword arguments. Provenance
+    (``session_id``, ``sequence_id``, ``known_to``) is NOT held here: it
+    comes from the ``SequenceTracker`` the writer is handed, mirroring
+    the production sidecar bypass writer.
+
+    Attributes:
+        user_public_id: Recipient whose Alerts tab shows this row.
+        alert_type: ``AlertType`` literal driving the iOS presentation.
+        priority: Delivery urgency (``medium`` / ``high``).
+        is_safety_critical: Whether the alert bypasses quiet hours.
+        title: Short headline rendered in the alert list.
+        body: Human-readable detail line.
+        payload: Structured detail serialized to JSON in the row.
+        dedup_key: Stable key collapsing repeat deliveries.
+        thread_key: Grouping key threading related alerts together.
+        source_topic: ZMQ topic a production frame would have carried.
+        occurred_at: Domain time of the alert, also its row timestamp.
+        wallet_public_id: Wallet the alert concerns, when wallet-scoped.
+        operator_public_id: Desk the alert concerns, when desk-scoped.
+    """
+
+    user_public_id: str
+    alert_type: str
+    priority: str
+    is_safety_critical: bool
+    title: str
+    body: str
+    payload: dict[str, object]
+    dedup_key: str
+    thread_key: str
+    source_topic: str
+    occurred_at: datetime
+    wallet_public_id: str | None = None
+    operator_public_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DemoBacktestRun:
+    """One finished backtest as the Backtests/Compare page renders it.
+
+    Holds only the run's domain facts. The demo-fixed execution columns
+    (``mode``, ``created_by_user_id``, ``execution_mode``, ``fill_model``,
+    slippage and commission) stay literals in the writer's INSERT because
+    no caller varies them, and provenance comes from the tracker.
+
+    Attributes:
+        wallet: Wallet the run is booked against.
+        instrument: Instrument public_id the run traded.
+        exchange: Venue the instrument belongs to.
+        strategy_name: Strategy class name shown in the run list.
+        strategy_params: Strategy tuning serialized to JSON in the row.
+        timeframe: Candle timeframe the run consumed.
+        start: First simulated date, also the row's timestamp.
+        end: Last simulated date.
+        initial_cash: Starting equity of the simulation.
+        status: Terminal run status (``completed``).
+        started_at: Wall-clock time the run began.
+        completed_at: Wall-clock finish time, or ``None`` while unfinished.
+    """
+
+    wallet: str
+    instrument: str
+    exchange: str
+    strategy_name: str
+    strategy_params: dict[str, object]
+    timeframe: str
+    start: datetime
+    end: datetime
+    initial_cash: float
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+
+
 _EMPTY_DEMO_PNL_SEED = _DemoPnlSeedState(0, 0, 0, 0, 0, 0)
 """State of a database that has never received the demo P&L rows."""
 
@@ -931,20 +1010,7 @@ def _insert_position(
 def _insert_alert_event(
     conn: Connection,
     tracker: SequenceTracker,
-    *,
-    user_public_id: str,
-    alert_type: str,
-    priority: str,
-    is_safety_critical: bool,
-    title: str,
-    body: str,
-    payload: dict[str, object],
-    dedup_key: str,
-    thread_key: str,
-    source_topic: str,
-    occurred_at: datetime,
-    wallet_public_id: str | None = None,
-    operator_public_id: str | None = None,
+    alert: _DemoAlertEvent,
 ) -> str:
     """Insert one temporal (SCD2) alert_events row and return its public_id.
 
@@ -954,6 +1020,14 @@ def _insert_alert_event(
     pulled from ``tracker``. The iOS Alerts tab reads these rows
     via ``Repository.list_recent_alerts_for_user`` filtered on
     ``user_public_id == principal.user_public_id``.
+
+    Args:
+        conn: Open SQLite connection inside the seeder's transaction.
+        tracker: Provenance source for ``session_id`` / ``sequence_id``.
+        alert: Domain facts of the notification to persist.
+
+    Returns:
+        The freshly generated ``public_id`` of the inserted row.
     """
     public_id = str(uuid7())
     conn.execute(
@@ -971,19 +1045,19 @@ def _insert_alert_event(
         ),
         {
             "public_id": public_id,
-            "user": user_public_id,
-            "operator": operator_public_id,
-            "wallet": wallet_public_id,
-            "atype": alert_type,
-            "priority": priority,
-            "critical": is_safety_critical,
-            "title": title,
-            "body": body,
-            "payload": json.dumps(payload),
-            "dedup": dedup_key,
-            "thread": thread_key,
-            "topic": source_topic,
-            "ts": str(occurred_at),
+            "user": alert.user_public_id,
+            "operator": alert.operator_public_id,
+            "wallet": alert.wallet_public_id,
+            "atype": alert.alert_type,
+            "priority": alert.priority,
+            "critical": alert.is_safety_critical,
+            "title": alert.title,
+            "body": alert.body,
+            "payload": json.dumps(alert.payload),
+            "dedup": alert.dedup_key,
+            "thread": alert.thread_key,
+            "topic": alert.source_topic,
+            "ts": str(alert.occurred_at),
             "known_to": KNOWN_TO_MAX_STR,
             "sid": tracker.session_id,
             "seq": tracker.next_sequence("alert_events"),
@@ -1105,19 +1179,21 @@ def _seed_demo_alerts_for_user(
         _insert_alert_event(
             conn,
             tracker,
-            user_public_id=user_public_id,
-            wallet_public_id=wallet_public_id,
-            operator_public_id=operator_public_id,
-            alert_type=alert_type,
-            priority=priority,
-            is_safety_critical=critical,
-            title=title,
-            body=body,
-            payload=payload,
-            dedup_key=f"demo.{short}.{alert_type}",
-            thread_key=f"snapper.demo.{short}",
-            source_topic=f"alerts.{user_public_id}.{alert_type}",
-            occurred_at=occurred,
+            _DemoAlertEvent(
+                user_public_id=user_public_id,
+                wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
+                alert_type=alert_type,
+                priority=priority,
+                is_safety_critical=critical,
+                title=title,
+                body=body,
+                payload=payload,
+                dedup_key=f"demo.{short}.{alert_type}",
+                thread_key=f"snapper.demo.{short}",
+                source_topic=f"alerts.{user_public_id}.{alert_type}",
+                occurred_at=occurred,
+            ),
         )
     return len(alerts)
 
@@ -1125,21 +1201,18 @@ def _seed_demo_alerts_for_user(
 def _insert_backtest_run(
     conn: Connection,
     tracker: SequenceTracker,
-    *,
-    wallet: str,
-    instrument: str,
-    exchange: str,
-    strategy_name: str,
-    strategy_params: dict[str, object],
-    timeframe: str,
-    start: datetime,
-    end: datetime,
-    initial_cash: float,
-    status: str,
-    started_at: datetime,
-    completed_at: datetime | None,
+    run: _DemoBacktestRun,
 ) -> str:
-    """Insert one backtest_runs row and return its public_id."""
+    """Insert one backtest_runs row and return its public_id.
+
+    Args:
+        conn: Open SQLite connection inside the seeder's transaction.
+        tracker: Provenance source for ``session_id`` / ``sequence_id``.
+        run: Domain facts of the finished backtest to persist.
+
+    Returns:
+        The freshly generated ``public_id`` of the inserted row.
+    """
     public_id = str(uuid7())
     conn.execute(
         text(
@@ -1164,19 +1237,19 @@ def _insert_backtest_run(
         ),
         {
             "public_id": public_id,
-            "wallet": wallet,
-            "strategy": strategy_name,
-            "params": json.dumps(strategy_params),
-            "instrument": instrument,
-            "exchange": exchange,
-            "tf": timeframe,
-            "start": str(start),
-            "end": str(end),
-            "cash": initial_cash,
-            "status": status,
-            "started": str(started_at),
-            "completed": str(completed_at) if completed_at else None,
-            "ts": str(start),
+            "wallet": run.wallet,
+            "strategy": run.strategy_name,
+            "params": json.dumps(run.strategy_params),
+            "instrument": run.instrument,
+            "exchange": run.exchange,
+            "tf": run.timeframe,
+            "start": str(run.start),
+            "end": str(run.end),
+            "cash": run.initial_cash,
+            "status": run.status,
+            "started": str(run.started_at),
+            "completed": str(run.completed_at) if run.completed_at else None,
+            "ts": str(run.start),
             "known_to": KNOWN_TO_MAX_STR,
             "sid": tracker.session_id,
             "seq": tracker.next_sequence("backtest_runs"),
@@ -1569,71 +1642,79 @@ def main() -> int:
         _insert_backtest_run(
             conn,
             tracker,
-            wallet=wallet,
-            instrument=btc_perp,
-            exchange="kraken_futures",
-            strategy_name="RsiReversion",
-            strategy_params={"period": 14, "oversold": 28, "overbought": 72},
-            timeframe="1h",
-            start=bt_start,
-            end=bt_end,
-            initial_cash=10000.0,
-            status="completed",
-            started_at=datetime(2026, 5, 4, 21, 0, 0, tzinfo=UTC),
-            completed_at=datetime(2026, 5, 4, 21, 14, 32, tzinfo=UTC),
+            _DemoBacktestRun(
+                wallet=wallet,
+                instrument=btc_perp,
+                exchange="kraken_futures",
+                strategy_name="RsiReversion",
+                strategy_params={"period": 14, "oversold": 28, "overbought": 72},
+                timeframe="1h",
+                start=bt_start,
+                end=bt_end,
+                initial_cash=10000.0,
+                status="completed",
+                started_at=datetime(2026, 5, 4, 21, 0, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, 4, 21, 14, 32, tzinfo=UTC),
+            ),
         )
 
         _insert_backtest_run(
             conn,
             tracker,
-            wallet=wallet,
-            instrument=btc_perp,
-            exchange="kraken_futures",
-            strategy_name="MacdCrossover",
-            strategy_params={"fast": 12, "slow": 26, "signal": 9},
-            timeframe="1h",
-            start=bt_start,
-            end=bt_end,
-            initial_cash=10000.0,
-            status="completed",
-            started_at=datetime(2026, 5, 4, 21, 14, 33, tzinfo=UTC),
-            completed_at=datetime(2026, 5, 4, 21, 28, 11, tzinfo=UTC),
+            _DemoBacktestRun(
+                wallet=wallet,
+                instrument=btc_perp,
+                exchange="kraken_futures",
+                strategy_name="MacdCrossover",
+                strategy_params={"fast": 12, "slow": 26, "signal": 9},
+                timeframe="1h",
+                start=bt_start,
+                end=bt_end,
+                initial_cash=10000.0,
+                status="completed",
+                started_at=datetime(2026, 5, 4, 21, 14, 33, tzinfo=UTC),
+                completed_at=datetime(2026, 5, 4, 21, 28, 11, tzinfo=UTC),
+            ),
         )
 
         if clm6:
             _insert_backtest_run(
                 conn,
                 tracker,
-                wallet=wallet,
-                instrument=clm6,
-                exchange="kraken_equities",
-                strategy_name="RsiReversion",
-                strategy_params={"period": 14, "oversold": 30, "overbought": 70},
-                timeframe="1d",
-                start=datetime(2025, 5, 1, tzinfo=UTC),
-                end=bt_end,
-                initial_cash=10000.0,
-                status="completed",
-                started_at=datetime(2026, 5, 4, 21, 28, 12, tzinfo=UTC),
-                completed_at=datetime(2026, 5, 4, 21, 39, 50, tzinfo=UTC),
+                _DemoBacktestRun(
+                    wallet=wallet,
+                    instrument=clm6,
+                    exchange="kraken_equities",
+                    strategy_name="RsiReversion",
+                    strategy_params={"period": 14, "oversold": 30, "overbought": 70},
+                    timeframe="1d",
+                    start=datetime(2025, 5, 1, tzinfo=UTC),
+                    end=bt_end,
+                    initial_cash=10000.0,
+                    status="completed",
+                    started_at=datetime(2026, 5, 4, 21, 28, 12, tzinfo=UTC),
+                    completed_at=datetime(2026, 5, 4, 21, 39, 50, tzinfo=UTC),
+                ),
             )
 
         if gcm6:
             _insert_backtest_run(
                 conn,
                 tracker,
-                wallet=wallet,
-                instrument=gcm6,
-                exchange="kraken_equities",
-                strategy_name="MacdCrossover",
-                strategy_params={"fast": 8, "slow": 21, "signal": 5},
-                timeframe="1d",
-                start=datetime(2025, 5, 1, tzinfo=UTC),
-                end=bt_end,
-                initial_cash=10000.0,
-                status="completed",
-                started_at=datetime(2026, 5, 4, 21, 39, 51, tzinfo=UTC),
-                completed_at=datetime(2026, 5, 4, 21, 51, 33, tzinfo=UTC),
+                _DemoBacktestRun(
+                    wallet=wallet,
+                    instrument=gcm6,
+                    exchange="kraken_equities",
+                    strategy_name="MacdCrossover",
+                    strategy_params={"fast": 8, "slow": 21, "signal": 5},
+                    timeframe="1d",
+                    start=datetime(2025, 5, 1, tzinfo=UTC),
+                    end=bt_end,
+                    initial_cash=10000.0,
+                    status="completed",
+                    started_at=datetime(2026, 5, 4, 21, 39, 51, tzinfo=UTC),
+                    completed_at=datetime(2026, 5, 4, 21, 51, 33, tzinfo=UTC),
+                ),
             )
 
         demo_ai_password = (

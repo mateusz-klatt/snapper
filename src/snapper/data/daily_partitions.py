@@ -1071,6 +1071,9 @@ def _verify_prepared_ordinary_schema(
     _verify_sequence_owner(connection, spec)
 
 
+type _ColumnCatalogRow = tuple[str, str, bool, str | None, str, str]
+
+
 def _verify_relation_columns(
     connection: Connection,
     spec: TableSpec,
@@ -1128,22 +1131,52 @@ def _verify_relation_columns(
             f"refused: {relation} has {len(observed)} columns, expected {len(expected)}"
         )
     for actual, contract in zip(observed, expected, strict=True):
-        name, data_type, nullable, default, identity, generated = actual
-        if name != contract.name or data_type != contract.data_type:
-            raise DailyPartitionError(
-                f"refused: unexpected column {name} {data_type} on {relation}"
-            )
-        expected_nullable = contract.nullable
-        if partition_key_not_null and name == spec.partition_key:
-            expected_nullable = False
-        if expected_nullable is not None and nullable != expected_nullable:
-            raise DailyPartitionError(f"refused: unexpected nullability for {relation}.{name}")
-        if not _column_default_matches(default, contract, spec):
-            raise DailyPartitionError(f"refused: unexpected default for {relation}.{name}")
-        if identity or generated:
-            raise DailyPartitionError(
-                f"refused: unexpected identity or generated state for {relation}.{name}"
-            )
+        _verify_column_shape(
+            actual,
+            contract,
+            spec,
+            relation,
+            partition_key_not_null=partition_key_not_null,
+        )
+
+
+def _verify_column_shape(
+    column: _ColumnCatalogRow,
+    contract: ColumnContract,
+    spec: TableSpec,
+    relation: str,
+    *,
+    partition_key_not_null: bool,
+) -> None:
+    """Compare one observed catalog column to its exact expected contract.
+
+    Split out of the relation-wide walk so each per-column refusal reads on its
+    own; the caller keeps ownership of the catalog query and ordinal pairing.
+
+    Args:
+        column: One ``pg_attribute`` row in contract field order.
+        contract: Expected contract at the same ordinal position.
+        spec: Expected market-data column contract.
+        relation: Parent, ordinary, or attached legacy relation name.
+        partition_key_not_null: Whether preparation must have hardened the key.
+
+    Raises:
+        DailyPartitionError: If any column catalog property differs.
+    """
+    name, data_type, nullable, default, identity, generated = column
+    if name != contract.name or data_type != contract.data_type:
+        raise DailyPartitionError(f"refused: unexpected column {name} {data_type} on {relation}")
+    expected_nullable = contract.nullable
+    if partition_key_not_null and name == spec.partition_key:
+        expected_nullable = False
+    if expected_nullable is not None and nullable != expected_nullable:
+        raise DailyPartitionError(f"refused: unexpected nullability for {relation}.{name}")
+    if not _column_default_matches(default, contract, spec):
+        raise DailyPartitionError(f"refused: unexpected default for {relation}.{name}")
+    if identity or generated:
+        raise DailyPartitionError(
+            f"refused: unexpected identity or generated state for {relation}.{name}"
+        )
 
 
 def _ordinary_column_contract(spec: TableSpec) -> tuple[ColumnContract, ...]:
