@@ -1648,11 +1648,11 @@ class FxConversionElection(TemporalMixin, Base):
             unique=True,
             sqlite_where=text(
                 "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'shared_pair' "
-                "AND completeness_state IN ('complete', 'partial')"
+                "AND completeness_state IN ('complete', 'carried', 'partial')"
             ),
             postgresql_where=text(
                 "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'shared_pair' "
-                "AND completeness_state IN ('complete', 'partial')"
+                "AND completeness_state IN ('complete', 'carried', 'partial')"
             ),
         ),
         Index(
@@ -1669,11 +1669,11 @@ class FxConversionElection(TemporalMixin, Base):
             unique=True,
             sqlite_where=text(
                 "known_to = '9999-12-31 23:59:59.000000' AND scope_kind = 'instrument_owned' "
-                "AND completeness_state IN ('complete', 'partial')"
+                "AND completeness_state IN ('complete', 'carried', 'partial')"
             ),
             postgresql_where=text(
                 "known_to = '9999-12-31T23:59:59+00:00' AND scope_kind = 'instrument_owned' "
-                "AND completeness_state IN ('complete', 'partial')"
+                "AND completeness_state IN ('complete', 'carried', 'partial')"
             ),
         ),
         Index(

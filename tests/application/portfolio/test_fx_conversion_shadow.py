@@ -561,6 +561,27 @@ def test_carry_uses_the_newest_duplicate_from_only_the_selected_plane() -> None:
     assert proofs[0]["candle_id"] == 99
 
 
+def test_carry_refuses_a_source_minute_whose_duplicates_disagree() -> None:
+    """Row order must not elect a carried price the exact path would refuse.
+
+    Given two active rows for one preceding minute quoting different closes
+    When the gap is resolved by carrying the selected plane forward
+    Then that minute is discarded and an older undisputed mark is used instead
+    """
+    gap = _MINUTE + timedelta(minutes=5)
+    disputed = _MINUTE + timedelta(minutes=4)
+    undisputed = _row(_MINUTE + timedelta(minutes=1))
+    high = cast(PnlFxRateRow, {**_row(disputed), "candle_id": 99, "close": 9.0})
+    low = cast(PnlFxRateRow, {**_row(disputed), "candle_id": 1, "close": 2.0})
+    evaluation = _evaluation(frozenset({gap}), rows=(undisputed, high, low))
+
+    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+
+    assert len(proofs) == 1
+    assert proofs[0]["carried_minutes"] == 4
+    assert proofs[0]["candle_open_minute"] == undisputed["open_at"]
+
+
 def test_carry_never_looks_forward() -> None:
     """A later mark cannot value an earlier conversion.
 

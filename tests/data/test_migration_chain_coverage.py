@@ -654,6 +654,29 @@ class _CarriedCountOperations:
         return self._bind
 
 
+class _CarriedIdentityConnection:
+    """Answer revision 0047's active-carried count on a named dialect."""
+
+    def __init__(self, dialect_name: str, carried: int) -> None:
+        self.dialect = SimpleNamespace(name=dialect_name)
+        self._carried = carried
+
+    def execute(self, _statement: object) -> _ScalarResult:
+        """Return the configured active carried-election count."""
+        return _ScalarResult(self._carried)
+
+
+class _CarriedIdentityOperations:
+    """Expose only the bind revision 0047's downgrade guard reads."""
+
+    def __init__(self, dialect_name: str, carried: int) -> None:
+        self._bind = _CarriedIdentityConnection(dialect_name, carried)
+
+    def get_bind(self) -> _CarriedIdentityConnection:
+        """Return the counting connection."""
+        return self._bind
+
+
 def _expected_rename_ddl(table: str) -> tuple[str, str, str]:
     """Return the three statements a canonical sequence restore must emit.
 
@@ -785,4 +808,21 @@ def test_carry_forward_downgrade_refuses_to_orphan_carried_evidence() -> None:
     operations = _CarriedCountOperations(3)
 
     with patch.object(module, "op", operations), pytest.raises(RuntimeError, match="3 proof"):
+        migration.downgrade()
+
+
+def test_carried_identity_downgrade_refuses_to_strand_active_elections() -> None:
+    """Narrowing the resolved indexes must not orphan carried elections.
+
+    Given: A database holding active carried elections
+    When: Revision 0047 is reversed
+    Then: It refuses, naming how many rows would lose their uniqueness key
+    """
+    module = importlib.import_module(
+        "snapper.data.migrations.versions.0047_fx_conversion_carried_identity"
+    )
+    migration = cast(_ReversibleMigration, module)
+    operations = _CarriedIdentityOperations("postgresql", 4)
+
+    with patch.object(module, "op", operations), pytest.raises(RuntimeError, match="4 active"):
         migration.downgrade()

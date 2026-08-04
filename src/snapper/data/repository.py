@@ -526,6 +526,21 @@ unaffected. Registered on the shared ``.env`` allowlist via
 """
 
 _AI_RESEARCH_MANUAL_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"superseded", "expired"})
+_RESOLVED_ELECTION_STATES: Final[tuple[str, ...]] = ("complete", "carried", "partial")
+"""Election outcomes that resolved a plane, and so own an identity.
+
+These are the states the partial unique indexes cover, the states a reuse
+lookup may match, and the states latest-visible reads return. A resolved
+election carries a selected plane and proof rows; a refusal carries neither and
+lives under its own indexes instead.
+
+``carried`` belongs here for the same reason ``partial`` does — it pins a plane
+and writes proofs. Omitting it, as the original carry work did, leaves those
+artifacts unable to collide, reuse or be read back, so every snapshotter tick
+inserts a fresh duplicate and any consumer of the read-back sees the
+requirement as forever unpinned.
+"""
+
 _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE: Final[float] = 1e-9
 _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE: Final[str] = " \t\n\r\f\v"
 
@@ -9283,7 +9298,7 @@ class SQLAlchemyRepository(Repository):
         """Build the complete reusable-election identity predicate."""
         filters = [
             FxConversionElection.known_to == KNOWN_TO_MAX,
-            FxConversionElection.completeness_state.in_(("complete", "partial")),
+            FxConversionElection.completeness_state.in_(_RESOLVED_ELECTION_STATES),
             FxConversionElection.requirement_manifest_digest == manifest_digest,
             FxConversionElection.election_policy_version == row["election_policy_version"],
             FxConversionElection.calculation_version == row["calculation_version"],
@@ -9483,7 +9498,7 @@ class SQLAlchemyRepository(Repository):
             FxConversionElection.timestamp <= as_of,
             FxConversionElection.known_to > as_of,
             FxConversionElection.resolved_knowledge_at <= as_of,
-            FxConversionElection.completeness_state.in_(("complete", "partial")),
+            FxConversionElection.completeness_state.in_(_RESOLVED_ELECTION_STATES),
             FxConversionElection.scope_kind == query["scope_kind"],
             FxConversionElection.source_currency == query["source_currency"],
             FxConversionElection.target_currency == query["target_currency"],

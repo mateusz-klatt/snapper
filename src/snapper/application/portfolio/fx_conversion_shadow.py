@@ -289,6 +289,46 @@ def _selected_rows(
     return resolved
 
 
+def _carryable_marks(
+    rows: Sequence[PnlFxRateRow],
+    selected: PnlFxRatePlane,
+) -> dict[datetime, PnlFxRateRow]:
+    """Index the selected plane's usable marks by the minute each bar closed.
+
+    Duplicate rows for one minute are ordinary temporal versions, and the
+    greatest durable candle id wins among them. Rows that DISAGREE on the close
+    are a different thing: that minute is dropped rather than decided, because
+    the exact path already refuses it — :func:`build_fx_rates` poisons it to
+    ``NaN`` precisely so row order cannot elect a price — and a carried
+    substitution must not quietly acquire authority the exact path declines.
+
+    Args:
+        rows: Every loaded evidence row for the pair.
+        selected: The plane whose own marks may be carried.
+
+    Returns:
+        Undisputed source marks keyed by the minute their bar closed.
+    """
+    usable: dict[datetime, PnlFxRateRow] = {}
+    conflicted: set[datetime] = set()
+    for row in rows:
+        if (row["base"], row["quote"], row["exchange"]) != selected:
+            continue
+        if not is_positive_finite(row["close"]):
+            continue
+        minute = row["open_at"] + timedelta(minutes=1)
+        candidate = usable.get(minute)
+        if candidate is None:
+            usable[minute] = row
+        elif candidate["close"] != row["close"]:
+            conflicted.add(minute)
+        elif row["candle_id"] > candidate["candle_id"]:
+            usable[minute] = row
+    for minute in conflicted:
+        usable.pop(minute, None)
+    return usable
+
+
 def _carry_into_gaps(
     evaluation: FxShadowEvaluation,
     rows: Sequence[PnlFxRateRow],
@@ -313,16 +353,7 @@ def _carry_into_gaps(
     missing = sorted(set(evaluation.required_minutes) - set(resolved))
     if selected is None or not missing:
         return
-    usable: dict[datetime, PnlFxRateRow] = {}
-    for row in rows:
-        if (row["base"], row["quote"], row["exchange"]) != selected:
-            continue
-        if not is_positive_finite(row["close"]):
-            continue
-        minute = row["open_at"] + timedelta(minutes=1)
-        candidate = usable.get(minute)
-        if candidate is None or row["candle_id"] > candidate["candle_id"]:
-            usable[minute] = row
+    usable = _carryable_marks(rows, selected)
     for gap in missing:
         earliest = gap - timedelta(minutes=MAX_CARRIED_MINUTES)
         available = [minute for minute in usable if earliest <= minute < gap]
@@ -479,6 +510,27 @@ def _build_artifact(
     return election, proofs
 
 
+def _proof_mark_minute(proof: FxConversionProofInsertRow) -> datetime:
+    """Return the minute whose published close this proof actually pinned.
+
+    The authoritative rate map is keyed by the minute a bar CLOSED, so a carried
+    proof must be verified against its source mark rather than against the
+    conversion minute it serves — that minute has no published close, which is
+    why it was carried. Deriving the source from the pinned candle rather than
+    branching on ``carried_minutes`` keeps one path for both cases: revision
+    0045's CHECK requires ``conversion_minute = candle_open_minute + 1min +
+    carried_minutes``, so this is the conversion minute exactly when nothing was
+    carried.
+
+    Args:
+        proof: One persisted or candidate conversion proof row.
+
+    Returns:
+        The close minute of the candle this proof pinned.
+    """
+    return proof["candle_open_minute"] + timedelta(minutes=1)
+
+
 def _artifact_matches_raw(
     artifact: FxConversionArtifactRow,
     election: FxConversionElectionInsertRow,
@@ -523,7 +575,7 @@ def _artifact_matches_raw(
                         evaluation.authoritative_rates[
                             (
                                 *rate_key_plane,
-                                proof["conversion_minute"],
+                                _proof_mark_minute(proof),
                             )
                         ]
                     )
