@@ -811,6 +811,39 @@ def test_carry_forward_downgrade_refuses_to_orphan_carried_evidence() -> None:
         migration.downgrade()
 
 
+def test_sequence_setval_advances_both_sequences_only_on_postgresql() -> None:
+    """The resync emits one setval per table, and nothing off PostgreSQL.
+
+    Given: A bind reporting PostgreSQL, then one reporting SQLite
+    When: Revision 0049 upgrades under each
+    Then: Both identity sequences are advanced past their rows, then none are
+
+    The SQLite chain test reaches only the early return, so without this the
+    statement that actually repairs production would never execute in a test.
+    """
+    module = importlib.import_module(
+        "snapper.data.migrations.versions.0049_fx_conversion_sequence_setval"
+    )
+    migration = cast(_ReversibleMigration, module)
+
+    postgresql = _SequenceOperations("postgresql", set())
+    with patch.object(module, "op", postgresql):
+        migration.upgrade()
+
+    assert [statement.split("(")[1].split(",")[0] for statement in postgresql.statements] == [
+        "'fx_conversion_elections_id_seq'",
+        "'fx_conversion_proofs_id_seq'",
+    ]
+    assert all("+ 1, false)" in statement for statement in postgresql.statements)
+
+    sqlite = _SequenceOperations("sqlite", set())
+    with patch.object(module, "op", sqlite):
+        migration.upgrade()
+        migration.downgrade()
+
+    assert sqlite.statements == []
+
+
 def test_carried_identity_downgrade_refuses_to_strand_active_elections() -> None:
     """Narrowing the resolved indexes must not orphan carried elections.
 
