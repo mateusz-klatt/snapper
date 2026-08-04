@@ -50,7 +50,6 @@ from datetime import timedelta
 from types import MappingProxyType
 from typing import Final
 from typing import Literal
-from typing import NamedTuple
 from typing import cast
 from uuid import UUID
 from uuid import uuid7
@@ -100,7 +99,6 @@ from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 from snapper.core.numeric import is_positive_finite
-from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import Repository
@@ -140,15 +138,6 @@ The canonical definition lives in :mod:`snapper.data.repository_types` so the
 data-layer sample validator compares against the real constant rather than a
 caller-supplied scope echo; this module re-exposes it for the snapshotter and
 overlay callers that already import from here.
-"""
-
-_FX_CARRY_WINDOW: Final[timedelta] = timedelta(minutes=MAX_CARRIED_MINUTES)
-"""Look-back a conversion minute may reach for an earlier mark on its plane.
-
-Evidence reads widen their lower bound by this window, and plane selection
-counts a minute as servable when the plane published within it. Without both,
-bounded carry-forward is unreachable: the rows never load, and a minute with no
-exact mark leaves every candidate plane at zero coverage, so none is pinned.
 """
 
 PNL_TIMELINE_MAX_WORK_UNITS: Final[int] = 131_040
@@ -2937,7 +2926,7 @@ async def _discover_fx_candidates(
         return []
     return await repo.get_pnl_fx_rate_exchanges(
         _oriented_fx_pairs(pairs),
-        bounds[0] - _FX_CARRY_WINDOW,
+        bounds[0],
         bounds[1],
         as_of,
     )
@@ -2993,116 +2982,47 @@ async def _load_fx_candidate_rows(
         return []
     return await repo.get_pnl_fx_rate_candles(
         sorted(planes),
-        bounds[0] - _FX_CARRY_WINDOW,
+        bounds[0],
         bounds[1],
         as_of,
     )
 
 
-class _PlaneCoverage(NamedTuple):
-    """Requirement minutes one plane serves exactly and by bounded carry.
-
-    ``exact`` always outranks ``carried`` when a plane is chosen, so a venue
-    publishing on the minute beats one that only reaches it from earlier.
-    """
-
-    exact: set[datetime]
-    carried: set[datetime]
-
-
-def _plane_observations(
-    rows: Sequence[PnlFxRateRow],
-) -> dict[PnlFxRatePlane, set[datetime]]:
-    """Collect every usable published minute for each plane in the evidence."""
-    observed: dict[PnlFxRatePlane, set[datetime]] = {}
-    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
-        if is_positive_finite(close):
-            observed.setdefault((base, quote, exchange), set()).add(minute)
-    return observed
-
-
-def _carried_minutes_for_plane(
-    published: set[datetime],
-    required: set[datetime],
-) -> set[datetime]:
-    """Return required minutes this plane reaches only by bounded carry.
-
-    A minute already published exactly is excluded, so the two coverage halves
-    never double-count the same requirement.
-    """
-    carried: set[datetime] = set()
-    for minute in required:
-        if minute in published:
-            continue
-        earliest = minute - _FX_CARRY_WINDOW
-        if any(earliest <= observed < minute for observed in published):
-            carried.add(minute)
-    return carried
-
-
 def _covered_fx_minutes(
     requirements: Mapping[FxPairKey, set[datetime]],
     rows: Sequence[PnlFxRateRow],
-) -> dict[PnlFxRatePlane, _PlaneCoverage]:
-    """Collect exact and bounded-carry requirement coverage for each plane.
-
-    Carry coverage is what makes a gapped venue electable at all: a conversion
-    minute whose candle is missing leaves every plane at zero exact coverage,
-    and without this the pair would be refused instead of carried.
-    """
-    covered: dict[PnlFxRatePlane, _PlaneCoverage] = {}
-    for plane, published in _plane_observations(rows).items():
-        pair = currency_pair_key(plane[0], plane[1])
-        required = requirements.get(pair, set())
-        exact = published & required
-        carried = _carried_minutes_for_plane(published, required)
-        if exact or carried:
-            covered[plane] = _PlaneCoverage(exact=exact, carried=carried)
+) -> dict[PnlFxRatePlane, set[datetime]]:
+    """Collect usable exact requirement minutes for every candidate plane."""
+    covered: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if not is_positive_finite(close):
+            continue
+        pair = currency_pair_key(base, quote)
+        if minute in requirements.get(pair, set()):
+            covered.setdefault((base, quote, exchange), set()).add(minute)
     return covered
-
-
-def _plane_rank(
-    coverage: _PlaneCoverage | None,
-    minutes: set[datetime],
-) -> tuple[int, int]:
-    """Rank one plane over the requested minutes: exact first, carry second."""
-    if coverage is None:
-        return (0, 0)
-    return len(coverage.exact & minutes), len(coverage.carried & minutes)
 
 
 def _preferred_fx_plane(
     pair: FxPairKey,
     minutes: set[datetime],
     planes: set[PnlFxRatePlane],
-    covered: Mapping[PnlFxRatePlane, _PlaneCoverage],
+    covered: Mapping[PnlFxRatePlane, set[datetime]],
     valuation_ccy: str,
 ) -> PnlFxRatePlane | None:
-    """Select the coverage, venue, and orientation winner for one pair.
-
-    Carry is consulted ONLY when no candidate has any exact mark. As long as one
-    plane publishes on any required minute, scoring is exact-count alone and
-    every existing election elects exactly the plane it always did; carry then
-    fills that winner's gaps downstream. Letting carry count as a tie-break
-    among planes that do have exact marks would re-elect settled elections — a
-    plane whose sole exact mark sits at the end of the window plus one stale
-    mark before it would outscore a rival with a fresh mark mid-window, and
-    displace it across venue and orientation. Only the previously hopeless case,
-    where every candidate scored zero and the pair was refused, changes outcome.
-    """
+    """Select the coverage, venue, and orientation winner for one pair."""
     if not planes:
         return None
-    coverage_by_plane = {plane: _plane_rank(covered.get(plane), minutes) for plane in planes}
-    best_exact = max(exact for exact, _ in coverage_by_plane.values())
-    scored = {
-        plane: exact if best_exact else carried
-        for plane, (exact, carried) in coverage_by_plane.items()
+    coverage_by_plane = {
+        plane: len(covered.get(plane, set()).intersection(minutes)) for plane in planes
     }
-    best_coverage = max(scored.values())
+    best_coverage = max(coverage_by_plane.values())
     if best_coverage == 0:
         return None
-    finalists = {plane for plane, coverage in scored.items() if coverage == best_coverage}
-    if best_exact == len(minutes) and "PLN" in pair:
+    finalists = {
+        plane for plane, coverage in coverage_by_plane.items() if coverage == best_coverage
+    }
+    if best_coverage == len(minutes) and "PLN" in pair:
         walutomat = {plane for plane in finalists if plane[2] == "walutomat"}
         if walutomat:
             finalists = walutomat
@@ -3165,13 +3085,9 @@ def _resolve_identity_fx_planes(
     """Pin instrument-owned planes only after they prove usable coverage.
 
     Partial positive coverage pins the canonical plane for the instrument's
-    whole request so a rival cannot fill later gaps. Coverage counts a minute
-    the plane published exactly, or one it reaches by bounded carry from its own
-    earlier mark — the canonical plane is the only candidate here, so admitting
-    carry can never let a rival or a reverse orientation win, it only decides
-    whether this instrument is provable at all. A plane with neither still does
-    not pin or enter provenance, and the unresolved identity claim keeps that
-    instrument from borrowing the shared plane.
+    whole request so a rival cannot fill later gaps. Zero usable coverage does
+    not pin or enter provenance, but the unresolved identity claim still blocks
+    that instrument from borrowing the shared plane.
 
     Args:
         requirements: Exact conversion minutes grouped by consuming instrument.
@@ -3181,13 +3097,15 @@ def _resolve_identity_fx_planes(
     Returns:
         Canonical planes with nonzero usable coverage keyed by instrument.
     """
-    observed = _plane_observations(rows)
+    covered: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if is_positive_finite(close):
+            covered.setdefault((base, quote, exchange), set()).add(minute)
     resolved: _FxIdentityPlanes = {}
     for instrument_public_id, plane in identity_planes.items():
         pair = currency_pair_key(plane[0], plane[1])
         minutes = requirements.get(instrument_public_id, {}).get(pair, set())
-        published = observed.get(plane, set())
-        if published & minutes or _carried_minutes_for_plane(published, minutes):
+        if covered.get(plane, set()).intersection(minutes):
             resolved[instrument_public_id] = plane
     return resolved
 
