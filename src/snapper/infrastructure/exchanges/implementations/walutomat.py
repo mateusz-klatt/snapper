@@ -761,6 +761,77 @@ capped at one line per five minutes per symbol and the suppressed count rides
 the next line that gets through. The counts and durations on the heartbeat are
 the current-state signal; the log is only the transition record."""
 
+WALUTOMAT_CANDLE_INTERVAL_SECONDS: Final[int] = 60
+"""Width in seconds of every candle this client publishes.
+
+The venue serves no candle endpoint, so bars are built locally from polled
+top-of-book marks and ``1m`` is the only interval
+:meth:`WalutomatExchangeClient.subscribe_candles` accepts. The width is named
+rather than inlined because the builder uses it in three distinct roles - the
+sleep target, the floor divisor, and the step by which the boundary cursor
+advances - and a bare ``60`` in any of them reads as a coincidence instead of
+as the same quantity."""
+
+WALUTOMAT_CANDLE_BURST_YIELD_BOUNDARIES: Final[int] = 60
+"""Boundaries a catch-up burst may emit before it yields to the event loop.
+
+``_candle_queue`` is unbounded, so ``put`` never suspends, and once the tick
+buffers drain the catch-up loop performs no await at all. A builder resuming
+after a long stall would then run ``boundaries x pairs`` iterations
+synchronously and starve every other task on the loop - including the poller
+that feeds it. One yield per hour of reconstructed boundaries costs nothing and
+bounds that.
+
+The burst LENGTH is bounded by the wall clock: it ends at the most recently
+closed boundary. No arbitrary cap is applied on top of that, because a builder
+that stalled while polling kept appending really can reconstruct every minute
+in the gap and a cap would throw real bars away.
+:meth:`WalutomatExchangeClient._fast_forward_candle_boundary` then removes the
+leading minutes that provably hold no tick, so the work is proportional to the
+minutes that can actually carry a candle."""
+
+
+def _floor_to_candle_minute(moment: float) -> int:
+    """Return the candle boundary at or before one wall-clock moment.
+
+    Args:
+        moment: Wall-clock seconds since the epoch.
+
+    Returns:
+        The largest candle boundary that is not after ``moment``.
+    """
+    interval = WALUTOMAT_CANDLE_INTERVAL_SECONDS
+    return int(moment // interval) * interval
+
+
+def _log_backward_clock_step(now: float, next_boundary: int, already_logged: bool) -> bool:
+    """Report a wall-clock step that landed behind the builder's cursor.
+
+    The cursor is deliberately NOT re-derived from the stepped-back clock. The
+    boundaries between the new reading and the cursor were already published,
+    and re-deriving would republish them - the same ``interval_begin`` twice,
+    which is a worse failure than the silence. Stalling until wall time catches
+    up is the correct behaviour; this only makes the silence explicable in the
+    log instead of leaving an operator to guess.
+
+    Args:
+        now: Current wall-clock reading in seconds since the epoch.
+        next_boundary: First boundary the builder has not published yet.
+        already_logged: Whether this backward step was already reported.
+
+    Returns:
+        Whether a backward step is in effect and has now been reported.
+    """
+    if now >= next_boundary - WALUTOMAT_CANDLE_INTERVAL_SECONDS:
+        return False
+    if not already_logged:
+        logger.warning(
+            f"Walutomat candle builder: wall clock stepped back to {now:.0f} while the next "
+            f"unpublished boundary is {next_boundary} - stalling until wall time catches up "
+            f"rather than republishing minutes that were already emitted"
+        )
+    return True
+
 
 @dataclass(frozen=True)
 class WalutomatQuote:
@@ -992,6 +1063,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._backoff_wakeup_event: asyncio.Event | None = None
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
+        self._last_published_boundary: int = 0
         self._refused_marks: set[str] = set()
         self._refused_mark_counts: dict[str, int] = {}
         self._refused_since: dict[str, float] = {}
@@ -1067,6 +1139,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
         ``connect()`` leaves ``_running`` False with the client object
         already allocated, and the ``__aenter__`` failure cleanup calls
         this method expecting it to release that client.
+
+        The tick buffers are dropped because the builder task dies here with
+        whatever it had not published yet. Those leftovers cannot honestly
+        become candles after a reconnect: the next builder seeds its cursor
+        from the buffers, so it would publish minutes whose ticks predate the
+        outage, and every such minute it did not reach would be truncated away
+        unpublished regardless. Clearing makes the loss explicit at the point
+        where it actually happened.
         """
         if self._running:
             logger.info("Disconnecting from Walutomat API...")
@@ -1081,6 +1161,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._candle_builder_task
                 self._candle_builder_task = None
+            self._tick_buffers.clear()
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
@@ -1605,6 +1686,16 @@ class WalutomatExchangeClient(ExchangeClientBase):
         top-of-book quote, and no trade is observed on this feed. Counting
         polls would publish a trade count the venue never reported.
 
+        The trailing truncation is IRREVERSIBLE - every tick older than
+        ``current_minute`` is dropped whether or not it was published. That is
+        safe only because the caller walks boundaries in ascending order and
+        never skips one; see :meth:`_candle_builder_loop`.
+
+        ``_last_published_boundary`` is advanced HERE, on the statement after
+        the queue put, so it records what was actually published rather than
+        what a scheduler intended to publish and cannot drift from it. See
+        :meth:`_seed_candle_boundary` for the invariant it carries.
+
         Args:
             symbol: Native symbol string.
             ticks: List of (timestamp, price) tick tuples.
@@ -1629,30 +1720,203 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 interval=1,
             )
             await self._candle_queue.put(candle)
+            self._last_published_boundary = max(self._last_published_boundary, current_minute)
             logger.debug(
                 f"{symbol} 1m candle: O={candle.open:.4f} H={candle.high:.4f} "
                 f"L={candle.low:.4f} C={candle.close:.4f} ({len(prices)} ticks)"
             )
         self._tick_buffers[symbol] = [(ts, price) for ts, price in ticks if ts >= current_minute]
 
+    async def _build_closed_minute(self, boundary: int) -> None:
+        """Emit every buffered symbol's candle for one closed minute.
+
+        The buffer is re-read from ``_tick_buffers`` per symbol on every call
+        rather than captured once by the caller:
+        :meth:`_build_candle_for_symbol` REWRITES ``_tick_buffers[symbol]``
+        when it truncates, so a list captured for an earlier boundary would
+        resurrect ticks that boundary already consumed.
+
+        Args:
+            boundary: Exclusive end of the closed minute; the candle covers
+                ``[boundary - WALUTOMAT_CANDLE_INTERVAL_SECONDS, boundary)``.
+
+        Returns:
+            None.
+        """
+        minute_start = boundary - WALUTOMAT_CANDLE_INTERVAL_SECONDS
+        for symbol in tuple(self._tick_buffers):
+            ticks = self._tick_buffers.get(symbol)
+            if not ticks:
+                continue
+            await self._build_candle_for_symbol(symbol, ticks, minute_start, boundary)
+
+    def _oldest_buffered_tick(self) -> float | None:
+        """Return the oldest buffered tick timestamp across every symbol.
+
+        The scan takes the true minimum of each buffer rather than its first
+        entry. Append order equals timestamp order only while the wall clock
+        runs monotonically forward, and this module explicitly declines to
+        assume that - :func:`_log_backward_clock_step` exists because the
+        clock does step. After such a step element 0 reports a stamp LATER
+        than the true oldest, which would let
+        :meth:`_fast_forward_candle_boundary` skip a boundary whose window
+        still holds ticks.
+
+        Returns:
+            The oldest buffered timestamp, or None when every buffer is empty.
+        """
+        stamps = [min(ts for ts, _ in ticks) for ticks in self._tick_buffers.values() if ticks]
+        if not stamps:
+            return None
+        return min(stamps)
+
+    def _seed_candle_boundary(self) -> int:
+        """Choose the first boundary a starting builder is responsible for.
+
+        Polling outlives any single builder task, so a CLOSED minute can
+        already be sitting in the buffers when this loop begins. Seeding the
+        cursor from the clock would put that minute behind the cursor forever
+        and the next truncation would discard it unpublished, so the buffers
+        win whenever they hold anything and the clock is only the empty-buffer
+        fallback.
+
+        The buffer-derived seed is CLAMPED to the currently open minute, for
+        the reason spelled out in :meth:`_fast_forward_candle_boundary`: a
+        future-dated buffered tick must never park the cursor where no
+        boundary is ever processed.
+
+        The seed is then FLOORED at ``_last_published_boundary``, and that
+        floor is the invariant this client actually offers: within one client
+        instance an ``interval_begin`` is published at most once. The
+        truncation invariant alone does not deliver it. Truncation leaves only
+        stamps at or after the last published boundary, which holds only while
+        the clock runs forward; one backward step and the poller appends BELOW
+        that boundary, so a builder starting afterwards re-seeds onto a minute
+        already sent and restates it downstream - the worst thing this loop
+        can do, since a restated bar is read as new information. The latch
+        :func:`_log_backward_clock_step` maintains cannot cover that: it lives
+        in the loop frame and dies with the builder task, while this attribute
+        lives exactly as long as the buffers it guards. That restart is the
+        reachable case, not a hypothetical - :meth:`subscribe_candles`
+        recreates the builder task whenever the previous one is ``done()``,
+        and the publisher's consumer supervisor re-subscribes on both a raise
+        and a clean return.
+
+        The floor is applied LAST, so it wins wherever it conflicts with the
+        open-minute clamp: stalling until wall time catches up is always
+        better than republishing. Under a forward clock the two cannot
+        conflict at all, because every published boundary is at or before the
+        most recently closed one and the floor therefore sits at or below the
+        clamp.
+
+        The attribute is deliberately NOT persisted. A process restart drops
+        it together with the tick buffers it is derived from, and no consumer
+        is promised uniqueness across that.
+
+        Returns:
+            The first boundary the builder must publish.
+        """
+        interval = WALUTOMAT_CANDLE_INTERVAL_SECONDS
+        open_minute = _floor_to_candle_minute(time.time()) + interval
+        oldest = self._oldest_buffered_tick()
+        seed = (
+            open_minute
+            if oldest is None
+            else min(_floor_to_candle_minute(oldest) + interval, open_minute)
+        )
+        if self._last_published_boundary == 0:
+            return seed
+        return max(seed, self._last_published_boundary + interval)
+
+    def _fast_forward_candle_boundary(self, next_boundary: int, closed_through: int) -> int:
+        """Skip leading boundaries that provably cannot hold a candle.
+
+        No arbitrary cap is placed on the catch-up burst: when the builder
+        alone stalled while polling kept appending, every minute in the gap
+        really is reconstructible and capping would throw real bars away. The
+        burst already ends at ``closed_through``, and this method only removes
+        its leading EMPTY minutes - no candle can exist before the oldest
+        buffered tick, so advancing the cursor to that tick's minute discards
+        nothing while collapsing an arbitrarily long empty prefix into one
+        step. With no ticks at all there is nothing to reconstruct anywhere,
+        so the cursor jumps straight to the currently open minute.
+
+        The buffer-derived candidate is CLAMPED to the currently open minute.
+        A tick stamped ahead of the wall clock - a venue or host clock
+        anomaly, not a hypothetical - would otherwise park the cursor in the
+        future, where no boundary is ever processed; nothing then truncates
+        the offending tick, so it re-poisons every later wake and the feed
+        goes dark venue-wide for as long as the stamp is ahead. That is worse
+        than the defect this loop replaced. Clamped, a future-dated tick costs
+        at most the minutes it genuinely implies. The clamp cannot skip a live
+        boundary either: ``oldest`` is a minimum over every buffer, so any
+        boundary whose window holds a tick is at or after
+        ``_floor_to_candle_minute(oldest) + interval``.
+
+        The result never moves the cursor backwards, which is what keeps this
+        safe next to :func:`_log_backward_clock_step` - a stepped-back clock
+        must stall the builder, never rewind it into republishing.
+
+        Args:
+            next_boundary: First boundary the builder has not published yet.
+            closed_through: Most recent boundary wall time has closed.
+
+        Returns:
+            The boundary to resume from, never earlier than ``next_boundary``.
+        """
+        interval = WALUTOMAT_CANDLE_INTERVAL_SECONDS
+        open_minute = closed_through + interval
+        oldest = self._oldest_buffered_tick()
+        if oldest is None:
+            return max(next_boundary, open_minute)
+        return max(next_boundary, min(_floor_to_candle_minute(oldest) + interval, open_minute))
+
+    async def _emit_closed_boundaries(self, next_boundary: int, closed_through: int) -> int:
+        """Emit every already-closed boundary in ascending order.
+
+        Args:
+            next_boundary: First boundary the builder has not published yet.
+            closed_through: Most recent boundary wall time has closed.
+
+        Returns:
+            The first boundary that is still open once the burst is done.
+        """
+        interval = WALUTOMAT_CANDLE_INTERVAL_SECONDS
+        emitted = 0
+        while next_boundary <= closed_through:
+            await self._build_closed_minute(next_boundary)
+            next_boundary += interval
+            emitted += 1
+            if emitted % WALUTOMAT_CANDLE_BURST_YIELD_BOUNDARIES == 0:
+                await asyncio.sleep(0)
+        return next_boundary
+
     async def _candle_builder_loop(self) -> None:
-        """Build 1-minute candles from accumulated tick data."""
+        """Build 1-minute candles from accumulated tick data.
+
+        The boundary cursor advances on its OWN schedule: it moves by exactly
+        one interval per boundary PROCESSED and is never re-derived from the
+        clock after it is seeded. The clock answers one question only - how
+        many boundaries are closed by now - and every one of them is emitted in
+        ascending order. That is what makes a 44-pair pass which overruns its
+        minute publish the minute it stepped over instead of truncating those
+        ticks away unpublished, which is the defect this shape exists to
+        remove. The predecessor read the boundary from the clock after waking
+        and emitted only the single previous minute, so roughly a quarter of
+        all 1m bars were lost around the clock.
+        """
         logger.info("Starting Walutomat candle builder (1m interval)")
+        next_boundary = self._seed_candle_boundary()
+        clock_step_logged = False
         while self._running:
-            now = time.time()
-            seconds_until_next_minute = 60 - (now % 60)
-            await asyncio.sleep(seconds_until_next_minute)
+            await asyncio.sleep(max(0.0, next_boundary - time.time()))
             if not self._running:
                 break
-            current_minute = int(time.time() // 60) * 60
-            prev_minute_start = current_minute - 60
-            for symbol in tuple(self._tick_buffers):
-                ticks = self._tick_buffers.get(symbol, [])
-                if not ticks:
-                    continue
-                await self._build_candle_for_symbol(
-                    symbol, ticks, prev_minute_start, current_minute
-                )
+            now = time.time()
+            clock_step_logged = _log_backward_clock_step(now, next_boundary, clock_step_logged)
+            closed_through = _floor_to_candle_minute(now)
+            next_boundary = self._fast_forward_candle_boundary(next_boundary, closed_through)
+            next_boundary = await self._emit_closed_boundaries(next_boundary, closed_through)
         logger.info("Walutomat candle builder stopped")
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:

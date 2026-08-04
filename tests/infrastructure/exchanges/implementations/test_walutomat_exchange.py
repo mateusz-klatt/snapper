@@ -1027,22 +1027,136 @@ async def test_polling_loop_enqueues_tick_updates(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_candle_builder_loop_emits_candles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify candle builder emits candles from tick buffer.
+    """Verify candle builder emits EVERY closed minute held in the buffer.
 
-    Given: A running client with ticks in buffer,
-    When: Minute boundary is crossed,
-    Then: CandleUpdate is emitted with OHLC data.
+    Given: A running client whose buffer holds ticks from two closed minutes,
+    When: The builder wakes after both of those minutes have closed,
+    Then: Both minutes produce a CandleUpdate and the buffer is left empty.
+        The predecessor published only the last minute and truncated the
+        earlier one away unpublished, which is the measured defect.
     """
     client = WalutomatExchangeClient()
     client._running = True
     client._tick_buffers["EUR-PLN"] = [(10.0, 4.10), (20.0, 4.30), (75.0, 4.50)]
-    times = iter([59.0, 60.0, 120.0])
     real_sleep = asyncio.sleep
+    sleeps = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        lambda: 120.0,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    await client._candle_builder_loop()
+    assert len(captured) == 2, f"expected both closed minutes, got {len(captured)}"
+    first, second = captured
+    assert first.symbol == "EUR-PLN"
+    assert first.interval_begin == datetime.fromtimestamp(0, UTC)
+    assert math.isclose(first.open, 4.10, rel_tol=1e-9)
+    assert math.isclose(first.close, 4.30, rel_tol=1e-9)
+    assert first.trades == 0
+    assert second.interval_begin == datetime.fromtimestamp(60, UTC)
+    assert math.isclose(second.open, 4.50, rel_tol=1e-9)
+    assert math.isclose(second.close, 4.50, rel_tol=1e-9)
+    assert client._tick_buffers["EUR-PLN"] == []
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_handles_empty_minute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify candle builder leaves a still-open minute alone.
+
+    Given: A running client whose only ticks belong to the currently open
+        minute,
+    When: The builder wakes before that minute has closed,
+    Then: Buffer remains unchanged and no candle emitted.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(120.0, 4.00)]
+    real_sleep = asyncio.sleep
+    sleeps = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        lambda: 150.0,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    await client._candle_builder_loop()
+    assert client._candle_queue.empty()
+    assert client._tick_buffers["EUR-PLN"] == [(120.0, 4.00)]
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_exits_when_not_running() -> None:
+    """Verify candle builder exits when not running.
+
+    Given: A client with running=False,
+    When: _candle_builder_loop() is called,
+    Then: Loop exits immediately.
+    """
+    client = WalutomatExchangeClient()
+    client._running = False
+    await client._candle_builder_loop()
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_recovers_a_stepped_over_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an overrunning pass still publishes the minute it stepped over.
+
+    Given: A buffer holding one tick inside [60, 120) and one inside
+        [120, 180), and a pass that only reaches its 120 boundary once wall
+        time has already run on to 185,
+    When: The builder processes that wake-up,
+    Then: Both elapsed minutes produce a candle, in ascending order, and a
+        symbol with an empty buffer produces none. This is the measured
+        defect: the old loop derived a single boundary from the clock after
+        waking, published [120, 180) alone, and truncated the tick at 65 away
+        without ever publishing it.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(65.0, 4.0), (130.0, 4.5)]
+    client._tick_buffers["USD-PLN"] = []
+    times = iter([100.0, 100.0, 185.0])
+    real_sleep = asyncio.sleep
+    sleeps = 0
 
     def fake_time() -> float:
-        return next(times, 120.0)
+        return next(times, 185.0)
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            client._running = False
         await real_sleep(0)
 
     monkeypatch.setattr(
@@ -1060,40 +1174,147 @@ async def test_candle_builder_loop_emits_candles(monkeypatch: pytest.MonkeyPatch
             captured.append(item)
 
     client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
-    task = asyncio.create_task(client._candle_builder_loop())
-    await real_sleep(0)
-    await real_sleep(0)
-    client._running = False
-    await real_sleep(0)
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    assert captured, "expected candle to be emitted"
-    candle = captured[0]
-    assert candle.symbol == "EUR-PLN"
-    assert math.isclose(candle.open, 4.10, rel_tol=1e-9)
-    assert math.isclose(candle.close, 4.30, rel_tol=1e-9)
-    assert candle.trades == 0
-    assert client._tick_buffers["EUR-PLN"] == [(75.0, 4.50)]
+    await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [
+        datetime.fromtimestamp(60, UTC),
+        datetime.fromtimestamp(120, UTC),
+    ]
+    assert {candle.symbol for candle in captured} == {"EUR-PLN"}
+    assert [candle.open for candle in captured] == [pytest.approx(4.0), pytest.approx(4.5)]
+    assert client._tick_buffers["EUR-PLN"] == []
+    assert client._tick_buffers["USD-PLN"] == []
 
 
 @pytest.mark.asyncio
-async def test_candle_builder_loop_handles_empty_minute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify candle builder handles empty tick window.
+async def test_candle_builder_loop_emits_a_minute_closed_before_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a starting builder publishes a minute that closed before it began.
 
-    Given: A running client with ticks outside current window,
-    When: Minute boundary is crossed,
-    Then: Buffer remains unchanged and no candle emitted.
+    Given: A buffer that already holds a tick from a CLOSED minute, which is
+        exactly the state polling leaves behind when the builder task restarts,
+    When: The builder starts during the following minute,
+    Then: That closed minute is published. Seeding the cursor from the clock
+        instead would leave it behind the cursor forever and the next
+        truncation would discard it unpublished.
     """
     client = WalutomatExchangeClient()
     client._running = True
-    client._tick_buffers["EUR-PLN"] = [(120.0, 4.00)]
-    times = iter([0.0, 60.0])
+    client._tick_buffers["EUR-PLN"] = [(30.0, 4.2)]
     real_sleep = asyncio.sleep
-
-    def fake_time() -> float:
-        return next(times, 60.0)
+    sleeps = 0
 
     async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        lambda: 95.0,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    await client._candle_builder_loop()
+    assert len(captured) == 1, f"expected the already-closed minute, got {len(captured)}"
+    assert captured[0].interval_begin == datetime.fromtimestamp(0, UTC)
+    assert math.isclose(captured[0].close, 4.2, rel_tol=1e-9)
+    assert client._tick_buffers["EUR-PLN"] == []
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_reconstructs_a_long_stall_without_a_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an hour-long builder stall is reconstructed boundary by boundary.
+
+    Given: A buffer holding a tick from the first minute of an hour-long
+        builder stall and one from its last minute, with wall time already
+        past the end of the stall,
+    When: The builder wakes,
+    Then: Both minutes are published from a single burst - the catch-up is
+        bounded by the data, never by a chosen horizon - and the burst yields
+        to the event loop once instead of running all 61 boundaries
+        synchronously. The recorded sleep delays are the evidence: without the
+        mid-burst yield the second delay would be the next boundary's wait.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(0.5, 4.0), (3605.0, 4.9)]
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        if delay > 0.0:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        lambda: 3700.0,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [
+        datetime.fromtimestamp(0, UTC),
+        datetime.fromtimestamp(3600, UTC),
+    ]
+    assert delays == [0.0, 0.0, 20.0], f"expected one mid-burst yield, got {delays}"
+    assert client._tick_buffers["EUR-PLN"] == []
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_logs_a_backward_clock_step_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify a backward wall-clock step stalls the builder and logs once.
+
+    Given: A builder that has already published the [120, 180) minute and
+        advanced its cursor to 240, after which the wall clock steps back to
+        10,
+    When: The builder wakes twice in that state,
+    Then: Nothing further is published - re-deriving the cursor from the
+        stepped-back clock would repeat an already-published interval_begin
+        downstream - and exactly one WARNING explains the silence.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(125.0, 4.0)]
+    times = iter([190.0, 190.0, 190.0])
+    real_sleep = asyncio.sleep
+    sleeps = 0
+
+    def fake_time() -> float:
+        return next(times, 10.0)
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 4:
+            client._running = False
         await real_sleep(0)
 
     monkeypatch.setattr(
@@ -1104,27 +1325,231 @@ async def test_candle_builder_loop_handles_empty_minute(monkeypatch: pytest.Monk
         "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
         fake_sleep,
     )
-    task = asyncio.create_task(client._candle_builder_loop())
-    await real_sleep(0)
-    await real_sleep(0)
-    client._running = False
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    assert client._tick_buffers["EUR-PLN"] == [(120.0, 4.00)]
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await client._candle_builder_loop()
+    finally:
+        logger.remove(sink_id)
+    stepped_back = [r for r in caplog.records if "stepped back" in r.message]
+    assert len(stepped_back) == 1, f"expected one warning, got {[r.message for r in stepped_back]}"
+    assert stepped_back[0].levelname == "WARNING"
+    assert [candle.interval_begin for candle in captured] == [datetime.fromtimestamp(120, UTC)]
+    assert client._tick_buffers["EUR-PLN"] == []
 
 
 @pytest.mark.asyncio
-async def test_candle_builder_loop_exits_when_not_running() -> None:
-    """Verify candle builder exits when not running.
+async def test_candle_builder_loop_keeps_publishing_past_a_future_dated_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a tick stamped ahead of the wall clock cannot stall the feed.
 
-    Given: A client with running=False,
-    When: _candle_builder_loop() is called,
-    Then: Loop exits immediately.
+    Given: A buffer poisoned with a tick stamped far in the future, then three
+        minutes of honest polling,
+    When: The builder runs across those minutes,
+    Then: Every minute is published. Without the clamp on the buffer-derived
+        cursor the builder parks in the future, never processes a boundary, so
+        nothing ever truncates the offending tick and the whole venue's candle
+        feed goes dark - worse than the defect this loop replaced, and behind a
+        liveness watchdog that keys on the unaffected tick channel.
     """
     client = WalutomatExchangeClient()
-    client._running = False
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(9000.0, 4.0)]
+    clock = {"now": 1000.0}
+    real_sleep = asyncio.sleep
+    wakes = 0
+
+    def fake_time() -> float:
+        return clock["now"]
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal wakes
+        wakes += 1
+        if wakes > 3:
+            client._running = False
+        else:
+            clock["now"] = 1021.0 + 60.0 * (wakes - 1)
+            client._tick_buffers["EUR-PLN"].append((clock["now"] - 30.0, 4.5))
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        fake_time,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
     await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [
+        datetime.fromtimestamp(960, UTC),
+        datetime.fromtimestamp(1020, UTC),
+        datetime.fromtimestamp(1080, UTC),
+    ]
+    assert (9000.0, 4.0) in client._tick_buffers["EUR-PLN"]
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_restart_never_republishes_a_published_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a restarted builder cannot restate a minute the client already sent.
+
+    Given: A builder that published the [120, 180) minute, after which the wall
+        clock steps back inside that minute and the poller appends a tick below
+        the published boundary - the truncation invariant is broken exactly
+        here,
+    When: The builder task ends and a new builder starts on the SAME client,
+        which is what subscribe_candles does whenever the previous task is
+        done, and wall time then runs forward again,
+    Then: The earlier interval_begin is NOT republished. The published-boundary
+        floor is what delivers that; seeding from the buffers alone would land
+        straight back on the sent minute and restate it downstream.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(125.0, 4.0)]
+    clock = {"now": 190.0}
+    real_sleep = asyncio.sleep
+    wakes = 0
+
+    def fake_time() -> float:
+        return clock["now"]
+
+    async def fake_sleep_first(_delay: float) -> None:
+        nonlocal wakes
+        wakes += 1
+        if wakes >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        fake_time,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep_first,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [datetime.fromtimestamp(120, UTC)]
+    assert client._last_published_boundary == 180
+    clock["now"] = 150.0
+    client._tick_buffers["EUR-PLN"].append((150.0, 4.9))
+    wakes = 0
+
+    async def fake_sleep_second(_delay: float) -> None:
+        nonlocal wakes
+        wakes += 1
+        clock["now"] = 190.0
+        if wakes >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep_second,
+    )
+    client._running = True
+    await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [datetime.fromtimestamp(120, UTC)]
+    assert client._last_published_boundary == 180
+    assert client._tick_buffers["EUR-PLN"] == [(150.0, 4.9)]
+
+
+def test_fast_forward_clamps_a_future_dated_tick_but_never_rewinds() -> None:
+    """Verify the boundary fast-forward is clamped above and floored below.
+
+    Given: A buffer holding only a tick stamped far ahead of the wall clock,
+    When: The fast-forward is asked to place the cursor,
+    Then: The buffered stamp can push the cursor no further than the currently
+        open minute, and a cursor already beyond that minute - the state a
+        backward clock step leaves behind - is never pulled back, since
+        rewinding it would republish minutes that were already emitted.
+    """
+    client = WalutomatExchangeClient()
+    client._tick_buffers["EUR-PLN"] = [(9000.0, 4.0)]
+    assert client._fast_forward_candle_boundary(960, 1200) == 1260
+    assert client._fast_forward_candle_boundary(1320, 1200) == 1320
+    client._tick_buffers["EUR-PLN"] = []
+    assert client._fast_forward_candle_boundary(960, 1200) == 1260
+    assert client._fast_forward_candle_boundary(1320, 1200) == 1320
+
+
+@pytest.mark.asyncio
+async def test_candle_builder_loop_uses_the_true_oldest_buffered_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the oldest-tick scan does not trust buffer append order.
+
+    Given: A buffer whose first entry is NOT its oldest entry, which is what a
+        backward wall-clock step leaves behind - append order equals timestamp
+        order only while the clock runs forward, and this module exists partly
+        because it does not,
+    When: The builder catches up,
+    Then: The [900, 960) minute is published from the two out-of-order ticks
+        instead of being skipped by the fast-forward and truncated away.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(1005.0, 4.1), (946.0, 9.0), (952.0, 9.1)]
+    assert client._oldest_buffered_tick() == pytest.approx(946.0)
+    assert client._fast_forward_candle_boundary(960, 1200) == 960
+    real_sleep = asyncio.sleep
+    sleeps = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            client._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.time.time",
+        lambda: 1200.0,
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep",
+        fake_sleep,
+    )
+    captured: list[CandleUpdate] = []
+
+    class _StubQueue:
+        async def put(self, item: CandleUpdate) -> None:
+            captured.append(item)
+
+    client._candle_queue = cast(asyncio.Queue[CandleUpdate], _StubQueue())
+    await client._candle_builder_loop()
+    assert [candle.interval_begin for candle in captured] == [
+        datetime.fromtimestamp(900, UTC),
+        datetime.fromtimestamp(960, UTC),
+    ]
+    assert math.isclose(captured[0].open, 9.0, rel_tol=1e-9)
+    assert math.isclose(captured[0].close, 9.1, rel_tol=1e-9)
+    assert client._tick_buffers["EUR-PLN"] == []
 
 
 @pytest.mark.asyncio
@@ -3888,6 +4313,23 @@ async def test_disconnect_cancels_tasks_and_closes() -> None:
     assert client._polling_task is None
     assert client._candle_builder_task is None
     assert client._http_client is None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_drops_unpublished_tick_buffers() -> None:
+    """Verify disconnect clears the tick buffers the builder left behind.
+
+    Given: A running client holding ticks the candle builder never published,
+    When: disconnect() is called,
+    Then: The buffers are empty, so a later reconnect cannot seed its boundary
+        cursor from ticks that predate the outage nor truncate them away at
+        the first new boundary.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._tick_buffers["EUR-PLN"] = [(10.0, 4.10)]
+    await client.disconnect()
+    assert client._tick_buffers == {}
 
 
 @pytest.mark.asyncio
