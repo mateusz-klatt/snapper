@@ -73,15 +73,10 @@ def _render_refusals(result: FxProofBackfillResult) -> None:
             minutes = ",".join(
                 minute.isoformat() for minute in sorted(item.evaluation.required_minutes)
             )
-            state = (
-                "audited"
-                if item.refusal_audited
-                else (
-                    "partial-proof"
-                    if completeness == "partial" and item.pinned
-                    else "missing-audit"
-                )
+            unaudited_state = (
+                "partial-proof" if completeness == "partial" and item.pinned else "missing-audit"
             )
+            state = "audited" if item.refusal_audited else unaudited_state
             typer.echo(
                 f"{item.wallet_public_id} | {'-'.join(item.evaluation.pair)} | "
                 f"{item.evaluation.scope_kind} | {minutes} | fx_conversion_unproven | "
