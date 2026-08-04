@@ -36,7 +36,20 @@ from snapper.data.repository_types import FxConversionScopeKind
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 
-FX_ELECTION_POLICY_VERSION = "pnl-fiat-v1"
+FX_ELECTION_POLICY_VERSION = "pnl-fiat-v2"
+"""Identity of the election ALGORITHM, not of the data it elects.
+
+It is part of the election uniqueness key, so it is what keeps two
+contradictory answers to the same question from claiming to be the same
+answer. Bump it whenever a change can make identical inputs at an identical
+knowledge horizon elect differently.
+
+``v2`` (2026-08-04) made bounded carry-forward reachable: a requirement whose
+only mark predates it now elects `carried` where `v1` refused. Without the bump
+a replay would produce append-only evidence that disagrees with the stored
+`v1` row while asserting the same policy. Raising ``MAX_CARRIED_MINUTES``
+rides on the same bump for the same reason.
+"""
 MAX_SHADOW_MANIFEST_MINUTES = 15
 SHADOW_PIN_TICK_TIMEOUT_SECONDS = 10.0
 
