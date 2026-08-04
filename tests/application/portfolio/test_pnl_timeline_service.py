@@ -28,6 +28,8 @@ from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
+from snapper.application.portfolio.fx_conversion_shadow import carried_minutes_for
+from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_evaluation_completeness
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_rates import convert_amount
@@ -54,6 +56,7 @@ from snapper.application.portfolio.pnl_timeline_service import _build_equity_ove
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
 from snapper.application.portfolio.pnl_timeline_service import _convert_equity_overlay
+from snapper.application.portfolio.pnl_timeline_service import _covered_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _derive_series_replay_metadata
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayRequest
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayResult
@@ -66,6 +69,7 @@ from snapper.application.portfolio.pnl_timeline_service import _opening_nonflat_
 from snapper.application.portfolio.pnl_timeline_service import _parse_anchor
 from snapper.application.portfolio.pnl_timeline_service import _parse_sample_coverage
 from snapper.application.portfolio.pnl_timeline_service import _point_equity_overlays
+from snapper.application.portfolio.pnl_timeline_service import _preferred_fx_plane
 from snapper.application.portfolio.pnl_timeline_service import _qualified_sample_overlays
 from snapper.application.portfolio.pnl_timeline_service import _resolve_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _sample_coverage_flags
@@ -2305,6 +2309,101 @@ class TestCrossCurrencyPrices:
         assert point.unrealized_pnl is None
         assert point.net_pnl is None
 
+    async def test_gap_minutes_resolve_by_bounded_carry_from_an_older_mark(self) -> None:
+        """A plane with no exact mark is pinned and carried through the real path.
+
+        Given: A held walutomat symbol whose only EUR-PLN mark closed 15 and 16
+            minutes before the two required conversion minutes,
+        When: The wallet series runs under an active shadow context,
+        Then: The evidence read widens past the old exact-minute window, the
+            identity plane is pinned on carry coverage alone, and the election
+            resolves as carried rather than refused.
+
+        This walks the REAL producer chain — discovery, bounded row load, plane
+        resolution, shadow collection — against a repository double that honors
+        its query bounds, so the mark can only arrive if the loader genuinely
+        asked for the widened window. The 16-minute distance also exceeds the
+        original 15-minute bound, so this locks the raised ceiling in place.
+        """
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                )
+            ],
+            refs=[_ref(_I1, "EUR-PLN", "PLN", exchange="walutomat")],
+            candles=[_candle(_m(-1), 4.0), _candle(_m(0), 5.0)],
+            fx_rows=[_fx_row("EUR", "PLN", -15, 3.9, exchange="walutomat")],
+        )
+        shadow_context = FxShadowPinContext(calculation_version="5B.2", evaluations=[])
+        with activate_fx_shadow_context(shadow_context):
+            result = await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _m(1),
+                "1m",
+                _m(2),
+                valuation_ccy="EUR",
+            )
+        assert min(start for start, _ in repo.fx_range_calls) <= _m(-16)
+        owned = [
+            evaluation
+            for evaluation in shadow_context.evaluations
+            if evaluation.scope_kind == "instrument_owned"
+        ]
+        assert len(owned) == 1
+        evaluation = owned[0]
+        assert evaluation.selected_plane == ("EUR", "PLN", "walutomat")
+        assert fx_shadow_evaluation_completeness(evaluation) == "carried"
+        carried_row = evaluation.rows[0]
+        assert carried_minutes_for(_m(0), carried_row) == 15
+        assert carried_minutes_for(_m(1), carried_row) == 16
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+
+    def test_carry_only_election_prefers_the_freshest_mark_over_the_name(self) -> None:
+        """Among planes that can only carry, the nearest mark wins, not the alphabet.
+
+        Given: Two venues reaching one gap minute, the alphabetically earlier
+            one from eighteen minutes back and the later one from two,
+        When: The plane is elected with no exact coverage anywhere,
+        Then: The nearer mark's venue wins, and an exact mark still outranks both
+
+        Coverage is computed by the production builder rather than hand-written,
+        so this exercises the real distance accounting; only the election is
+        called directly, because reaching a two-venue shared pair through the
+        whole series would say more about fixture shape than about the rule.
+        """
+        pair = currency_pair_key("EUR", "PLN")
+        minutes = {_m(0)}
+        stale = _fx_row("EUR", "PLN", -18, 4.0, exchange="alpha")
+        fresh = _fx_row("EUR", "PLN", -2, 4.5, exchange="zeta")
+        planes = {("EUR", "PLN", "alpha"), ("EUR", "PLN", "zeta")}
+
+        carried_only = _covered_fx_minutes({pair: minutes}, [stale, fresh])
+        assert _preferred_fx_plane(pair, minutes, planes, carried_only, "PLN") == (
+            "EUR",
+            "PLN",
+            "zeta",
+        )
+
+        exact = _fx_row("EUR", "PLN", 0, 4.2, exchange="alpha")
+        with_exact = _covered_fx_minutes({pair: minutes}, [stale, fresh, exact])
+        assert _preferred_fx_plane(pair, minutes, planes, with_exact, "PLN") == (
+            "EUR",
+            "PLN",
+            "alpha",
+        )
+
     async def test_pinned_fill_venue_does_not_switch_to_rival_for_mark(self) -> None:
         """A missing canonical-venue mark rate withholds instead of venue-hopping."""
         repo = FakeRepo(
@@ -3680,7 +3779,12 @@ class TestCrossCurrencyPrices:
         ]
 
     async def test_pre_window_fill_and_marks_use_separate_fx_ranges(self) -> None:
-        """An old basis rate does not widen the current mark-rate candle read."""
+        """An old basis rate does not widen the current mark-rate candle read.
+
+        Both reads carry the fixed ``_FX_CARRY_WINDOW`` look-back for bounded
+        carry-forward, but they stay separate: the ten-hour-old fill widens its
+        own event read only, never the chart-window mark read.
+        """
         repo = FakeRepo(
             executions=[_exec_row(_I1, 1, -600, "buy", 1.0, 10.0, 0.0, "PLN")],
             refs=[_ref(_I1, "XRP-EUR", "EUR")],
@@ -3703,8 +3807,8 @@ class TestCrossCurrencyPrices:
         assert result.points[0].valuation_status == "complete"
         assert result.points[0].unrealized_pnl == 10.0
         assert repo.fx_range_calls == [
-            (_m(-1), _T0),
-            (_m(-601), _m(-600)),
+            (_m(-21), _T0),
+            (_m(-621), _m(-600)),
         ]
 
 

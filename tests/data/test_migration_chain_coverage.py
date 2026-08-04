@@ -826,3 +826,20 @@ def test_carried_identity_downgrade_refuses_to_strand_active_elections() -> None
 
     with patch.object(module, "op", operations), pytest.raises(RuntimeError, match="4 active"):
         migration.downgrade()
+
+
+def test_carry_bound_downgrade_refuses_to_strand_wider_carries() -> None:
+    """Tightening the carried-minutes ceiling must not orphan wider proofs.
+
+    Given: A database holding proofs carried further than the historical bound
+    When: Revision 0048 is reversed
+    Then: It refuses, naming how much evidence a replay would lose
+    """
+    module = importlib.import_module(
+        "snapper.data.migrations.versions.0048_fx_conversion_carry_bound_20"
+    )
+    migration = cast(_ReversibleMigration, module)
+    operations = _CarriedCountOperations(2)
+
+    with patch.object(module, "op", operations), pytest.raises(RuntimeError, match="2 proof"):
+        migration.downgrade()
