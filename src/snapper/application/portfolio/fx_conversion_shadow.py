@@ -392,8 +392,22 @@ def carried_minutes_for(conversion_minute: datetime, row: PnlFxRateRow) -> int:
 
 
 def _reason(state: FxConversionCompleteness, missing: Sequence[datetime]) -> str | None:
-    """Build a canonical stable reason without attempt-specific fields."""
-    if state == "complete":
+    """Build a canonical stable reason without attempt-specific fields.
+
+    ``carried`` is a RESOLVED outcome, not a partial one: every required minute
+    has evidence, some of it carried from an earlier mark on the same plane. It
+    therefore carries no refusal reason, and the repository rejects one outright
+    — a reason here would claim minutes are unproven while the proofs prove
+    them.
+
+    Args:
+        state: Classified completeness of the election.
+        missing: Required minutes left without evidence.
+
+    Returns:
+        The canonical refusal reason, or null for a resolved election.
+    """
+    if state in ("complete", "carried"):
         return None
     return canonical_fx_refusal_reason(
         {

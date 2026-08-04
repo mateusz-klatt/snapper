@@ -494,9 +494,10 @@ def test_carry_resolves_a_gap_within_the_bound() -> None:
 
     assert fx_shadow_evaluation_completeness(evaluation) == "carried"
 
-    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+    election, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
     assert len(proofs) == 1
     assert proofs[0]["carried_minutes"] == 5
+    assert election["refusal_reason_json"] is None
     assert proofs[0]["conversion_minute"] == _MINUTE + timedelta(minutes=5)
     assert proofs[0]["candle_open_minute"] == _MINUTE - timedelta(minutes=1)
 
@@ -553,12 +554,14 @@ def test_carry_uses_the_newest_duplicate_from_only_the_selected_plane() -> None:
     foreign = _row(previous, exchange="walutomat")
     newest = cast(PnlFxRateRow, {**_row(previous), "candle_id": 99})
     older = cast(PnlFxRateRow, {**_row(previous), "candle_id": 1})
-    evaluation = _evaluation(frozenset({gap}), rows=(foreign, newest, older))
 
-    _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+    for ordering in ((foreign, newest, older), (foreign, older, newest)):
+        evaluation = _evaluation(frozenset({gap}), rows=ordering)
 
-    assert len(proofs) == 1
-    assert proofs[0]["candle_id"] == 99
+        _, proofs = _build_artifact(evaluation, _AS_OF, "5A.13")
+
+        assert len(proofs) == 1
+        assert proofs[0]["candle_id"] == 99
 
 
 def test_carry_refuses_a_source_minute_whose_duplicates_disagree() -> None:
