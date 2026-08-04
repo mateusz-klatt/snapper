@@ -20,12 +20,17 @@ from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionStatus
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.implementations.kraken_futures import (
+    KrakenFuturesExchangeClient,
+)
 from snapper.messaging.publishers import base as base_module
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
 from snapper.messaging.publishers.kraken_futures import KrakenFuturesMarketDataPublisher
 from snapper.messaging.publishers.minute_completion import EMITTED
+from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
 from snapper.messaging.publishers.minute_completion import SKIP_ALREADY_EMITTED
 from snapper.messaging.publishers.minute_completion import SKIP_FEED_BREAK
 from snapper.messaging.publishers.minute_completion import SKIP_NOT_OBSERVED
@@ -692,6 +697,152 @@ class TestSweepCounters:
         assert counters["last_swept_minute"] == _begin(_BASE).isoformat()
 
 
+class TestPublisherRosterHooks:
+    """The hooks that bind the roster gate to the live subscription tracker.
+
+    The rest of this module exercises ``confirmed_trade_symbols`` directly and
+    injects a roster double into the emitter, so without these tests the wiring
+    from publisher to tracker — the link the whole liveness argument rests on —
+    is never executed. They also cover the base-class defaults, which the
+    venue subclasses override but which any future publisher inherits.
+    """
+
+    def test_base_publisher_names_nobody(self) -> None:
+        """A publisher with no tracker must arm no symbol at all.
+
+        Given the base implementation,
+        When the roster is read,
+        Then it is empty — a publisher that cannot observe per-symbol
+            subscription health has no grounds to assert silence for any
+            symbol, so the safe default is to name nobody rather than to
+            fall back to the symbol mapper.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        assert publisher._confirmed_trade_roster() == set()
+
+    def test_base_settle_is_the_bare_scheduling_margin(self) -> None:
+        """Futures inherits this value, and it is the first venue to be enabled.
+
+        Given the base implementation,
+        When the settle slack is read,
+        Then it is the bare margin — correct for a venue that finalizes a
+            minute the instant it ends, which futures does: its aggregator
+            pops completed buckets against an un-graced wall clock.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        assert publisher._minute_sweep_settle_seconds() == MINUTE_SWEEP_MARGIN_S
+
+    def test_spot_settle_adds_the_venues_own_finalize_grace(self) -> None:
+        """Spot pops buckets a grace period late, so the sweep must wait longer.
+
+        Given a Spot publisher whose finalize grace is 12 seconds,
+        When the settle slack is read,
+        Then it is that grace plus the scheduling margin — sweeping earlier
+            would race a real bar for the same minute.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher.settings = cast(
+            AppSettings, _CompletionSettings(candle_source="trade_built", finalize_grace=12)
+        )
+        assert publisher._minute_sweep_settle_seconds() == 12.0 + MINUTE_SWEEP_MARGIN_S
+
+    def test_spot_roster_is_empty_before_the_client_exists(self) -> None:
+        """Startup ordering must not raise, and must not arm anything.
+
+        Given a Spot publisher whose exchange client is not yet built,
+        When the roster is read,
+        Then it is empty rather than an error.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher._exchange_client = None
+        assert publisher._confirmed_trade_roster() == set()
+
+    def test_spot_roster_reads_the_live_tracker(self) -> None:
+        """The binding under test: publisher hook to tracker to native symbols.
+
+        Given a Spot client whose tracker holds a confirmed ticker entry and
+            an unmappable trade entry,
+        When the roster is read,
+        Then nothing is armed — the ticker entry because ticker confirmation
+            must never arm a symbol, the trade entry because an unmappable
+            wire symbol is skipped rather than raised.
+
+        Deliberately asserts a refusal rather than a mapping: the venue hook
+        resolves through the DB-backed symbol mapper, so a positive case would
+        pin this test to whichever aliases the fixture seeds. What needs
+        covering here is the binding itself — the hook reaching a live tracker
+        and projecting it — which this exercises end to end.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher._exchange_client = cast(
+            KrakenExchangeClient,
+            _TrackerStub(
+                {
+                    ("ticker", "XBT/USD"): _health_entry(channel="ticker"),
+                    ("trade", "UNKNOWN/PAIR"): _health_entry(symbol="UNKNOWN/PAIR"),
+                }
+            ),
+        )
+        assert publisher._confirmed_trade_roster() == set()
+
+    def test_futures_roster_is_empty_before_the_client_exists(self) -> None:
+        """Startup ordering must not raise on the first venue to be enabled.
+
+        Given a Futures publisher whose exchange client is not yet built,
+        When the roster is read,
+        Then it is empty rather than an error.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=[])
+        publisher._exchange_client = None
+        assert publisher._confirmed_trade_roster() == set()
+
+    def test_futures_roster_reads_the_live_tracker(self) -> None:
+        """Futures binds to its own tracker with its own symbol mapping.
+
+        Given a Futures client whose tracker holds a ticker entry and an
+            unmappable trade entry,
+        When the roster is read,
+        Then nothing is armed.
+
+        Scoped the same way as the Spot case above and for the same reason:
+        the venue mappers resolve through the DB-backed symbol mapper, so a
+        positive assertion here would pin the test to whichever aliases the
+        fixture happens to seed. The projection itself is proved symbol by
+        symbol in ``TestConfirmedTradeRoster``.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=[])
+        publisher._exchange_client = cast(
+            KrakenFuturesExchangeClient,
+            _TrackerStub(
+                {
+                    ("ticker", "PF_XBTUSD"): _health_entry(channel="ticker", symbol="PF_XBTUSD"),
+                    ("trade", "UNKNOWN_PAIR"): _health_entry(symbol="UNKNOWN_PAIR"),
+                }
+            ),
+        )
+        assert publisher._confirmed_trade_roster() == set()
+
+
+class _TrackerStub:
+    """Minimal exchange-client stand-in exposing only the health snapshot."""
+
+    def __init__(self, snapshot: dict[tuple[str, str], _SymbolEntry]) -> None:
+        """Store the snapshot the publisher hook will read.
+
+        Args:
+            snapshot: Tracker rows keyed by ``(channel, wire symbol)``.
+        """
+        self._snapshot = snapshot
+
+    def subscription_health_snapshot(self) -> dict[tuple[str, str], _SymbolEntry]:
+        """Return the stored snapshot.
+
+        Returns:
+            Tracker rows keyed by ``(channel, wire symbol)``.
+        """
+        return self._snapshot
+
+
 def _health_entry(
     *,
     channel: str = "trade",
@@ -941,6 +1092,40 @@ class TestHigherTimeframeRollup:
         assert bars[0].open == 200.0
         assert bars[0].low == 200.0
         assert bars[0].high == 260.0
+
+    def test_fully_tradeless_window_prices_its_vwap_at_the_carried_close(self) -> None:
+        """The dominant case once completion is on, and the one that was missed.
+
+        Given a 5m window of five flat minutes at a carried close of 200.0,
+        When the window closes,
+        Then it is flat at 200.0 with volume 0.0, trades 0 and vwap 200.0 —
+            never 0.0.
+
+        This is not an edge case. With most instruments trading only a few
+        minutes an hour, most higher-TF windows for most instruments are
+        fully tradeless, so this path carries the majority of the rolled-up
+        corpus once completion is enabled. It also reaches the durable plane
+        offline, because the synthesized-candle backfill folds persisted 1m
+        rows through this same aggregator.
+
+        Before the volume-guard fallback carried the close, this window
+        projected ``vwap=0.0`` while its OHLC named a real level. The existing
+        rollup test above could not catch it: every window it builds contains
+        at least one real bar, so ``volume > 0`` and the guard never fires.
+        """
+        window = _BASE
+        aggregator = self._aggregator(window)
+        for offset in range(0, 300, 60):
+            aggregator.fold(build_flat_minute_bar(_SYMBOL, _begin(window + offset), 200.0))
+        bars = self._close_window(aggregator, window)
+        assert len(bars) == 1
+        assert bars[0].volume == 0.0
+        assert bars[0].trades == 0
+        assert bars[0].vwap == 200.0
+        assert bars[0].open == 200.0
+        assert bars[0].high == 200.0
+        assert bars[0].low == 200.0
+        assert bars[0].close == 200.0
 
 
 class TestVenueOptIn:
