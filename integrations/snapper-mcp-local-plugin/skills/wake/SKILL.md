@@ -27,14 +27,24 @@ order:
    - description: `Snapper consult (ai_review.request) JSONL stream`
    - persistent: true
 
-   `CLAUDE_PLUGIN_DATA` is set PER PLUGIN, and in an agent shell it resolves to
-   whichever plugin exported it last — observed pointing at an unrelated
-   plugin's directory. The host expands it correctly when IT arms the monitor,
-   but on this self-arm path you must check: run
-   `test -f "$CLAUDE_PLUGIN_DATA/env.json"` first, and if it is missing, use
-   this plugin's own seeded `env.json` under the Claude plugin data directory
-   (the `snapper-mcp-local-*` one) by absolute path instead. Never print the
-   file — it holds a credential.
+   **Do not use `$CLAUDE_PLUGIN_DATA` on this path.** It is set PER PLUGIN and
+   in an agent shell resolves to whichever plugin exported it last — observed
+   pointing at the copilot plugin's directory. Checking `test -f
+   "$CLAUDE_PLUGIN_DATA/env.json"` does NOT save you: that directory holds its
+   own `env.json` with the same `SNAPPER_BASE_URL` / `SNAPPER_ACCESS_TOKEN`
+   keys but a different backend, so the check passes and the monitor silently
+   connects somewhere else entirely.
+
+   Resolve the directory by NAME instead, and confirm it is this plugin's:
+
+   ```
+   ls -d ~/.claude/plugins/data/snapper-mcp-local-*/
+   ```
+
+   Pass that absolute path in `--config`. Never print the file — it holds a
+   credential. (When the HOST arms the monitor, `${CLAUDE_PLUGIN_DATA}` in the
+   manifest is expanded per plugin and is correct; this warning is only for the
+   self-arm fallback, which runs in a shell.)
 
    Do not add `--topic`: it replaces the defaults, and dropping `ai_reviews.`
    silently stops every consult.
