@@ -841,6 +841,49 @@ async def test_poisoned_prefix_is_isolated_in_report_and_apply(
     await repository.engine.dispose()
 
 
+def test_posix_apply_lock_uses_guarded_native_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The POSIX branch takes an exclusive nonblocking flock and releases it.
+
+    Given a POSIX platform marker and a native lock API probe
+    When the apply lock helpers acquire and release the file
+    Then only the guarded POSIX operations execute in order
+
+    This mirrors the Windows case deliberately. ``sys.platform`` decides which
+    branch runs, so on Windows the POSIX body is unreachable through real calls
+    and on POSIX the Windows body is; faking only one side leaves the other
+    uncovered on that platform, and ``fail_under`` is enforced per platform.
+    """
+    calls: list[int] = []
+    posix_api = ModuleType("fcntl")
+    posix_api.LOCK_EX = 1
+    posix_api.LOCK_NB = 4
+    posix_api.LOCK_UN = 8
+
+    def flock(descriptor: int, operation: int) -> None:
+        """Record the selected POSIX lock operation."""
+        calls.append(operation)
+
+    posix_api.flock = flock
+
+    def load_module(name: str) -> ModuleType:
+        """Return the guarded POSIX API for the deferred import."""
+        return posix_api
+
+    monkeypatch.setattr("snapper.application.portfolio.fx_proof_backfill.sys.platform", "linux")
+    monkeypatch.setattr(
+        "snapper.application.portfolio.fx_proof_backfill.importlib.import_module",
+        load_module,
+    )
+    lock_path = tmp_path / "native.lock"
+    with lock_path.open("a+b") as stream:
+        stream.write(b"\0")
+        _acquire_apply_lock(stream)
+        _release_apply_lock(stream)
+    assert calls == [5, 8]
+
+
 def test_windows_apply_lock_uses_guarded_native_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
