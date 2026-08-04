@@ -1071,6 +1071,7 @@ class _EquityOverlayRequest:
     mode: str
     valuation_ccy: str
     epoch_public_id: str
+    activation_t0: datetime
     from_time: datetime
     to_time: datetime
     current_truth: bool
@@ -4447,6 +4448,15 @@ def _convert_equity_overlay(
 
     Returns:
         The converted overlay result with its conversion disclosure.
+
+    A restatement with no elected plane degrades to the unsampled disclosure even
+    when some minute produced a value. ``convert_amount`` short-circuits an exact
+    zero to ``0.0`` without consulting a rate, so a drained wallet converts every
+    zero-equity minute on a pair that was never priced; serving that would emit a
+    sampled coverage naming no plane, which the transport contract refuses ("a
+    served converted coverage must name the plane it priced with") and which would
+    surface as a 500 rather than an honest gap. Those zero minutes count as
+    withheld because a short-circuit is not a proven price.
     """
     converted: dict[datetime, PnlPointEquityOverlay] = {}
     withheld = 0
@@ -4456,17 +4466,17 @@ def _convert_equity_overlay(
             withheld += 1
             continue
         converted[minute] = restated
-    if not converted:
+    plane = venues.get(currency_pair_key(valuation_ccy, "USD"))
+    if not converted or plane is None:
         return _EquityOverlayResult(
             overlay=_EMPTY_EQUITY_OVERLAY_MAP,
             coverage=replace(
                 _UNSAMPLED_EQUITY_COVERAGE,
                 valuation_basis=valuation_ccy,
                 converted_from="USD",
-                conversion_withheld_minutes=withheld,
+                conversion_withheld_minutes=withheld + len(converted),
             ),
         )
-    plane = venues.get(currency_pair_key(valuation_ccy, "USD"))
     coverage = replace(
         result.coverage,
         complete_minutes=len(converted),
@@ -4490,14 +4500,31 @@ async def _resolve_equity_overlay(
     Only a current-truth scope is eligible; a historical read withholds the
     overlay without a read. The single ``get_portfolio_pnl_samples`` call applies
     the exact R4 predicate set (active, ``point_kind='sample'``, exact scope, the
-    current anchor epoch, the exact sample ``calc_version``, ``complete`` status)
+    USD anchor's epoch, the exact sample ``calc_version``, ``complete`` status)
     over the requested grid window, so there is one bounded sample read per request.
 
     Samples exist in USD alone, so the query is always USD-scoped and a non-USD
     request is served by converting the folded overlay at each minute's proven
-    close. A currency with no provable plane therefore yields the honest
+    close. The epoch must be the USD anchor's for exactly the same reason: the
+    predicate set pairs ``valuation_ccy`` with ``epoch_public_id``, so scoping USD
+    rows by the requested currency's own anchor epoch matches no stored sample at
+    all and strands every non-USD basis permanently unsampled. That epoch is
+    derived from the scope rather than read, because an anchor's epoch IS the
+    ``uuid5`` identity of its ``wallet|mode|ccy`` scope; a USD request therefore
+    derives precisely the epoch it already carries, and when no USD anchor exists
+    the derived id simply matches nothing, so the read stays fail-closed rather
+    than raising. A currency with no provable plane therefore yields the honest
     unsampled disclosure with its withheld-minute count rather than an error or
     a silently empty overlay.
+
+    Decoupling the epoch from the requested currency also decouples it from that
+    currency's activation, so the read's lower bound is clamped to the REQUESTING
+    scope's ``t0``. A currency anchored later than USD would otherwise be served
+    USD samples reaching back before it was ever activated, and
+    ``_point_equity_overlays`` attaches an overlay on minute membership alone —
+    the module states the opposite invariant, that "a pre-``t0`` grid point must
+    never be valued from the seeded book". The values would be true wallet
+    stocks, but the coverage span would claim minutes the scope cannot prove.
     """
     if not request.current_truth:
         return _UNSAMPLED_EQUITY_OVERLAY_RESULT
@@ -4505,12 +4532,16 @@ async def _resolve_equity_overlay(
         wallet_public_id=request.wallet_public_id,
         mode=request.mode,
         valuation_ccy=_USD_VALUATION_BASIS,
-        epoch_public_id=request.epoch_public_id,
+        epoch_public_id=portfolio_pnl_anchor_public_id(
+            request.wallet_public_id,
+            request.mode,
+            _USD_VALUATION_BASIS,
+        ),
         calc_version=PNL_SAMPLE_CALC_VERSION,
     )
     samples = await repo.get_portfolio_pnl_samples(
         query,
-        request.from_time,
+        max(request.from_time, request.activation_t0),
         request.to_time,
         status="complete",
     )
@@ -4836,6 +4867,7 @@ async def build_wallet_pnl_series(
                 mode=mode,
                 valuation_ccy=valuation_ccy,
                 epoch_public_id=anchor.row["epoch_public_id"],
+                activation_t0=anchor.opening.t0,
                 from_time=from_time,
                 to_time=to_time,
                 current_truth=policy.current_truth,

@@ -11,6 +11,7 @@ from collections import Counter
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -6650,12 +6651,19 @@ def _overlay_request(
     epoch_public_id: str = "",
     to_time: datetime | None = None,
 ) -> _EquityOverlayRequest:
-    """Build one equity-overlay request over the ``[_T0, _m(2)]`` grid window."""
+    """Build one equity-overlay request over the ``[_T0, _m(2)]`` grid window.
+
+    ``activation_t0`` is pinned to the window start so the sample read is never
+    clamped away. A test proving the pre-activation guard restates it with
+    ``dataclasses.replace`` rather than widening this signature past the
+    five-parameter limit.
+    """
     return _EquityOverlayRequest(
         wallet_public_id=_W1,
         mode="live",
         valuation_ccy=valuation_ccy,
         epoch_public_id=epoch_public_id or _default_epoch(),
+        activation_t0=_T0,
         from_time=_T0,
         to_time=to_time or _m(2),
         current_truth=current_truth,
@@ -6939,6 +6947,58 @@ class TestConvertEquityOverlay:
         assert result.coverage.complete_minutes == 1
         assert result.coverage.conversion_withheld_minutes == 1
 
+    async def test_a_drained_wallet_without_a_plane_degrades_to_unsampled(self) -> None:
+        """Never serve a converted coverage that names no plane.
+
+        Given a zero-equity minute and no elected plane for the target pair
+        When the overlay is requested in EUR
+        Then it degrades to the unsampled disclosure counting that minute withheld.
+
+        A zero amount short-circuits inside ``convert_amount`` and restates to
+        ``0.0`` without ever consulting a rate, so a drained wallet yields a
+        non-empty converted map on a pair that was never priced. Serving it would
+        emit a sampled coverage with no rate source, which the transport contract
+        refuses outright and which would surface as a 500 instead of a gap.
+        """
+        repo = FakeRepo()
+        repo.load_samples([_sample_row(_m(1), cash_usd=0.0, position_value_usd=0.0)])
+        result = await _resolve_equity_overlay(
+            repo, _overlay_request([_grid_point(_m(1))], valuation_ccy="EUR")
+        )
+        assert dict(result.overlay) == {}
+        assert result.coverage.sampled is False
+        assert result.coverage.conversion_rate_source is None
+        assert result.coverage.converted_from == "USD"
+        assert result.coverage.conversion_withheld_minutes == 1
+
+    async def test_the_read_never_reaches_before_the_requesting_scope_activation(
+        self,
+    ) -> None:
+        """Clamp the sample read to the requesting scope's own activation.
+
+        Given a scope activated later than the requested window start
+        When the overlay resolves
+        Then the bounded read starts at that activation, not at the window start.
+
+        The epoch is the USD anchor's, so it no longer bounds the read to the
+        requested currency's activation. Without this clamp a currency anchored
+        after USD would be valued over minutes its own anchor proves nothing about.
+        """
+        repo = self._eur_repo([2])
+        repo.load_samples([_sample_row(_m(2))])
+        result = await _resolve_equity_overlay(
+            repo,
+            replace(
+                _overlay_request(
+                    [_grid_point(_m(1)), _grid_point(_m(2))],
+                    valuation_ccy="EUR",
+                ),
+                activation_t0=_m(2),
+            ),
+        )
+        assert repo.sample_calls[0][1] == _m(2)
+        assert set(result.overlay) == {_m(2)}
+
     async def test_usd_request_is_never_converted(self) -> None:
         """Serve a USD request natively.
 
@@ -7106,6 +7166,67 @@ class TestResolveEquityOverlay:
         assert query.calc_version == PNL_SAMPLE_CALC_VERSION
         assert (window_start, window_end, status) == (_T0, _m(2), "complete")
 
+    async def test_non_usd_request_reads_the_usd_anchor_epoch_not_its_own(self) -> None:
+        """Scope the sample read by the USD anchor's epoch, never the request's.
+
+        Given a PLN request carrying the PLN anchor's epoch while every stored
+        sample carries the USD anchor's epoch, exactly as production persists them
+        When the overlay resolves
+        Then the read names the USD epoch and the PLN overlay is served, because
+        the R4 predicate set pairs ``valuation_ccy`` with ``epoch_public_id``, so
+        asking for USD rows under the PLN epoch matches nothing and would strand
+        the whole non-USD equity series unsampled forever.
+        """
+        usd_epoch = portfolio_pnl_anchor_public_id(_W1, "live", "USD")
+        pln_epoch = portfolio_pnl_anchor_public_id(_W1, "live", "PLN")
+        assert usd_epoch != pln_epoch
+        sample = _sample_row(_m(1))
+        assert sample["epoch_public_id"] == usd_epoch
+        repo = FakeRepo(fx_rows=[_fx_row("PLN", "USD", 1, 0.25)])
+        repo.load_samples([sample])
+        result = await _resolve_equity_overlay(
+            repo,
+            _overlay_request(
+                [_grid_point(_m(1))],
+                valuation_ccy="PLN",
+                epoch_public_id=pln_epoch,
+            ),
+        )
+        assert repo.sample_calls[0][0].epoch_public_id == usd_epoch
+        assert result.coverage.sampled is True
+        assert result.coverage.complete_minutes == 1
+        assert result.coverage.valuation_basis == "PLN"
+        assert result.coverage.converted_from == "USD"
+        assert result.coverage.conversion_rate_source == "PLN/USD@kraken"
+        overlay = result.overlay[_m(1)]
+        assert overlay.equity == pytest.approx(1000.0 / 0.25)
+        assert overlay.cash == pytest.approx(400.0 / 0.25)
+        assert overlay.position_value == pytest.approx(600.0 / 0.25)
+
+    async def test_usd_request_derives_the_very_epoch_it_carries(self) -> None:
+        """Derive, for a USD request, exactly the epoch that request already passes.
+
+        Given a USD request carrying the USD anchor's epoch, as production does
+        When the overlay resolves
+        Then the read names that same epoch and the native USD overlay — both
+        stocks and the drawdown — is served exactly as before, so deriving the
+        epoch changes the non-USD read alone.
+        """
+        usd_epoch = portfolio_pnl_anchor_public_id(_W1, "live", "USD")
+        repo = FakeRepo()
+        repo.load_samples([_sample_row(_m(1))])
+        request = _overlay_request([_grid_point(_m(1))], epoch_public_id=usd_epoch)
+        assert request.epoch_public_id == usd_epoch
+        result = await _resolve_equity_overlay(repo, request)
+        assert repo.sample_calls[0][0].epoch_public_id == usd_epoch
+        overlay = result.overlay[_m(1)]
+        assert (overlay.equity, overlay.cash, overlay.position_value) == (1000.0, 400.0, 600.0)
+        assert overlay.drawdown == 0.1
+        assert result.coverage.sampled is True
+        assert result.coverage.valuation_basis == "USD"
+        assert result.coverage.converted_from is None
+        assert result.coverage.drawdown_withheld_reason is None
+
 
 class TestBuildWalletSeriesEquityOverlay:
     """Cover the overlay end-to-end through the public series builder (R4/D13)."""
@@ -7151,6 +7272,46 @@ class TestBuildWalletSeriesEquityOverlay:
         assert result.equity_overlay_at(_m(1)).cash == 400.0
         assert result.equity_overlay_at(_m(2)).position_value == 300.0
         assert len(repo.sample_calls) == 1
+
+    async def test_current_non_usd_series_still_overlays_its_sampled_minute(self) -> None:
+        """Overlay a non-USD series too, never USD alone.
+
+        Given a current-truth PLN scope whose anchor epoch is the PLN one, while
+        every persisted sample is USD and carries the USD anchor's epoch
+        When the series is built
+        Then the sampled minute is served restated at its proven close, rather
+        than the equity series and its cash/position split silently vanishing on
+        every non-USD basis while USD keeps them. The drawdown stays withheld on
+        a converted basis, which is the intended disclosure, not a loss.
+        """
+        repo = FakeRepo(fx_rows=[_fx_row("PLN", "USD", 1, 0.25)])
+        repo.load_samples([_sample_row(_m(1))])
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _T0,
+            valuation_ccy="PLN",
+            policy=PnlSeriesReadPolicy(current_truth=True),
+        )
+        assert repo.anchor_calls[0][2] == "PLN"
+        assert repo.sample_calls[0][0].epoch_public_id == portfolio_pnl_anchor_public_id(
+            _W1,
+            "live",
+            "USD",
+        )
+        assert result.equity_coverage.sampled is True
+        assert result.equity_coverage.complete_minutes == 1
+        assert result.equity_coverage.valuation_basis == "PLN"
+        assert result.equity_coverage.converted_from == "USD"
+        assert result.equity_coverage.drawdown_withheld_reason == "currency_basis_unsupported"
+        overlay = result.equity_overlay_at(_m(1))
+        assert overlay.equity == pytest.approx(4000.0)
+        assert overlay.cash == pytest.approx(1600.0)
+        assert overlay.position_value == pytest.approx(2400.0)
 
     async def test_overlay_equity_uses_persisted_floats_bit_exact(self) -> None:
         """The served equity equals ``cash + position_value`` of the stored floats."""
