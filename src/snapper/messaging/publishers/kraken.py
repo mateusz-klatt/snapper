@@ -59,9 +59,12 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
+from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
+from snapper.messaging.publishers.minute_completion import confirmed_trade_symbols
 
 apply_kraken_retry_after_honoring()
 apply_kraken_already_subscribed_filter()
@@ -266,6 +269,52 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         return True
 
+    def _supports_minute_completion(self) -> bool:
+        """Spot may assert a tradeless minute only when its 1m source is trades.
+
+        Kraken spot is a continuous 24/7 crypto venue, so "no bar" can never
+        mean "no session" here — it means no fill. That makes a flat bar for an
+        observed tradeless minute a true statement, but only in ``trade_built``
+        mode: with the native ``ohlc:1m`` channel selected the venue owns the
+        1m plane and the sweep's settle arithmetic (built around the trade-built
+        finalize grace) does not describe when a bar can still arrive.
+
+        Returns:
+            ``True`` in trade-built mode, otherwise ``False``.
+        """
+        return self.settings.spot_candle_source == "trade_built"
+
+    def _minute_sweep_settle_seconds(self) -> float:
+        """Return the settle slack before a Spot minute may be swept.
+
+        The client's trade-built builder holds a bucket until
+        ``trade_built_finalize_grace_seconds`` past the minute close and pops it
+        on a 1 Hz loop, so a real bar for minute ``M`` lands around
+        ``M_end + grace + 1``. Sweeping before that would race a genuine bar.
+
+        Returns:
+            The live finalize grace plus the shared scheduling margin.
+        """
+        return float(self.settings.trade_built_finalize_grace_seconds) + MINUTE_SWEEP_MARGIN_S
+
+    def _confirmed_trade_roster(self) -> set[str]:
+        """Return Spot symbols whose ``trade`` subscription is confirmed now.
+
+        Read from the exchange client's subscription-health tracker rather than
+        from the symbol mapper: the mapper would name pairs this connection
+        never subscribed, and a flat bar for one of those would assert silence
+        on a channel nobody was listening to.
+
+        Returns:
+            Confirmed native Spot symbols; empty before the client exists.
+        """
+        client = self._exchange_client
+        if client is None:
+            return set()
+        return confirmed_trade_symbols(
+            client.subscription_health_snapshot(), kraken_websocket_to_native
+        )
+
     def _candle_liveness_threshold_s(self) -> int:
         """Enable the candle liveness guard for Spot's live 1m stream.
 
@@ -461,8 +510,16 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         storms do not double-fire. A forced restart already in flight is
         not re-scheduled, so a storm cannot spawn overlapping restart
         tasks that race on the same WebSocket client.
+
+        Every attempt — not only the ones that escalate to a restart — opens a
+        minute-completion feed break, because the SDK reconnects internally and
+        this hook is the only place the publisher learns of it. A minute
+        overlapping that window is never asserted and is never retro-filled once
+        the socket returns: the resulting hole in the 1m plane is the correct
+        record that we were not listening.
         """
         self._suspend_candle_synthesis_across_break()
+        self._mark_minute_feed_break()
         now = time.monotonic()
         self._reconnect_timestamps.append(now)
         cutoff = now - _RECONNECT_WINDOW_S
@@ -490,11 +547,15 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         the same source IP. The rebuild is skipped when the publisher is
         no longer running so a storm restart that overlaps :meth:`stop`
         cannot re-establish a WebSocket after shutdown has begun.
+
+        Opens a minute-completion feed break before the teardown so no minute
+        spanning the restart is asserted as observed.
         """
         async with self._restart_lock:
             client = self._exchange_client
             if client is None:
                 return
+            self._mark_minute_feed_break()
             try:
                 await client.disconnect_websocket()
             except Exception:

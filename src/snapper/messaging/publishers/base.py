@@ -23,6 +23,7 @@ from enum import Enum
 from functools import partial
 from time import monotonic
 from time import perf_counter_ns
+from time import time as wall_clock
 from typing import Any
 from typing import Final
 from typing import cast
@@ -82,6 +83,8 @@ from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_T
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
+from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
+from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitter
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
@@ -669,6 +672,18 @@ class _TradeDedupState(Enum):
 class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for publishing market data via ZMQ messaging."""
 
+    _minute_emitter: MinuteCompletionEmitter | None = None
+    """Live-evidence gate that completes the base 1m plane, or None.
+
+    Declared on the class rather than in ``__init__`` on purpose: the
+    complexity ratchet pins ``__init__`` at an exact statement count in both
+    directions, and every read of this attribute (the tick and trade hot paths
+    included) happens on publishers that will never own an emitter, for which
+    the class default is exactly the right answer. :meth:`_configure_candle_consumers`
+    assigns the instance attribute when the venue opts in AND the operator has
+    switched minute completion on.
+    """
+
     def __init__(self, symbols: list[str]) -> None:
         """Initialize the instance.
 
@@ -1068,6 +1083,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         higher_timeframes = [timeframe for timeframe in timeframes if timeframe != "1m"]
         supported_higher = [tf for tf in higher_timeframes if tf in SUPPORTED_SYNTHESIS_TIMEFRAMES]
         self._candle_aggregator = None
+        self._minute_emitter = self._create_minute_emitter()
         if supported_higher:
             return await self._configure_synthesized_candle_consumers(
                 symbols_to_subscribe, higher_timeframes, supported_higher, tasks
@@ -1119,7 +1135,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._candle_aggregator = CandleAggregator(
             supported_higher,
             forward_fill=forward_fill,
-            flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
+            flush_grace_seconds=self._candle_flush_grace_seconds(),
         )
         await self._seed_aggregator_from_db(
             symbols_to_subscribe, supported_higher, datetime.now(UTC)
@@ -1180,7 +1196,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self._persist_intermediate_candles = self.settings.persist_intermediate_candles
             self._native_finalizer = NativeCandleFinalizer(
                 persist_intermediate=self._persist_intermediate_candles,
-                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
+                flush_grace_seconds=self._candle_flush_grace_seconds(),
             )
             self._native_finalize_flush_task = asyncio.create_task(
                 self._native_finalize_flush_loop(self._get_data_exchange())
@@ -1791,6 +1807,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         self._last_recovery_at = monotonic()
         self._suspend_candle_synthesis_across_break()
+        self._mark_minute_feed_break()
         task = asyncio.create_task(
             self._run_recovery_under_lock(reason, require_candle_progress=require_candle_progress)
         )
@@ -2083,6 +2100,184 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             ``True`` if forward-fill may be enabled for this publisher.
         """
         return False
+
+    def _supports_minute_completion(self) -> bool:
+        """Whether a flat bar for a tradeless minute is TRUE on this venue.
+
+        A structural venue property, not an operator preference: it holds only
+        where the venue is continuously open AND this publisher's own 1m source
+        is trade-driven, so a minute with no bar genuinely means "no trades"
+        rather than "no session". Kraken spot (in ``trade_built`` mode) and
+        Kraken futures override it. Session-based venues must NOT — a flat bar
+        at 03:00 on a closed equities market is a falsehood, not a convenience —
+        and neither may a polling venue that already emits per poll, nor paper /
+        replay, whose bars are reconstructions rather than observations.
+
+        Returns:
+            ``True`` if flat minute bars are sound for this publisher's venue.
+        """
+        return False
+
+    def _minute_completion_enabled(self) -> bool:
+        """Read the live operator kill switch for minute completion.
+
+        Consulted on every sweep (not cached), so switching the setting OFF
+        stops flat bars at the next boundary with no restart and no effect on
+        real bars. Switching it ON mid-process starts the flat bars, but the
+        widened higher-TF flush grace is fixed at startup, so a full enable
+        wants a publisher restart.
+
+        Returns:
+            ``True`` when the operator has switched minute completion on.
+        """
+        return self.settings.candle_minute_completion
+
+    def _minute_completion_active(self) -> bool:
+        """Whether this publisher run both may and should complete its 1m plane.
+
+        Returns:
+            ``True`` when the venue supports flat minute bars and the operator
+            has switched them on.
+        """
+        return self._supports_minute_completion() and self._minute_completion_enabled()
+
+    def _minute_sweep_settle_seconds(self) -> float:
+        """Seconds after a minute ends before its flat bars may be swept.
+
+        Must exceed the venue's own bar-finalization latency, otherwise the
+        sweep races a real bar for the same minute and the two SCD2-supersede
+        each other. The base value is the bare scheduling margin, which suits a
+        venue that finalizes a minute the instant it ends; a venue with its own
+        grace adds it.
+
+        Returns:
+            Settle slack in seconds.
+        """
+        return MINUTE_SWEEP_MARGIN_S
+
+    def _confirmed_trade_roster(self) -> set[str]:
+        """Native symbols whose ``trade`` subscription is confirmed right now.
+
+        The roster must describe what the LIVE connection actually holds, not
+        what the symbol mapper currently knows: a symbol the connection never
+        subscribed must never receive a flat bar, however plausible its
+        existence. The base publisher tracks no per-symbol subscription health
+        and therefore names nobody.
+
+        Returns:
+            Confirmed native symbols; empty for publishers without a tracker.
+        """
+        return set()
+
+    def _candle_flush_grace_seconds(self) -> float:
+        """Wall-clock slack before a higher-TF window or held 1m bar is sealed.
+
+        With minute completion active the LAST minute of every higher-TF window
+        only lands at ``window_end + settle``, which is after the default 5 s
+        seal — the window would be published missing its final minute and the
+        arriving bar dropped as late. Widening the grace past the settle is what
+        keeps the rollup whole. It also corrects the same defect for REAL
+        trade-built bars, which already land past the default seal, so enabling
+        minute completion changes higher-TF timing (bars publish about a settle
+        later) and their content (the final minute is now included).
+
+        Returns:
+            Seconds subtracted from ``now`` by the aggregator flush and the
+            native-candle finalizer flush.
+        """
+        if not self._minute_completion_active():
+            return _CANDLE_FLUSH_GRACE_S
+        return self._minute_sweep_settle_seconds() + _CANDLE_FLUSH_GRACE_S
+
+    def _create_minute_emitter(self) -> MinuteCompletionEmitter | None:
+        """Build the minute-completion emitter when this run should complete 1m.
+
+        Returns:
+            A configured emitter, or ``None`` when the venue does not support
+            minute completion or the operator has it switched off.
+        """
+        if not self._minute_completion_active():
+            return None
+        return MinuteCompletionEmitter(
+            roster=self._confirmed_trade_roster,
+            enabled=self._minute_completion_enabled,
+            settle_seconds=self._minute_sweep_settle_seconds(),
+        )
+
+    def _mark_feed_message(self) -> None:
+        """Record an inbound venue frame for liveness and minute witnessing.
+
+        The monotonic watermark answers "how long since the last frame, now",
+        which is what the dark-feed watchdog needs. The emitter's witness
+        answers "was the socket delivering during minute M", which the watchdog
+        cannot: a scalar keeps no history. Both are fed from the same call so
+        they can never disagree about what arrived.
+
+        Returns:
+            None.
+        """
+        self._last_message_at = monotonic()
+        emitter = self._minute_emitter
+        if emitter is not None:
+            emitter.observe_feed_frame()
+
+    def _mark_minute_feed_break(self) -> None:
+        """Bar every minute overlapping a detected reconnect or recovery.
+
+        Returns:
+            None.
+        """
+        emitter = self._minute_emitter
+        if emitter is not None:
+            emitter.mark_feed_break()
+
+    def _note_real_1m_bar(self, candle: CandleUpdate, timeframe: str) -> None:
+        """Record a real 1m frame as this symbol's newest observed minute.
+
+        Args:
+            candle: The real candle frame just taken off the stream.
+            timeframe: Timeframe of the stream that produced it.
+
+        Returns:
+            None.
+        """
+        emitter = self._minute_emitter
+        if emitter is None or timeframe != "1m":
+            return
+        emitter.observe_feed_frame()
+        emitter.observe_real_bar(candle)
+
+    async def _sweep_completed_minute(self, exchange: MarketDataExchange, timeframe: str) -> None:
+        """Publish and persist the flat bars owed for the minute that just settled.
+
+        Runs inside the candle loop's own task, so each flat bar is folded into
+        the higher-TF aggregator before the time-driven flush task can seal the
+        enclosing window — the same ordering guarantee the real fold path relies
+        on. Flat bars take the synthesized route (:meth:`_publish_synthesized_candle`)
+        rather than :meth:`_process_candle` deliberately: that route neither
+        refreshes ``_last_message_at`` nor stamps ``_last_data_timestamps``, so
+        a self-emitted bar can never forge feed liveness for the dark-feed
+        watchdog or hide a dark symbol from the heartbeat's lag figure.
+
+        Args:
+            exchange: Data exchange stamped on outbound/persisted rows.
+            timeframe: Native timeframe of the stream being consumed.
+
+        Returns:
+            None.
+        """
+        emitter = self._minute_emitter
+        if emitter is None or timeframe != "1m":
+            return
+        aggregator = self._candle_aggregator
+        for flat in emitter.due_flat_bars(wall_clock()):
+            synthesized: list[tuple[str, CandleUpdate]] = (
+                [] if aggregator is None else aggregator.fold(flat)
+            )
+            self._drain_aggregator_repair_signals()
+            await self._publish_synthesized_candle(flat, exchange, "1m")
+            for tf_label, synth in synthesized:
+                await self._publish_synthesized_candle(synth, exchange, tf_label)
 
     async def _ensure_instrument(self, native_symbol: str) -> str | None:
         """Resolve instrument_public_id for a native symbol, using cache.
@@ -2432,6 +2627,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
                 done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
                 if not done:
+                    await self._sweep_completed_minute(exchange, timeframe)
                     continue
                 next_fut = None
                 candle = done.pop().result()
@@ -2440,6 +2636,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 )
                 if not should_continue:
                     break
+                await self._sweep_completed_minute(exchange, timeframe)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -2471,6 +2668,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if candle is _STREAM_END:
             return False
         candle_update = cast(CandleUpdate, candle)
+        self._note_real_1m_bar(candle_update, timeframe)
         synthesized: list[tuple[str, CandleUpdate]] = []
         aggregator = self._candle_aggregator
         if aggregator is not None and timeframe == "1m":
@@ -2666,8 +2864,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         timeframes are synthesized. Every :data:`_CANDLE_FLUSH_INTERVAL_S` it asks
         the aggregator to seal any wall-clock-ended higher-TF window and
         forward-fill empty windows, then publishes each resulting bar exactly like
-        the live fold path (publish-only, no persist). One bad tick is logged and
-        never kills the loop, mirroring :meth:`_heartbeat_loop`.
+        the live fold path — which means published AND persisted:
+        :meth:`_publish_synthesized_candle` enqueues a ``source='synthesized'``
+        row under the same persist gate as the native path. One bad tick is
+        logged and never kills the loop, mirroring :meth:`_heartbeat_loop`.
+
+        With minute completion active this loop becomes a safety net rather than
+        the routine path: a dense 1m plane leaves no higher-TF window empty, so
+        the forward-fill branch only fires across an outage.
 
         Args:
             exchange: Exchange name for message provenance.
@@ -3248,6 +3452,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         volume is ~10-50× lower than ticks (one row per
         ``timeframe`` window per instrument), so the queue cap is
         ``_CANDLE_WRITE_QUEUE_MAX``.
+
+        That ratio no longer holds on a venue running minute completion. There
+        the 1m plane goes from sparse to one row per subscribed instrument per
+        minute, arriving as a single burst within a second or two of each
+        boundary — on Kraken spot roughly 1500 rows at once against a 20 000-row
+        cap. The cap absorbs it, but the exposure changes shape: a writer stall
+        now makes the drop-oldest eviction discard REAL bars faster.
         """
         state = _WriterBatchState[CandleUpsertRow]([])
         backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
@@ -3895,7 +4106,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             message: Raw ticker update from exchange client.
             exchange: Exchange name for message provenance.
         """
-        self._last_message_at = monotonic()
+        self._mark_feed_message()
         probe = get_probe()
         t_start = perf_counter_ns()
         native_symbol = message.symbol
@@ -4152,7 +4363,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trade: Raw trade update from exchange client.
             exchange: Exchange name for message provenance.
         """
-        self._last_message_at = monotonic()
+        self._mark_feed_message()
         trade_probe = get_trade_probe()
         t_start = perf_counter_ns()
         native_symbol = trade.symbol
@@ -4290,18 +4501,28 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     def _venue_feed_health(self) -> VenueFeedHealth:
         """Return venue-specific heartbeat facts contributed by this publisher.
 
-        The base publisher has no venue-specific health: its heartbeat carries
-        the standard symbol/liveness keys and escalates only on write-buffer
-        flush errors. A publisher whose exchange client refuses data for
-        venue-specific reasons (Walutomat's fail-closed mark refusals)
+        The base publisher has no venue-specific health of its own: its
+        heartbeat carries the standard symbol/liveness keys and escalates only
+        on write-buffer flush errors. A publisher whose exchange client refuses
+        data for venue-specific reasons (Walutomat's fail-closed mark refusals)
         overrides this to expose that state, so a refusal is legible on the
         status surface instead of only in a log line that has scrolled away.
+
+        The one fact the base DOES contribute is the minute-completion sweep
+        ledger, and only when an emitter exists. A hole in the 1m plane is
+        supposed to mean "we were not listening", and that reading is worthless
+        unless an operator can see WHICH gate refused and how often; the ledger
+        is that surface. Publishers without an emitter contribute nothing, so
+        their heartbeat is byte-identical to before this hook existed.
 
         Returns:
             The venue's extra ``meta`` keys and its degraded flag; empty and
             healthy when the publisher contributes nothing.
         """
-        return VenueFeedHealth(meta={}, degraded=False)
+        emitter = self._minute_emitter
+        if emitter is None:
+            return VenueFeedHealth(meta={}, degraded=False)
+        return VenueFeedHealth(meta={"minute_completion": emitter.counters()}, degraded=False)
 
     async def _heartbeat_tick(self, component_name: str) -> None:
         """Compute and publish one heartbeat with honest status.

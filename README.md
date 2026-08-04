@@ -44,7 +44,11 @@ or rotate after first login via
 - **Candle synthesis** — Multi-timeframe candle synthesis from the 1m base
     stream (in-process per-publisher rollups) with provenance tagging
     (`native` / `calculated` / `synthesized`), controlled by the `timeframes`,
-    `candle_forward_fill`, and `persist_intermediate_candles` settings
+    `candle_forward_fill`, and `persist_intermediate_candles` settings.
+    `candle_minute_completion` additionally completes the base 1m plane on
+    continuously-open trade-driven venues (Kraken spot in `trade_built` mode,
+    Kraken futures), emitting a flat zero-volume bar for every minute the
+    publisher observed the venue live and the instrument did not trade
 - **Egress routing** — Per-venue VPN egress routing via the WireGuard/SOCKS5
     `snapper-egress` sidecar. `feed_egress_enabled` gates feed-publisher
     pools; the API process initializes its own pool from `egress_pool`, so

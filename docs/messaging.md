@@ -1055,6 +1055,47 @@ Key properties:
     hook — SDK-internal reconnects never reach the liveness watchdog at all,
     because the socket returns on its own and messages resume with no stall ever
     detected.
+- **Minute completion on the base `1m` plane (opt-in, default off)** — with
+    `candle_minute_completion` enabled, a venue whose 1m source is trade-driven and
+    whose market never closes (Kraken spot in `trade_built` mode, Kraken futures)
+    also emits a flat bar for every minute it observed the venue live and in which
+    the instrument did not trade. The bar has the same shape as the forward-fill
+    bar above (`open = high = low = close = vwap = prior close`, `volume = 0`,
+    `trades = 0`, `complete = true`) and is published and persisted through the
+    same synthesized path, so its row carries `source = synthesized`;
+    `trades = 0 AND volume = 0` distinguishes it from every venue bar without a
+    schema change. Emission is gated on live evidence and every gate is fail-safe
+    — no evidence means NO row, never a guessed one:
+    - the venue must have been witnessed by inbound public frames continuously
+      from just before the minute opened to just after it closed (ticks, trades
+      and real candle frames all count; a monotonic "time since last message"
+      watermark cannot answer this, so the publisher keeps a small ring of
+      per-minute witness spans);
+    - no detected reconnect, WS restart or liveness recovery may overlap the
+      minute;
+    - the symbol's `trade` subscription must be confirmed and not quarantined
+      right now, read from the exchange client's subscription-health tracker
+      (never from the symbol mapper, which would name pairs the connection never
+      subscribed, and never from the `ticker` channel, which a reconnect re-seeds
+      as confirmed wholesale); and
+    - the symbol must have printed at least one real bar in THIS process. The
+      carried close is never seeded from the database: reconstructing a flat bar
+      after the fact cannot distinguish "nobody traded" from "we were not
+      listening", so a restarted publisher produces no flat bars for an instrument
+      until it trades again.
+    A minute that fails any gate is simply absent, and it is never retro-filled —
+    the sweep considers only the single minute that has just settled. Refusals are
+    counted per reason and surfaced on the feed heartbeat under
+    `meta.venue.minute_completion`, so a hole in the plane is explainable rather
+    than merely asserted. Two consequences worth planning for: the daily `candles`
+    volume on Kraken spot rises roughly five- to sixfold on a table with no
+    retention policy, and a higher-TF window whose first or last minute was
+    tradeless now opens or closes on the carried price rather than the first or
+    last TRADED price (the price is a real prior print, but bars either side of
+    the cutover are computed differently). Enabling also widens the higher-TF
+    flush grace past the sweep settle, so higher-TF bars publish about 20 s later
+    and now include their final minute, which the default 5 s seal could drop as
+    late.
 - **Native-feed replacement (kraken spot)** — kraken spot is the one venue with a
     native higher-TF OHLC feed; synthesizing those timeframes from 1m REPLACES it
     (a deliberate one-mechanism choice — the rolled-up VWAP/trades approximate the

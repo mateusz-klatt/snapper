@@ -609,6 +609,34 @@ class AppSettings:
         return self._get_db_setting("candle_forward_fill", False)
 
     @property
+    def candle_minute_completion(self) -> bool:
+        """Return whether the base 1m plane is completed with flat minute bars.
+
+        When ``True``, a publisher whose venue supports it (Kraken spot in
+        ``trade_built`` mode, Kraken futures) emits a flat carried-close bar with
+        ``volume = 0`` and ``trades = 0`` for every minute it OBSERVED the venue
+        live and in which the instrument did not trade, so every subscribed
+        instrument has a candle at every minute boundary and date-joins stop
+        hunting backwards for the last bar. Emission is gated on live feed
+        evidence: a minute the publisher did not witness edge to edge, a symbol
+        whose trade subscription is not confirmed, and a symbol with no
+        in-session close all produce NO row rather than a guessed one.
+
+        Default ``False``. Enabling it is a roughly five- to sixfold increase in
+        daily ``candles`` rows on Kraken spot, on a table with no retention
+        policy, and it shifts higher-timeframe open/close for windows whose
+        first or last minute was tradeless — approve both before switching it
+        on. Switching it OFF takes effect at the next minute boundary; switching
+        it ON wants a publisher restart so the higher-TF flush grace widens with
+        it.
+
+        Returns:
+            ``True`` to emit flat bars for observed tradeless minutes; ``False``
+            (default) to leave the 1m plane trade-driven and gappy.
+        """
+        return self._get_db_setting("candle_minute_completion", False)
+
+    @property
     def persist_intermediate_candles(self) -> bool:
         """Return whether in-progress (non-final) native candle bars are persisted.
 

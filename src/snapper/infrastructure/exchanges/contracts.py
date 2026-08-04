@@ -497,9 +497,23 @@ class CandleUpdate:
 
     ``complete`` is the trustworthy-boundary flag for higher-TF synthesis: True
     for native frames and for synthesized bars whose window was seeded from the
-    durable plane or opened at/after the aggregator live epoch. It is NOT a
-    full-minute-coverage assertion (the 1m corpus is inherently gappy); it marks
-    boundary trust so the persistence layer can record provenance.
+    durable plane or opened at/after the aggregator live epoch. It marks
+    boundary trust so the persistence layer can record provenance; it is not,
+    by itself, a coverage claim about the plane the bar belongs to.
+
+    Whether the 1m plane is DENSE is a separate, per-venue question, and the
+    answer differs across this codebase. On Kraken spot in ``trade_built`` mode
+    and on Kraken futures, with ``candle_minute_completion`` switched on, the
+    publisher additionally emits a flat carried-close bar for every minute it
+    witnessed the venue live and in which the instrument did not trade — so on
+    those two venues, and only over the intersection of (minutes witnessed live
+    edge to edge, symbols with a confirmed trade subscription, symbols with an
+    in-session close), the plane is complete at every minute boundary. Outside
+    that intersection — and on every other venue and every historical or replay
+    path, where the 1m corpus stays inherently gappy — an absent minute means
+    "not observed", never "no trades". The positive assertion of the opposite is
+    a bar carrying ``trades == 0`` with ``volume == 0.0``: the venue was live,
+    the subscription was confirmed, and nobody traded.
     """
 
     symbol: str

@@ -48,6 +48,7 @@ from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.minute_completion import confirmed_trade_symbols
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.topics.builders import system_topic
 
@@ -144,6 +145,33 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             ``TradeCandleBuilder``), not venue-precomputed OHLC.
         """
         return "calculated"
+
+    def _supports_minute_completion(self) -> bool:
+        """Kraken Futures perpetuals never close, so a tradeless minute is true.
+
+        The venue has no WebSocket candle channel at all: every 1m bar here is
+        built from the live trade stream, so an instrument with no fill in a
+        minute simply has no row. There is no session calendar to make that
+        ambiguous, which is exactly what makes a flat carried-close bar for an
+        observed tradeless minute an observation rather than a guess.
+
+        Returns:
+            ``True``.
+        """
+        return True
+
+    def _confirmed_trade_roster(self) -> set[str]:
+        """Return Futures symbols whose ``trade`` subscription is confirmed now.
+
+        Returns:
+            Confirmed native Futures symbols; empty before the client exists.
+        """
+        client = self._exchange_client
+        if client is None:
+            return set()
+        return confirmed_trade_symbols(
+            client.subscription_health_snapshot(), kraken_futures_ws_to_native
+        )
 
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.
@@ -456,8 +484,19 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         return 0
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
-        """Recover stale market data by rebuilding the public WS client."""
+        """Recover stale market data by rebuilding the public WS client.
+
+        Opens a minute-completion feed break around the rebuild so no minute
+        spanning the reconnect is asserted as observed.
+
+        Args:
+            reason: Liveness trigger reason for log context.
+
+        Returns:
+            None.
+        """
         logger.error("kraken_futures publisher: liveness recovery triggered ({})", reason)
+        self._mark_minute_feed_break()
         client = self._exchange_client
         if client is not None:
             await client.disconnect()
