@@ -1891,6 +1891,14 @@ class VenueAccountObservation(TemporalMixin, Base):
             "exchange",
             "mode",
         ),
+        Index(
+            "ix_venue_account_observations_attempt_stream",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "timestamp",
+            "id",
+        ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_venue_account_obs_exchange_lower"),
         CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_venue_account_obs_mode"),
         CheckConstraint(

@@ -29,6 +29,10 @@ Ledger Maintenance:
     - ``annulment annul``: Append one guarded execution annulment
     - ``annulment complete-visibility``: Complete pending durability observations
 
+Portfolio Evidence:
+    - ``pnl-minimum-gate report``: Measure the disconnected F6 activation bound
+    - ``pnl-minimum-gate check``: Evaluate a future standing-alarm threshold
+
 Data Updates:
     - ``update-kraken-symbols``: Sync Kraken symbol mappings
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
@@ -136,6 +140,7 @@ from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.fx_proofs import fx_proofs_app
+from snapper.cli.pnl_minimum_activation_gate import pnl_minimum_gate_app
 from snapper.cli.token_preflight import token_app
 from snapper.cli.trade_projection_checkpoints import retire_trade_projection_checkpoints
 from snapper.config.settings import BootstrapSettingsLoader
@@ -3003,6 +3008,7 @@ app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_
 app.add_typer(annulment_app, name="annulment")
 app.add_typer(daily_partitions_app, name="daily-partitions")
 app.add_typer(fx_proofs_app, name="fx-proofs")
+app.add_typer(pnl_minimum_gate_app, name="pnl-minimum-gate")
 app.add_typer(token_app, name="token")
 
 

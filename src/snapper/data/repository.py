@@ -5021,6 +5021,27 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_venue_account_observation_attempt_stream(
+        self,
+        wallet_public_id: str,
+        exchanges: Sequence[str],
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[VenueAccountObservationAttemptRow]:
+        """Return one bounded attempt stream plus each exchange's opening seed.
+
+        The result contains at most one attempt per exchange at or before
+        ``window_start``: the exact winner selected by
+        :meth:`get_venue_account_observation_attempts_at`. It then contains every
+        attempt after ``window_start`` through ``window_end`` inclusive, ordered by
+        bus ``timestamp`` and immutable row ``id``. A pure cursor fold can therefore
+        reconstruct every point read inside the window without issuing one query per
+        grid minute or skipping a later failed attempt.
+        """
+        ...
+
+    @abstractmethod
     async def get_fill_shard_keys_for_scope(
         self,
         wallet_public_id: str,
@@ -16477,6 +16498,68 @@ class SQLAlchemyRepository(Repository):
                 if row is not None:
                     result[exchange] = self._venue_account_observation_attempt_to_row(row)
         return result
+
+    async def get_venue_account_observation_attempt_stream(
+        self,
+        wallet_public_id: str,
+        exchanges: Sequence[str],
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[VenueAccountObservationAttemptRow]:
+        """Return bounded attempts and one latest-at-start seed per exchange."""
+        if window_end < window_start:
+            raise ValueError("observation attempt window_end must not precede window_start")
+        canonical_exchanges = tuple(dict.fromkeys(exchanges))
+        if not canonical_exchanges:
+            return []
+        canonical_wallet = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        scope_filters = (
+            VenueAccountObservation.wallet_public_id == canonical_wallet,
+            VenueAccountObservation.exchange.in_(canonical_exchanges),
+            VenueAccountObservation.mode == mode,
+        )
+        seed_timestamps = (
+            select(
+                VenueAccountObservation.exchange.label("exchange"),
+                func.max(VenueAccountObservation.timestamp).label("timestamp"),
+            )
+            .where(*scope_filters, VenueAccountObservation.timestamp <= window_start)
+            .group_by(VenueAccountObservation.exchange)
+            .subquery()
+        )
+        seed_observation = aliased(VenueAccountObservation)
+        seed_ids = (
+            select(func.max(seed_observation.id))
+            .join(
+                seed_timestamps,
+                and_(
+                    seed_observation.exchange == seed_timestamps.c.exchange,
+                    seed_observation.timestamp == seed_timestamps.c.timestamp,
+                ),
+            )
+            .where(
+                seed_observation.wallet_public_id == canonical_wallet,
+                seed_observation.exchange.in_(canonical_exchanges),
+                seed_observation.mode == mode,
+            )
+            .group_by(seed_observation.exchange)
+        )
+        stmt = (
+            select(VenueAccountObservation)
+            .where(
+                *scope_filters,
+                VenueAccountObservation.timestamp <= window_end,
+                or_(
+                    VenueAccountObservation.timestamp > window_start,
+                    VenueAccountObservation.id.in_(seed_ids),
+                ),
+            )
+            .order_by(VenueAccountObservation.timestamp, VenueAccountObservation.id)
+        )
+        async with self.session() as s:
+            rows = (await s.execute(stmt)).scalars().all()
+        return [self._venue_account_observation_attempt_to_row(row) for row in rows]
 
     @staticmethod
     async def _read_pnl_timeline_execution_prefix(

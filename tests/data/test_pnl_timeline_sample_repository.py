@@ -1295,6 +1295,127 @@ async def test_observation_read_empty_exchanges_returns_nothing(
     assert result == {}
 
 
+def test_observation_stream_index_matches_seed_and_range_query() -> None:
+    """The ORM declares the exact covering prefix required by the stream read."""
+    stream_indexes = {
+        index.name: (tuple(column.name for column in index.columns), index.unique)
+        for index in VenueAccountObservation.__table__.indexes
+        if index.name == "ix_venue_account_observations_attempt_stream"
+    }
+
+    assert stream_indexes == {
+        "ix_venue_account_observations_attempt_stream": (
+            ("wallet_public_id", "exchange", "mode", "timestamp", "id"),
+            False,
+        )
+    }
+
+
+async def test_observation_stream_is_bounded_and_matches_every_point_read(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The bounded seed plus stream reproduces all latest-at-minute winners."""
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _observation("kraken", _M1 - timedelta(minutes=2), balances_json='[{"v":1}]'),
+                _observation("kraken", _M1, balances_json='[{"v":2}]'),
+                _observation(
+                    "kraken",
+                    _M2,
+                    balance_status="error",
+                    balances_json=None,
+                    error="timeout",
+                ),
+                _observation("kraken", _M3, balances_json='[{"v":3}]'),
+            ]
+        )
+        await s.commit()
+    stream = await repository.get_venue_account_observation_attempt_stream(
+        _WALLET,
+        ["kraken", "kraken"],
+        "live",
+        _M1,
+        _M3,
+    )
+    assert [row["timestamp"] for row in stream] == [_M1, _M2, _M3]
+    for minute in (_M1, _M2, _M3):
+        point = await repository.get_venue_account_observation_attempts_at(
+            _WALLET, ["kraken"], "live", minute
+        )
+        candidates = [row for row in stream if row["timestamp"] <= minute]
+        winner = max(candidates, key=lambda row: (row["timestamp"], row["id"]))
+        assert point == {"kraken": winner}
+
+
+async def test_observation_stream_seed_uses_max_id_at_the_latest_timestamp(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The opening seed tie-breaks only rows at the latest in-scope timestamp."""
+    first = _observation("kraken", _M2, balances_json='[{"currency":"BTC"}]')
+    winner = _observation("kraken", _M2, balances_json='[{"currency":"ETH"}]')
+    older_higher_id = _observation("kraken", _M1, balances_json='[{"currency":"SOL"}]')
+    async with repository.session() as s:
+        s.add(first)
+        await s.commit()
+        s.add(winner)
+        await s.commit()
+        s.add(older_higher_id)
+        await s.commit()
+
+    stream = await repository.get_venue_account_observation_attempt_stream(
+        _WALLET,
+        ["kraken"],
+        "live",
+        _M2,
+        _M2,
+    )
+
+    assert [row["id"] for row in stream] == [winner.id]
+    assert older_higher_id.id > winner.id > first.id
+
+
+async def test_observation_stream_seeds_each_exchange_independently(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Grouped timestamp and id maxima retain one winner for every exchange."""
+    kraken_old = _observation("kraken", _M1, balances_json='[{"v":"kraken-old"}]')
+    kraken_winner = _observation("kraken", _M2, balances_json='[{"v":"kraken-new"}]')
+    zonda_first = _observation("zonda", _M1, balances_json='[{"v":"zonda-first"}]')
+    zonda_winner = _observation("zonda", _M1, balances_json='[{"v":"zonda-winner"}]')
+    async with repository.session() as s:
+        for observation in (kraken_old, kraken_winner, zonda_first, zonda_winner):
+            s.add(observation)
+            await s.commit()
+
+    stream = await repository.get_venue_account_observation_attempt_stream(
+        _WALLET,
+        ["kraken", "zonda"],
+        "live",
+        _M2,
+        _M2,
+    )
+
+    assert [(row["exchange"], row["id"]) for row in stream] == [
+        ("zonda", zonda_winner.id),
+        ("kraken", kraken_winner.id),
+    ]
+
+
+async def test_observation_stream_refuses_reversed_window_and_empty_scope(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Malformed windows fail closed while an empty venue set reads nothing."""
+    with pytest.raises(ValueError, match="window_end"):
+        await repository.get_venue_account_observation_attempt_stream(
+            _WALLET, ["kraken"], "live", _M3, _M1
+        )
+    assert (
+        await repository.get_venue_account_observation_attempt_stream(_WALLET, [], "live", _M1, _M3)
+        == []
+    )
+
+
 async def test_sample_write_transaction_takes_the_postgres_advisory_lock(
     repository: SQLAlchemyRepository,
 ) -> None:

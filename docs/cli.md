@@ -416,6 +416,96 @@ newly captured execution prefix.
 Each backdated election `timestamp` asserts knowledge at the durable consumer
 horizon by design, so the historical `as_of` lookup can see exactly the proof
 or refusal that certifies that consumer.
+### `pnl-minimum-gate`
+
+Builds the read-only evidence required before the F6 below-venue-minimum
+rule may change published equity. The command evaluates the existing temporal
+minimum proof against authoritative production balance observations, but it
+does not write samples, change the snapshotter, or alter an API response.
+
+The venue denominator is not operator input. Every command loads the complete
+active credential catalogue, applies the same executor-topology policy and
+`resolve_spot_venues` semantics as the live snapshotter, and fails closed when
+the wallet has no executor-backed live spot venue. The artifact includes only
+non-secret scope provenance: credential public ids, exchange and credential
+type, executor disposition, and inclusion flags. It never serializes encrypted
+payloads, labels, or the raw pin declaration.
+
+The one-time activation artifact is always exactly 24 hours, exactly 1440
+finalized minute points, and bound to the operator's threshold:
+
+```bash
+snapper pnl-minimum-gate report \
+  --wallet <wallet-public-id> \
+  --max-bound-share <accepted-equity-fraction> \
+  > pnl-minimum-gate.json
+```
+
+`report` ends its minute grid two finalized minutes behind the current clock.
+All commands are intentionally current-only: the credential catalogue, executor
+topology, fresh mint-wallet pin, market evidence, and P&L samples are read for one
+captured current horizon. There is no backdated `--as-of` surface that could mix
+historical topology with a current setting. Each would-be excluded leg is bounded
+independently of the snapshotter's sparse minute price plane. For every certified
+direct USD plane, the report takes its latest causal close no more than 24 hours
+old, then uses the highest of those closes. The leg bound is
+`min_order_size * selected_close`.
+
+When exclusions exist, their per-minute aggregate is divided by a conservative
+equity denominator. For each impacted minute, the denominator is the lowest
+positive complete current-epoch equity observed causally through that minute,
+provided the latest causal sample is no more than five minutes old. A complete
+sample with missing, non-finite, or non-positive equity, a missing causal sample,
+or a stale sample fails closed. The latest complete sample must also be within
+five minutes of the report end. The JSON names the exact minimum proof, candle
+version, close age, per-impact causal equity floor, Rule-W refusals, and every
+minute that lacked an authoritative basket. A finite positive bound overflow is
+recorded as a definite threshold breach rather than ambiguous evidence.
+
+The current-time evaluator for a future standing alarm accepts a window of at
+least 24 hours; shorter checks are refused:
+
+```bash
+snapper pnl-minimum-gate check \
+  --wallet <wallet-public-id> \
+  --hours 24 \
+  --max-bound-share <accepted-equity-fraction>
+```
+
+For diagnostics only, `inspect` permits a shorter bounded window. Its JSON
+always says `"activation_eligible": false`, even when every available point is
+complete:
+
+```bash
+snapper pnl-minimum-gate inspect \
+  --wallet <wallet-public-id> \
+  --hours 1
+```
+
+The check emits the same canonical JSON with a `gate` verdict. Exit codes are
+stable for cron, systemd, or another alert runner:
+
+| Exit | Meaning |
+| ---- | ------- |
+| `0` | Complete evidence and the observed bound does not exceed the stated share |
+| `1` | Invalid input or the database read failed |
+| `2` | Typer rejected the command-line syntax before the report ran |
+| `3` | Evidence is incomplete, including no authoritative minutes, no exercised minimum proof, a missing or non-finite USD bound, or no positive complete equity denominator |
+| `4` | At least one fully known bound exceeds the stated share |
+
+The threshold comparison is strict: equality passes. A known breach takes
+priority over incomplete evidence, so a partial authoritative window, a Rule-W
+refusal, or an unpriced leg cannot hide an already-proven alarm. Any of those
+conditions still remains visible and prevents a passing activation artifact.
+Redirect standard output to retain the review artifact; refusals go to standard
+error.
+
+No standing alarm or scheduler is deployed by these commands. They provide the
+read-only evaluator only. As of this documentation update the F6 activation
+gate remains unsatisfied: no passing 24-hour threshold-bound production
+artifact has been accepted, no recurring alarm has been deployed, and the
+legacy sample-basis plus coordinated frontend/server prerequisites remain open.
+Nothing in this section claims S3/S4 activation is complete.
 
 ### `db-seed`
 
