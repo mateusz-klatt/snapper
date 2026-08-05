@@ -1409,6 +1409,129 @@ class TestExecutionVenueMatrix:
         client.close()
 
 
+class TestCreateOrderModifierRefusals:
+    """REST refuses execution modifiers the resolved venue's client would drop.
+
+    Until 2026-08-06 this route persisted and submitted `leverage`, `post_only`
+    and `reduce_only` with no venue check at all, while the MCP surface refused
+    them. An order refused for an autonomous agent and accepted for a human is
+    the worst possible split, so both now share one decision through
+    ``application.trade.execution_modifiers``; only the wire shape differs.
+    """
+
+    def test_post_only_is_refused_where_the_client_drops_it(self) -> None:
+        """A venue that never sends the flag refuses rather than submitting without it.
+
+        Given: a `post_only` order routed to `walutomat`,
+        When: the client POSTs it,
+        Then: HTTP 400 `order_flags_unsupported`, and neither the plan nor the
+            command row is written.
+        """
+        repo = _create_order_repo()
+        _arm_execution_venue(repo, credential_exchanges=("kraken", "walutomat"))
+        body = _create_order_body()
+        body["payload"]["exchange"] = "walutomat"
+        body["payload"]["post_only"] = True
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "order_flags_unsupported"
+        assert detail["flags"] == ["post_only"]
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_the_refusal_never_claims_the_exchange_lacks_the_feature(self) -> None:
+        """Wording matters: Snapper does not send it, the venue may well accept it.
+
+        Given: a `reduce_only` order routed to `walutomat`,
+        When: the client POSTs it,
+        Then: the reason says Snapper does not send the flag, and does NOT say
+            the venue does not support it.
+
+        Kraken spot accepts all three modifiers on its API; what varies is which
+        of them our client forwards. A caller told the exchange lacks a feature
+        goes looking for a different venue when the real remedy is a different
+        client, so the distinction is load-bearing rather than stylistic.
+        """
+        repo = _create_order_repo()
+        _arm_execution_venue(repo, credential_exchanges=("kraken", "walutomat"))
+        body = _create_order_body()
+        body["payload"]["exchange"] = "walutomat"
+        body["payload"]["reduce_only"] = True
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        detail = response.json()["detail"]
+        assert "Snapper does not send" in detail["reason"]
+        assert "does not support" not in detail["reason"]
+        client.close()
+
+    def test_post_only_is_refused_on_a_taker_order_type(self) -> None:
+        """Maker-only cannot apply to an order that must take liquidity.
+
+        Given: a `post_only` market order routed to `kraken`, a venue that DOES
+            honour the flag,
+        When: the client POSTs it,
+        Then: HTTP 400 `post_only_order_type_unsupported`.
+
+        The venue set alone is too coarse a gate here: kraken passes it, and the
+        flag would then be persisted on an order that cannot rest on the book.
+        """
+        repo = _create_order_repo()
+        body = _create_order_body()
+        body["payload"]["order_type"] = "market"
+        body["payload"].pop("price")
+        body["payload"]["post_only"] = True
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "post_only_order_type_unsupported"
+        client.close()
+
+    def test_spot_reduce_only_without_leverage_is_refused(self) -> None:
+        """Cash spot has no margin position for the clamp to bind to.
+
+        Given: a `reduce_only` order on `kraken` with no leverage,
+        When: the client POSTs it,
+        Then: HTTP 400 `reduce_only_requires_margin`.
+        """
+        repo = _create_order_repo()
+        body = _create_order_body()
+        body["payload"]["reduce_only"] = True
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "reduce_only_requires_margin"
+        client.close()
+
+    def test_an_honoured_modifier_is_not_refused(self) -> None:
+        """The gate refuses what is dropped, and only that.
+
+        Given: a `post_only` limit order on `kraken`, which forwards it,
+        When: the client POSTs it,
+        Then: the request is not refused by the modifier gate.
+
+        Pinned because a fail-closed rule that also blocks working orders would
+        be a worse defect than the silent drop it replaced.
+        """
+        repo = _create_order_repo()
+        body = _create_order_body()
+        body["payload"]["post_only"] = True
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        if response.status_code == 400:
+            assert "error_code" not in response.json().get("detail", {}) or response.json()[
+                "detail"
+            ]["error_code"] not in {
+                "order_flags_unsupported",
+                "post_only_order_type_unsupported",
+                "reduce_only_requires_margin",
+                "leverage_not_an_order_parameter",
+            }
+        client.close()
+
+
 class TestPaperReferencePrice:
     """Branch coverage for ``order_routes._resolve_paper_reference_price``.
 

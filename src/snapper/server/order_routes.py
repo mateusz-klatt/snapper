@@ -45,6 +45,7 @@ from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.execution_modifiers import modifier_refusal
 from snapper.application.trade.execution_venue import ExecutionVenueError
 from snapper.application.trade.execution_venue import resolve_execution_venue
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -267,7 +268,13 @@ async def _resolve_execution_venue(
     wallet_public_id: str,
     as_of: datetime,
 ) -> str:
-    """Validate mode/wallet/exchange consistency and derive the execution venue.
+    """Validate the order against the venue, and derive where it will execute.
+
+    Also refuses execution modifiers the resolved venue's client would drop. It
+    belongs here rather than in the route body because it answers the same
+    question as the routing matrix — can this order run on this venue at all —
+    and because both answers need the venue AFTER routing, not the one the
+    caller asked for.
 
     Enforces the paper-routing matrix so a manual order can never be
     dispatched onto a topic no executor consumes (the pre-fix behaviour:
@@ -304,7 +311,7 @@ async def _resolve_execution_venue(
             ``error_code`` detail.
     """
     try:
-        return await resolve_execution_venue(
+        execution_exchange = await resolve_execution_venue(
             repo,
             body.exchange,
             ExecutionModeEnum(body.mode),
@@ -316,6 +323,8 @@ async def _resolve_execution_venue(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error_code": exc.error_code, **exc.details},
         ) from exc
+    _refuse_unsupported_modifiers(body, execution_exchange)
+    return execution_exchange
 
 
 _PAPER_SNAPSHOT_MAX_AGE = timedelta(seconds=30)
@@ -397,6 +406,48 @@ async def _resolve_paper_reference_price(
             ),
         },
     )
+
+
+def _refuse_unsupported_modifiers(body: CreateOrderBody, execution_exchange: str) -> None:
+    """Refuse a submit whose execution modifiers would not reach the venue.
+
+    Shares its decision with the MCP surface through
+    :func:`snapper.application.trade.execution_modifiers.modifier_refusal`, so an
+    order can never be refused for an autonomous agent and accepted for a human.
+    Only the wire shape differs — a 400 with a structured ``detail`` here, the
+    canonical envelope there.
+
+    Enforced at this boundary and deliberately NOT in the exchange client. The
+    client serves every producer of these flags, and the strategy engine's close,
+    the paired-execution guard scanner's protective flatten, and the bracket and
+    trailing-stop exits all emit ``reduce_only`` with no leverage. A client-side
+    version of this rule would refuse every one of them, leaving spot positions
+    that can be opened and never closed.
+
+    Args:
+        body: Validated create-order request payload.
+        execution_exchange: Effective execution venue after routing.
+
+    Raises:
+        HTTPException: 400 with the shared ``error_code`` when a requested
+            modifier would be dropped instead of reaching the exchange.
+    """
+    refusal = modifier_refusal(
+        execution_exchange,
+        order_type=body.order_type,
+        leverage=body.leverage,
+        post_only=body.post_only,
+        reduce_only=body.reduce_only,
+    )
+    if refusal is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": refusal.error_code,
+                "reason": refusal.message,
+                **refusal.details,
+            },
+        )
 
 
 def _build_create_order_plan_params(

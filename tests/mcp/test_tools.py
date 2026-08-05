@@ -33,6 +33,7 @@ from snapper.application.plans import cancel_service
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.execution_modifiers import honoured_flags
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -49,7 +50,6 @@ from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
-from snapper.mcp.tools import _honoured_manual_order_flags
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
 from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
@@ -1429,7 +1429,7 @@ class TestSubmitManualOrderTool:
         venue added later inheriting permission to accept a flag its client
         drops. The default must make silence mean "sends nothing".
         """
-        assert _honoured_manual_order_flags("some_venue_added_next_year") == frozenset()
+        assert honoured_flags("some_venue_added_next_year") == frozenset()
 
     @pytest.mark.asyncio
     async def test_an_order_whose_flags_are_all_honoured_discloses_nothing(self) -> None:

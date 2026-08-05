@@ -31,13 +31,11 @@ claims are only a login-time snapshot.
 import datetime as dt
 import json
 from collections.abc import Callable
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
-from typing import Final
 from typing import cast
 from uuid import uuid7
 
@@ -68,6 +66,9 @@ from snapper.application.portfolio.account_view import build_portfolio_account_s
 from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.execution_modifiers import ModifierRefusal
+from snapper.application.trade.execution_modifiers import inert_flags
+from snapper.application.trade.execution_modifiers import modifier_refusal
 from snapper.application.trade.execution_venue import ExecutionVenueError
 from snapper.application.trade.execution_venue import derive_manual_execution_mode
 from snapper.application.trade.execution_venue import resolve_execution_venue
@@ -82,7 +83,6 @@ from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewStatusEnum
-from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderStatusEnum
@@ -751,124 +751,18 @@ def _manual_order_wallet_blank_result() -> CallToolResult:
     )
 
 
-_HONOURED_MANUAL_ORDER_FLAGS: Final[Mapping[str, frozenset[str]]] = {
-    ExchangeEnum.KRAKEN: frozenset({"leverage", "post_only", "reduce_only"}),
-    ExchangeEnum.KRAKEN_FUTURES: frozenset({"post_only", "reduce_only"}),
-    ExchangeEnum.KRAKEN_EQUITIES: frozenset(),
-    ExchangeEnum.WALUTOMAT: frozenset(),
-    ExchangeEnum.PAPER: frozenset(),
-}
-"""Execution modifiers each venue's client actually puts on the wire.
-
-Read this as a property of OUR CLIENT, never of the exchange. The distinction is
-the whole point: Kraken spot's API accepts all three — ``kraken.spot`` exposes
-``leverage``, ``oflags`` and ``reduce_only`` on ``create_order`` — so a refusal
-worded "the venue does not support this" would have been simply false. What
-varies is which of them we forward.
-
-Per venue, with the mechanism:
-
-- ``kraken``: ``leverage`` and ``postOnly``/``oflags=post`` on both the ccxt and
-  the native path, and ``reduceOnly``/``reduce_only`` on both since this change.
-- ``kraken_futures``: ``reduceOnly`` as a first-class ``sendorder`` field, and
-  ``post_only`` as a rewrite of the order type ``lmt`` to ``post``. Leverage is
-  NOT an order field there at all; it is a per-symbol account preference reached
-  through ``set_leverage_preference``, which is why it is absent here.
-- ``kraken_equities``, ``walutomat``, ``paper``: none of the three.
-
-A venue missing from this mapping honours nothing, because
-:func:`_honoured_manual_order_flags` defaults to the empty set. That default is
-load-bearing rather than tidy: a venue added later cannot silently inherit
-permission to accept a flag its client drops on the floor.
-"""
-
-
-_LIMIT_POST_ONLY_TYPES: Final[Mapping[str, frozenset[str]]] = {
-    ExchangeEnum.KRAKEN: frozenset({"limit", "stop_limit"}),
-    ExchangeEnum.KRAKEN_FUTURES: frozenset({"limit"}),
-}
-"""Order types that actually carry ``post_only`` through, per venue.
-
-Maker-only is meaningless for an order that must take liquidity, and each venue
-drops it differently, so the venue set alone is not a fine enough gate.
-
-On Kraken spot a ``stop_limit`` reaches ccxt as type ``limit`` and comes out with
-``oflags=post`` on the wire, so it belongs here; ``market`` and ``stop`` both
-reach ccxt as ``market``, where ccxt itself raises rather than submit. On Kraken
-futures only the plain ``lmt`` is rewritten to ``post`` — ``stop_limit`` maps to
-``stp`` and the flag vanishes with no error at all, which is the silent drop this
-gate exists to catch.
-"""
-
-
-_DISCLOSING_VENUES: Final[frozenset[str]] = frozenset({ExchangeEnum.PAPER})
-"""Venues where a dropped modifier is disclosed rather than refused.
-
-Paper is where an agent rehearses, and refusing there would block the default
-practice venue for a workflow that is legitimate the moment it moves to Kraken.
-Nothing can be overshot into: there is no real position and no real money, so
-the only cost of the ignored flag is fidelity — the rehearsal will not behave
-exactly like the live venue.
-
-That cost is real, though, so it is stated rather than swallowed. An accepted
-order names the flag in ``inert_flags``, which is the honest middle between
-refusing a harmless request and silently dropping a parameter the caller
-believed was doing something. This is also the only remaining producer of a
-non-empty ``inert_flags``, which is why that field survives the change to
-fail-closed refusals rather than becoming permanently empty.
-
-The refusal stands for every OTHER venue that drops a flag, because there the
-consequence is a real submission missing the constraint that was asked for.
-"""
-
-
-def _honoured_manual_order_flags(execution_exchange: str) -> frozenset[str]:
-    """Return the modifiers the resolved venue's client puts on the wire.
-
-    Args:
-        execution_exchange: The resolved execution venue.
-
-    Returns:
-        The honoured flag names, empty for any venue not enumerated.
-    """
-    return _HONOURED_MANUAL_ORDER_FLAGS.get(execution_exchange, frozenset())
-
-
-def _requested_manual_order_flags(order: _ManualOrderInput) -> tuple[str, ...]:
-    """Name the execution modifiers this submit actually asked for.
-
-    ``leverage`` counts only when set, since ``None`` is the absence of a
-    request rather than a request for no leverage.
-
-    Args:
-        order: The validated manual-order request.
-
-    Returns:
-        Requested flag names, in a stable order.
-    """
-    requested: list[str] = []
-    if order.leverage is not None:
-        requested.append("leverage")
-    if order.post_only:
-        requested.append("post_only")
-    if order.reduce_only:
-        requested.append("reduce_only")
-    return tuple(requested)
-
-
 def _inert_manual_order_flags(order: _ManualOrderInput, execution_exchange: str) -> tuple[str, ...]:
     """Name every requested flag the resolved venue will not act on.
 
     A flag the caller set and nothing reads is a silent lie by omission: the
-    order succeeds, so the caller concludes the constraint was applied. Naming
-    it on the accepted envelope costs nothing and removes the false belief.
+    order succeeds, so the caller concludes the constraint was applied. Naming it
+    on the accepted envelope costs nothing and removes the false belief.
 
-    This now fires on paper alone. Everywhere else a dropped modifier is
-    REFUSED rather than disclosed, because there the consequence is a real
-    unclamped or unlevered submission against real money. Paper keeps the
-    disclosure so a rehearsal of a workflow that is legitimate on Kraken is not
-    blocked on the venue that exists to rehearse it — see
-    :data:`_DISCLOSING_VENUES`.
+    This now fires on paper alone. Everywhere else a dropped modifier is REFUSED
+    rather than disclosed, because there the consequence is a real unclamped or
+    unlevered submission against real money. Paper keeps the disclosure so a
+    rehearsal of a workflow that is legitimate on Kraken is not blocked on the
+    venue that exists to rehearse it.
 
     Args:
         order: The validated manual-order request.
@@ -878,184 +772,34 @@ def _inert_manual_order_flags(order: _ManualOrderInput, execution_exchange: str)
         Requested-but-inert flag names, in a stable order. Empty when every
         requested flag is honoured.
     """
-    honoured = _honoured_manual_order_flags(execution_exchange)
-    return tuple(flag for flag in _requested_manual_order_flags(order) if flag not in honoured)
-
-
-def _venues_honouring(flag: str) -> list[str]:
-    """List the venues whose client forwards a given modifier.
-
-    Args:
-        flag: One of ``leverage``, ``post_only``, ``reduce_only``.
-
-    Returns:
-        Sorted venue names, for the refusal envelope's ``details``.
-    """
-    return sorted(venue for venue, flags in _HONOURED_MANUAL_ORDER_FLAGS.items() if flag in flags)
-
-
-def _manual_order_flags_unsupported_result(exchange: str, flags: tuple[str, ...]) -> CallToolResult:
-    """Return the envelope refusing modifiers this venue's client drops.
-
-    The wording says SNAPPER does not send the flag, never that the exchange
-    cannot do it. On Kraken spot in particular the venue accepts all three, so
-    a "venue does not support it" refusal would be a false statement handed to
-    a caller that acts on it.
-
-    Args:
-        exchange: The resolved execution venue.
-        flags: The requested-but-dropped flag names.
-
-    Returns:
-        The canonical failure envelope.
-    """
-    named = ", ".join(flags)
-    return to_call_tool_result(
-        success=False,
-        error_code="order_flags_unsupported",
-        message=(
-            f"Snapper does not send {named} to {exchange}, so the order would be "
-            "submitted without it. Resubmit without the flag, or use a venue whose "
-            "client forwards it (details.supported_exchanges)."
-        ),
-        details=sanitize_output(
-            {
-                "exchange": exchange,
-                "flags": list(flags),
-                "supported_exchanges": {flag: _venues_honouring(flag) for flag in flags},
-            }
-        ),
+    return inert_flags(
+        execution_exchange,
+        leverage=order.leverage,
+        post_only=order.post_only,
+        reduce_only=order.reduce_only,
     )
 
 
-def _manual_order_futures_leverage_result(exchange: str) -> CallToolResult:
-    """Return the envelope refusing per-order ``leverage`` on a futures venue.
+def _manual_order_modifier_refusal_result(refusal: ModifierRefusal) -> CallToolResult:
+    """Format a shared modifier refusal as the canonical MCP envelope.
 
-    Kraken Futures DOES trade on leverage; it simply is not an order parameter
-    there. ``sendorder`` has no such field — leverage is a per-symbol account
-    preference reached through ``set_leverage_preference``. A refusal that let a
-    caller conclude "this venue cannot do leverage" would be false and would
-    push it toward the wrong remedy, so the message names the real mechanism.
-
-    Snapper deliberately does not set that preference on the caller's behalf: it
-    is account-wide for the symbol and outlives the order, so one manual submit
-    would silently re-lever every other position and every later order on that
-    symbol. A refusal is recoverable; a silent re-lever is not.
+    The DECISION is shared with the REST surface through
+    :func:`snapper.application.trade.execution_modifiers.modifier_refusal`; only
+    the wire shape differs. Keeping the decision in one place is what stops an
+    order being refused for an agent and accepted for a human.
 
     Args:
-        exchange: The resolved execution venue.
+        refusal: The transport-independent refusal decision.
 
     Returns:
         The canonical failure envelope.
     """
     return to_call_tool_result(
         success=False,
-        error_code="leverage_not_an_order_parameter",
-        message=(
-            f"{exchange} trades on leverage, but not as an order parameter: it is a "
-            "per-symbol account preference, set separately and outliving the order. "
-            "Resubmit without leverage; the position will use whatever leverage "
-            "preference the symbol already carries."
-        ),
-        details=sanitize_output({"exchange": exchange, "flag": "leverage"}),
+        error_code=refusal.error_code,
+        message=refusal.message,
+        details=sanitize_output(refusal.details),
     )
-
-
-def _manual_order_post_only_order_type_result(exchange: str, order_type: str) -> CallToolResult:
-    """Return the envelope refusing ``post_only`` on a taker order type.
-
-    Args:
-        exchange: The resolved execution venue.
-        order_type: The submitted order type.
-
-    Returns:
-        The canonical failure envelope.
-    """
-    return to_call_tool_result(
-        success=False,
-        error_code="post_only_order_type_unsupported",
-        message=(
-            f"post_only does not reach {exchange} on a {order_type} order. Maker-only "
-            "constrains an order that rests on the book, so it is meaningless for one "
-            "that must take liquidity. Resubmit as a resting order type "
-            "(details.supported_order_types), or without post_only."
-        ),
-        details=sanitize_output(
-            {
-                "exchange": exchange,
-                "order_type": order_type,
-                "supported_order_types": sorted(_LIMIT_POST_ONLY_TYPES.get(exchange, frozenset())),
-            }
-        ),
-    )
-
-
-def _manual_order_reduce_only_needs_margin_result(exchange: str) -> CallToolResult:
-    """Return the envelope refusing spot ``reduce_only`` without leverage.
-
-    Kraken spot binds the reduce-only clamp to a MARGIN position, so on a cash
-    order there is nothing for it to reduce and the venue would reject or ignore
-    it. This gate is venue-scoped on purpose: Kraken Futures carries
-    ``reduceOnly`` with no leverage precondition at all, and applying the same
-    rule there would make the flag unreachable in both directions — refused
-    without leverage, and refused WITH leverage because futures takes no
-    per-order leverage.
-
-    Deliberately NOT enforced in the exchange client. The strategy engine, the
-    paired-execution guard scanner, bracket and trailing-stop plans all emit
-    ``reduce_only`` with no leverage on their closing orders, so a client-side
-    version of this rule would refuse every automated exit and protective
-    flatten on spot: a position that can be opened and never closed.
-
-    Args:
-        exchange: The resolved execution venue.
-
-    Returns:
-        The canonical failure envelope.
-    """
-    return to_call_tool_result(
-        success=False,
-        error_code="reduce_only_requires_margin",
-        message=(
-            f"reduce_only on {exchange} applies to margin orders only — the clamp "
-            "binds to a leveraged position, and a cash order has none for it to bind "
-            "to. Resubmit with leverage, or size the order so it cannot exceed the "
-            "position you hold."
-        ),
-        details=sanitize_output({"exchange": exchange, "flag": "reduce_only"}),
-    )
-
-
-def _manual_order_flag_refusal(
-    order: _ManualOrderInput, execution_exchange: str
-) -> CallToolResult | None:
-    """Refuse a submit whose execution modifiers would not reach the venue.
-
-    Fail-closed: a modifier the caller asked for either reaches the exchange or
-    the submit is refused. The one exception is :data:`_DISCLOSING_VENUES`,
-    where the flag is named on the accepted envelope instead.
-
-    Args:
-        order: The validated manual-order request.
-        execution_exchange: The resolved execution venue.
-
-    Returns:
-        The refusal envelope, or ``None`` when every modifier is honoured.
-    """
-    if execution_exchange in _DISCLOSING_VENUES:
-        return None
-    dropped = _inert_manual_order_flags(order, execution_exchange)
-    if dropped == ("leverage",) and execution_exchange == ExchangeEnum.KRAKEN_FUTURES:
-        return _manual_order_futures_leverage_result(execution_exchange)
-    if dropped:
-        return _manual_order_flags_unsupported_result(execution_exchange, dropped)
-    if order.post_only and order.order_type not in _LIMIT_POST_ONLY_TYPES.get(
-        execution_exchange, frozenset()
-    ):
-        return _manual_order_post_only_order_type_result(execution_exchange, order.order_type)
-    if order.reduce_only and order.leverage is None and execution_exchange == ExchangeEnum.KRAKEN:
-        return _manual_order_reduce_only_needs_margin_result(execution_exchange)
-    return None
 
 
 async def _prepare_manual_order(
@@ -1136,9 +880,15 @@ async def _prepare_manual_order(
             message=str(exc.details["reason"]),
             details=sanitize_output(exc.details),
         )
-    flag_refusal = _manual_order_flag_refusal(order, execution_exchange)
-    if flag_refusal is not None:
-        return flag_refusal
+    refusal = modifier_refusal(
+        execution_exchange,
+        order_type=order.order_type,
+        leverage=order.leverage,
+        post_only=order.post_only,
+        reduce_only=order.reduce_only,
+    )
+    if refusal is not None:
+        return _manual_order_modifier_refusal_result(refusal)
     resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
         order.instrument, order.exchange, created_at
     )
