@@ -1041,6 +1041,20 @@ Key properties:
     warning even if the flag is set. The flush wall-clock also applies a small
     grace so a just-ended minute is not sealed before the venue can deliver its
     final frame.
+- **Feed breaks re-arm the live epoch** — the flush loop is process-scoped, so
+    without this it keeps running across a disconnect and carries the pre-gap
+    close forward into windows nobody observed, marking them complete. On a
+    break the aggregator advances its live epoch, purges the buckets that opened
+    before it, and drops the carried close and last-real-window marker. A window
+    straddling the gap is therefore MISSING rather than truncated or flat-filled:
+    a hole is honest, a fabricated bar is not. Forward-fill resumes on its own
+    once a fresh real bar re-seeds the carry, so a break costs only the windows
+    it actually spans. Three call sites feed it: stall detection, confirmed
+    recovery (which moves the epoch to when data really resumed, closing the
+    one-window hole detection alone would leave), and the kraken SDK reconnect
+    hook — SDK-internal reconnects never reach the liveness watchdog at all,
+    because the socket returns on its own and messages resume with no stall ever
+    detected.
 - **Native-feed replacement (kraken spot)** — kraken spot is the one venue with a
     native higher-TF OHLC feed; synthesizing those timeframes from 1m REPLACES it
     (a deliberate one-mechanism choice — the rolled-up VWAP/trades approximate the

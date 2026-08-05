@@ -444,6 +444,12 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
     def _on_sdk_reconnect_attempt(self) -> None:
         """Hook called by the patched SDK reconnect path on every attempt.
 
+        Re-arms the candle aggregator's live epoch FIRST. An SDK-internal
+        reconnect is invisible to the liveness watchdog — the socket comes
+        back on its own and messages resume, so no stall is ever detected —
+        yet the gap is exactly as real, and higher-TF forward-fill would
+        carry the pre-gap close straight across it.
+
         Records the reconnect timestamp and schedules an in-process WS
         restart when more than ``_RECONNECT_LIMIT`` attempts fall inside
         the rolling ``_RECONNECT_WINDOW_S`` window. The publisher process
@@ -456,6 +462,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         not re-scheduled, so a storm cannot spawn overlapping restart
         tasks that race on the same WebSocket client.
         """
+        self._suspend_candle_synthesis_across_break()
         now = time.monotonic()
         self._reconnect_timestamps.append(now)
         cutoff = now - _RECONNECT_WINDOW_S

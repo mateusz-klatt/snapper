@@ -407,6 +407,52 @@ class CandleAggregator:
         """
         self._live_epoch_ts = int(self._floor(epoch, 60).timestamp())
 
+    def suspend_across_feed_break(self, resumed_at: datetime) -> None:
+        """Re-arm the live epoch after a feed break, failing closed.
+
+        Until this existed, :meth:`set_live_epoch` had exactly ONE caller —
+        the publisher at startup, before the flush loop starts. Nothing
+        re-armed it on reconnect, so after a gap the epoch still pointed at
+        process start and every bucket opened during or after the gap was
+        unconditionally trustworthy, while the process-scoped flush loop kept
+        carrying the pre-gap close forward for up to
+        :data:`_FORWARD_FILL_MAX_WINDOWS` windows. Both effects manufacture
+        bars for minutes nobody observed, and mark them complete.
+
+        Advancing the epoch alone does not fix it, which is why this is a
+        distinct method rather than a second ``set_live_epoch`` call. Three
+        pieces of state outlive a gap and each has to be dropped:
+
+        - **Buckets that opened before the resume.** A bucket's ``complete``
+          is decided once, when it is created, and never recomputed — so a
+          bucket opened before the break keeps a trustworthy verdict it no
+          longer deserves. The flush walk starts at the epoch and would never
+          pop them, orphaning them exactly as an overflow jump would, so they
+          are purged outright. A straddling window is dropped, never
+          flat-filled: a missing window is honest, a fabricated one is not.
+        - **The carried close.** The epoch stops windows BEFORE the resume
+          from being filled, but a close observed before the gap would still
+          be carried into windows AFTER it. Dropping it makes the fill wait
+          for a fresh real bar.
+        - **The last-real-window marker**, which together with the close is
+          what authorizes a fill at all.
+
+        Self-healing by construction: the first window opening after the
+        resume is fully observed and completes normally, and the first real
+        bar re-seeds the carry. The cost of a break is bounded to the windows
+        it actually spans.
+
+        Args:
+            resumed_at: When live consumption resumed. Floored to the minute
+                by :meth:`set_live_epoch`.
+        """
+        self.set_live_epoch(resumed_at)
+        epoch = self._live_epoch_ts
+        for key in [k for k in self._buckets if k[2] < epoch]:
+            del self._buckets[key]
+        self._last_close.clear()
+        self._last_real_window.clear()
+
     def timeframe_seconds(self, timeframe: str) -> int:
         """Return the width in seconds of a configured higher timeframe.
 

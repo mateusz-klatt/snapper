@@ -1209,6 +1209,80 @@ async def test_spawn_recovery_tracks_and_runs_task(monkeypatch: pytest.MonkeyPat
     assert pub._recovery_tasks == set()
 
 
+@pytest.mark.asyncio
+async def test_detecting_a_stall_re_arms_the_candle_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The severe half: forward-fill is disarmed the moment a stall is seen.
+
+    Given: A publisher holding a candle aggregator,
+    When: A recovery is spawned because the feed went stale,
+    Then: The aggregator is told to suspend across the break, and the
+        suspend happens BEFORE the first recovery attempt is awaited.
+
+    Without this the process-scoped flush loop keeps carrying the pre-gap
+    close for up to 2000 windows, publishing complete bars for minutes
+    nobody observed. Ordering is the assertion that matters: a suspend that
+    only landed after a recovery attempt would leave the flush loop free to
+    fabricate for the whole duration of that attempt.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    def _resume(_reason: str) -> None:
+        pub._last_message_at = 100.0
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_resume)
+    aggregator = MagicMock()
+    pub._candle_aggregator = aggregator
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._spawn_recovery("stale")
+    aggregator.suspend_across_feed_break.assert_called_once()
+    pub._attempt_liveness_recovery.assert_not_awaited()
+    await asyncio.gather(*pub._recovery_tasks)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_recovery_re_arms_the_epoch_again() -> None:
+    """The second call moves the epoch to when data actually resumed.
+
+    Given: A running publisher whose recovery attempt restores messages,
+    When: Recovery completes successfully,
+    Then: The aggregator is suspended a SECOND time.
+
+    Detection-time alone leaves one hole: a higher-TF window that opened
+    while the feed was still dark would count as fully observed and could
+    publish a truncated bar. Re-arming at confirmed resume closes it, and
+    is why this is two calls rather than one.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    def _resume(_reason: str) -> None:
+        pub._last_message_at = 100.0
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_resume)
+    aggregator = MagicMock()
+    pub._candle_aggregator = aggregator
+    await pub._run_recovery_under_lock("stale")
+    aggregator.suspend_across_feed_break.assert_called_once()
+
+
+def test_suspending_without_an_aggregator_is_inert() -> None:
+    """Native-candle venues have no aggregator and must not crash.
+
+    Given: A publisher with no candle aggregator,
+    When: The suspend hook is called,
+    Then: Nothing raises — so every venue and every call site can invoke it
+        unconditionally rather than guarding at each one.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = None
+    pub._suspend_candle_synthesis_across_break()
+
+
 def test_recovery_respects_60s_min_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     """Recovery spawning is rate-limited.
 

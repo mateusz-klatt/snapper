@@ -739,6 +739,119 @@ class TestForwardFillBounds:
         assert len(agg._warned_fill_overflow) <= 1
 
 
+class TestSuspendAcrossFeedBreak:
+    """Re-arming the live epoch around a feed break, failing closed.
+
+    Before this existed, ``set_live_epoch`` had exactly one caller — the
+    publisher at startup — so nothing re-armed the epoch on reconnect. The
+    flush loop is process-scoped and kept running across the gap, carrying
+    the pre-gap close forward and marking the results complete. These tests
+    pin the three pieces of state that have to be dropped.
+    """
+
+    def test_carried_close_does_not_survive_the_break(self) -> None:
+        """The whole point: a pre-gap price must not be filled into post-gap windows.
+
+        Given real data ending at close 50.0 and then a feed break,
+        When windows elapse after the break with no data,
+        Then nothing is emitted at all — rather than a run of flat bars at
+            50.0 asserting a price nobody observed during the gap.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        agg.suspend_across_feed_break(_at(10, 10))
+        assert agg.flush(_at_s(10, 31, 30)) == []
+
+    def test_window_straddling_the_break_is_dropped_not_filled(self) -> None:
+        """A window whose minutes span the gap is missing, never fabricated.
+
+        Given a window opened before the break with only its early minutes,
+        When the break is recorded and the window's end passes,
+        Then it emits nothing: its ``complete`` verdict was decided when it
+            was created and no longer deserves trust, and the flush walk
+            starts at the new epoch so it would otherwise be orphaned rather
+            than judged. A missing window is honest; a truncated one is not.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(2):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.suspend_across_feed_break(_at(10, 3))
+        emitted = agg.flush(_at_s(10, 11, 30))
+        assert [bar.interval_begin for _label, bar in emitted] == []
+
+    def test_fill_resumes_only_after_a_fresh_real_bar(self) -> None:
+        """Self-healing: the first real bar after the break re-seeds the carry.
+
+        Given a break followed by fresh real data at a NEW price,
+        When later windows are empty,
+        Then they fill at the new price — so the break costs only the windows
+            it actually spans, and forward-fill is not disabled permanently.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        agg.suspend_across_feed_break(_at(10, 10))
+        for minute in range(10, 15):
+            agg.fold(_candle("A", _at(10, minute), close=77.0))
+        emitted = agg.flush(_at_s(10, 21, 30))
+        bars = {bar.interval_begin: bar for _label, bar in emitted}
+        assert bars[_at(10, 10)].close == 77.0
+        fill = bars[_at(10, 15)]
+        assert fill.open == fill.high == fill.low == fill.close == 77.0
+        assert fill.volume == 0.0
+        assert fill.trades == 0
+
+    def test_window_opening_after_the_break_completes_normally(self) -> None:
+        """The epoch moves forward, it does not poison everything after it.
+
+        Given a break at 10:03,
+        When a window opens fully after it and every minute is observed,
+        Then it emits as a normal complete bar.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        agg.suspend_across_feed_break(_at(10, 3))
+        for minute in range(5, 11):
+            agg.fold(_candle("A", _at(10, minute), close=60.0))
+        emitted = agg.flush(_at_s(10, 11, 30))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 5) in begins
+        assert _at(10, 0) not in begins
+
+    def test_break_is_floored_to_the_minute_like_the_startup_epoch(self) -> None:
+        """Re-arming reuses ``set_live_epoch``, so it inherits its flooring.
+
+        Given a break recorded at 10:05:45,
+        When a window opening at 10:05 is fully observed,
+        Then it still emits — the same reasoning as a restart landing
+            partway through a minute.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        agg.suspend_across_feed_break(_at_s(10, 5, 45))
+        for minute in range(5, 11):
+            agg.fold(_candle("A", _at(10, minute), close=60.0))
+        emitted = agg.flush(_at_s(10, 11, 30))
+        assert _at(10, 5) in [bar.interval_begin for _label, bar in emitted]
+
+    def test_break_affects_every_symbol(self) -> None:
+        """A socket carries every symbol, so a break darkens all of them.
+
+        Given two symbols both carrying a close,
+        When the feed breaks,
+        Then neither forward-fills — the gap is a property of the connection,
+            not of one instrument.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for symbol in ("A", "B"):
+            for minute in range(5):
+                agg.fold(_candle(symbol, _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        agg.suspend_across_feed_break(_at(10, 10))
+        assert agg.flush(_at_s(10, 31, 30)) == []
+
+
 class TestLiveEpochFloor:
     """CA-1: the live epoch is floored to the minute so a restart mid-first-minute keeps its bar."""
 

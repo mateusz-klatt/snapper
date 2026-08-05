@@ -1744,6 +1744,37 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return 0
 
+    def _suspend_candle_synthesis_across_break(self) -> None:
+        """Re-arm the aggregator's live epoch around a feed break.
+
+        Three call sites feed it. A break the liveness watchdog SEES drives
+        two of them, and both are load-bearing:
+
+        - When a stall is DETECTED, which disarms forward-fill immediately.
+          Without it the process-scoped flush loop keeps carrying the pre-gap
+          close for up to 2000 windows, manufacturing complete bars for
+          minutes nobody observed. This is the severe half.
+        - When recovery is CONFIRMED, which moves the epoch to the moment data
+          actually resumed. Without it, a higher-TF window that opened while
+          the feed was still dark would count as fully observed and could
+          publish a truncated bar. Detection-time alone bounds the damage to
+          one window per break; this closes it.
+
+        The third is the venue SDK's own reconnect hook, and it fires for a
+        break the watchdog never sees at all: the socket drops and returns on
+        its own, messages resume, and no stall is ever detected — yet the gap
+        is just as real and the carried close just as stale. That path calls
+        this once, not twice, because there is no separate detection moment to
+        call it from.
+
+        A no-op when no aggregator exists (native-candle venues, or before
+        synthesis is configured), so every venue can call it unconditionally.
+        """
+        aggregator = self._candle_aggregator
+        if aggregator is None:
+            return
+        aggregator.suspend_across_feed_break(datetime.now(UTC))
+
     def _spawn_recovery(self, reason: str, *, require_candle_progress: bool = False) -> None:
         """Schedule a tracked liveness recovery task with deduplication.
 
@@ -1759,6 +1790,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if self._recovery_lock.locked():
             return
         self._last_recovery_at = monotonic()
+        self._suspend_candle_synthesis_across_break()
         task = asyncio.create_task(
             self._run_recovery_under_lock(reason, require_candle_progress=require_candle_progress)
         )
@@ -1824,6 +1856,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                         f"{self._get_exchange_name()}: feed recovered after {attempt} "
                         f"attempt(s) (reason={reason})"
                     )
+                    self._suspend_candle_synthesis_across_break()
                     return
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2.0, _RECOVERY_BACKOFF_CAP_S)

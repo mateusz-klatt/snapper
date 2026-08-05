@@ -823,6 +823,39 @@ class TestKrakenReconnectWatchdog:
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert pub._candle_liveness_threshold_s() == 300
 
+    def test_every_sdk_reconnect_re_arms_the_candle_epoch(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher holding a candle aggregator,
+        When a single SDK reconnect attempt fires — far below the storm
+            limit, so no restart is scheduled,
+        Then the aggregator's live epoch is re-armed anyway.
+
+        An SDK-internal reconnect is invisible to the liveness watchdog: the
+        socket returns on its own and messages resume, so no stall is ever
+        detected and ``_spawn_recovery`` never runs. The gap is just as real,
+        and higher-TF forward-fill would carry the pre-gap close across it.
+        This is the only hook that sees those reconnects.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        aggregator = MagicMock()
+        pub._candle_aggregator = aggregator
+        pub._on_sdk_reconnect_attempt()
+        aggregator.suspend_across_feed_break.assert_called_once()
+
+    def test_sdk_reconnect_without_an_aggregator_is_inert(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher with no candle aggregator (native-candle venues, or
+            before synthesis is configured),
+        When an SDK reconnect attempt fires,
+        Then nothing raises — every venue may call the hook unconditionally.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub._candle_aggregator = None
+        pub._on_sdk_reconnect_attempt()
+        assert len(pub._reconnect_timestamps) == 1
+
     def test_storm_under_limit_does_not_schedule_restart(self) -> None:
         """Spec — full Given/When/Then below.
 
