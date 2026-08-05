@@ -57,8 +57,11 @@ _ALL_WORKFLOWS = tuple(
 _SCAN_ACTION_PREFIX = "SonarSource/sonarqube-scan-action@"
 _QUALITY_GATE_ACTION_PREFIX = "SonarSource/sonarqube-quality-gate-action@"
 _PINNED_QUALITY_GATE_ACTION = (
-    "SonarSource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b"
+    "SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa"
 )
+"""v1.2.1. Bumping this is a deliberate two-step: move all four workflows, then
+move this pin. The test exists so the four cannot drift apart silently, which
+means a refresh that touches only the workflows is SUPPOSED to fail here."""
 _PINNED_ACTION_PATTERN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 _UNTRUSTED_SHELL_CONTEXT_PATTERN = re.compile(
     r"\$\{\{\s*(?:inputs(?:\.|\[)|github\.(?:event|ref))",
