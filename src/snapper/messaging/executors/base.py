@@ -568,6 +568,7 @@ def _exchange_order_request_from_core(
         signaled_at=order.signaled_at,
         leverage=order.leverage,
         reduce_only=order.reduce_only,
+        post_only=order.post_only,
         wallet_public_id=wallet_public_id,
         operator_public_id=order.operator_public_id,
     )

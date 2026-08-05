@@ -494,41 +494,87 @@ to `caps_enforcer_getter` at registration.
 
     - `leverage` (int, default absent) goes to the plan params only
         when supplied, and always to the `trade_commands.leverage`
-        column. No `supports_leverage` / `max_leverage_*` capability
-        gate is applied, because the REST route applies none either.
-        Trading caps measure notional as `quantity x price`, so
+        column. Trading caps measure notional as `quantity x price`, so
         leverage does not raise the exposure caps evaluate.
-    - `post_only` (bool, default `false`) is plan-params metadata
-        only; there is no command column for it on either surface.
-        The executor does not currently forward it to the venue, so
-        it records intent rather than guaranteeing maker placement.
-        Every accepted order therefore names it in `inert_flags`.
+    - `post_only` (bool, default `false`) reaches the venue since
+        migration 0051 carried it onto the `trade_commands` column the
+        executor builds its request from. Before that it was plan-params
+        metadata only and nothing downstream could act on it.
     - `reduce_only` (bool, default `false`) goes to the
-        `trade_commands.reduce_only` column only, never to the plan
-        params — matching REST. **Only `kraken_futures` forwards it**;
-        the Kraken spot, Kraken equities, Walutomat and paper clients
-        never read it. On the REAL venues among those the tool refuses
-        the submit with `reduce_only_unsupported` rather than
-        persisting an order the caller believes is clamped and then
-        submitting it unclamped. This is deliberately stricter than
-        REST, which applies no such gate: `leverage` is forwarded on
-        Kraken spot and nowhere else while `reduce_only` is honoured on
-        Kraken futures and nowhere else, so the pair would otherwise
-        submit a leveraged order with no clamp — a sell larger than the
-        held position then opens a margin short. Parity with an ungated
-        REST is not the right target for a surface an autonomous agent
-        drives.
+        `trade_commands.reduce_only` column, and is forwarded on both
+        Kraken spot paths as well as Kraken futures.
 
-        **`paper` is the exception and is accepted, not refused.** It
-        ignores the flag exactly as spot does, but there is no real
-        position to overshoot and no real money, so the only cost is
-        rehearsal fidelity. Refusing would block the default practice
-        venue for a workflow that becomes legitimate the moment it moves
-        to Kraken futures, so the order goes through and the inertness
-        is disclosed instead.
+    **Modifiers are fail-closed: a flag either reaches the exchange or
+    the submit is refused.** Persisting an order the caller believes is
+    constrained and then submitting it unconstrained is the failure this
+    rules out — a caller told nothing went wrong has no way to learn the
+    protection was dropped.
+
+    Which flags survive is a property of **our client**, never of the
+    exchange, and the refusal messages say so. Kraken spot's API accepts
+    all three; what varies is what Snapper sends:
+
+    | flag | `kraken` | `kraken_futures` | `kraken_equities` | `walutomat` | `paper` |
+    |---|---|---|---|---|---|
+    | `leverage` | yes | no | no | no | no |
+    | `post_only` | limit, stop_limit | limit | no | no | no |
+    | `reduce_only` | yes, margin only | yes | no | no | no |
+
+    A venue absent from that table honours nothing, so a venue added
+    later cannot silently inherit permission to accept a flag its client
+    drops.
+
+    The refusals, and why each is worded the way it is:
+
+    - `order_flags_unsupported` — the venue's client does not send the
+        flag. The message says **Snapper** does not send it, never that
+        the exchange lacks the feature, because a caller acting on the
+        latter would go hunting for a different venue when the real
+        remedy is a different client.
+    - `leverage_not_an_order_parameter` — `kraken_futures` only. Futures
+        trade on leverage; it is simply not an order field there but a
+        per-symbol account preference, set separately and outliving the
+        order. Snapper does not set it on the caller's behalf: it is
+        account-wide for the symbol, so one manual order would silently
+        re-lever every other position on it. A refusal is recoverable;
+        a silent re-lever is not.
+    - `post_only_order_type_unsupported` — maker-only constrains an
+        order that rests on the book, so it cannot apply to one that
+        must take liquidity. The two Kraken venues differ on exactly
+        this: a spot `stop_limit` reaches the wire with `oflags=post`,
+        while a futures `stop_limit` maps to `stp` and the flag is
+        dropped with no error, which is why the gate keys on the
+        (venue, order type) pair.
+    - `reduce_only_requires_margin` — `kraken` only. Spot binds the
+        clamp to a margin position and a cash order has none. The rule
+        is venue-scoped on purpose: `kraken_futures` carries
+        `reduceOnly` with no leverage precondition, and applying the
+        spot rule there would make the flag unreachable in both
+        directions, since futures also refuse per-order leverage.
+
+        It is enforced at this boundary and deliberately **not** in the
+        exchange client, which serves every producer of the flag. The
+        strategy engine's closing order, the paired-execution guard
+        scanner's protective flatten, and the bracket and trailing-stop
+        exits all emit `reduce_only` with no leverage; a client-side
+        version of the rule would refuse every one of them, leaving spot
+        positions that can be opened and never closed.
+
+    **`paper` is the exception and is accepted, not refused.** It reads
+    none of the flags, but there is no real position to overshoot and no
+    real money, so the only cost is rehearsal fidelity. Refusing would
+    block the default practice venue for a workflow that becomes
+    legitimate the moment it moves to Kraken, so the order goes through
+    and the inertness is disclosed instead.
+
+    REST applies none of these gates and is unchanged. Parity with an
+    ungated REST is not the right target for a surface an autonomous
+    agent drives.
     - **`inert_flags`** on every accepted envelope lists the requested
-        flags the resolved venue will not act on — `post_only` always,
-        and `reduce_only` when submitting to `paper`. The key is always
+        flags the resolved venue will not act on. Now that every other
+        venue refuses instead, `paper` is the only thing that can make
+        this non-empty — which is exactly why the field survives the
+        move to fail-closed rather than becoming dead. The key is always
         present and is an empty list when every requested flag is
         honoured, so a caller can read it unconditionally and can tell
         "nothing inert" apart from "an older server that never

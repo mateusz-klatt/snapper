@@ -96,6 +96,7 @@ def order_request_from_command(cmd: TradeCommandRow) -> OrderRequestData:
         strategy_tag=tag,
         leverage=cmd["leverage"],
         reduce_only=cmd["reduce_only"],
+        post_only=cmd.get("post_only", False),
         wallet_public_id=cmd.get("wallet_public_id") or "",
         operator_public_id=cmd.get("operator_public_id"),
         user_public_id=cmd.get("user_public_id"),

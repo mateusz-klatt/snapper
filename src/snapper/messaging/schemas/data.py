@@ -627,6 +627,11 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
         signaled_at: Original signal timestamp (optional).
         leverage: Margin leverage (None for spot, integer for margin).
         reduce_only: True when closing an existing position.
+        post_only: True when the order must not take liquidity. Honoured by
+            the Kraken spot and futures clients; venues that cannot forward
+            it refuse the flag rather than silently dropping it, because a
+            caller who believes an order is maker-only and is wrong pays
+            taker fees on a fill they meant to avoid.
     """
 
     type: Literal["order_request"] = "order_request"
@@ -644,6 +649,7 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     strategy_tag: str | None = None
     leverage: int | None = None
     reduce_only: bool = False
+    post_only: bool = False
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None

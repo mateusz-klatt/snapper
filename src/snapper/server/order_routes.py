@@ -645,6 +645,7 @@ async def create_order(
                     "stop_price": body.stop_price,
                     "leverage": body.leverage,
                     "reduce_only": body.reduce_only,
+                    "post_only": body.post_only,
                     "status": TradeCommandStatusEnum.CREATED,
                     "created_at": now,
                     "correlation_id": plan_public_id,

@@ -1101,6 +1101,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             ccxt_params["leverage"] = request.leverage
         if request.post_only:
             ccxt_params["postOnly"] = True
+        if request.reduce_only:
+            ccxt_params["reduceOnly"] = True
         ccxt_type = request.type.value
         if request.type in _STOP_ORDER_TYPES:
             ccxt_params["stopLossPrice"] = _require_stop_price(request)
@@ -1303,6 +1305,19 @@ class KrakenExchangeClient(ExchangeClientBase):
         ``extra_params or None`` guard below can no longer collapse to
         ``None``.
 
+        ``reduce_only`` is sent as the STRING ``"true"``, not the bool
+        ``True``, and that is deliberate. The SDK writes the value
+        straight into its params dict and the transport urlencodes it,
+        so a Python bool reaches Kraken as the literal ``True`` with a
+        capital T. The venue already receives ``reduce_only=False`` on
+        every native order — the SDK emits the key unconditionally —
+        which proves only that an unrecognised literal is read as FALSE,
+        never that ``True`` is read as true. Guessing wrong here is the
+        one failure this flag cannot tolerate: a leveraged order placed
+        with no clamp while the envelope reports success. ``ccxt`` sends
+        the lowercase string for exactly this reason, so both transports
+        now put the same bytes on the wire.
+
         Args:
             request: Order parameters.
 
@@ -1333,6 +1348,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                 kraken_params["leverage"] = str(request.leverage)
             if request.post_only:
                 kraken_params["oflags"] = "post"
+            if request.reduce_only:
+                kraken_params["reduce_only"] = "true"
             extra_params: dict[str, Any] = {"cl_ord_id": request.client_order_id}
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"

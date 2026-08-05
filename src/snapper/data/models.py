@@ -1013,6 +1013,9 @@ class Order(TemporalMixin, Base):
     reduce_only: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    post_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
 
 
@@ -3255,6 +3258,7 @@ class TradeCommand(TemporalMixin, Base):
     stop_price: Mapped[float | None] = mapped_column(Float)
     leverage: Mapped[int | None] = mapped_column(Integer)
     reduce_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    post_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     status: Mapped[str] = mapped_column(String(32))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(String(512))

@@ -49,6 +49,7 @@ from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
+from snapper.mcp.tools import _honoured_manual_order_flags
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
 from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
@@ -273,6 +274,28 @@ def _stub_mcp_guard() -> Guard:
         assigned_public_id="guard-pid",
         submitted_notional_usd=77.25,
     )
+
+
+def _price_fields_for(order_type: str) -> dict[str, float]:
+    """Build the price fields the manual-order rule demands for an order type.
+
+    The rule is asymmetric and rejects the wrong shape before any flag is
+    examined, so a modifier test that varied the order type without varying
+    these would fail on validation and never reach the gate it is testing.
+
+    Args:
+        order_type: One of ``market``, ``limit``, ``stop``, ``stop_limit``.
+
+    Returns:
+        The price fields to merge into the tool payload — ``market`` carries
+        none, since the field is a limit price under this contract.
+    """
+    fields: dict[str, float] = {}
+    if order_type in {"limit", "stop_limit"}:
+        fields["price"] = 50000.0
+    if order_type in {"stop", "stop_limit"}:
+        fields["stop_price"] = 49000.0
+    return fields
 
 
 class TestSubmitManualOrderTool:
@@ -957,6 +980,7 @@ class TestSubmitManualOrderTool:
         modifiers: dict[str, object],
         exchange: str = "kraken",
         paper_wallet: bool = False,
+        order_type: str = "limit",
     ) -> tuple[AsyncMock, dict[str, Any]]:
         """Dispatch a baseline limit submit plus optional execution modifiers.
 
@@ -967,9 +991,13 @@ class TestSubmitManualOrderTool:
             modifiers: Extra tool arguments merged over the baseline
                 payload — the optional ``leverage`` / ``post_only`` /
                 ``reduce_only`` parameters under test.
-            exchange: Venue to submit against. Overridden by the
-                ``reduce_only`` tests because that flag is refused on
-                every real venue whose client does not forward it.
+            exchange: Venue to submit against. Overridden by the flag
+                tests, because which modifiers survive is a property of
+                the venue's client rather than of the request.
+            order_type: Order type to submit. Overridden by the
+                ``post_only`` tests, because maker-only reaches the wire
+                only on the resting types and the two Kraken venues
+                disagree on which those are.
             paper_wallet: Make the scoped wallet a paper wallet. Required
                 whenever ``exchange="paper"``, because the tool derives
                 mode from the venue and then requires mode and wallet to
@@ -1000,11 +1028,11 @@ class TestSubmitManualOrderTool:
                 "instrument": "BTC-USD",
                 "instrument_public_id": "inst-1",
                 "side": "buy",
-                "order_type": "limit",
+                "order_type": order_type,
                 "quantity": 0.5,
                 "wallet_public_id": "wallet-1",
                 "idempotency_key": "idem-modifier",
-                "price": 50000.0,
+                **_price_fields_for(order_type),
                 **modifiers,
             },
         )
@@ -1056,20 +1084,27 @@ class TestSubmitManualOrderTool:
         assert "post_only" not in plan_row["params"]
 
     @pytest.mark.asyncio
-    async def test_post_only_reaches_plan_params_only(self) -> None:
-        """Post-only is plan metadata; it has no command column to reach.
+    async def test_post_only_reaches_the_command_row_and_the_plan(self) -> None:
+        """Post-only must reach the DURABLE row, or the venue never sees it.
 
         Given: a submit carrying ``post_only=True``,
         When: ``submit_manual_order`` runs,
-        Then: the plan params carry ``post_only`` and the command row
-            gains no such key — ``trade_commands`` has no
-            ``post_only`` column on either surface.
+        Then: the flag lands on BOTH the plan params and the command row.
+
+        The command row is the load-bearing half. An earlier version of this
+        test asserted the opposite — that ``post_only`` reaches plan params
+        ONLY — and in doing so pinned a real defect: the executor builds its
+        venue request from the command row, so a flag that stopped at the plan
+        was inert. A caller asking for maker-only placement got an order that
+        could take liquidity and pay taker fees, which is the precise outcome
+        the flag exists to prevent. Migration 0051 gave it a column beside
+        ``leverage`` and ``reduce_only``, which already travelled that path.
         """
         repo, _ = await self._dispatch_manual_order_with_modifiers({"post_only": True})
         plan_row = repo.insert_execution_plan.await_args.args[0]
         cmd_row = repo.insert_trade_command.await_args.args[0]
         assert plan_row["params"]["post_only"] is True
-        assert "post_only" not in cmd_row
+        assert cmd_row["post_only"] is True
         assert cmd_row["leverage"] is None
         assert cmd_row["reduce_only"] is False
 
@@ -1114,38 +1149,139 @@ class TestSubmitManualOrderTool:
         assert cmd_row["leverage"] is None
 
     @pytest.mark.asyncio
-    async def test_reduce_only_is_refused_on_a_venue_that_ignores_it(self) -> None:
-        """Kraken spot cannot honour reduce-only, so the tool refuses instead.
+    async def test_reduce_only_is_refused_where_snapper_does_not_send_it(self) -> None:
+        """A venue whose client drops the flag refuses instead of submitting unclamped.
 
-        Given: a submit carrying ``reduce_only=True`` against ``kraken``,
+        Given: a submit carrying ``reduce_only=True`` against ``walutomat``,
         When: ``submit_manual_order`` runs,
-        Then: it fails with ``reduce_only_unsupported`` and writes
-            neither a plan nor a command.
+        Then: it fails with ``order_flags_unsupported`` and writes neither a
+            plan nor a command.
 
-        The flag is read only by ``kraken_futures``; the spot, equities,
-        Walutomat and paper clients never reference it. Accepting it on a
-        REAL venue would persist an order the operator believes is
-        clamped and then submit it unclamped — and because ``leverage``
-        is forwarded on spot and nowhere else, the pair
-        ``leverage + reduce_only`` would submit a leveraged order with
-        no clamp, so a sell larger than the position opens a margin
-        short. REST does not gate this, and this test states that
-        parity with an ungated REST is deliberately not the target for
-        a surface an autonomous agent drives.
+        This test used to assert the refusal on ``kraken``, and that was
+        WRONG about the exchange. Kraken spot's API accepts reduce-only —
+        ``kraken.spot`` exposes it on ``create_order`` — so the old refusal
+        told the caller the venue could not do something it does. Only our
+        client failed to send it, which is now fixed. The refusal survives
+        only where it is true: Walutomat and Kraken equities reference none
+        of these flags.
 
-        Paper is the one exception and is covered separately below: it
-        ignores the flag too, but nothing there can be overshot into, so
-        the order is accepted and the inertness disclosed instead.
+        Note the wording the envelope must carry. It says SNAPPER does not
+        send the flag, never that the exchange lacks the feature, because a
+        caller acting on the latter would go looking for a different venue
+        when the real remedy is a different client.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True}, exchange="walutomat"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "order_flags_unsupported"
+        assert envelope["details"]["flags"] == ["reduce_only"]
+        assert envelope["details"]["supported_exchanges"]["reduce_only"] == [
+            "kraken",
+            "kraken_futures",
+        ]
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bare_reduce_only_is_accepted_on_futures(self) -> None:
+        """Futures take reduce-only with no leverage, and must not be caught by the spot rule.
+
+        Given: a submit carrying ``reduce_only=True`` and no leverage against
+            ``kraken_futures``,
+        When: ``submit_manual_order`` runs,
+        Then: the order is accepted and the command row carries the flag.
+
+        This pins a deadlock that an earlier design would have shipped. Spot
+        binds the reduce-only clamp to a margin position, so spot refuses the
+        flag without leverage. Applying that rule venue-wide would refuse the
+        bare futures call — and refusing WITH leverage too, since futures take
+        no per-order leverage. Both directions closed, and the single most
+        legitimate use of the flag in the whole system — de-risking an open
+        futures position — becomes unreachable.
+
+        ``kraken_futures.py`` sets ``reduceOnly`` on any order type with no
+        leverage precondition whatsoever, so the acceptance here is what the
+        venue actually does.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True}, exchange="kraken_futures"
+        )
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert cmd_row["reduce_only"] is True
+        assert cmd_row["leverage"] is None
+
+    @pytest.mark.asyncio
+    async def test_spot_reduce_only_without_leverage_is_refused(self) -> None:
+        """Cash spot has no margin position for the clamp to bind to.
+
+        Given: a submit carrying ``reduce_only=True`` and no leverage against
+            ``kraken``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``reduce_only_requires_margin``.
+
+        The venue attaches reduce-only to a leveraged position; a cash order
+        has none. The rule is enforced HERE and deliberately not in the
+        exchange client, because the client serves every producer of the flag,
+        not just this tool. The strategy engine's closing order, the paired
+        execution guard scanner's protective flatten, and the bracket and
+        trailing-stop exits all emit ``reduce_only`` with no leverage. A
+        client-side version of this rule would refuse every one of them,
+        leaving spot positions that can be opened and never closed.
         """
         repo, result = await self._dispatch_manual_order_with_modifiers(
             {"reduce_only": True}, exchange="kraken"
         )
         envelope = _decode_envelope(result)
-        assert envelope["success"] is False
-        assert envelope["error_code"] == "reduce_only_unsupported"
-        assert envelope["details"]["exchange"] == "kraken"
-        assert envelope["details"]["supported_exchanges"] == ["kraken_futures"]
-        repo.insert_execution_plan.assert_not_awaited()
+        assert envelope["error_code"] == "reduce_only_requires_margin"
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_leveraged_spot_reduce_only_is_accepted(self) -> None:
+        """With margin on, spot takes the clamp and it reaches the command row.
+
+        Given: a submit carrying ``reduce_only=True`` and ``leverage=2``
+            against ``kraken``,
+        When: ``submit_manual_order`` runs,
+        Then: the order is accepted and both modifiers reach the command row.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True, "leverage": 2}, exchange="kraken"
+        )
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert cmd_row["reduce_only"] is True
+        assert cmd_row["leverage"] == 2
+
+    @pytest.mark.asyncio
+    async def test_leverage_on_futures_is_refused_without_calling_it_unsupported(
+        self,
+    ) -> None:
+        """Futures trade on leverage; it is simply not an order parameter there.
+
+        Given: a submit carrying ``leverage=2`` against ``kraken_futures``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``leverage_not_an_order_parameter`` and the message
+            does NOT claim the venue lacks leverage.
+
+        The distinction is the whole point of the refusal. ``sendorder`` has no
+        leverage field — leverage there is a per-symbol account preference set
+        through a separate call and outliving the order. A message saying the
+        venue does not support leverage would be false, and would send an
+        autonomous caller hunting for another venue when the position it wants
+        is perfectly available on this one.
+
+        Snapper does not set that preference on the caller's behalf, because it
+        is account-wide for the symbol and persists: one manual order would
+        silently re-lever every other position on it.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"leverage": 2}, exchange="kraken_futures"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "leverage_not_an_order_parameter"
+        assert "does not support" not in envelope["message"]
+        assert "trades on leverage" in envelope["message"]
         repo.insert_trade_command.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1173,22 +1309,127 @@ class TestSubmitManualOrderTool:
         assert repo.insert_trade_command.await_args.args[0]["reduce_only"] is True
 
     @pytest.mark.asyncio
-    async def test_post_only_is_disclosed_as_inert_on_every_venue(self) -> None:
-        """``post_only`` is persisted but read by nothing, so it is always disclosed.
+    async def test_post_only_is_not_disclosed_as_inert_where_the_venue_honours_it(
+        self,
+    ) -> None:
+        """Kraken forwards post-only now, so disclosing it as inert would lie.
 
-        Given: a submit carrying ``post_only=True``,
+        Given: a submit carrying ``post_only=True`` against ``kraken``,
         When: ``submit_manual_order`` runs,
-        Then: it returns the accepted envelope naming ``post_only`` in
-            ``inert_flags``.
+        Then: ``inert_flags`` is empty.
 
-        No executor reads the key: ``messaging/executors/base.py`` never
-        references it. It is recorded on the plan params for forensics and
-        for REST parity, which is worth keeping — but a caller who set it
-        and saw success would otherwise conclude maker-only placement was
-        requested of the venue, and it was not.
+        This assertion is the inverse of the one it replaces, and the inversion
+        is the point. ``post_only`` genuinely WAS inert everywhere: it reached
+        the execution plan's JSON params while the executor builds its venue
+        request from the command row, so nothing downstream could act on it.
+        Migration 0051 carried it through, and Kraken spot has always been able
+        to send it (``postOnly`` over ccxt, ``oflags=post`` natively).
+
+        A stale "inert" disclosure is the more dangerous direction of the two:
+        a caller told the constraint was ignored may place a second order to
+        compensate for protection the first one actually had.
         """
         _, result = await self._dispatch_manual_order_with_modifiers({"post_only": True})
-        assert result["inert_flags"] == ["post_only"]
+        assert result["inert_flags"] == []
+
+    @pytest.mark.asyncio
+    async def test_post_only_is_refused_where_it_is_dropped(self) -> None:
+        """A venue that never reads the flag refuses rather than accepting quietly.
+
+        Given: a submit carrying ``post_only=True`` against ``walutomat``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``order_flags_unsupported``.
+
+        This replaces an assertion that the flag was merely DISCLOSED here.
+        Disclosure was the right answer while nothing anywhere honoured the
+        flag; once it genuinely reaches Kraken, a venue that drops it is
+        submitting an order without protection the caller asked for, and that
+        is a refusal.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"post_only": True}, exchange="walutomat"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_flags_unsupported"
+        assert envelope["details"]["flags"] == ["post_only"]
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_only_is_refused_on_a_taker_order_type(self) -> None:
+        """Maker-only cannot apply to an order that must take liquidity.
+
+        Given: a submit carrying ``post_only=True`` with ``order_type='market'``
+            against ``kraken``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``post_only_order_type_unsupported``.
+
+        The venue set alone is too coarse a gate here. Kraken spot honours
+        post-only, so the venue check passes, and the flag would then be
+        persisted on an order that cannot rest on the book.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"post_only": True}, exchange="kraken", order_type="market"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "post_only_order_type_unsupported"
+        assert envelope["details"]["supported_order_types"] == ["limit", "stop_limit"]
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_only_on_a_spot_stop_limit_is_accepted(self) -> None:
+        """Spot stop-limit rests on the book, so the flag survives to the wire.
+
+        Given: a submit carrying ``post_only=True`` with
+            ``order_type='stop_limit'`` against ``kraken``,
+        When: ``submit_manual_order`` runs,
+        Then: the order is accepted.
+
+        Worth pinning because it is the case a coarser rule gets wrong. A
+        stop-limit reaches ccxt as type ``limit`` and comes out with
+        ``oflags=post`` on the wire, so refusing it — and telling the caller
+        the transport would have rejected it — would both block working
+        behaviour and misstate what the transport does.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers(
+            {"post_only": True}, exchange="kraken", order_type="stop_limit"
+        )
+        assert repo.insert_trade_command.await_args.args[0]["post_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_post_only_on_a_futures_stop_limit_is_refused(self) -> None:
+        """Futures rewrite only the plain limit type, so the flag vanishes here.
+
+        Given: a submit carrying ``post_only=True`` with
+            ``order_type='stop_limit'`` against ``kraken_futures``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``post_only_order_type_unsupported``.
+
+        The two venues differ on exactly this input, which is why the gate is
+        keyed on the pair and not on the order type alone. Futures carry
+        post-only by rewriting the order type ``lmt`` to ``post``; a stop-limit
+        maps to ``stp`` and the flag is dropped with no error at all.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"post_only": True}, exchange="kraken_futures", order_type="stop_limit"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "post_only_order_type_unsupported"
+        assert envelope["details"]["supported_order_types"] == ["limit"]
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_unenumerated_venue_honours_nothing(self) -> None:
+        """The capability table fails closed for a venue nobody listed.
+
+        Given: a venue absent from the honoured-flag table,
+        When: the honoured set is read,
+        Then: it is empty.
+
+        Pinned as a property rather than a convention, because the hazard is a
+        venue added later inheriting permission to accept a flag its client
+        drops. The default must make silence mean "sends nothing".
+        """
+        assert _honoured_manual_order_flags("some_venue_added_next_year") == frozenset()
 
     @pytest.mark.asyncio
     async def test_an_order_whose_flags_are_all_honoured_discloses_nothing(self) -> None:

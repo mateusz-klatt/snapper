@@ -1796,6 +1796,7 @@ class TradeCommandRow(TypedDict):
     stop_price: float | None
     leverage: int | None
     reduce_only: bool
+    post_only: bool
     status: str
     attempt_count: int
     last_error: str | None
@@ -2062,6 +2063,7 @@ class TradeCommandInsertRow(TypedDict, total=False):
     stop_price: float | None
     leverage: int | None
     reduce_only: bool
+    post_only: bool
     status: str
     created_at: datetime
     correlation_id: str

@@ -21895,6 +21895,7 @@ class SQLAlchemyRepository(Repository):
             "stop_price": cmd.stop_price,
             "leverage": cmd.leverage,
             "reduce_only": cmd.reduce_only,
+            "post_only": cmd.post_only,
             "status": cmd.status,
             "attempt_count": cmd.attempt_count,
             "last_error": cmd.last_error,

@@ -10367,6 +10367,45 @@ class TestCoreToWireOrderRequest:
         assert limit.type is ExchangeOrderTypeEnum.LIMIT
         assert limit.price == 50000.0
 
+    def test_execution_modifiers_reach_the_wire_contract(self) -> None:
+        """All three modifiers must survive the core-to-wire translation.
+
+        Given: a CORE request carrying leverage, reduce_only and post_only,
+        When: translated to the venue wire contract,
+        Then: all three appear on the wire request.
+
+        ``post_only`` is the one that was silently dropped here. Every venue
+        client was already able to send it — Kraken spot as ``postOnly`` over
+        ccxt and ``oflags=post`` natively, Kraken futures by converting the
+        order type ``lmt`` to ``post`` — but this translation never copied it,
+        so a caller asking for maker-only placement got an order that could
+        take liquidity and pay the taker fee it was trying to avoid. The
+        omission was invisible because the flag still reached the execution
+        plan's JSON params, which nothing downstream reads.
+        """
+        wire = base_module._exchange_order_request_from_core(
+            self._order(
+                order_type="limit", price=50000.0, leverage=3, reduce_only=True, post_only=True
+            ),
+            "wallet-1",
+        )
+        assert wire.leverage == 3
+        assert wire.reduce_only is True
+        assert wire.post_only is True
+
+    def test_modifiers_default_to_inert_on_the_wire(self) -> None:
+        """A request that asks for nothing must not assert anything.
+
+        Given: a CORE request with no modifiers set,
+        When: translated to the wire contract,
+        Then: leverage is absent and both booleans are false, so the venue
+            receives a plain order rather than an implicit constraint.
+        """
+        wire = base_module._exchange_order_request_from_core(self._order(), "wallet-1")
+        assert wire.leverage is None
+        assert wire.reduce_only is False
+        assert wire.post_only is False
+
     def test_stop_types_map_to_wire_and_thread_trigger(self) -> None:
         """Stop types translate to wire values WITH the trigger (#156).
 
