@@ -106,6 +106,16 @@ _TICK_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TICK_WRITER_SHUTDOWN_POLL_S = 0.5
 _tick_writer_drop_counters: dict[str, list[float]] = {}
 
+_SWEEP_YIELD_EVERY: Final[int] = 50
+"""Flat bars published between cooperative yields during a minute sweep.
+
+A sweep can run to roughly 1500 symbols in one pass. Without a yield the
+whole pass occupies the event loop, and the client-side candle queue uses
+drop-oldest — so a slow sweep would evict REAL bars in order to publish flat
+ones, which is exactly backwards. Yielding lets the 1m consumer drain while
+the sweep is still going.
+"""
+
 _CANDLE_WRITE_QUEUE_MAX = 20_000
 _CANDLE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _CANDLE_WRITER_SHUTDOWN_POLL_S = 0.5
@@ -2269,8 +2279,42 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         emitter = self._minute_emitter
         if emitter is None or timeframe != "1m":
             return
+        for index, flat in enumerate(emitter.due_flat_bars(wall_clock())):
+            await self._publish_one_flat_bar(flat, exchange, emitter)
+            if index % _SWEEP_YIELD_EVERY == _SWEEP_YIELD_EVERY - 1:
+                await asyncio.sleep(0)
+
+    async def _publish_one_flat_bar(
+        self,
+        flat: CandleUpdate,
+        exchange: MarketDataExchange,
+        emitter: MinuteCompletionEmitter,
+    ) -> None:
+        """Fold and publish one flat bar, absorbing any failure it raises.
+
+        The guard is not defensive padding. ``_candle_loop``'s handler is
+        TERMINAL — it logs and lets the ``while`` loop exit — so a single
+        raise anywhere in a sweep of roughly 1500 symbols would permanently
+        stop 1m candle consumption for the whole venue until the liveness
+        watchdog noticed. Trading a lost bar for a dead feed is never the
+        right exchange, so each bar is isolated and the remaining symbols
+        still publish.
+
+        The loss is genuinely permanent and is recorded as such: the symbol's
+        floor advanced when the bar was BUILT, so the next sweep refuses this
+        minute as already emitted. ``mark_publish_failed`` is the only trace
+        it leaves.
+
+        Args:
+            flat: The flat bar to fold and publish.
+            exchange: Data exchange stamped on outbound/persisted rows.
+            emitter: Emitter to notify when the publish fails.
+
+        Returns:
+            None.
+        """
         aggregator = self._candle_aggregator
-        for flat in emitter.due_flat_bars(wall_clock()):
+        try:
             synthesized: list[tuple[str, CandleUpdate]] = (
                 [] if aggregator is None else aggregator.fold(flat)
             )
@@ -2278,6 +2322,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             await self._publish_synthesized_candle(flat, exchange, "1m")
             for tf_label, synth in synthesized:
                 await self._publish_synthesized_candle(synth, exchange, tf_label)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            emitter.mark_publish_failed()
+            logger.error(
+                f"{self._get_exchange_name()}: flat bar publish failed for {flat.symbol}: {exc}"
+            )
 
     async def _ensure_instrument(self, native_symbol: str) -> str | None:
         """Resolve instrument_public_id for a native symbol, using cache.

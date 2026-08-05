@@ -1062,9 +1062,17 @@ Key properties:
     the instrument did not trade. The bar has the same shape as the forward-fill
     bar above (`open = high = low = close = vwap = prior close`, `volume = 0`,
     `trades = 0`, `complete = true`) and is published and persisted through the
-    same synthesized path, so its row carries `source = synthesized`;
-    `trades = 0 AND volume = 0` distinguishes it from every venue bar without a
-    schema change. Emission is gated on live evidence and every gate is fail-safe
+    same synthesized path, so its row carries `source = synthesized`. The
+    queryable signature is therefore
+    `timeframe = '1m' AND source = 'synthesized' AND trades = 0 AND volume = 0`,
+    which needs no schema change — but **all four conjuncts are required**.
+    `trades = 0 AND volume = 0` alone is NOT a discriminator: walutomat emits
+    every real 1m bar with `volume = 0` and `trades = 0` (a genuine tick-mean
+    price, no reported size), so the shorter test reads that venue's whole
+    corpus as flat no-trade bars. The `source` clause is what makes the rule
+    sound corpus-wide, and `timeframe` is what separates these from the
+    higher-TF rollups, which are also `synthesized`.
+    Emission is gated on live evidence and every gate is fail-safe
     — no evidence means NO row, never a guessed one:
     - the venue must have been witnessed by inbound public frames continuously
       from just before the minute opened to just after it closed (ticks, trades

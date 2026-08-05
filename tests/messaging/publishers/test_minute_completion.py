@@ -8,6 +8,7 @@ other refusal test exists for the same reason — degradation is always toward
 today's sparse plane, never toward a fabricated bar.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -31,6 +32,7 @@ from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDat
 from snapper.messaging.publishers.kraken_futures import KrakenFuturesMarketDataPublisher
 from snapper.messaging.publishers.minute_completion import EMITTED
 from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
+from snapper.messaging.publishers.minute_completion import PUBLISH_FAILED
 from snapper.messaging.publishers.minute_completion import SKIP_ALREADY_EMITTED
 from snapper.messaging.publishers.minute_completion import SKIP_FEED_BREAK
 from snapper.messaging.publishers.minute_completion import SKIP_NOT_OBSERVED
@@ -1404,6 +1406,106 @@ class TestPublisherSweep:
         self._sweep_clock(monkeypatch, _BASE)
         await publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
         assert publisher._candle_write_queue.qsize() == 0
+
+    @pytest.mark.asyncio
+    async def test_one_failed_bar_does_not_stop_the_sweep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising publish must never take the candle loop down with it.
+
+        Given three armed symbols where the middle one raises on publish,
+        When the sweep runs,
+        Then the sweep completes, the other two symbols still publish, and
+            the failure is counted.
+
+        ``_candle_loop``'s exception handler is TERMINAL — it logs and lets
+        the while loop exit — so without the per-bar guard a single raise in
+        a sweep of ~1500 symbols would permanently stop 1m candle consumption
+        for the whole venue. Trading one lost bar for a dead feed is never the
+        right exchange.
+        """
+        symbols = ("A-USD", "B-USD", "C-USD")
+        publisher = self._publisher()
+        publisher._minute_emitter = _make_emitter(
+            roster=_Roster(set(symbols)), settle=_SPOT_SETTLE_S
+        )
+        emitter = publisher._minute_emitter
+        _witness_live_around(emitter, _BASE)
+        for symbol in symbols:
+            emitter.observe_real_bar(build_flat_minute_bar(symbol, _begin(_BASE - _MINUTE), 105.0))
+        emitter.due_flat_bars(float(_BASE) + _SPOT_SETTLE_S + 2.0)
+        published: list[str] = []
+
+        async def _publish(candle: CandleUpdate, *_args: object) -> None:
+            if candle.symbol == "B-USD":
+                raise RuntimeError("zmq send failed")
+            published.append(candle.symbol)
+
+        monkeypatch.setattr(publisher, "_publish_synthesized_candle", _publish)
+        self._sweep_clock(monkeypatch, _BASE)
+        await publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        assert sorted(published) == ["A-USD", "C-USD"]
+        assert emitter.counters()[PUBLISH_FAILED] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_bars_minute_is_gone_and_says_so(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The loss is permanent, so the counter is the only record of it.
+
+        Given a symbol whose publish raised on the swept minute,
+        When the same minute is swept again,
+        Then nothing is republished — the floor advanced when the bar was
+            BUILT, so the retry is refused as already emitted.
+
+        Pinned rather than fixed: advancing the floor on publish instead of on
+        build would need the emitter to hold bars until the publisher confirms
+        them. Until that exists, ``publish_failed`` must stay a distinct
+        counter and must never be folded into a generic error tally.
+        """
+        publisher = self._publisher()
+        self._prime(publisher, _BASE, with_close=True)
+
+        async def _boom(*_args: object) -> None:
+            raise RuntimeError("zmq send failed")
+
+        monkeypatch.setattr(publisher, "_publish_synthesized_candle", _boom)
+        self._sweep_clock(monkeypatch, _BASE)
+        await publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        emitter = publisher._minute_emitter
+        assert emitter is not None
+        assert emitter.counters()[PUBLISH_FAILED] == 1
+        recorder = _Recorder()
+        monkeypatch.setattr(publisher, "_publish_message", recorder)
+        monkeypatch.setattr(publisher, "_ensure_instrument", _resolve_instrument)
+        await publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        assert recorder.published == []
+
+    @pytest.mark.asyncio
+    async def test_sweep_cancellation_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shutdown must not be swallowed by the per-bar guard.
+
+        Given a publish that raises CancelledError,
+        When the sweep runs,
+        Then the cancellation propagates rather than being counted as a
+            publish failure — a guard that eats CancelledError would make the
+            publisher unstoppable.
+        """
+        publisher = self._publisher()
+        self._prime(publisher, _BASE, with_close=True)
+
+        async def _cancelled(*_args: object) -> None:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(publisher, "_publish_synthesized_candle", _cancelled)
+        self._sweep_clock(monkeypatch, _BASE)
+        with pytest.raises(asyncio.CancelledError):
+            await publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        emitter = publisher._minute_emitter
+        assert emitter is not None
+        assert PUBLISH_FAILED not in emitter.counters()
 
     def test_sdk_reconnect_attempt_opens_a_feed_break(self) -> None:
         """The SDK reconnects internally; this hook is where we learn of it.

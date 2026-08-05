@@ -511,9 +511,16 @@ class CandleUpdate:
     in-session close), the plane is complete at every minute boundary. Outside
     that intersection — and on every other venue and every historical or replay
     path, where the 1m corpus stays inherently gappy — an absent minute means
-    "not observed", never "no trades". The positive assertion of the opposite is
-    a bar carrying ``trades == 0`` with ``volume == 0.0``: the venue was live,
-    the subscription was confirmed, and nobody traded.
+    "not observed", never "no trades".
+
+    The positive assertion of the opposite is a bar carrying
+    ``source == "synthesized"`` with ``trades == 0`` and ``volume == 0.0``: the
+    venue was live, the subscription was confirmed, and nobody traded. **All
+    three conjuncts are required, and the ``source`` one is what makes the rule
+    sound corpus-wide.** Walutomat emits every REAL 1m bar with ``volume=0.0``
+    and ``trades=0`` — it reports a genuine tick-mean price and no size at all —
+    so a reader testing only the volume and trade count would read the entire
+    walutomat corpus as flat no-trade bars.
     """
 
     symbol: str

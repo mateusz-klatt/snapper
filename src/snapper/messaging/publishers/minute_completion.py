@@ -95,6 +95,14 @@ SKIP_FEED_BREAK: Final[str] = "skipped_feed_break"
 SKIP_UNCONFIRMED: Final[str] = "skipped_subscription_unconfirmed"
 SKIP_ALREADY_EMITTED: Final[str] = "skipped_already_emitted"
 EMITTED: Final[str] = "emitted"
+PUBLISH_FAILED: Final[str] = "publish_failed"
+"""Bars built and counted as emitted whose publish then raised.
+
+Named separately because the per-symbol floor advances when a bar is BUILT,
+not when it is published, so a failed publish loses that minute permanently —
+the next sweep refuses it as already emitted. The counter is the only record
+that the minute existed, so it must never be folded into a generic error tally.
+"""
 
 
 @dataclass(slots=True)
@@ -468,6 +476,18 @@ class MinuteCompletionEmitter:
         for minute in tuple(self._observed):
             if minute < horizon:
                 del self._observed[minute]
+
+    def mark_publish_failed(self) -> None:
+        """Record that a built bar could not be published.
+
+        The publisher calls this when a flat bar it received from
+        :meth:`due_flat_bars` raises on the way out. The bar is already
+        counted in ``EMITTED`` and the symbol's floor has already advanced, so
+        the minute is gone — the next sweep refuses it as already emitted.
+        This counter is therefore the ONLY record that it existed, which is
+        why it is a distinct name rather than a generic error tally.
+        """
+        self._bump(PUBLISH_FAILED)
 
     def _bump(self, key: str, amount: int = 1) -> None:
         """Add to a cumulative sweep counter.
