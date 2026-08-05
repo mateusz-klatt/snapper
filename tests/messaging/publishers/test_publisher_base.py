@@ -1228,6 +1228,11 @@ async def test_detecting_a_stall_re_arms_the_candle_epoch(
     nobody observed. Ordering is the assertion that matters: a suspend that
     only landed after a recovery attempt would leave the flush loop free to
     fabricate for the whole duration of that attempt.
+
+    Both subsystems are armed at every break site, and the pairing is not
+    decorative: the epoch governs higher-TF forward fill, the feed-break window
+    governs 1m completion, and neither substitutes for the other. Merging the
+    two branches exposed a site that armed only one of them.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -1239,9 +1244,12 @@ async def test_detecting_a_stall_re_arms_the_candle_epoch(
     pub._attempt_liveness_recovery = AsyncMock(side_effect=_resume)
     aggregator = MagicMock()
     pub._candle_aggregator = aggregator
+    emitter = MagicMock()
+    pub._minute_emitter = emitter
     monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
     pub._spawn_recovery("stale")
     aggregator.suspend_across_feed_break.assert_called_once()
+    emitter.mark_feed_break.assert_called_once()
     pub._attempt_liveness_recovery.assert_not_awaited()
     await asyncio.gather(*pub._recovery_tasks)
 
@@ -1258,6 +1266,14 @@ async def test_confirmed_recovery_re_arms_the_epoch_again() -> None:
     while the feed was still dark would count as fully observed and could
     publish a truncated bar. Re-arming at confirmed resume closes it, and
     is why this is two calls rather than one.
+
+    The minute emitter is re-marked here for the same reason, and it is NOT
+    redundant with the detection-time mark. That bar lasts only
+    ``resubscribe_settle`` seconds while recovery backs off exponentially and
+    never abandons a dark feed, so on any outage longer than the settle the
+    first mark has already expired by the time data returns — leaving the
+    subscription-replay window uncovered, which is precisely when the
+    confirmed-trade roster is least trustworthy.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -1269,8 +1285,11 @@ async def test_confirmed_recovery_re_arms_the_epoch_again() -> None:
     pub._attempt_liveness_recovery = AsyncMock(side_effect=_resume)
     aggregator = MagicMock()
     pub._candle_aggregator = aggregator
+    emitter = MagicMock()
+    pub._minute_emitter = emitter
     await pub._run_recovery_under_lock("stale")
     aggregator.suspend_across_feed_break.assert_called_once()
+    emitter.mark_feed_break.assert_called_once()
 
 
 def test_suspending_without_an_aggregator_is_inert() -> None:
