@@ -230,7 +230,37 @@ _CANDLE_FLUSH_INTERVAL_S = 30.0
 
 Only started when ``candle_forward_fill`` is enabled. Well under the 300s
 smallest synthesizable timeframe, so a wall-clock-sealed or forward-filled
-higher-TF bar is at most ~one interval late."""
+higher-TF bar is at most ~one interval late.
+
+Applies to the higher-TF flush ALONE. The native-1m finalizer used to share it
+and now has :data:`_NATIVE_FINALIZE_INTERVAL_S`, because 10% of a 5-minute bar
+is half of a one-minute one."""
+
+_NATIVE_FINALIZE_INTERVAL_S: Final = 1.0
+"""Cadence for the native-1m finalizer's time-driven release.
+
+Deliberately NOT :data:`_CANDLE_FLUSH_INTERVAL_S`, which the two loops shared
+until the cost of that became measurable. Thirty seconds was sized against the
+300 s smallest synthesizable timeframe — 10% of that bar — and is still right
+for the loop it was written for. Reused for a 60 s bar it is half the bar and
+the DOMINANT term in how late a closed 1m candle becomes available: the grace
+below explains a few seconds, the cadence explained up to thirty.
+
+That matters beyond a chart. Strategies are to consume completed 1m bars, and a
+bar arriving tens of seconds into the following minute is a different input
+from one arriving at its start.
+
+One second is cheap here in a way it would not be in the sibling loop: this
+release walks held windows in memory and enqueues nothing when none has ended,
+whereas the higher-TF flush also drains repair signals and publishes. It also
+matches the cadence the margin arithmetic already assumes — see
+``MINUTE_SWEEP_MARGIN_S``, budgeted against Kraken's own 1 Hz finalize tick.
+
+Cutting the cadence does not make the bar prompt on its own. With minute
+completion active the grace is the settle chain plus
+:data:`_CANDLE_FLUSH_GRACE_S`, so worst-case release goes from roughly a minute
+to about 26 s and no further. Shrinking what remains is a bar-integrity
+decision about the settle, not a scheduling one."""
 
 _CANDLE_FLUSH_GRACE_S = 5.0
 """Wall-clock slack the flush subtracts from ``now`` before sealing a minute/window.
@@ -2891,9 +2921,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """Release native bars whose window has ended (illiquid/stalled symbols).
 
         Mirrors :meth:`_candle_flush_loop`'s scaffolding but for the native-1m
-        finalizer: every :data:`_CANDLE_FLUSH_INTERVAL_S` it asks the finalizer to
-        release any held window ended past the grace and enqueues each for
-        persistence. Runs for every native-candle publisher (not only
+        finalizer: every :data:`_NATIVE_FINALIZE_INTERVAL_S` it asks the
+        finalizer to release any held window ended past the grace and enqueues
+        each for persistence. It ticks far more often than the higher-TF flush
+        because a 1m bar is short enough that the cadence, not the grace, was
+        deciding how late it landed. Runs for every native-candle publisher (not only
         forward-fill venues) so a symbol that stops trading still gets its last
         bar persisted. One bad tick is logged and never kills the loop.
 
@@ -2903,7 +2935,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         exchange_label = self._get_exchange_name()
         while self.running:
             try:
-                await asyncio.sleep(_CANDLE_FLUSH_INTERVAL_S)
+                await asyncio.sleep(_NATIVE_FINALIZE_INTERVAL_S)
                 if not self.running:
                     break
                 if self._native_finalizer is None:

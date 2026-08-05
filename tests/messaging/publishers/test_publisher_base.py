@@ -50,8 +50,10 @@ from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.publishers.base import _CANDLE_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _DARK_FEED_EXIT_CEILING_S
 from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
+from snapper.messaging.publishers.base import _NATIVE_FINALIZE_INTERVAL_S
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
 from snapper.messaging.publishers.base import FeedDarkTooLongError
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -79,6 +81,7 @@ from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
+from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -11616,3 +11619,69 @@ async def test_seed_aggregator_defaults_now_to_current_time() -> None:
     pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
     await pub._seed_aggregator_from_db(["BTC-USD"], ["1d"])
     assert pub._candle_aggregator._buckets == {}
+
+
+async def _sleep_once(recorded: list[float], seconds: float, stop: Callable[[], None]) -> None:
+    """Record one slept interval and stop the loop that requested it.
+
+    Args:
+        recorded: Accumulator for the slept intervals.
+        seconds: Interval the loop asked to sleep.
+        stop: Callback clearing the loop's running flag.
+    """
+    recorded.append(seconds)
+    stop()
+
+
+@pytest.mark.asyncio
+async def test_the_two_flush_loops_keep_separate_cadences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each loop sleeps on its own constant, and that separation is the point.
+
+    Given: the native-1m finalize loop and the higher-TF flush loop,
+    When: each ticks once,
+    Then: the first sleeps ``_NATIVE_FINALIZE_INTERVAL_S`` and the second
+        ``_CANDLE_FLUSH_INTERVAL_S``.
+
+    They shared one constant until the cost showed up in production: 30 s was
+    sized against the 300 s smallest synthesizable timeframe, and reused for a
+    60 s bar it became the dominant term in how late a closed 1m candle landed.
+    Nothing else fails if a refactor merges them back — the loops still run and
+    coverage still sees both lines — so the cadence is pinned here explicitly.
+
+    The magnitude is bounded, not merely the order. Asserting only that the
+    native cadence is the smaller one passes at 29 s, which reintroduces almost
+    the whole latency this change exists to remove.
+
+    The bound is the arithmetic that justified the original constant — a
+    cadence within a tenth of its own bar — applied to each loop's actual bar.
+    That is deliberately not an equality against the literal: a test that
+    restates the value fails on any considered re-tune and gets edited
+    mechanically, which is how a pin rots. This one fails only when the value
+    stops satisfying the property that chose it.
+    """
+    slept: list[float] = []
+    native: Any = DummyPublisher(symbols=["BTC-USD"])
+    native.running = True
+    native._native_finalizer = None
+
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        lambda seconds: _sleep_once(slept, seconds, lambda: setattr(native, "running", False)),
+    )
+    await native._native_finalize_flush_loop(cast(Any, "kraken"))
+
+    higher: Any = DummyPublisher(symbols=["BTC-USD"])
+    higher.running = True
+    higher._candle_aggregator = None
+
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        lambda seconds: _sleep_once(slept, seconds, lambda: setattr(higher, "running", False)),
+    )
+    await higher._candle_flush_loop(cast(Any, "kraken"))
+
+    assert slept == [_NATIVE_FINALIZE_INTERVAL_S, _CANDLE_FLUSH_INTERVAL_S]
+    assert 0.1 * window_seconds("1m") >= _NATIVE_FINALIZE_INTERVAL_S
+    assert 0.1 * window_seconds("5m") >= _CANDLE_FLUSH_INTERVAL_S
