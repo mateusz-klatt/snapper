@@ -140,6 +140,7 @@ from snapper.application.services.candle_query import (
 from snapper.application.services.candle_query import CacheUnavailableError
 from snapper.application.services.candle_query import CandleQueryResult
 from snapper.application.services.candle_query import CandleQueryRow
+from snapper.application.services.candle_query import CandleReadPolicy
 from snapper.application.services.candle_query import fetch_cache_only as fetch_cache_only_candles
 from snapper.application.services.candle_query import fetch_candles as fetch_candle_query
 from snapper.application.services.candle_query import fetch_db_only as fetch_db_only_candles
@@ -1628,30 +1629,36 @@ def _resolve_zmq_heartbeat_interval_ms(request: Request) -> int:
         return _ZMQ_HEARTBEAT_INTERVAL_DEFAULT_MS
 
 
-def _resolve_candle_single_source(request: Request) -> bool:
-    """Resolve the candle single-source read flag from DB-aware settings.
+def _resolve_candle_read_policy(request: Request) -> CandleReadPolicy:
+    """Resolve the candle read policy from DB-aware settings.
 
     The cached :func:`get_settings` instance is bootstrap-only (no
-    ``SettingsService``), so reading the DB-backed ``candle_single_source``
-    directly off it raises ``RuntimeError``. The lifespan attaches the DB-aware
-    settings instance to ``request.app.state.settings``; fall back to OFF when
-    state is missing (e.g. ``TestClient`` setups that bypass the lifespan) so the
-    candle route never 500s on the flag lookup.
+    ``SettingsService``), so reading the DB-backed candle flags directly off it
+    raises ``RuntimeError``. The lifespan attaches the DB-aware settings
+    instance to ``request.app.state.settings``; fall back to the conservative
+    default policy when state is missing (e.g. ``TestClient`` setups that bypass
+    the lifespan) so the candle route never 500s on the lookup.
+
+    The fallback is deliberately the no-gap-fill default rather than the
+    configured value: if we cannot read settings we do not know what the
+    operator asked for, and serving the sparse truth is the safe answer.
 
     Args:
         request: FastAPI request whose app state we consult.
 
     Returns:
-        ``True`` to serve ``>1m`` reads single-source from the DB; ``False``
-        (default) to keep the on-read cache derivation.
+        The resolved :class:`CandleReadPolicy`.
     """
     settings = getattr(request.app.state, "settings", None)
     if settings is None:
-        return False
+        return CandleReadPolicy()
     try:
-        return bool(settings.candle_single_source)
+        return CandleReadPolicy(
+            single_source=bool(settings.candle_single_source),
+            gap_fill_minutes=int(settings.candle_read_gap_fill_minutes),
+        )
     except RuntimeError:
-        return False
+        return CandleReadPolicy()
 
 
 def _build_strategy_payload(
@@ -1966,7 +1973,7 @@ async def _handle_get_candles(
                 timeframe=timeframe,
                 limit=limit,
                 as_of=as_of,
-                single_source=_resolve_candle_single_source(request),
+                policy=_resolve_candle_read_policy(request),
             )
         items = [
             project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)

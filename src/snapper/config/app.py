@@ -690,6 +690,36 @@ class AppSettings:
         return self._get_db_setting("candle_single_source", False)
 
     @property
+    def candle_read_gap_fill_minutes(self) -> int:
+        """Return the longest run of absent 1m bars ``/api/candles`` may bridge.
+
+        A venue publishes a 1m bar only for a minute in which something traded,
+        so a thin instrument's 1m series is full of holes. The public candle
+        façade bridges an interior hole with carried-close ``volume=0.0`` bars,
+        which repairs both the broken chart line and — the bigger effect — the
+        derived frames, since ``derive_snaps`` needs ``minutes_per_bar``
+        CONSECUTIVE 1m bars and a sparse instrument therefore yields almost no
+        5m/15m/30m cells at all.
+
+        The bound is what keeps this honest. Read-side nothing distinguishes
+        "the market was quiet" from "our collector was blind"; both are simply
+        absent rows. Anything longer than this many minutes is left as a hole,
+        mirroring the live rule that a window straddling a feed break is
+        MISSING rather than flat-filled. It also keeps a session boundary
+        unbridgeable: an overnight equity gap is ~1050 minutes and a weekend
+        ~4300, both far above any sane value here.
+
+        Affects ONLY the ``/api/candles`` façade. ``/api/candles/db`` and
+        ``/api/candles/cache`` stay literal, and time-travel reads
+        (``as_of``) are never filled.
+
+        Returns:
+            Longest bridgeable run of absent minutes; ``0`` disables gap
+            filling and restores the sparse series verbatim.
+        """
+        return max(0, int(self._get_db_setting("candle_read_gap_fill_minutes", 60)))
+
+    @property
     def backfill_days(self) -> int:
         """Return number of days for historical data backfill.
 

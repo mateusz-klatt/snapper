@@ -81,6 +81,9 @@ CACHE_ELIGIBLE_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "30m"}
 VALID_TIMEFRAMES: frozenset[str] = CACHE_ELIGIBLE_TIMEFRAMES | DB_FALLBACK_TIMEFRAMES
 """Full set of timeframes any candle route accepts."""
 
+MINUTE_MS: int = 60_000
+"""One 1m bar width in integer milliseconds."""
+
 
 class CacheUnavailableError(RuntimeError):
     """Signalled by :func:`fetch_cache_only` when the cache is not wired.
@@ -140,6 +143,29 @@ class CandleQueryRow:
 
 
 @dataclass(frozen=True, slots=True)
+class CandleReadPolicy:
+    """Operator-tunable read behaviour for the public ``/api/candles`` façade.
+
+    Bundled rather than passed loose so the two flags travel together
+    through :func:`fetch_candles` and the route resolves them in one
+    place.
+
+    Attributes:
+        single_source: Candle Phase 3 slice-4 read cutover. When True,
+            the derived frames (``5m/15m/30m``) serve single-source
+            from the persisted ``candles`` plane instead of on-read
+            :func:`derive_snaps`, closing the dual-source hazard.
+            ``1m`` stays cache-served.
+        gap_fill_minutes: Longest run of absent 1m bars the read may
+            bridge with carried-close bars. ``0`` disables gap filling
+            entirely and restores the sparse series verbatim.
+    """
+
+    single_source: bool = False
+    gap_fill_minutes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class CandleQueryResult:
     """Combined return shape from the three fetch helpers.
 
@@ -150,7 +176,11 @@ class CandleQueryResult:
             for aggregated 5m/15m/30m output; ``"db"`` only when zero
             cache rows participated.
         sample_count: ``len(rows)``.
-        is_warm: ``True`` when ``sample_count >= limit``.
+        is_warm: ``True`` when enough OBSERVED bars were available to
+            satisfy ``limit``. Gap-filled bars never count toward it,
+            so a sparse instrument whose response was densified up to
+            ``limit`` still reports the cache honestly as cold rather
+            than claiming warmth it does not have.
     """
 
     rows: list[CandleQueryRow]
@@ -221,6 +251,128 @@ def row_from_db(row: CandleRow, timeframe: str) -> CandleQueryRow:
         timestamp=row["timestamp"],
         session_id=row["session_id"],
         sequence_id=row["sequence_id"],
+    )
+
+
+def densify_snaps(snaps: Sequence[CandleSnap], gap_fill_minutes: int) -> list[CandleSnap]:
+    """Bridge interior tradeless minutes with carried-close 1m bars.
+
+    A venue publishes a 1m bar only for a minute in which something
+    traded, so a thin instrument's 1m series is full of holes. That
+    breaks two things at once. The chart draws a broken line, and —
+    far worse — :func:`derive_snaps` requires ``minutes_per_bar``
+    CONSECUTIVE 1m bars, so a 30m cell for an instrument that trades a
+    few minutes an hour essentially never materialises and the higher
+    timeframes come back empty.
+
+    Each filled minute repeats the previous bar's close as its whole
+    OHLC and carries ``volume=0.0``. That is the same bar the live
+    minute-completion path publishes for an observed tradeless minute,
+    so this read-side fill and the persisted plane agree rather than
+    diverge once that feature is enabled.
+
+    Three bounds keep this from fabricating history:
+
+    - INTERIOR only. Never before the oldest bar and never after the
+      newest, so an instrument that stopped trading an hour ago does
+      not grow a flat tail up to ``now``. Silence at the edge of the
+      window stays silent.
+    - Bounded by ``gap_fill_minutes``. A longer run is left as a hole.
+      Read-side we cannot distinguish "the market was quiet" from "our
+      collector was blind", and the two look identical — both are
+      simply absent rows. The bound is the line past which blindness
+      becomes the likelier explanation, and it mirrors the live rule
+      that a window straddling a feed break is MISSING, never
+      flat-filled. A hole is honest; a fabricated bar is not.
+    - ``0`` disables the whole mechanism.
+
+    Args:
+        snaps: Chronological 1m snaps, strictly increasing in
+            ``open_at_ms``.
+        gap_fill_minutes: Longest bridgeable run of absent minutes.
+            ``0`` returns the input unchanged.
+
+    Returns:
+        Chronological 1m snaps with qualifying interior gaps filled.
+    """
+    if gap_fill_minutes <= 0 or len(snaps) < 2:
+        return list(snaps)
+    out: list[CandleSnap] = []
+    for snap in snaps:
+        if out:
+            previous = out[-1]
+            missing = (snap.open_at_ms - previous.open_at_ms) // MINUTE_MS - 1
+            if 0 < missing <= gap_fill_minutes:
+                out.extend(
+                    CandleSnap(
+                        open_at_ms=previous.open_at_ms + step * MINUTE_MS,
+                        open=previous.close,
+                        high=previous.close,
+                        low=previous.close,
+                        close=previous.close,
+                        volume=0.0,
+                    )
+                    for step in range(1, missing + 1)
+                )
+        out.append(snap)
+    return out
+
+
+def densify_rows(rows: Sequence[CandleQueryRow], gap_fill_minutes: int) -> list[CandleQueryRow]:
+    """Apply the :func:`densify_snaps` rule to already-projected 1m rows.
+
+    Needed because the smart router merges older DB rows under newer
+    cache snaps when the cache is short of ``limit``, and that merge
+    happens in row space, after provenance has been attached. Same
+    three bounds, same carried-close bar.
+
+    A synthesized row carries ``vwap`` equal to its close rather than
+    ``None`` or ``0.0``: its OHLC names a real price level, and zero
+    would price a valid bar at nothing for any reader that joins on
+    VWAP. ``trades=0`` is simply true. The persisted-identity fields
+    stay ``None`` because no such row was ever written.
+
+    Args:
+        rows: Chronological 1m rows, strictly increasing in ``open_at``.
+        gap_fill_minutes: Longest bridgeable run of absent minutes.
+            ``0`` returns the input unchanged.
+
+    Returns:
+        Chronological 1m rows with qualifying interior gaps filled.
+    """
+    if gap_fill_minutes <= 0 or len(rows) < 2:
+        return list(rows)
+    out: list[CandleQueryRow] = []
+    for row in rows:
+        if out:
+            previous = out[-1]
+            previous_ms = int(previous.open_at.timestamp() * 1000)
+            missing = (int(row.open_at.timestamp() * 1000) - previous_ms) // MINUTE_MS - 1
+            if 0 < missing <= gap_fill_minutes:
+                out.extend(
+                    _carried_row(previous, previous_ms + step * MINUTE_MS)
+                    for step in range(1, missing + 1)
+                )
+        out.append(row)
+    return out
+
+
+def _carried_row(previous: CandleQueryRow, open_at_ms: int) -> CandleQueryRow:
+    """Build one flat carried-close 1m row for a bridged minute."""
+    return CandleQueryRow(
+        open_at=datetime.fromtimestamp(open_at_ms / 1000.0, tz=UTC),
+        timeframe=previous.timeframe,
+        open=previous.close,
+        high=previous.close,
+        low=previous.close,
+        close=previous.close,
+        volume=0.0,
+        vwap=previous.close,
+        trades=0,
+        public_id=None,
+        timestamp=None,
+        session_id=None,
+        sequence_id=None,
     )
 
 
@@ -385,26 +537,57 @@ async def fetch_db_range(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _CacheRead:
+    """One resolved cache-eligible read, bundled to keep the call sites flat.
+
+    Attributes:
+        exchange: Resolved venue identifier.
+        native_symbol: Canonical native symbol.
+        timeframe: One of the cache-eligible timeframes.
+        limit: Maximum bars to return.
+        gap_fill_minutes: Longest bridgeable run of absent 1m bars.
+            ``0`` (the diagnostic route) leaves the series sparse.
+    """
+
+    exchange: AllExchange
+    native_symbol: str
+    timeframe: str
+    limit: int
+    gap_fill_minutes: int
+
+
 async def _read_cache_snaps(
-    *,
     cache: MarketCacheService,
-    exchange: AllExchange,
-    native_symbol: str,
-    timeframe: str,
-    limit: int,
+    read: _CacheRead,
 ) -> tuple[list[CandleSnap], CandleQuerySource]:
-    """Return cache snaps + the source discriminator for a cache-eligible read."""
-    if timeframe == "1m":
-        snaps = await cache.get_1m_candles(exchange, native_symbol, limit=limit)
-        return snaps, "cache"
-    minutes_per_bar = DERIVED_AGGREGATION_MAP[timeframe]
+    """Return cache snaps + the source discriminator for a cache-eligible read.
+
+    Gap filling happens BEFORE derivation, never after. Bridging the 1m
+    plane and then aggregating keeps every real print inside a derived
+    window contributing to its OHLC; filling holes in the derived series
+    instead would flatten a window that did contain trades down to a
+    single carried close.
+
+    Args:
+        cache: The in-process market cache.
+        read: The resolved read parameters.
+
+    Returns:
+        The chronological snaps plus the source discriminator.
+    """
+    if read.timeframe == "1m":
+        snaps = await cache.get_1m_candles(read.exchange, read.native_symbol, limit=read.limit)
+        filled = densify_snaps(snaps, read.gap_fill_minutes)
+        return filled[-read.limit :] if len(filled) > read.limit else filled, "cache"
+    minutes_per_bar = DERIVED_AGGREGATION_MAP[read.timeframe]
     one_min = await cache.get_1m_candles(
-        exchange,
-        native_symbol,
+        read.exchange,
+        read.native_symbol,
         limit=cache.cache_capacity_per_instrument(),
     )
-    derived = derive_snaps(one_min, minutes_per_bar)
-    sliced = derived[-limit:] if len(derived) > limit else derived
+    derived = derive_snaps(densify_snaps(one_min, read.gap_fill_minutes), minutes_per_bar)
+    sliced = derived[-read.limit :] if len(derived) > read.limit else derived
     return sliced, "derived"
 
 
@@ -428,6 +611,12 @@ async def fetch_cache_only(
     - 1h / 4h / 1d → DB fallback because the cache literally cannot
       serve long frames; the discriminator surfaces this as
       ``source="db"``.
+
+    Never gap-fills. This route exists to answer "is the cache lying?",
+    so it reports the deque exactly as it stands — a synthesized bar
+    here would inflate ``sample_count`` and ``is_warm`` and defeat the
+    only honest view of the cache's real state. The public façade
+    (:func:`fetch_candles`) is where gap filling belongs.
 
     Args:
         cache: The in-process cache. ``None`` raises
@@ -459,11 +648,14 @@ async def fetch_cache_only(
     if cache is None:
         raise CacheUnavailableError("Market cache not initialized")
     cache_snaps, cache_source = await _read_cache_snaps(
-        cache=cache,
-        exchange=exchange,
-        native_symbol=native_symbol,
-        timeframe=timeframe,
-        limit=limit,
+        cache,
+        _CacheRead(
+            exchange=exchange,
+            native_symbol=native_symbol,
+            timeframe=timeframe,
+            limit=limit,
+            gap_fill_minutes=0,
+        ),
     )
     rows = [row_from_snap(snap, timeframe) for snap in cache_snaps]
     return CandleQueryResult(
@@ -483,7 +675,7 @@ async def fetch_candles(
     timeframe: str,
     limit: int,
     as_of: datetime | None = None,
-    single_source: bool = False,
+    policy: CandleReadPolicy = CandleReadPolicy(),
 ) -> CandleQueryResult:
     """Smart-routing entry used by ``/api/candles``.
 
@@ -492,6 +684,11 @@ async def fetch_candles(
     cache when the persist policy is OFF for an instrument.
 
     See the module docstring for the full routing tree.
+
+    This is the ONLY entry that gap-fills. Both escape hatches stay
+    literal: ``/api/candles/db`` reports what is persisted and
+    ``/api/candles/cache`` reports what the deque holds, so an operator
+    asking whether a bar is real always has a route that answers.
 
     Args:
         cache: The in-process market cache, or ``None`` when the
@@ -502,16 +699,14 @@ async def fetch_candles(
         native_symbol: Canonical native symbol. The legacy route's
             ``instrument`` query param maps 1:1 onto this field.
         timeframe: One of the seven supported timeframes.
-        limit: Maximum bars to return.
         as_of: Optional point-in-time. When set, hard-routes to the
             DB path so cache (live snapshot only) cannot silently
-            mis-serve time-travel queries.
-        single_source: Candle Phase 3 slice-4 read cutover. When True, the
-            derived frames (``5m/15m/30m``) serve single-source from the
-            persisted ``candles`` plane instead of on-read ``derive_snaps``,
-            closing the dual-source hazard. ``1m`` stays cache-served. Gated
-            OFF by default until the persisted plane is verified populated
-            (``verify-candle-coverage``); flipping it before then serves empty.
+            mis-serve time-travel queries. Time travel is never
+            gap-filled: reconstructing a past instant means reporting
+            what was actually known then.
+        limit: Maximum bars to return.
+        policy: Operator-tunable read behaviour. See
+            :class:`CandleReadPolicy`.
 
     Returns:
         :class:`CandleQueryResult` with chronological rows + a source
@@ -529,7 +724,7 @@ async def fetch_candles(
     serves_from_db = (
         cache is None
         or timeframe not in CACHE_ELIGIBLE_TIMEFRAMES
-        or (single_source and timeframe in DERIVED_AGGREGATION_MAP)
+        or (policy.single_source and timeframe in DERIVED_AGGREGATION_MAP)
     )
     if serves_from_db:
         return await fetch_db_only(
@@ -541,11 +736,14 @@ async def fetch_candles(
         )
     assert cache is not None
     cache_snaps, cache_source = await _read_cache_snaps(
-        cache=cache,
-        exchange=exchange,
-        native_symbol=native_symbol,
-        timeframe=timeframe,
-        limit=limit,
+        cache,
+        _CacheRead(
+            exchange=exchange,
+            native_symbol=native_symbol,
+            timeframe=timeframe,
+            limit=limit,
+            gap_fill_minutes=policy.gap_fill_minutes,
+        ),
     )
     if len(cache_snaps) >= limit:
         chrono = [row_from_snap(snap, timeframe) for snap in cache_snaps]
@@ -576,11 +774,14 @@ async def fetch_candles(
     for snap in cache_snaps:
         merged.append(row_from_snap(snap, timeframe))
     merged.sort(key=lambda r: int(r.open_at.timestamp() * 1000))
+    observed = len(merged)
+    if timeframe == "1m":
+        merged = densify_rows(merged, policy.gap_fill_minutes)
     trimmed = merged[-limit:] if len(merged) > limit else merged
     final_source: CandleQuerySource = cache_source if cache_snaps else "db"
     return CandleQueryResult(
         rows=trimmed,
         source=final_source,
         sample_count=len(trimmed),
-        is_warm=len(trimmed) >= limit,
+        is_warm=observed >= limit,
     )

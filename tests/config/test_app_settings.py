@@ -588,6 +588,30 @@ class TestAppSettingsTradingProperties:
         )
         assert enabled.candle_single_source is True
 
+    def test_candle_read_gap_fill_minutes_defaults_to_an_hour_and_floors_at_zero(self) -> None:
+        """Verify the gap-fill bound defaults to 60, coerces, and never goes negative.
+
+        Given a service without the setting, with a string, and with a negative,
+        When accessing settings.candle_read_gap_fill_minutes,
+        Then 60 is the default, strings coerce, and a negative floors to 0.
+
+        Flooring matters: the value is a budget of minutes the read may bridge,
+        and a negative budget is not a smaller budget, it is a nonsense one. 0
+        is the honest reading of "do not bridge anything".
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+
+        def _value(raw: object) -> int:
+            service = MockSettingsService({"candle_read_gap_fill_minutes": raw})
+            return AppSettings(bootstrap, settings_service=service).candle_read_gap_fill_minutes
+
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_read_gap_fill_minutes == 60
+        assert _value(15) == 15
+        assert _value("30") == 30
+        assert _value(0) == 0
+        assert _value(-5) == 0
+
     def test_paper_instruments_returns_value(self) -> None:
         """Verify paper_instruments returns configured source map.
 

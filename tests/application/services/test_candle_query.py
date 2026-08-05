@@ -22,6 +22,10 @@ from snapper.application.services.candle_query import CACHE_ELIGIBLE_TIMEFRAMES
 from snapper.application.services.candle_query import DB_FALLBACK_TIMEFRAMES
 from snapper.application.services.candle_query import VALID_TIMEFRAMES
 from snapper.application.services.candle_query import CacheUnavailableError
+from snapper.application.services.candle_query import CandleQueryResult
+from snapper.application.services.candle_query import CandleReadPolicy
+from snapper.application.services.candle_query import densify_rows
+from snapper.application.services.candle_query import densify_snaps
 from snapper.application.services.candle_query import derive_snaps
 from snapper.application.services.candle_query import fetch_cache_only
 from snapper.application.services.candle_query import fetch_candles
@@ -768,7 +772,7 @@ class TestFetchCandlesSingleSource:
             native_symbol="BTC-USD",
             timeframe="5m",
             limit=1,
-            single_source=True,
+            policy=CandleReadPolicy(single_source=True),
         )
         assert result.source == "db"
         assert [row.close for row in result.rows] == [999.0]
@@ -792,7 +796,7 @@ class TestFetchCandlesSingleSource:
             native_symbol="BTC-USD",
             timeframe="5m",
             limit=1,
-            single_source=False,
+            policy=CandleReadPolicy(single_source=False),
         )
         assert result.source == "derived"
         assert [row.close for row in result.rows] == [1.0]
@@ -815,7 +819,244 @@ class TestFetchCandlesSingleSource:
             native_symbol="BTC-USD",
             timeframe="1m",
             limit=5,
-            single_source=True,
+            policy=CandleReadPolicy(single_source=True),
         )
         assert result.source == "cache"
         cache.get_1m_candles.assert_awaited()
+
+
+class TestDensifySnaps:
+    """``densify_snaps`` bridges interior tradeless minutes, and only those."""
+
+    def test_disabled_and_degenerate_inputs_pass_through(self) -> None:
+        """Zero budget or fewer than two bars returns the input unchanged.
+
+        Given: a gapped series with the feature off, and a single-bar series,
+        When: densify_snaps runs,
+        Then: neither grows — there is nothing to interpolate between.
+        """
+        gapped = [_snap(0, 1.0), _snap(300_000, 2.0)]
+        assert densify_snaps(gapped, 0) == gapped
+        assert densify_snaps(gapped, -1) == gapped
+        single = [_snap(0, 1.0)]
+        assert densify_snaps(single, 60) == single
+        assert densify_snaps([], 60) == []
+
+    def test_interior_gap_is_bridged_with_carried_close_bars(self) -> None:
+        """A hole becomes flat bars priced at the last observed close.
+
+        Given: bars at minute 0 and minute 4 with nothing between,
+        When: densify_snaps runs with room to spare,
+        Then: minutes 1-3 appear as flat OHLC at the minute-0 close with
+            zero volume, which is exactly the bar the live minute-completion
+            path publishes for an observed tradeless minute.
+        """
+        filled = densify_snaps([_snap(0, 7.0), _snap(240_000, 9.0)], 60)
+        assert [s.open_at_ms for s in filled] == [0, 60_000, 120_000, 180_000, 240_000]
+        bridged = filled[1:4]
+        assert all(s.volume == 0.0 for s in bridged)
+        assert all(s.open == s.high == s.low == s.close == 7.0 for s in bridged)
+        assert filled[-1].close == pytest.approx(9.0)
+
+    def test_a_gap_longer_than_the_budget_stays_a_hole(self) -> None:
+        """Beyond the bound the series keeps its hole rather than inventing bars.
+
+        Given: bars six minutes apart, so five minutes are missing, and a
+            budget of four,
+        When: densify_snaps runs,
+        Then: nothing is inserted; raising the budget to exactly five fills it.
+
+        Read-side nothing distinguishes a quiet market from a blind
+        collector, so past the bound the honest answer is the gap itself.
+        """
+        gapped = [_snap(0, 1.0), _snap(360_000, 2.0)]
+        assert densify_snaps(gapped, 4) == gapped
+        assert len(densify_snaps(gapped, 5)) == 7
+
+    def test_never_extends_past_either_end_of_the_window(self) -> None:
+        """Filling is interior only, so a dead instrument grows no flat tail.
+
+        Given: two adjacent bars,
+        When: densify_snaps runs with a large budget,
+        Then: the series still starts and ends on the observed bars.
+        """
+        observed = [_snap(600_000, 1.0), _snap(660_000, 2.0)]
+        filled = densify_snaps(observed, 600)
+        assert filled == observed
+
+    def test_out_of_order_or_duplicate_input_inserts_nothing(self) -> None:
+        """A non-increasing pair yields no bars rather than a negative range.
+
+        Given: a duplicate timestamp and a backwards step,
+        When: densify_snaps runs,
+        Then: the guard leaves both alone.
+        """
+        duplicate = [_snap(0, 1.0), _snap(0, 2.0)]
+        assert densify_snaps(duplicate, 60) == duplicate
+        backwards = [_snap(120_000, 1.0), _snap(60_000, 2.0)]
+        assert densify_snaps(backwards, 60) == backwards
+
+
+class TestDensifyRows:
+    """``densify_rows`` applies the same rule after provenance is attached."""
+
+    def test_bridged_row_prices_itself_and_claims_no_identity(self) -> None:
+        """A synthesized row carries close-as-VWAP, zero trades and no identity.
+
+        Given: two 1m rows two minutes apart,
+        When: densify_rows bridges the hole,
+        Then: the inserted row prices its VWAP at its own close — never 0.0,
+            which would price a valid bar at nothing — reports zero trades,
+            and leaves every persisted-identity field None because no such
+            row was ever written.
+        """
+        rows = [row_from_db(_row(0, 5.0), "1m"), row_from_db(_row(120_000, 6.0), "1m")]
+        filled = densify_rows(rows, 60)
+        assert len(filled) == 3
+        bridged = filled[1]
+        assert bridged.close == pytest.approx(5.0)
+        assert bridged.vwap == pytest.approx(5.0)
+        assert bridged.trades == 0
+        assert bridged.volume == 0.0
+        assert bridged.timeframe == "1m"
+        assert bridged.public_id is None
+        assert bridged.timestamp is None
+        assert bridged.session_id is None
+        assert bridged.sequence_id is None
+
+    def test_disabled_and_degenerate_inputs_pass_through(self) -> None:
+        """Zero budget or fewer than two rows returns the input unchanged."""
+        rows = [row_from_db(_row(0, 5.0), "1m"), row_from_db(_row(300_000, 6.0), "1m")]
+        assert densify_rows(rows, 0) == rows
+        assert densify_rows(rows[:1], 60) == rows[:1]
+
+    def test_a_gap_longer_than_the_budget_stays_a_hole(self) -> None:
+        """Beyond the bound the row series keeps its hole.
+
+        Given: rows six minutes apart, so five minutes are missing,
+        When: densify_rows runs with a budget of four,
+        Then: nothing is inserted; exactly five fills it.
+        """
+        rows = [row_from_db(_row(0, 5.0), "1m"), row_from_db(_row(360_000, 6.0), "1m")]
+        assert densify_rows(rows, 4) == rows
+        assert len(densify_rows(rows, 5)) == 7
+
+
+class TestGapFillOnTheFacade:
+    """Gap filling reaches the public façade and stops at both escape hatches."""
+
+    @pytest.mark.asyncio
+    async def test_a_sparse_instrument_can_finally_derive_a_higher_frame(self) -> None:
+        """Bridging the 1m plane is what lets a thin instrument produce a 5m bar.
+
+        Given: a 1m cache holding only minutes 0 and 4 of one 5m window,
+        When: fetch_candles serves 5m with and without a gap-fill budget,
+        Then: without it derive_snaps finds no contiguous run and returns
+            nothing; with it the window completes.
+
+        This is the dominant effect of the whole feature. derive_snaps
+        requires minutes_per_bar CONSECUTIVE bars, so an instrument that
+        trades a few minutes an hour otherwise yields no derived cells at all.
+        """
+        snaps = [_snap(0, 1.0), _snap(240_000, 5.0)]
+
+        async def _serve(policy: CandleReadPolicy) -> CandleQueryResult:
+            return await fetch_candles(
+                cache=_stub_cache(snaps),
+                repo=cast(Repository, _stub_repo([])),
+                exchange="kraken",
+                native_symbol="PAXG-USD",
+                timeframe="5m",
+                limit=1,
+                policy=policy,
+            )
+
+        sparse = await _serve(CandleReadPolicy())
+        assert sparse.rows == []
+        filled = await _serve(CandleReadPolicy(gap_fill_minutes=60))
+        assert len(filled.rows) == 1
+        assert filled.rows[0].open == pytest.approx(1.0)
+        assert filled.rows[0].close == pytest.approx(5.0)
+
+    @pytest.mark.asyncio
+    async def test_the_1m_facade_fills_and_still_honours_the_limit(self) -> None:
+        """A bridged 1m response is contiguous and never longer than ``limit``.
+
+        Given: a 1m cache with a three-minute hole and a limit of 4,
+        When: fetch_candles serves 1m with a budget,
+        Then: the response is exactly 4 consecutive minutes.
+        """
+        snaps = [_snap(0, 1.0), _snap(240_000, 5.0), _snap(300_000, 6.0)]
+        result = await fetch_candles(
+            cache=_stub_cache(snaps),
+            repo=cast(Repository, _stub_repo([])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=4,
+            policy=CandleReadPolicy(gap_fill_minutes=60),
+        )
+        stamps = [int(row.open_at.timestamp() * 1000) for row in result.rows]
+        assert stamps == [120_000, 180_000, 240_000, 300_000]
+
+    @pytest.mark.asyncio
+    async def test_the_db_backfill_merge_is_filled_and_warmth_stays_honest(self) -> None:
+        """Rows merged from the DB are bridged, but synthetic bars never warm the cache.
+
+        Given: one cache snap plus older DB rows with a hole between them,
+        When: fetch_candles takes the backfill path under a limit it cannot meet,
+        Then: the merged series is contiguous, yet ``is_warm`` stays False
+            because only observed bars count toward warmth.
+        """
+        result = await fetch_candles(
+            cache=_stub_cache([_snap(300_000, 6.0)]),
+            repo=cast(Repository, _stub_repo([_row(0, 1.0), _row(60_000, 2.0)])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=50,
+            policy=CandleReadPolicy(gap_fill_minutes=60),
+        )
+        stamps = [int(row.open_at.timestamp() * 1000) for row in result.rows]
+        assert stamps == [0, 60_000, 120_000, 180_000, 240_000, 300_000]
+        assert result.is_warm is False
+        assert result.sample_count == 6
+
+    @pytest.mark.asyncio
+    async def test_time_travel_is_never_filled(self) -> None:
+        """An ``as_of`` read reports what was known then, holes included.
+
+        Given: a gapped DB series and a point-in-time request,
+        When: fetch_candles routes to the DB path,
+        Then: the response keeps its hole regardless of the budget.
+        """
+        result = await fetch_candles(
+            cache=_stub_cache([_snap(0, 1.0)]),
+            repo=cast(Repository, _stub_repo([_row(300_000, 6.0), _row(0, 1.0)])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=50,
+            as_of=datetime.fromtimestamp(600, tz=UTC),
+            policy=CandleReadPolicy(gap_fill_minutes=60),
+        )
+        assert [int(row.open_at.timestamp() * 1000) for row in result.rows] == [0, 300_000]
+
+    @pytest.mark.asyncio
+    async def test_the_cache_diagnostic_route_stays_literal(self) -> None:
+        """``/api/candles/cache`` never fills, so it can still answer "is it lying?".
+
+        Given: a gapped 1m cache,
+        When: fetch_cache_only serves it,
+        Then: the hole survives and sample_count reports the real deque depth.
+        """
+        result = await fetch_cache_only(
+            cache=_stub_cache([_snap(0, 1.0), _snap(300_000, 6.0)]),
+            repo=cast(Repository, _stub_repo([])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=50,
+        )
+        assert [int(row.open_at.timestamp() * 1000) for row in result.rows] == [0, 300_000]
+        assert result.sample_count == 2
