@@ -311,11 +311,17 @@ def test_roll_up_settle_cutoff_excludes_all() -> None:
 
 
 def test_build_rows_handles_zero_and_nonzero_volume() -> None:
-    """Verify vwap is computed for traded windows and zeroed for empty ones.
+    """Verify vwap is weighted for traded windows and the close for empty ones.
 
     Given: Two closed buckets, one with volume and one with zero volume,
     When: _build_rows projects them,
-    Then: The traded bar carries a weighted vwap and the empty bar carries 0.0.
+    Then: The traded bar carries a weighted vwap and the empty bar carries its
+        own close, never 0.0 — its OHLC names a real price level, so a
+        persisted zero would price a valid bar at nothing.
+
+    This must match ``CandleAggregator._to_candle_update``: the script and the
+    live publisher write to the same durable plane, so a reconstruction that
+    disagreed with the live path would be worse than no reconstruction.
     """
     traded = backfill._Bucket(open=1, high=2, low=1, close=2, volume=4.0, trades=3, vwap_sum=8.0)
     empty = backfill._Bucket(open=2, high=2, low=2, close=2, volume=0.0, trades=0, vwap_sum=0.0)
@@ -323,7 +329,7 @@ def test_build_rows_handles_zero_and_nonzero_volume() -> None:
     out = backfill._build_rows(closed, "iid", _at(0), count(1), "sess")
     by_tf = {r["timeframe"]: r for r in out}
     assert by_tf["5m"]["vwap"] == 2.0
-    assert by_tf["15m"]["vwap"] == 0.0
+    assert by_tf["15m"]["vwap"] == 2.0
     assert by_tf["5m"]["source"] == "synthesized"
     assert by_tf["5m"]["complete"] is True
     assert by_tf["5m"]["instrument_public_id"] == "iid"

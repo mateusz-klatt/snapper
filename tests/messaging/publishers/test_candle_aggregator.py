@@ -192,8 +192,20 @@ class TestRollup:
         _label, bar = emitted[0]
         assert bar.vwap == (10.0 * 1.0 + 20.0 * 3.0) / 4.0
 
-    def test_zero_volume_window_yields_zero_vwap(self) -> None:
-        """Given a window of zero-volume 1m, when closed, then VWAP is 0."""
+    def test_zero_volume_window_carries_the_close_as_vwap(self) -> None:
+        """Given a window of zero-volume 1m, when closed, then VWAP is the close.
+
+        A volume-weighted mean is undefined without volume, and zero is the
+        one answer that is affirmatively wrong: the bar's OHLC still names a
+        real price level, so a persisted ``vwap=0.0`` would price a valid bar
+        at zero for every reader that joins on it. Carrying the close matches
+        the ``_flat_fill`` bar the same aggregator writes when a window has no
+        bucket at all.
+
+        This is reached today by walutomat, whose real 1m bars all carry
+        ``volume=0.0``, and by kraken once minute completion folds flat bars
+        for a fully tradeless window.
+        """
         agg = CandleAggregator(["5m"])
         agg.fold(_candle("A", _at(10, 0), close=10.0, volume=0.0))
         agg.fold(_candle("A", _at(10, 1), close=11.0, volume=0.0))
@@ -201,7 +213,8 @@ class TestRollup:
         emitted = agg.fold(_candle("A", _at(10, 6)))
         _label, bar = emitted[0]
         assert bar.volume == 0.0
-        assert bar.vwap == 0.0
+        assert bar.vwap == 11.0
+        assert bar.close == 11.0
 
 
 class TestEmitOnClose:

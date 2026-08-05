@@ -490,13 +490,21 @@ def _build_rows(
         seq: Monotonic sequence-id generator (values > 0).
         session_id: One backfill-run session id stamped on every row.
 
+    A window carrying no volume at all falls back to its close rather than to
+    ``0.0``. Zero is not a cheaper answer, it is a false statement about price:
+    the bar's own OHLC still names a real level, so a reader joining on VWAP
+    would see a valid bar priced at zero. This must stay identical to
+    ``CandleAggregator._to_candle_update``, because this script and the live
+    publisher write to the same durable plane and a reconstruction that
+    disagreed with the live path would be worse than no reconstruction.
+
     Returns:
         The synthesized rows ready for :meth:`Repository.upsert_candles`.
     """
     out: list[CandleUpsertRow] = []
     for tf, items in closed.items():
         for begin_ts, bucket in items:
-            vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else 0.0
+            vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else bucket.close
             out.append(
                 CandleUpsertRow(
                     instrument_public_id=instrument_public_id,

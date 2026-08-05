@@ -860,13 +860,27 @@ class CandleAggregator:
         for provenance only — the caller uses the explicit label, never decodes
         this field.
 
+        A window carrying no volume at all falls back to ``bucket.close``
+        rather than to ``0.0``. Zero is not a cheaper answer, it is a false
+        statement about price: the bar's own OHLC still names a real level, so
+        a reader joining on VWAP would see a valid bar priced at zero. The
+        fallback matches what :meth:`_flat_fill` already writes for a window
+        with no bucket at all (``vwap=last_close``), so the two paths that can
+        produce a tradeless higher-TF bar now agree.
+
+        Two populations reach this branch. Walutomat emits every real 1m bar
+        with ``volume=0.0`` and a genuine tick-mean VWAP, so its higher-TF bars
+        have always been projected to zero here — this corrects that. Kraken
+        reaches it only once minute completion is enabled, where a fully
+        tradeless window folds flat bars whose VWAP is the carried close.
+
         Args:
             bucket: The closed bucket to project.
 
         Returns:
             The synthesized higher-TF :class:`CandleUpdate`.
         """
-        vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else 0.0
+        vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else bucket.close
         return CandleUpdate(
             symbol=bucket.symbol,
             open=bucket.open,
