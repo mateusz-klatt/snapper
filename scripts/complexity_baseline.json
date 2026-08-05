@@ -969,7 +969,7 @@
         "PLR0913": 6
       },
       "WalutomatExchangeClient.create_order": {
-        "C901": 12
+        "C901": 11
       }
     },
     "src/snapper/infrastructure/exchanges/kraken_rest_egress.py": {

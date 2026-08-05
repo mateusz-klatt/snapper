@@ -6034,13 +6034,21 @@ class TestWalutomatAmbiguousSubmitClassification:
         return client
 
     def _request(self) -> ExchangeOrderRequest:
-        """Build a market order request with a fixed submit id."""
+        """Build a priced limit request with a fixed submit id.
+
+        Limit rather than market because the venue has no market orders
+        and ``create_order`` refuses them before it reaches the network.
+        These tests are about how a request that DID leave the process is
+        classified on failure, so the request has to be one the client
+        will actually send.
+        """
         return ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.BUY,
-            type=ExchangeOrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=100.0,
             client_order_id="amb-w1",
+            price=4.2,
         )
 
     @pytest.mark.asyncio
@@ -6197,6 +6205,39 @@ async def test_create_order_rejects_stop_types_before_any_send() -> None:
         )
         with pytest.raises(ValueError, match="does not support stop orders"):
             await client.create_order(request)
+
+
+@pytest.mark.asyncio
+async def test_create_order_rejects_market_type_before_any_send() -> None:
+    """Market orders are refused pre-send — the venue rejected every one.
+
+    Given: A client (even unauthenticated — the gate runs first),
+    When: create_order() is called with a MARKET request,
+    Then: a ValueError surfaces BEFORE auth or any HTTP send.
+
+    This was previously left to the venue and failed there every single
+    time. The body attaches ``limitPrice`` only ``if request.price``, a
+    market order carries no price, and the venue requires the field, so
+    every market submit came back ``INVALID_ARGUMENTS`` naming
+    ``limitPrice`` as required — after a full dispatch round trip of
+    roughly forty seconds. Refusing locally turns a late and generic
+    venue rejection into an immediate and specific one, and keeps the
+    disposition definitively-rejected rather than ambiguously parked.
+
+    Deliberately NOT solved by synthesizing a crossing limit: that would
+    invent a price the caller never named, on a venue whose book can be
+    thin, and hide that this venue has no market-order concept.
+    """
+    client = WalutomatExchangeClient(api_key="key")
+    request = ExchangeOrderRequest(
+        symbol="EUR-PLN",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.MARKET,
+        amount=10.0,
+        client_order_id="coid-create-order-rejects-market-type-before-any-send",
+    )
+    with pytest.raises(ValueError, match="does not support market orders"):
+        await client.create_order(request)
 
 
 def test_account_history_capability_supported() -> None:

@@ -108,6 +108,45 @@ no terminal state is ever fabricated."""
 _EXEC_ID_BASIS_UNITS = 1e8
 
 
+def _reject_unsupported_order_type(order_type: ExchangeOrderTypeEnum) -> None:
+    """Refuse an order type Walutomat's FX market API cannot express.
+
+    Raised BEFORE any network send, so the failure is provably-not-placed
+    and the executor's definitive-reject branch (publish REJECTED) is the
+    honest disposition, never an ambiguous park (#156).
+
+    Two types qualify. Stop orders have no venue concept at all. Market
+    orders were previously left to the venue and failed there every single
+    time: the request body attaches ``limitPrice`` only when a price is
+    given, a market order carries none, and the venue requires the field,
+    so every market submit came back ``INVALID_ARGUMENTS`` naming
+    ``limitPrice`` as required — after a full dispatch round trip.
+    Refusing locally turns a late, generic venue rejection into an
+    immediate and specific one.
+
+    Synthesizing an aggressive limit that crosses the spread and calling
+    it a market order is deliberately NOT done: it would invent a price
+    the caller never named, on a venue whose book can be thin, and hide
+    from the operator that this venue has no market-order concept.
+
+    Args:
+        order_type: The requested order type.
+
+    Raises:
+        ValueError: If the type is stop-typed or market-typed.
+    """
+    if order_type in (
+        ExchangeOrderTypeEnum.STOP_LOSS,
+        ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+    ):
+        raise ValueError("Walutomat does not support stop orders")
+    if order_type is ExchangeOrderTypeEnum.MARKET:
+        raise ValueError(
+            "Walutomat does not support market orders; submit a limit order "
+            "priced at or through the opposite side of the book"
+        )
+
+
 def _walutomat_exec_id(order_id: str, cumulative: float) -> str:
     """Deterministic execution id for a cumulative-snapshot fill.
 
@@ -2407,20 +2446,33 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated, or the
                 venue answered ``success=false``.
-            ValueError: If the request is stop-typed — Walutomat's FX
-                market API has no stop orders. Raised BEFORE any network
-                send, so the failure is provably-not-placed and the
-                executor's definitive-reject branch (publish REJECTED)
-                is the honest disposition, never an ambiguous park
-                (#156).
+            ValueError: If the request is stop-typed or market-typed —
+                Walutomat's FX market API has neither. Raised BEFORE any
+                network send, so the failure is provably-not-placed and
+                the executor's definitive-reject branch (publish
+                REJECTED) is the honest disposition, never an ambiguous
+                park (#156).
+
+                The market case was previously left to the venue and it
+                failed there every single time: the body attaches
+                ``limitPrice`` only ``if request.price``, a market order
+                carries no price, and the venue requires the field, so
+                every market submit came back
+                ``INVALID_ARGUMENTS {'key': 'limitPrice', 'value':
+                'required'}`` after a full dispatch round trip. Refusing
+                locally turns a late, generic venue rejection into an
+                immediate and specific one.
+
+                The alternative — synthesizing an aggressive limit that
+                crosses the spread and calling it a market order — is
+                deliberately not taken. It would invent a price the
+                caller never named, on a venue whose book can be thin,
+                and it would hide from the operator that this venue has
+                no market-order concept at all.
             AmbiguousOrderSubmitError: If the call failed in a way where
                 the order MAY exist on the venue.
         """
-        if request.type in (
-            ExchangeOrderTypeEnum.STOP_LOSS,
-            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
-        ):
-            raise ValueError("Walutomat does not support stop orders")
+        _reject_unsupported_order_type(request.type)
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]
