@@ -522,6 +522,45 @@ def _bound_totals(
     return total, complete, overflow
 
 
+def _classify_equity_sample(
+    sample: PortfolioPnlSampleRow,
+    start: datetime,
+    end: datetime,
+) -> tuple[_EquityPoint | None, bool]:
+    """Project one sample to an equity point, flagging a corrupt complete row.
+
+    The two outputs are independent on purpose. A sample can be neither
+    usable nor corrupt — an incomplete row, or one outside the window — and
+    silently skipping that is correct. A row that CLAIMS ``complete`` and then
+    cannot produce a finite positive equity is a different thing entirely: it
+    is evidence the denominator is unsound, and it has to reach the caller
+    even though it contributes no point.
+
+    Args:
+        sample: One persisted portfolio P&L sample row.
+        start: First minute of the exact report window, inclusive.
+        end: Last minute of the exact report window, inclusive.
+
+    Returns:
+        The usable equity point or ``None``, paired with whether this row is a
+        complete sample that failed validation.
+    """
+    minute = sample["point_time"]
+    if minute.tzinfo is None or minute.utcoffset() is None:
+        return None, sample["valuation_status"] == "complete"
+    minute = minute.astimezone(UTC)
+    if minute < start or minute > end or sample["valuation_status"] != "complete":
+        return None, False
+    cash = sample["cash_usd"]
+    position = sample["position_value_usd"]
+    if cash is None or position is None:
+        return None, True
+    equity = cash + position
+    if not math.isfinite(equity) or equity <= 0.0:
+        return None, True
+    return _EquityPoint(minute=minute, equity_usd=equity), False
+
+
 def _equity_points(
     request: ActivationGateRequest,
     samples: Sequence[PortfolioPnlSampleRow],
@@ -531,24 +570,10 @@ def _equity_points(
     points: list[_EquityPoint] = []
     invalid_complete = False
     for sample in samples:
-        minute = sample["point_time"]
-        if minute.tzinfo is None or minute.utcoffset() is None:
-            if sample["valuation_status"] == "complete":
-                invalid_complete = True
-            continue
-        minute = minute.astimezone(UTC)
-        if minute < start or minute > end or sample["valuation_status"] != "complete":
-            continue
-        cash = sample["cash_usd"]
-        position = sample["position_value_usd"]
-        if cash is None or position is None:
-            invalid_complete = True
-            continue
-        equity = cash + position
-        if not math.isfinite(equity) or equity <= 0.0:
-            invalid_complete = True
-            continue
-        points.append(_EquityPoint(minute=minute, equity_usd=equity))
+        point, invalid = _classify_equity_sample(sample, start, end)
+        invalid_complete = invalid_complete or invalid
+        if point is not None:
+            points.append(point)
     return (
         tuple(sorted(points, key=lambda point: (point.minute, point.equity_usd))),
         invalid_complete,
@@ -594,6 +619,40 @@ def _attach_causal_equity(
     )
 
 
+def _attach_causal_equity_to_all(
+    impacts: Sequence[MinuteImpact],
+    points: Sequence[_EquityPoint],
+    floors: Sequence[_EquityPoint],
+) -> tuple[list[MinuteImpact], list[GateIncompleteCause]]:
+    """Attach a causal equity denominator to every impact that carries legs.
+
+    An impact with no legs excludes nothing, so it needs no denominator and is
+    passed through untouched rather than being given a share of zero — the
+    distinction between "nothing was omitted" and "the omission measured zero"
+    is one the report keeps.
+
+    Args:
+        impacts: Every requested minute's impact, legged or not.
+        points: Chronological positive complete equity points.
+        floors: Precomputed conservative prefix floors for those points.
+
+    Returns:
+        The assessed impacts in request order, paired with every incompleteness
+        cause raised while attaching them.
+    """
+    assessed: list[MinuteImpact] = []
+    causes: list[GateIncompleteCause] = []
+    for impact in impacts:
+        if not impact.legs:
+            assessed.append(impact)
+            continue
+        updated, cause = _attach_causal_equity(impact, points, floors)
+        assessed.append(updated)
+        if cause is not None:
+            causes.append(cause)
+    return assessed, causes
+
+
 def _equity_assessment(
     request: ActivationGateRequest,
     impacts: Sequence[MinuteImpact],
@@ -628,15 +687,8 @@ def _equity_assessment(
     if request.minutes[-1] - points[-1].minute > _EQUITY_MAX_AGE:
         causes.append("stale_complete_equity")
     floors = _prefix_equity_floors(points)
-    assessed: list[MinuteImpact] = []
-    for impact in impacts:
-        if not impact.legs:
-            assessed.append(impact)
-            continue
-        updated, cause = _attach_causal_equity(impact, points, floors)
-        assessed.append(updated)
-        if cause is not None:
-            causes.append(cause)
+    assessed, attach_causes = _attach_causal_equity_to_all(impacts, points, floors)
+    causes.extend(attach_causes)
     shares = [
         impact.known_bound_share for impact in assessed if impact.known_bound_share is not None
     ]

@@ -320,12 +320,13 @@ def test_request_refuses_an_unbounded_or_ambiguous_window() -> None:
             as_of=_AS_OF,
             window_minutes=60,
         )
+    naive_horizon = _AS_OF.replace(tzinfo=None)
     with pytest.raises(ValueError, match="timezone-aware"):
         ActivationGateRequest(
             wallet_public_id="wallet",
             mode="live",
             exchanges=("kraken",),
-            as_of=_AS_OF.replace(tzinfo=None),
+            as_of=naive_horizon,
             window_minutes=60,
         )
     with pytest.raises(ValueError, match="window_minutes"):
@@ -419,12 +420,16 @@ def test_command_request_refuses_every_ambiguous_pre_scope_shape(
         "purpose": "inspect",
     }
     values.update(overrides)
+    wallet_public_id = cast(str, values["wallet_public_id"])
+    as_of = cast(datetime, values["as_of"])
+    window_minutes = cast(int, values["window_minutes"])
+    purpose = cast(GatePurpose, values["purpose"])
     with pytest.raises(ValueError, match=message):
         GateCommandRequest(
-            wallet_public_id=cast(str, values["wallet_public_id"]),
-            as_of=cast(datetime, values["as_of"]),
-            window_minutes=cast(int, values["window_minutes"]),
-            purpose=cast(GatePurpose, values["purpose"]),
+            wallet_public_id=wallet_public_id,
+            as_of=as_of,
+            window_minutes=window_minutes,
+            purpose=purpose,
         )
 
 
@@ -477,8 +482,9 @@ def test_observation_cursor_refuses_foreign_or_out_of_window_rows(
     """
     row = _attempt(_MINUTE)
     cast(dict[str, object], row)[field] = value
+    request = _request()
     with pytest.raises(ValueError, match=message):
-        reconstruct_observation_attempts(_request(), [row])
+        reconstruct_observation_attempts(request, [row])
 
 
 @pytest.mark.asyncio
@@ -528,8 +534,9 @@ async def test_live_scope_refuses_an_executor_excluded_wallet(
     repository.list_active_wallet_credentials = AsyncMock(return_value=credentials)
     repository.get_orders_total_count = AsyncMock(return_value=0)
     repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+    scoped_repository = cast(Repository, repository)
     with pytest.raises(ValueError, match="no executor-backed"):
-        await resolve_live_wallet_scope(cast(Repository, repository), "wallet", _AS_OF, "wallet")
+        await resolve_live_wallet_scope(scoped_repository, "wallet", _AS_OF, "wallet")
 
 
 @pytest.mark.asyncio
@@ -545,8 +552,9 @@ async def test_live_scope_refuses_wallet_absent_from_active_catalogue(
     repository.list_active_wallet_credentials = AsyncMock(
         return_value=[_credential("kraken", wallet="other")]
     )
+    scoped_repository = cast(Repository, repository)
     with pytest.raises(ValueError, match="no active credential"):
-        await resolve_live_wallet_scope(cast(Repository, repository), "wallet", _AS_OF, None)
+        await resolve_live_wallet_scope(scoped_repository, "wallet", _AS_OF, None)
 
 
 def test_best_close_is_conservative_temporal_and_bounded() -> None:
