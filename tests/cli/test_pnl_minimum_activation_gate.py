@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import asdict
 from dataclasses import replace
@@ -273,6 +274,35 @@ def repository() -> MagicMock:
 def runner() -> CliRunner:
     """Provide an isolated Typer runner."""
     return CliRunner()
+
+
+_ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
+"""Matches one ANSI SGR sequence in captured CLI output."""
+
+
+def _unstyled(text: str) -> str:
+    """Strip ANSI styling before matching against Typer's own error text.
+
+    Typer renders usage errors through Rich, which highlights the offending
+    option and emits it as SEPARATELY STYLED RUNS: with colour on, ``--as-of``
+    leaves the renderer as an SGR sequence, then ``-``, then another sequence,
+    then ``-as``, then another, then ``-of``.
+    The literal substring is therefore absent from the raw capture, and an
+    assertion against it passes wherever colour is off and fails wherever it
+    is on. That is exactly how this test passed locally and failed in CI,
+    taking the rest of the test body — and the coverage of every refusal path
+    it exercises — down with it.
+
+    Only Typer's OWN messages need this. Our refusals go through plain
+    ``typer.echo`` and are never styled.
+
+    Args:
+        text: Raw captured stdout or stderr.
+
+    Returns:
+        The same text with every SGR sequence removed.
+    """
+    return _ANSI_STYLE.sub("", text)
 
 
 def test_request_refuses_an_unbounded_or_ambiguous_window() -> None:
@@ -1535,7 +1565,7 @@ def test_cli_refuses_backdating_thresholds_manual_scope_and_read_secrets(
         ],
     )
     assert backdated.exit_code == 2
-    assert "--as-of" in backdated.stderr
+    assert "--as-of" in _unstyled(backdated.stderr)
     naive = runner.invoke(
         app,
         [
