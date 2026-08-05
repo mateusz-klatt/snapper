@@ -125,12 +125,13 @@ every agent, every session, and every host sees the same notes.
 8) Coverage (must be 100% - TDD requirement)
 
 - `make cov`
-    - The repo enforces 100% coverage over the configured unit-testable scope
-      via `[tool.coverage.report]` `fail_under = 100` in `pyproject.toml`.
-      The exact omit allowlist is contract-tested. The PostgreSQL trades
-      partition rehearsal supervisor is the sole executable exception: its
-      fast contract tests still run here, while production partition DDL
-      requires a separate full-system rehearsal PASS report.
+    - The repo enforces 100% coverage via `[tool.coverage.report]`
+      `fail_under = 100` in `pyproject.toml`. There is **no omit list** — the
+      measured scope is exactly `[tool.coverage.run]` `source`, which covers
+      `src/snapper`, `proprietary/src`,
+      `integrations/snapper-delegate/src/snapper_delegate` and `scripts`, with
+      `branch = true`. Anything added under those roots must reach 100% line
+      AND branch coverage; there is no sanctioned way to exempt a file.
 - `make ui-cov`
     - The frontend enforces 100% coverage thresholds via `frontend/vite.config.ts`.
 
