@@ -36,6 +36,7 @@ from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from typing import Final
 from typing import cast
 from uuid import uuid7
 
@@ -80,6 +81,7 @@ from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderStatusEnum
@@ -148,11 +150,26 @@ class _ManualOrderInput:
     stop_price: float | None
     operator_public_id: str | None
     ai_review_public_id: str | None
+    leverage: int | None
+    post_only: bool
+    reduce_only: bool
 
 
 @dataclass(frozen=True)
 class _PreparedManualOrder:
-    """Precomputed context for the MCP manual-order tool."""
+    """Precomputed context for the MCP manual-order tool.
+
+    ``post_only`` is deliberately absent: it is consumed while the
+    execution-plan params are built inside
+    :func:`_prepare_manual_order` and has no ``trade_commands``
+    column, exactly as on the REST create-order route. ``leverage``
+    and ``reduce_only`` are carried because both are real command
+    columns written by :func:`_build_manual_order_command_row`.
+
+    ``inert_flags`` is computed once at preparation time, where both the
+    request and the resolved execution venue are in scope, and carried
+    so the accepted envelope can name what the venue will not act on.
+    """
 
     repo: Repository
     enforcer: TradingCapsEnforcer
@@ -166,6 +183,8 @@ class _PreparedManualOrder:
     quantity: float
     price: float | None
     stop_price: float | None
+    leverage: int | None
+    reduce_only: bool
     created_at: datetime
     bus_time: dt.datetime
     wallet_public_id: str
@@ -174,6 +193,7 @@ class _PreparedManualOrder:
     shard_key: str
     client_order_id: str
     tracker: SequenceTracker
+    inert_flags: tuple[str, ...]
 
 
 def _is_unique_constraint_violation(exc: IntegrityError) -> bool:
@@ -728,6 +748,93 @@ def _manual_order_wallet_blank_result() -> CallToolResult:
     )
 
 
+_REDUCE_ONLY_VENUES: Final[frozenset[str]] = frozenset({ExchangeEnum.KRAKEN_FUTURES})
+"""Venues whose client actually forwards ``reduce_only`` to the exchange.
+
+Only ``implementations/kraken_futures.py`` reads the flag; the Kraken spot,
+equities, Walutomat and paper clients never reference it, so on those venues a
+``reduce_only`` order is persisted and then submitted WITHOUT the clamp.
+
+This set exists because that silence is dangerous rather than merely useless.
+``leverage`` is forwarded on Kraken SPOT and nowhere else, while ``reduce_only``
+is honoured on Kraken FUTURES and nowhere else — disjoint venues. Submitting
+both together on spot therefore yields a leveraged order with no reduce clamp,
+so a sell larger than the held position opens a margin short: precisely the
+overshoot the caller asked to prevent. REST does not gate this either, but
+parity with an ungated REST is not the right target for a surface an autonomous
+agent drives.
+"""
+
+
+_REDUCE_ONLY_DISCLOSED_VENUES: Final[frozenset[str]] = frozenset({ExchangeEnum.PAPER})
+"""Venues where an ignored ``reduce_only`` is disclosed rather than refused.
+
+Paper is where an agent rehearses, and refusing there would block the default
+practice venue for a workflow that is legitimate the moment it moves to Kraken
+Futures. Nothing can be overshot into: there is no real position and no real
+money, so the only cost of the ignored flag is fidelity — the rehearsal will
+not behave exactly like the live venue.
+
+That cost is real, though, so it is stated rather than swallowed. An accepted
+order names the flag in ``inert_flags``, which is the honest middle between
+refusing a harmless request and silently dropping a parameter the caller
+believed was doing something.
+
+The refusal stands for every OTHER venue that ignores the flag, because there
+the consequence is a real unclamped submission. See
+:data:`_REDUCE_ONLY_VENUES`.
+"""
+
+
+def _inert_manual_order_flags(order: _ManualOrderInput, execution_exchange: str) -> tuple[str, ...]:
+    """Name every requested flag the resolved venue will not act on.
+
+    A flag the caller set and nothing reads is a silent lie by omission: the
+    order succeeds, so the caller concludes the constraint was applied. Naming
+    it on the accepted envelope costs nothing and removes the false belief.
+
+    Args:
+        order: The validated manual-order request.
+        execution_exchange: The resolved execution venue.
+
+    Returns:
+        Requested-but-inert flag names, in a stable order. Empty when every
+        requested flag is honoured.
+    """
+    inert: list[str] = []
+    if order.post_only:
+        inert.append("post_only")
+    if order.reduce_only and execution_exchange not in _REDUCE_ONLY_VENUES:
+        inert.append("reduce_only")
+    return tuple(inert)
+
+
+def _manual_order_reduce_only_unsupported_result(exchange: str) -> CallToolResult:
+    """Return the envelope refusing ``reduce_only`` on a venue that ignores it.
+
+    Args:
+        exchange: The submitted venue that does not honour the flag.
+
+    Returns:
+        The canonical failure envelope.
+    """
+    return to_call_tool_result(
+        success=False,
+        error_code="reduce_only_unsupported",
+        message=(
+            f"{exchange} does not honour reduce_only; the order would be submitted "
+            "without the clamp. Resubmit without reduce_only, or size the order so "
+            "it cannot exceed the held position."
+        ),
+        details=sanitize_output(
+            {
+                "exchange": exchange,
+                "supported_exchanges": sorted(_REDUCE_ONLY_VENUES),
+            }
+        ),
+    )
+
+
 async def _prepare_manual_order(
     *,
     repository_getter: Callable[[], Repository | None],
@@ -740,6 +847,27 @@ async def _prepare_manual_order(
 
     MCP manual orders derive mode from the requested venue because the
     public tool intentionally exposes no mode parameter.
+
+    Optional execution modifiers land exactly where the REST
+    create-order route puts them, so neither surface invents a
+    persistence shape the other cannot read:
+
+        - ``leverage`` is written into the plan params only when
+          supplied (REST does the same) and onto the command row
+          unconditionally, because ``trade_commands.leverage`` is a
+          real nullable column.
+        - ``post_only`` has no command column on either surface and
+          travels only as plan-params metadata.
+        - ``reduce_only`` is a command column only; REST never writes
+          it into plan params despite the ``manual_once`` docstring
+          listing it, and mirroring REST beats mirroring that
+          docstring.
+
+    Both optional plan-params keys are omitted when the caller leaves
+    the parameter at its default, so a call that passes none of the
+    three produces byte-identical plan params to the pre-parity tool.
+    An omitted key and a stored ``false`` are equivalent to every
+    reader of ``post_only`` today.
     """
     claims = claims_getter()
     _require_permission(claims, Permission.CREATE_ORDERS)
@@ -785,6 +913,12 @@ async def _prepare_manual_order(
             message=str(exc.details["reason"]),
             details=sanitize_output(exc.details),
         )
+    if (
+        order.reduce_only
+        and execution_exchange not in _REDUCE_ONLY_VENUES
+        and execution_exchange not in _REDUCE_ONLY_DISCLOSED_VENUES
+    ):
+        return _manual_order_reduce_only_unsupported_result(execution_exchange)
     resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
         order.instrument, order.exchange, created_at
     )
@@ -844,6 +978,8 @@ async def _prepare_manual_order(
             "native_instrument": order.instrument,
             **({"price": order.price} if order.price is not None else {}),
             **({"stop_price": order.stop_price} if order.stop_price is not None else {}),
+            **({"leverage": order.leverage} if order.leverage is not None else {}),
+            **({"post_only": order.post_only} if order.post_only else {}),
         },
         "status": "pending",
         "created_at": created_at,
@@ -865,12 +1001,15 @@ async def _prepare_manual_order(
         quantity=order.quantity,
         price=order.price,
         stop_price=order.stop_price,
+        leverage=order.leverage,
+        reduce_only=order.reduce_only,
         created_at=created_at,
         bus_time=bus_time,
         wallet_public_id=wallet_public_id,
         operator_public_id=resolved_operator_public_id,
         user_public_id=user_public_id,
         shard_key=shard_key,
+        inert_flags=_inert_manual_order_flags(order, execution_exchange),
         client_order_id=client_order_id,
         tracker=tracker,
     )
@@ -897,6 +1036,13 @@ def _build_manual_order_command_row(
 ) -> TradeCommandInsertRow:
     """Build the trade-command row after the plan public ID is known.
 
+    ``leverage`` and ``reduce_only`` are taken from the prepared
+    bundle rather than hardcoded, matching the REST create-order
+    route which writes both columns unconditionally from the request
+    body. A caller that supplies neither still yields ``None`` /
+    ``False``, the exact values this builder emitted before the two
+    fields became caller-controlled.
+
     Args:
         prepared: The validated manual-order preparation bundle.
         plan_public_id: Public id of the just-inserted execution plan.
@@ -921,8 +1067,8 @@ def _build_manual_order_command_row(
         "quantity": prepared.quantity,
         "price": prepared.price,
         "stop_price": prepared.stop_price,
-        "leverage": None,
-        "reduce_only": False,
+        "leverage": prepared.leverage,
+        "reduce_only": prepared.reduce_only,
         "status": TradeCommandStatusEnum.CREATED,
         "created_at": prepared.created_at,
         "correlation_id": plan_public_id,
@@ -2026,6 +2172,9 @@ def register_mcp_tools(
         stop_price: float | None = None,
         operator_public_id: str | None = None,
         ai_review_public_id: str | None = None,
+        leverage: int | None = None,
+        post_only: bool = False,
+        reduce_only: bool = False,
     ) -> object:
         """Submit a single manual order — wraps REST ``create_order`` via MCP.
 
@@ -2063,6 +2212,33 @@ def register_mcp_tools(
                 ``bus.caps_violation_after_ai_approve`` publish so
                 :class:`AiReviewService` can re-fanout the rejection
                 to the delegate's UI.
+            leverage: Optional margin multiplier persisted on the
+                command row and forwarded to the venue by the Kraken
+                spot adapter. Omit for unleveraged orders. NOT
+                validated against the instrument's
+                ``supports_leverage`` / ``max_leverage_*``
+                capabilities — the REST create-order route applies no
+                such gate, and this tool deliberately mirrors it
+                rather than inventing a stricter rule on one surface.
+                Trading caps still measure notional as
+                ``quantity x price``, so raising leverage does NOT
+                raise the exposure the caps enforcer sees; size the
+                order accordingly.
+            post_only: Request maker-only placement. Persisted as
+                execution-plan metadata only — there is no
+                ``trade_commands`` column for it on either surface.
+                Callers must treat this as a stated preference, not a
+                guarantee: the current executor does not forward the
+                flag to the venue, so it does not yet secure maker
+                fees. Left at ``False`` the key is omitted from the
+                plan params entirely.
+            reduce_only: Restrict the order to reducing an existing
+                position so a close cannot flip into a new opposite
+                position. Persisted on the command row and honoured
+                by the Kraken futures adapter. The Kraken spot and
+                paper adapters ignore it, so on those venues the flag
+                is recorded for audit but enforces nothing — do not
+                rely on it as the sole overshoot guard there.
 
         Returns:
             Dict with ``plan_public_id`` (UUID7), ``command_public_id``
@@ -2097,6 +2273,9 @@ def register_mcp_tools(
             stop_price=stop_price,
             operator_public_id=operator_public_id,
             ai_review_public_id=ai_review_public_id,
+            leverage=leverage,
+            post_only=post_only,
+            reduce_only=reduce_only,
         )
         prepared = await _prepare_manual_order(
             repository_getter=repository_getter,
@@ -2136,6 +2315,7 @@ def register_mcp_tools(
                 "plan_public_id": plan_public_id,
                 "command_public_id": command_public_id,
                 "source_surface": _MCP_SOURCE_SURFACE,
+                "inert_flags": list(prepared.inert_flags),
             }
         )
         return sanitized

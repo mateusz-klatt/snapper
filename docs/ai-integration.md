@@ -472,7 +472,8 @@ to `caps_enforcer_getter` at registration.
 
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
     side, order_type, quantity, idempotency_key, wallet_public_id?,
-    price?, stop_price?, operator_public_id?, ai_review_public_id?)`** —
+    price?, stop_price?, operator_public_id?, ai_review_public_id?,
+    leverage?, post_only?, reduce_only?)`** —
     enqueues a trade command under the delegate's user_public_id
     with `source_surface='mcp'` + the caps check from
     `TradingCapsEnforcer.guard`. Requires `CREATE_ORDERS`, rejects
@@ -487,6 +488,53 @@ to `caps_enforcer_getter` at registration.
     a structured `wallet_ambiguous` envelope and zero candidates
     `wallet_unresolved` (a blank string returns `invalid_argument`).
     Wraps the REST `create_order` route.
+    `leverage`, `post_only`, and `reduce_only` are optional execution
+    modifiers threaded to the same destinations the REST route uses,
+    and each is omitted from persistence when left at its default:
+
+    - `leverage` (int, default absent) goes to the plan params only
+        when supplied, and always to the `trade_commands.leverage`
+        column. No `supports_leverage` / `max_leverage_*` capability
+        gate is applied, because the REST route applies none either.
+        Trading caps measure notional as `quantity x price`, so
+        leverage does not raise the exposure caps evaluate.
+    - `post_only` (bool, default `false`) is plan-params metadata
+        only; there is no command column for it on either surface.
+        The executor does not currently forward it to the venue, so
+        it records intent rather than guaranteeing maker placement.
+        Every accepted order therefore names it in `inert_flags`.
+    - `reduce_only` (bool, default `false`) goes to the
+        `trade_commands.reduce_only` column only, never to the plan
+        params — matching REST. **Only `kraken_futures` forwards it**;
+        the Kraken spot, Kraken equities, Walutomat and paper clients
+        never read it. On the REAL venues among those the tool refuses
+        the submit with `reduce_only_unsupported` rather than
+        persisting an order the caller believes is clamped and then
+        submitting it unclamped. This is deliberately stricter than
+        REST, which applies no such gate: `leverage` is forwarded on
+        Kraken spot and nowhere else while `reduce_only` is honoured on
+        Kraken futures and nowhere else, so the pair would otherwise
+        submit a leveraged order with no clamp — a sell larger than the
+        held position then opens a margin short. Parity with an ungated
+        REST is not the right target for a surface an autonomous agent
+        drives.
+
+        **`paper` is the exception and is accepted, not refused.** It
+        ignores the flag exactly as spot does, but there is no real
+        position to overshoot and no real money, so the only cost is
+        rehearsal fidelity. Refusing would block the default practice
+        venue for a workflow that becomes legitimate the moment it moves
+        to Kraken futures, so the order goes through and the inertness
+        is disclosed instead.
+    - **`inert_flags`** on every accepted envelope lists the requested
+        flags the resolved venue will not act on — `post_only` always,
+        and `reduce_only` when submitting to `paper`. The key is always
+        present and is an empty list when every requested flag is
+        honoured, so a caller can read it unconditionally and can tell
+        "nothing inert" apart from "an older server that never
+        disclosed". A flag that is set and read by nothing is otherwise
+        a silent lie by omission: the submit succeeds, so the caller
+        concludes the constraint was applied.
 
 - **`cancel_order(plan_public_id, idempotency_key)`** — cancels an
     active execution plan via the same `PlansCancelService` REST

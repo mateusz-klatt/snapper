@@ -315,18 +315,33 @@ _REAL_TOOL_SCHEMAS: tuple[tuple[str, JsonObject], ...] = (
                     "title": "Instrument Public Id",
                     "type": "string",
                 },
+                "leverage": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Leverage",
+                },
                 "operator_public_id": {
                     "anyOf": [{"type": "string"}, {"type": "null"}],
                     "default": None,
                     "title": "Operator Public Id",
                 },
                 "order_type": {"title": "Order Type", "type": "string"},
+                "post_only": {
+                    "default": False,
+                    "title": "Post Only",
+                    "type": "boolean",
+                },
                 "price": {
                     "anyOf": [{"type": "number"}, {"type": "null"}],
                     "default": None,
                     "title": "Price",
                 },
                 "quantity": {"title": "Quantity", "type": "number"},
+                "reduce_only": {
+                    "default": False,
+                    "title": "Reduce Only",
+                    "type": "boolean",
+                },
                 "side": {"title": "Side", "type": "string"},
                 "stop_price": {
                     "anyOf": [{"type": "number"}, {"type": "null"}],

@@ -952,6 +952,298 @@ class TestSubmitManualOrderTool:
         assert plan_row["params"]["stop_price"] == 48000.0
         assert "venue_order_type" not in plan_row["params"]
 
+    async def _dispatch_manual_order_with_modifiers(
+        self,
+        modifiers: dict[str, object],
+        exchange: str = "kraken",
+        paper_wallet: bool = False,
+    ) -> tuple[AsyncMock, dict[str, Any]]:
+        """Dispatch a baseline limit submit plus optional execution modifiers.
+
+        Keeps the modifier tests focused on persisted destinations by
+        holding every other tool argument fixed across them.
+
+        Args:
+            modifiers: Extra tool arguments merged over the baseline
+                payload — the optional ``leverage`` / ``post_only`` /
+                ``reduce_only`` parameters under test.
+            exchange: Venue to submit against. Overridden by the
+                ``reduce_only`` tests because that flag is refused on
+                every real venue whose client does not forward it.
+            paper_wallet: Make the scoped wallet a paper wallet. Required
+                whenever ``exchange="paper"``, because the tool derives
+                mode from the venue and then requires mode and wallet to
+                agree — a live wallet on the paper venue is refused as
+                ``mode_wallet_mismatch`` long before any flag is examined.
+
+        Returns:
+            The repository mock — whose ``insert_execution_plan`` and
+            ``insert_trade_command`` await args carry the rows the caller
+            asserts on — paired with the tool's response envelope, so a
+            caller can assert on a refusal instead of on persistence.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        _allow_wallet(repo)
+        _allow_execution_venue(repo, "wallet-1", exchange=exchange, is_paper=paper_wallet)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await call_raw_tool(
+            server,
+            "submit_manual_order",
+            {
+                "exchange": exchange,
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-modifier",
+                "price": 50000.0,
+                **modifiers,
+            },
+        )
+        return repo, result
+
+    @pytest.mark.asyncio
+    async def test_omitted_execution_modifiers_write_the_pre_parity_row_shape(self) -> None:
+        """Omitting all three modifiers persists exactly what the tool wrote before.
+
+        Given: a submit passing none of ``leverage``, ``post_only`` or
+            ``reduce_only``,
+        When: ``submit_manual_order`` runs,
+        Then: the plan params carry exactly the key set they carried
+            before the modifiers existed and the command row still
+            holds ``leverage=None`` / ``reduce_only=False``. This is
+            the compatibility proof: every MCP client that never
+            learns about the new parameters keeps producing identical
+            rows.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers({})
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert set(plan_row["params"]) == {
+            "order_type",
+            "side",
+            "child_client_order_id",
+            "native_instrument",
+            "price",
+        }
+        assert cmd_row["leverage"] is None
+        assert cmd_row["reduce_only"] is False
+
+    @pytest.mark.asyncio
+    async def test_leverage_reaches_plan_params_and_command_column(self) -> None:
+        """Leverage lands in both REST destinations and nowhere else.
+
+        Given: a submit carrying ``leverage=5``,
+        When: ``submit_manual_order`` runs,
+        Then: the plan params gain a ``leverage`` key and the command
+            row's ``leverage`` column holds the same value, matching
+            the REST create-order route which writes both.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers({"leverage": 5})
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["params"]["leverage"] == 5
+        assert cmd_row["leverage"] == 5
+        assert cmd_row["reduce_only"] is False
+        assert "post_only" not in plan_row["params"]
+
+    @pytest.mark.asyncio
+    async def test_post_only_reaches_plan_params_only(self) -> None:
+        """Post-only is plan metadata; it has no command column to reach.
+
+        Given: a submit carrying ``post_only=True``,
+        When: ``submit_manual_order`` runs,
+        Then: the plan params carry ``post_only`` and the command row
+            gains no such key — ``trade_commands`` has no
+            ``post_only`` column on either surface.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers({"post_only": True})
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["params"]["post_only"] is True
+        assert "post_only" not in cmd_row
+        assert cmd_row["leverage"] is None
+        assert cmd_row["reduce_only"] is False
+
+    @pytest.mark.asyncio
+    async def test_post_only_left_false_is_omitted_from_plan_params(self) -> None:
+        """An explicit false post-only is stored the same way as an omitted one.
+
+        Given: a submit passing ``post_only=False`` explicitly,
+        When: ``submit_manual_order`` runs,
+        Then: no ``post_only`` key is written, because the omission
+            rule keys off the value rather than off argument presence
+            and an absent key means exactly what a stored ``false``
+            would mean to every reader.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers({"post_only": False})
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        assert "post_only" not in plan_row["params"]
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_reaches_command_column_only(self) -> None:
+        """Reduce-only follows REST into the command column, not the plan params.
+
+        Given: a submit carrying ``reduce_only=True``,
+        When: ``submit_manual_order`` runs,
+        Then: the command row's ``reduce_only`` column is set while
+            the plan params stay free of the key. The ``manual_once``
+            docstring lists ``reduce_only`` as an accepted plan param,
+            but REST never writes it there and this tool mirrors the
+            route rather than the docstring.
+
+        Submitted against ``kraken_futures`` because that is the only
+        venue whose client forwards the flag; see the spot refusal test
+        below for why the other venues cannot be used here.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True}, exchange="kraken_futures"
+        )
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert cmd_row["reduce_only"] is True
+        assert "reduce_only" not in plan_row["params"]
+        assert cmd_row["leverage"] is None
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_is_refused_on_a_venue_that_ignores_it(self) -> None:
+        """Kraken spot cannot honour reduce-only, so the tool refuses instead.
+
+        Given: a submit carrying ``reduce_only=True`` against ``kraken``,
+        When: ``submit_manual_order`` runs,
+        Then: it fails with ``reduce_only_unsupported`` and writes
+            neither a plan nor a command.
+
+        The flag is read only by ``kraken_futures``; the spot, equities,
+        Walutomat and paper clients never reference it. Accepting it on a
+        REAL venue would persist an order the operator believes is
+        clamped and then submit it unclamped — and because ``leverage``
+        is forwarded on spot and nowhere else, the pair
+        ``leverage + reduce_only`` would submit a leveraged order with
+        no clamp, so a sell larger than the position opens a margin
+        short. REST does not gate this, and this test states that
+        parity with an ungated REST is deliberately not the target for
+        a surface an autonomous agent drives.
+
+        Paper is the one exception and is covered separately below: it
+        ignores the flag too, but nothing there can be overshot into, so
+        the order is accepted and the inertness disclosed instead.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True}, exchange="kraken"
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "reduce_only_unsupported"
+        assert envelope["details"]["exchange"] == "kraken"
+        assert envelope["details"]["supported_exchanges"] == ["kraken_futures"]
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_paper_accepts_reduce_only_and_discloses_that_it_is_inert(self) -> None:
+        """Paper takes the order and says the flag does nothing, rather than refusing.
+
+        Given: a submit carrying ``reduce_only=True`` against ``paper``,
+        When: ``submit_manual_order`` runs,
+        Then: it returns the accepted envelope, persists plan and command,
+            and names ``reduce_only`` in ``inert_flags``.
+
+        Paper ignores the flag exactly as spot does, but the consequence
+        is not the same. There is no real position to overshoot and no
+        real money, so the only cost is rehearsal fidelity — refusing
+        here would block the default practice venue for a workflow that
+        becomes legitimate the moment it moves to Kraken Futures.
+        Disclosing is the honest middle: the caller is not stopped, and
+        is not left believing a clamp was applied.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True}, exchange="paper", paper_wallet=True
+        )
+        assert result["inert_flags"] == ["reduce_only"]
+        repo.insert_execution_plan.assert_awaited()
+        assert repo.insert_trade_command.await_args.args[0]["reduce_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_post_only_is_disclosed_as_inert_on_every_venue(self) -> None:
+        """``post_only`` is persisted but read by nothing, so it is always disclosed.
+
+        Given: a submit carrying ``post_only=True``,
+        When: ``submit_manual_order`` runs,
+        Then: it returns the accepted envelope naming ``post_only`` in
+            ``inert_flags``.
+
+        No executor reads the key: ``messaging/executors/base.py`` never
+        references it. It is recorded on the plan params for forensics and
+        for REST parity, which is worth keeping — but a caller who set it
+        and saw success would otherwise conclude maker-only placement was
+        requested of the venue, and it was not.
+        """
+        _, result = await self._dispatch_manual_order_with_modifiers({"post_only": True})
+        assert result["inert_flags"] == ["post_only"]
+
+    @pytest.mark.asyncio
+    async def test_an_order_whose_flags_are_all_honoured_discloses_nothing(self) -> None:
+        """The disclosure stays empty when every requested flag is acted on.
+
+        Given: a submit with no inert modifiers,
+        When: ``submit_manual_order`` runs,
+        Then: ``inert_flags`` is present and empty.
+
+        Present rather than absent so a caller can read the key
+        unconditionally, and empty rather than omitted so "no disclosure"
+        is distinguishable from "an older server that never disclosed".
+        """
+        _, result = await self._dispatch_manual_order_with_modifiers({"leverage": 3})
+        assert result["inert_flags"] == []
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_omitted_is_unaffected_by_the_venue_guard(self) -> None:
+        """The guard keys off the flag, never off the venue alone.
+
+        Given: a submit against ``kraken`` passing no ``reduce_only``,
+        When: ``submit_manual_order`` runs,
+        Then: it succeeds — the refusal must not become a blanket ban
+            on spot orders, which is the obvious way to break every
+            existing caller while fixing the unclamped-order hazard.
+        """
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": False}, exchange="kraken"
+        )
+        assert result["command_public_id"] == "cmd-pid"
+        repo.insert_trade_command.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_leverage_is_not_gated_by_instrument_capabilities(self) -> None:
+        """Leverage passes through unvalidated, exactly as it does over REST.
+
+        Given: a submit carrying an implausibly large ``leverage``,
+        When: ``submit_manual_order`` runs,
+        Then: the value persists untouched and the instrument
+            capability read is never awaited. The REST create-order
+            route consults neither ``supports_leverage`` nor
+            ``max_leverage_*`` for manual orders, so this tool must
+            not invent a gate that would make one surface silently
+            stricter than the other. This test pins that deliberate
+            choice: if a leverage gate is ever wanted it belongs on
+            both surfaces at once, and this assertion should fail
+            loudly when that happens.
+        """
+        repo, _ = await self._dispatch_manual_order_with_modifiers({"leverage": 500})
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["params"]["leverage"] == 500
+        assert cmd_row["leverage"] == 500
+        repo.get_instrument_capabilities.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_caps_violation_propagates(self) -> None:
         """Enforcer rejection → CapsViolationError surfaces to MCP client.

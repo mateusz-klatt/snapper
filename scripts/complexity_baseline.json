@@ -1084,7 +1084,7 @@
         "PLR0913": 6
       },
       "register_mcp_tools.submit_manual_order": {
-        "PLR0913": 12
+        "PLR0913": 15
       }
     },
     "src/snapper/messaging/executors/base.py": {
