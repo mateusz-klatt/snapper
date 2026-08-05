@@ -6685,6 +6685,60 @@ class TestCcxtOrderLeverageAndPostOnly:
             assert params["postOnly"] is True
             assert result.id == "post-id"
 
+    @pytest.mark.asyncio
+    async def test_ccxt_order_with_reduce_only(self, client: KrakenExchangeClient) -> None:
+        """Verify reduce_only reaches ccxt as the camelCase key.
+
+        Given: An ExchangeOrderRequest with reduce_only=True,
+        When: _create_order_via_ccxt is called,
+        Then: The ccxt create_order call includes reduceOnly=True in params.
+
+        The spelling is load-bearing, not cosmetic. ccxt reads either
+        ``reduceOnly`` or ``reduce_only`` from params, but its omit list
+        strips only the camelCase one before merging what is left over the
+        request. A snake_case argument would therefore survive that merge
+        and overwrite ccxt's own lowercase ``'true'`` string with a raw
+        Python ``True``, which urlencodes to a literal Kraken does not
+        recognise — an unclamped order reported as success.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.create_order = AsyncMock(
+                return_value={
+                    "id": "reduce-id",
+                    "symbol": "BTC/USD",
+                    "amount": 1.0,
+                    "side": "sell",
+                    "type": "limit",
+                    "status": "open",
+                    "price": 50000.0,
+                    "filled": 0.0,
+                    "remaining": 1.0,
+                    "timestamp": 1640995200000,
+                    "datetime": "2022-01-01T00:00:00.000Z",
+                    "fee": None,
+                    "trades": [],
+                    "info": {},
+                }
+            )
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.SELL,
+                type=ExchangeOrderTypeEnum.LIMIT,
+                amount=1.0,
+                client_order_id="coid-ccxt-order-with-reduce-only",
+                price=50000.0,
+                leverage=2,
+                reduce_only=True,
+            )
+            with patch.object(client, "_log_order_to_db", new_callable=AsyncMock) as mock_log:
+                mock_log.return_value = None
+                result = await client.create_order(request)
+            call_args = mock_ccxt.create_order.call_args
+            params = call_args[0][5]
+            assert params["reduceOnly"] is True
+            assert "reduce_only" not in params
+            assert result.id == "reduce-id"
+
 
 class TestNativeOrderLeverageAndPostOnly:
     """Tests for leverage and post_only in _create_order_via_native."""
@@ -6779,6 +6833,58 @@ class TestNativeOrderLeverageAndPostOnly:
             call_kwargs = mock_trade_client.create_order.call_args.kwargs
             assert call_kwargs["oflags"] == "post"
             assert result.id == "NAT-POST"
+
+    @pytest.mark.asyncio
+    async def test_native_order_with_reduce_only(self, client: KrakenExchangeClient) -> None:
+        """Verify reduce_only is sent as the lowercase string on the native path.
+
+        Given: An ExchangeOrderRequest with reduce_only=True,
+        When: _create_order_via_native is called (via fallback),
+        Then: The native Trade.create_order call includes reduce_only='true'.
+
+        A string rather than a bool, and the assertion pins that on purpose.
+        The SDK writes the value straight into its params dict and the
+        transport urlencodes it, so a Python ``True`` reaches Kraken as the
+        literal ``True`` with a capital T. The venue already receives
+        ``reduce_only=False`` on every native order, which proves only that
+        an unrecognised literal is read as FALSE — never that ``True`` is
+        read as true. Guessing wrong yields a leveraged order placed with no
+        clamp while the envelope reports success, so both transports are held
+        to the same bytes.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: AAPLx-USD"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="AAPLx/USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {
+                "txid": ["NAT-REDUCE"],
+                "descr": {"order": "sell 10 AAPLx/USD @ limit 150.0"},
+            }
+            request = ExchangeOrderRequest(
+                symbol="AAPLx-USD",
+                side=OrderSideEnum.SELL,
+                type=ExchangeOrderTypeEnum.LIMIT,
+                amount=10.0,
+                client_order_id="coid-native-order-with-reduce-only",
+                price=150.0,
+                leverage=2,
+                reduce_only=True,
+            )
+            result = await client.create_order(request)
+            call_kwargs = mock_trade_client.create_order.call_args.kwargs
+            assert call_kwargs["reduce_only"] == "true"
+            assert result.id == "NAT-REDUCE"
 
 
 class TestKrakenLiveFixtures:
