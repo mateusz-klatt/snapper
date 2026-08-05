@@ -319,6 +319,15 @@ class TradeCandleBuilder:
         :attr:`late_trades_after_close` — every pop path (including the
         idle flush) counts as a close for late-trade accounting.
 
+        A bucket carrying no volume at all falls back to ``b.close`` rather
+        than to ``0.0``. A bucket exists here only because at least one trade
+        was accumulated into it, so its OHLC names a real traded price; zero
+        would price that bar at nothing for every reader joining on VWAP.
+        This is the third and last copy of the same guard — the other two are
+        ``CandleAggregator._to_candle_update`` and ``_build_rows`` in
+        ``scripts/backfill_synth_candles.py``. All three write into the same
+        durable candle plane, so they must agree.
+
         Args:
             should_emit: Predicate over a bucket's minute-start UNIX
                 timestamp (int seconds); ``True`` emits + removes that
@@ -332,7 +341,7 @@ class TradeCandleBuilder:
         for key, b in self._builders.items():
             if not should_emit(int(b.interval_begin.timestamp())):
                 continue
-            vwap = b.vwap_sum / b.volume if b.volume > 0 else 0.0
+            vwap = b.vwap_sum / b.volume if b.volume > 0 else b.close
             out.append(
                 CandleUpdate(
                     symbol=b.symbol,

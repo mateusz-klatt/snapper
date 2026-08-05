@@ -133,15 +133,23 @@ class TestTradeCandleBuilder:
         assert opens == [pytest.approx(3000.0), pytest.approx(3010.0)]
         assert b.active_buckets() == 0
 
-    def test_zero_volume_branch_falls_through_to_vwap_zero(self) -> None:
-        """An accumulator with zero volume yields a ``vwap=0.0`` candle.
+    def test_zero_volume_branch_carries_the_close_as_vwap(self) -> None:
+        """An accumulator with zero volume yields a ``vwap == close`` candle.
 
         Given: A trade with ``quantity == 0`` (a degenerate but
             schema-legal case — exchanges occasionally send these for
             informational fills),
         When: The minute closes and ``pop_completed`` runs,
-        Then: The emitted candle has ``vwap == 0.0`` (the
-            ``b.volume > 0`` guard short-circuits the divide).
+        Then: The emitted candle carries its own close as VWAP, never 0.0.
+
+        The bucket exists only because a trade was accumulated into it, so
+        its OHLC names a real traded price. A volume-weighted mean is
+        undefined without volume, and zero is the one answer that is
+        affirmatively wrong: it would price a valid bar at nothing for every
+        reader that joins on VWAP. This matches the same guard in
+        ``CandleAggregator._to_candle_update`` and in ``_build_rows`` in
+        ``scripts/backfill_synth_candles.py``; all three feed the same
+        durable candle plane and must agree.
         """
         minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
         b = TradeCandleBuilder()
@@ -149,7 +157,8 @@ class TestTradeCandleBuilder:
         candles = b.pop_completed(minute + timedelta(minutes=1))
         assert len(candles) == 1
         assert candles[0].volume == pytest.approx(0.0)
-        assert candles[0].vwap == pytest.approx(0.0)
+        assert candles[0].vwap == pytest.approx(1.0)
+        assert candles[0].close == pytest.approx(1.0)
 
 
 class TestTradeCandleBuilderEventWatermark:
