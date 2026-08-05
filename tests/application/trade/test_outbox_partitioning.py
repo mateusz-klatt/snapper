@@ -49,6 +49,7 @@ def _make_cmd_row(
         "stop_price": None,
         "leverage": None,
         "reduce_only": False,
+        "post_only": False,
         "status": "created",
         "attempt_count": 0,
         "last_error": None,
