@@ -28,6 +28,7 @@ Design constraints:
 
 import asyncio
 import contextlib
+import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -54,6 +55,25 @@ _CACHE_CANDLE_LIMIT = 100
 """Per-instrument deque cap. 100 minutes is enough to derive 30m × 3
 cells for the chart route while keeping cache memory predictable
 (~100 instruments × 100 candles × ~96 bytes = ~1 MB)."""
+
+_ELAPSED_CURRENT_GRACE_S = 5.0
+"""Seconds past a 1m window's end before the in-flight bar may be read.
+
+Mirrors ``_CANDLE_FLUSH_GRACE_S`` in the publisher, whose rationale — typical
+Kraken OHLC delivery latency — applies unchanged here.
+
+Deliberately NOT keyed to the write-side ceiling. With minute completion active
+the publisher's own seal waits ``trade_built_finalize_grace_seconds`` (12) plus
+``MINUTE_SWEEP_MARGIN_S`` (8) plus this grace, so a read that never exposed a
+bar the writer might still revise would have to wait 25 s, and more if an
+operator raises the finalize grace. That trade is not worth taking: a bar
+exposed here can still be revised, which is exactly what the live chart already
+does with every in-progress frame it receives over the bus. The candidate stays
+in ``_current`` rather than being promoted, so a later frame corrects it and the
+next read sees the correction."""
+
+_MINUTE_MS: Final[int] = 60_000
+"""One 1m window width in integer milliseconds."""
 
 _PRUNE_LOOP_INTERVAL_S = 60.0
 """How often the stale-key prune loop walks ``_last_seen_at``."""
@@ -388,7 +408,12 @@ class MarketCacheService:
                 context.term()
 
     async def get_1m_candles(
-        self, exchange: AllExchange, native_symbol: str, *, limit: int
+        self,
+        exchange: AllExchange,
+        native_symbol: str,
+        *,
+        limit: int,
+        include_elapsed_current: bool = False,
     ) -> list[CandleSnap]:
         """Return up to ``limit`` most-recent closed 1m candles, chronological.
 
@@ -403,6 +428,12 @@ class MarketCacheService:
             limit: Maximum number of bars; pulled from the right side
                 of the deque so the most recent bars are always
                 included.
+            include_elapsed_current: Also return the in-flight bar once its
+                own window has ended. Defaults to False, and every caller
+                except the public candle facade leaves it there: the cache
+                diagnostic route exists to report the deque literally, and
+                :mod:`candle_coverage` compares the deque against the DB, so
+                a bar the deque does not hold must not appear for them.
 
         Returns:
             List of :class:`CandleSnap` in chronological order
@@ -411,11 +442,47 @@ class MarketCacheService:
         key = (exchange, native_symbol)
         async with self._lock:
             cached = self._candles.get(key)
-            if cached is None:
-                return []
-            if limit >= len(cached):
-                return list(cached)
-            return list(cached)[-limit:]
+            snaps = [] if cached is None else list(cached)
+            if include_elapsed_current:
+                snaps = self._merge_elapsed_current(snaps, key)
+            return snaps if limit >= len(snaps) else snaps[-limit:]
+
+    def _merge_elapsed_current(
+        self, snaps: list[CandleSnap], key: tuple[AllExchange, str]
+    ) -> list[CandleSnap]:
+        """Append the in-flight bar once its own window has demonstrably ended.
+
+        The deque holds a bar only once a STRICTLY NEWER one arrives, so for an
+        instrument that trades every few hours its newest closed bar stays
+        invisible for exactly that long. Reading it back here is what makes the
+        served series reach the present.
+
+        The test is on the bar's own window, not on the arrival of anything
+        else: a bar stops being in flight when its minute ends, and those are
+        the same statement only for an instrument that trades every minute.
+
+        Caller holds :attr:`_lock`.
+
+        Args:
+            snaps: Closed bars already taken from the deque.
+            key: Exchange and native symbol being read.
+
+        Returns:
+            ``snaps`` with the in-flight bar appended, or replacing an equal
+            tail, when its window ended more than
+            :data:`_ELAPSED_CURRENT_GRACE_S` ago. Unchanged otherwise.
+        """
+        current = self._current.get(key)
+        if current is None:
+            return snaps
+        ends_at = (current.open_at_ms + _MINUTE_MS) / 1000.0
+        if time.time() < ends_at + _ELAPSED_CURRENT_GRACE_S:
+            return snaps
+        if snaps and snaps[-1].open_at_ms == current.open_at_ms:
+            return [*snaps[:-1], current]
+        if snaps and snaps[-1].open_at_ms > current.open_at_ms:
+            return snaps
+        return [*snaps, current]
 
     async def instruments_cached(self) -> int:
         """Return the count of distinct ``(exchange, symbol)`` keys in the cache.
@@ -865,7 +932,12 @@ class MarketCacheService:
           is still being built; replace OHLCV).
         - Incoming ``open_at`` greater than current: promote — append
           the prior current to the deque (now closed by construction),
-          then set current to the new frame.
+          then set current to the new frame. When the deque's tail already
+          holds that same minute the tail is REPLACED rather than appended:
+          prewarm seeds the deque from the database, so a live frame for a
+          minute prewarm already loaded would otherwise be promoted alongside
+          it and the series would carry the same ``open_at`` twice. The live
+          value wins, being the later observation of the same window.
         - Incoming ``open_at`` less than current: drop as stale; rare,
           debug-log only.
         """
@@ -882,7 +954,10 @@ class MarketCacheService:
                 return
             if snap.open_at_ms > current.open_at_ms:
                 cached = self._candles.setdefault(key, deque(maxlen=_CACHE_CANDLE_LIMIT))
-                cached.append(current)
+                if cached and cached[-1].open_at_ms == current.open_at_ms:
+                    cached[-1] = current
+                else:
+                    cached.append(current)
                 self._current[key] = snap
                 return
             logger.debug(

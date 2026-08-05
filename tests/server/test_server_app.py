@@ -1971,6 +1971,49 @@ class TestCreateApiRouter:
         assert data["count"] == 1
         assert data["payload"][0]["timeframe"] == "1d"
 
+    def test_get_candles_market_time_range_is_gap_filled(self) -> None:
+        """The scrubber's own window is bridged, which is what a zoom actually hits.
+
+        Given: a 1m range read whose rows leave a two-minute interior hole,
+        When: GET /api/candles is called with paired ``start`` and ``end``,
+        Then: the response comes back contiguous.
+
+        This is the path a chart takes the moment the operator scales, and it
+        was the one path the facade fill did not cover — the default view was
+        continuous and every zoom reopened the holes.
+        """
+        rows = [
+            {
+                "public_id": f"candle-range-{minute}",
+                "timestamp": datetime(2023, 1, 2, 0, minute, tzinfo=dt.UTC),
+                "session_id": "sess-1",
+                "sequence_id": minute,
+                "timeframe": "1m",
+                "open_at": datetime(2023, 1, 2, 0, minute, tzinfo=dt.UTC),
+                "open": 50000.0,
+                "high": 51000.0,
+                "low": 49000.0,
+                "close": 50500.0,
+                "volume": 1000.0,
+                "vwap": 50250.0,
+                "trades": 10,
+            }
+            for minute in (0, 3)
+        ]
+        client = create_app_with_overrides(MockRepository(session_result=rows))
+        client.app.state.settings = SimpleNamespace(
+            candle_single_source=False, candle_read_gap_fill_minutes=60
+        )
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1m"
+            "&start=2023-01-02T00:00:00Z&end=2023-01-02T01:00:00Z"
+        )
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        minutes = [item["open_at"][11:16] for item in payload]
+        assert minutes == ["00:00", "00:01", "00:02", "00:03"]
+        assert [item["volume"] for item in payload[1:3]] == [0.0, 0.0]
+
     def test_get_candles_range_requires_both_bounds(self) -> None:
         """Test candles endpoint rejects a half-specified range.
 

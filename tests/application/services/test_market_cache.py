@@ -12,6 +12,7 @@ each have their own assertion.
 
 import asyncio
 import contextlib
+from collections import deque
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
@@ -26,6 +27,7 @@ import pytest
 from snapper.application.services.market_cache import _PREWARM_INSTRUMENT_SLICE
 from snapper.application.services.market_cache import _PREWARM_MAX_CONCURRENCY
 from snapper.application.services.market_cache import _PREWARM_SLICE_FAILURE_BUDGET
+from snapper.application.services.market_cache import CandleSnap
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_cache import PairStats
 from snapper.application.services.market_cache import _format_stale_age
@@ -161,6 +163,21 @@ def _build_service(
         persist_policy=cast(Any, policy),
     )
     return service, repo, policy
+
+
+def _snap_at(open_at_ms: int, *, close: float) -> CandleSnap:
+    """Build one flat :class:`CandleSnap` at an explicit millisecond epoch.
+
+    Args:
+        open_at_ms: Window start in integer milliseconds.
+        close: Close price, also used for the rest of the OHLC.
+
+    Returns:
+        The snapshot.
+    """
+    return CandleSnap(
+        open_at_ms=open_at_ms, open=close, high=close, low=close, close=close, volume=0.0
+    )
 
 
 class TestDedupStateMachine:
@@ -1128,3 +1145,167 @@ class TestSnapHelpers:
             _candle(open_at=datetime(2026, 5, 13, 10, 0, tzinfo=UTC), timeframe="5m")
         )
         assert service._current == {}
+
+
+class TestElapsedCurrentIsReadable:
+    """The in-flight bar becomes readable once its own window has ended.
+
+    Without this the newest bar of every instrument stays invisible until a
+    STRICTLY NEWER one arrives, which for an instrument trading every few hours
+    means the served series is hours behind the persisted plane. Measured on
+    production before the fix: the cache's newest 1INCH-USD bar was 16:22 while
+    the database already held 18:27.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("offset_s", "expected"),
+        [(59.0, []), (64.0, []), (65.0, [7.5]), (600.0, [7.5])],
+    )
+    async def test_the_grace_boundary_is_exactly_the_window_end_plus_the_grace(
+        self, offset_s: float, expected: list[float], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is exposed before window end plus the grace; everything after is.
+
+        Given: one frame and a clock pinned relative to that frame's window start,
+        When: the facade asks for the elapsed current,
+        Then: the bar appears only from ``60 + _ELAPSED_CURRENT_GRACE_S`` onward.
+
+        The clock is controlled rather than inferred from a distant fixture date,
+        so the boundary itself is pinned and a change to the grace has to be a
+        deliberate edit here rather than something a date happens to hide.
+        """
+        service, _, _ = _build_service()
+        open_at = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        await service.record_candle_for_test(_candle(open_at=open_at, close=7.5))
+        monkeypatch.setattr(
+            "snapper.application.services.market_cache.time.time",
+            lambda: open_at.timestamp() + offset_s,
+        )
+
+        result = await service.get_1m_candles(
+            ExchangeEnum.KRAKEN, "BTC-USD", limit=10, include_elapsed_current=True
+        )
+
+        assert [snap.close for snap in result] == expected
+
+    @pytest.mark.asyncio
+    async def test_the_in_flight_bar_is_returned_once_its_window_ended(self) -> None:
+        """Past the window end plus the grace, the bar is readable.
+
+        Given: one frame for a minute that ended well in the past,
+        When: the facade asks for the elapsed current,
+        Then: that bar is returned even though no newer frame ever arrived.
+        """
+        service, _, _ = _build_service()
+        open_at = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        await service.record_candle_for_test(_candle(open_at=open_at, close=7.5))
+
+        result = await service.get_1m_candles(
+            ExchangeEnum.KRAKEN, "BTC-USD", limit=10, include_elapsed_current=True
+        )
+
+        assert [snap.close for snap in result] == [7.5]
+
+    @pytest.mark.asyncio
+    async def test_every_other_reader_still_sees_the_deque_alone(self) -> None:
+        """The default is off, and that is what keeps the other readers honest.
+
+        Given: an ended in-flight bar and no closed bars at all,
+        When: a reader that did not opt in asks,
+        Then: it gets nothing.
+
+        ``candle_coverage`` compares this deque against the database and the
+        ``/api/candles/cache`` route exists to report it literally, so a bar
+        the deque does not hold must not appear for either.
+        """
+        service, _, _ = _build_service()
+        await service.record_candle_for_test(
+            _candle(open_at=datetime(2026, 5, 13, 10, 0, tzinfo=UTC))
+        )
+
+        assert await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=10) == []
+
+    @pytest.mark.asyncio
+    async def test_an_equal_tail_is_replaced_rather_than_duplicated(self) -> None:
+        """A prewarmed bar and the in-flight bar for the same minute are one bar.
+
+        Given: prewarm seeded a minute the live feed then re-sent,
+        When: the elapsed current is merged,
+        Then: the minute appears once, carrying the live value.
+        """
+        service, _, _ = _build_service()
+        key = (ExchangeEnum.KRAKEN, "BTC-USD")
+        open_at_ms = int(datetime(2026, 5, 13, 10, 0, tzinfo=UTC).timestamp() * 1000)
+        service._candles[key] = deque([_snap_at(open_at_ms, close=1.0)])
+        service._current[key] = _snap_at(open_at_ms, close=2.0)
+
+        result = await service.get_1m_candles(
+            ExchangeEnum.KRAKEN, "BTC-USD", limit=10, include_elapsed_current=True
+        )
+
+        assert [snap.close for snap in result] == [2.0]
+
+    @pytest.mark.asyncio
+    async def test_a_stale_current_behind_the_deque_is_not_appended(self) -> None:
+        """An out-of-order current must never land after a newer closed bar.
+
+        Given: a deque whose newest bar is later than the in-flight slot,
+        When: the elapsed current is merged,
+        Then: the series is left alone rather than being given a bar out of
+            chronological order, which every downstream consumer assumes.
+        """
+        service, _, _ = _build_service()
+        key = (ExchangeEnum.KRAKEN, "BTC-USD")
+        base_ms = int(datetime(2026, 5, 13, 10, 0, tzinfo=UTC).timestamp() * 1000)
+        service._candles[key] = deque([_snap_at(base_ms + 120_000, close=3.0)])
+        service._current[key] = _snap_at(base_ms, close=9.0)
+
+        result = await service.get_1m_candles(
+            ExchangeEnum.KRAKEN, "BTC-USD", limit=10, include_elapsed_current=True
+        )
+
+        assert [snap.close for snap in result] == [3.0]
+
+    @pytest.mark.asyncio
+    async def test_promotion_replaces_a_prewarmed_minute_instead_of_duplicating_it(
+        self,
+    ) -> None:
+        """Prewarm and the live feed can both hold one minute; the deque keeps one.
+
+        Given: prewarm seeded minute M and a live frame for M is the in-flight bar,
+        When: minute M+1 arrives and promotes M into the deque,
+        Then: M appears once, carrying the live value.
+
+        Without this the series carries the same ``open_at`` twice the moment
+        promotion happens — the read-side merge hides it only until then, which
+        is worse than not hiding it at all because the duplicate appears later
+        and elsewhere.
+        """
+        service, _, _ = _build_service()
+        key = (ExchangeEnum.KRAKEN, "BTC-USD")
+        open_at = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        open_at_ms = int(open_at.timestamp() * 1000)
+        service._candles[key] = deque([_snap_at(open_at_ms, close=1.0)])
+        service._current[key] = _snap_at(open_at_ms, close=2.0)
+
+        await service.record_candle_for_test(
+            _candle(open_at=open_at + timedelta(minutes=1), close=3.0)
+        )
+
+        result = await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=10)
+        assert [(snap.open_at_ms, snap.close) for snap in result] == [(open_at_ms, 2.0)]
+
+    @pytest.mark.asyncio
+    async def test_an_instrument_with_no_in_flight_bar_is_unaffected(self) -> None:
+        """Opting in for an instrument holding only closed bars changes nothing."""
+        service, _, _ = _build_service()
+        key = (ExchangeEnum.KRAKEN, "BTC-USD")
+        base_ms = int(datetime(2026, 5, 13, 10, 0, tzinfo=UTC).timestamp() * 1000)
+        service._candles[key] = deque([_snap_at(base_ms, close=4.0)])
+
+        result = await service.get_1m_candles(
+            ExchangeEnum.KRAKEN, "BTC-USD", limit=10, include_elapsed_current=True
+        )
+
+        assert [snap.close for snap in result] == [4.0]

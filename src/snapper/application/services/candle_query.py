@@ -47,6 +47,7 @@ projection.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from typing import Literal
@@ -548,6 +549,9 @@ class _CacheRead:
         limit: Maximum bars to return.
         gap_fill_minutes: Longest bridgeable run of absent 1m bars.
             ``0`` (the diagnostic route) leaves the series sparse.
+        include_elapsed_current: Let the cache return its in-flight bar once
+            that bar's own window has ended. False for the diagnostic route,
+            which reports the deque literally.
     """
 
     exchange: AllExchange
@@ -555,6 +559,7 @@ class _CacheRead:
     timeframe: str
     limit: int
     gap_fill_minutes: int
+    include_elapsed_current: bool
 
 
 async def _read_cache_snaps(
@@ -577,7 +582,12 @@ async def _read_cache_snaps(
         The chronological snaps plus the source discriminator.
     """
     if read.timeframe == "1m":
-        snaps = await cache.get_1m_candles(read.exchange, read.native_symbol, limit=read.limit)
+        snaps = await cache.get_1m_candles(
+            read.exchange,
+            read.native_symbol,
+            limit=read.limit,
+            include_elapsed_current=read.include_elapsed_current,
+        )
         filled = densify_snaps(snaps, read.gap_fill_minutes)
         return filled[-read.limit :] if len(filled) > read.limit else filled, "cache"
     minutes_per_bar = DERIVED_AGGREGATION_MAP[read.timeframe]
@@ -585,10 +595,57 @@ async def _read_cache_snaps(
         read.exchange,
         read.native_symbol,
         limit=cache.cache_capacity_per_instrument(),
+        include_elapsed_current=read.include_elapsed_current,
     )
     derived = derive_snaps(densify_snaps(one_min, read.gap_fill_minutes), minutes_per_bar)
     sliced = derived[-read.limit :] if len(derived) > read.limit else derived
     return sliced, "derived"
+
+
+def densify_range_result(
+    result: CandleQueryResult,
+    timeframe: str,
+    as_of: datetime | None,
+    gap_fill_minutes: int,
+    limit: int,
+) -> CandleQueryResult:
+    """Bridge interior gaps in an explicit ``[start, end]`` range read.
+
+    The ranged read is what a chart uses when it zooms or scrubs, so leaving it
+    sparse means the series is continuous at the default view and full of holes
+    the moment the operator scales it. That is the same defect the facade fill
+    was landed to remove, on the one path it did not cover.
+
+    Interior stays relative to the OBSERVED rows, not to the requested window.
+    Naming a range says what the caller wants to see; it is not evidence that
+    the venue traded or that we were listening. So nothing is emitted before the
+    window's first real bar or after its last, however far those sit inside the
+    requested bounds — the leading edge is exactly where "quiet market" and
+    "blind collector" are indistinguishable, and there is no anchor to carry
+    forward from in any case.
+
+    Restricted to ``1m`` because :func:`densify_rows` steps by whole minutes and
+    would fabricate minute bars inside an hourly series. Restricted to
+    current-state reads because a point-in-time read reconstructs what was known
+    then, and filling it would quietly break the rule the facade already holds.
+
+    Args:
+        result: The ranged read to bridge.
+        timeframe: Resolved timeframe of the read.
+        as_of: Point-in-time pin, or ``None`` for a current-state read.
+        gap_fill_minutes: Longest bridgeable run of absent minutes.
+        limit: The range read's backstop cap.
+
+    Returns:
+        The result with qualifying interior gaps filled, re-capped at ``limit``
+        from the START of the window to match the ascending read's own cap.
+        The input is returned unchanged when filling does not apply.
+    """
+    if timeframe != "1m" or as_of is not None or gap_fill_minutes <= 0:
+        return result
+    filled = densify_rows(result.rows, gap_fill_minutes)
+    trimmed = filled[:limit] if len(filled) > limit else filled
+    return replace(result, rows=trimmed, sample_count=len(trimmed))
 
 
 async def fetch_cache_only(
@@ -655,6 +712,7 @@ async def fetch_cache_only(
             timeframe=timeframe,
             limit=limit,
             gap_fill_minutes=0,
+            include_elapsed_current=False,
         ),
     )
     rows = [row_from_snap(snap, timeframe) for snap in cache_snaps]
@@ -743,6 +801,7 @@ async def fetch_candles(
             timeframe=timeframe,
             limit=limit,
             gap_fill_minutes=policy.gap_fill_minutes,
+            include_elapsed_current=True,
         ),
     )
     if len(cache_snaps) >= limit:

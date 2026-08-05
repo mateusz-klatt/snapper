@@ -24,6 +24,7 @@ from snapper.application.services.candle_query import VALID_TIMEFRAMES
 from snapper.application.services.candle_query import CacheUnavailableError
 from snapper.application.services.candle_query import CandleQueryResult
 from snapper.application.services.candle_query import CandleReadPolicy
+from snapper.application.services.candle_query import densify_range_result
 from snapper.application.services.candle_query import densify_rows
 from snapper.application.services.candle_query import densify_snaps
 from snapper.application.services.candle_query import derive_snaps
@@ -72,21 +73,37 @@ def _row(open_at_ms: int, close: float, timeframe: str = "1m") -> CandleRow:
     )
 
 
-def _stub_cache(snaps: list[CandleSnap]) -> MagicMock:
+def _stub_cache(snaps: list[CandleSnap], elapsed: CandleSnap | None = None) -> MagicMock:
     """Mock :class:`MarketCacheService` honouring ``limit`` like the real cache.
 
     The real cache slices its deque via ``list(cached)[-limit:]`` so the
     mock mirrors that contract; tests asserting cache-only responses
     depend on the slice happening at the service level, not in the
     cache mock.
+
+    ``elapsed`` stands in for the in-flight bar the real cache returns only
+    when ``include_elapsed_current`` is set, so a test can prove the facade
+    asks for it and the diagnostic route does not.
+
+    Args:
+        snaps: Closed bars the deque holds.
+        elapsed: In-flight bar whose window has already ended, if any.
+
+    Returns:
+        The configured cache mock.
     """
 
     def _get_1m_candles(
-        _exchange: AllExchange, _symbol: str, *, limit: int = 100
+        _exchange: AllExchange,
+        _symbol: str,
+        *,
+        limit: int = 100,
+        include_elapsed_current: bool = False,
     ) -> list[CandleSnap]:
-        if limit >= len(snaps):
-            return list(snaps)
-        return list(snaps[-limit:])
+        available = [*snaps, elapsed] if include_elapsed_current and elapsed else list(snaps)
+        if limit >= len(available):
+            return available
+        return available[-limit:]
 
     cache = MagicMock()
     cache.get_1m_candles = AsyncMock(side_effect=_get_1m_candles)
@@ -1060,3 +1077,130 @@ class TestGapFillOnTheFacade:
         )
         assert [int(row.open_at.timestamp() * 1000) for row in result.rows] == [0, 300_000]
         assert result.sample_count == 2
+
+
+class TestDensifyRangeResult:
+    """The ranged read is what a zoom uses, and it was the one path left sparse."""
+
+    @staticmethod
+    def _result(*open_at_ms: int) -> CandleQueryResult:
+        """Build a chronological 1m range result at the given millisecond epochs."""
+        rows = [row_from_db(_row(ms, 5.0), "1m") for ms in open_at_ms]
+        return CandleQueryResult(rows=rows, source="db", sample_count=len(rows), is_warm=True)
+
+    def test_an_interior_hole_inside_the_window_is_bridged(self) -> None:
+        """Zooming must not reveal holes the default view had already closed.
+
+        Given: a ranged read with a two-minute interior hole,
+        When: the range result is densified,
+        Then: the series comes back contiguous.
+        """
+        filled = densify_range_result(self._result(0, 180_000), "1m", None, 60, 500)
+        stamps = [int(row.open_at.timestamp() * 1000) for row in filled.rows]
+        assert stamps == [0, 60_000, 120_000, 180_000]
+        assert filled.sample_count == 4
+
+    def test_nothing_is_emitted_before_the_first_observed_bar(self) -> None:
+        """A named range is not evidence that anything traded inside it.
+
+        Given: a window whose first real bar sits well after ``start``,
+        When: the range result is densified,
+        Then: the series still begins on that first real bar.
+
+        Naming a range says what the caller wants to see. The leading edge is
+        exactly where "the market was quiet" and "our collector was blind" are
+        indistinguishable, and there is no earlier bar to carry forward from.
+        """
+        filled = densify_range_result(self._result(600_000, 660_000), "1m", None, 60, 500)
+        assert int(filled.rows[0].open_at.timestamp() * 1000) == 600_000
+        assert len(filled.rows) == 2
+
+    def test_a_point_in_time_read_is_never_filled(self) -> None:
+        """Reconstructing a past instant means reporting what was known then."""
+        pinned = densify_range_result(
+            self._result(0, 180_000), "1m", datetime.fromtimestamp(600, tz=UTC), 60, 500
+        )
+        assert len(pinned.rows) == 2
+
+    def test_only_the_one_minute_plane_is_filled(self) -> None:
+        """``densify_rows`` steps by whole minutes and would fabricate 1m bars.
+
+        Given: an hourly range result with a gap,
+        When: densification is attempted,
+        Then: it is refused — inserting minute bars into an hourly series would
+            invent fifty-nine rows per hole.
+        """
+        hourly = densify_range_result(self._result(0, 7_200_000), "1h", None, 60, 500)
+        assert len(hourly.rows) == 2
+
+    def test_a_disabled_budget_passes_the_range_through(self) -> None:
+        """Zero keeps the ranged read literal, exactly as on the facade."""
+        assert densify_range_result(self._result(0, 180_000), "1m", None, 0, 500).rows == (
+            self._result(0, 180_000).rows
+        )
+
+    def test_the_backstop_cap_is_reapplied_from_the_start_of_the_window(self) -> None:
+        """Filling can exceed the cap, and the ascending read keeps its head.
+
+        Given: a bridged series longer than the range read's backstop,
+        When: the cap is reapplied,
+        Then: the EARLIEST rows survive — the range query orders ascending and
+            its limit is a backstop on an over-wide window, so truncation has
+            to drop the tail rather than the head the caller anchored on.
+        """
+        capped = densify_range_result(self._result(0, 300_000), "1m", None, 60, 3)
+        stamps = [int(row.open_at.timestamp() * 1000) for row in capped.rows]
+        assert stamps == [0, 60_000, 120_000]
+        assert capped.sample_count == 3
+
+
+class TestElapsedCurrentReachesOnlyTheFacade:
+    """Which route asks the cache for its in-flight bar, and which must not.
+
+    The two ``_CacheRead`` constructions differ by one boolean. Coverage sees
+    both lines execute whatever those literals say, so without these tests a
+    refactor could collapse or flip them and every gate would stay green while
+    thin instruments silently returned to an hours-stale head — the exact
+    incident this shipped to fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_public_facade_asks_for_the_in_flight_bar(self) -> None:
+        """``/api/candles`` reaches the present, which is the whole point.
+
+        Given: a cache holding one closed bar and one ended in-flight bar,
+        When: the public facade serves 1m,
+        Then: both appear.
+        """
+        result = await fetch_candles(
+            cache=_stub_cache([_snap(0, 1.0)], _snap(60_000, 2.0)),
+            repo=cast(Repository, _stub_repo([])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=10,
+            policy=CandleReadPolicy(gap_fill_minutes=60),
+        )
+        assert [row.close for row in result.rows] == [1.0, 2.0]
+
+    @pytest.mark.asyncio
+    async def test_the_cache_diagnostic_route_does_not(self) -> None:
+        """``/api/candles/cache`` reports the deque, and the in-flight bar is not in it.
+
+        Given: the same cache,
+        When: the diagnostic route serves 1m,
+        Then: only the closed bar appears.
+
+        This route exists to answer "is the cache lying?", and
+        ``candle_coverage`` compares the same deque against the database, so a
+        bar the deque does not hold must not be reported by either.
+        """
+        result = await fetch_cache_only(
+            cache=_stub_cache([_snap(0, 1.0)], _snap(60_000, 2.0)),
+            repo=cast(Repository, _stub_repo([])),
+            exchange="kraken",
+            native_symbol="PAXG-USD",
+            timeframe="1m",
+            limit=10,
+        )
+        assert [row.close for row in result.rows] == [1.0]

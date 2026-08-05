@@ -141,6 +141,7 @@ from snapper.application.services.candle_query import CacheUnavailableError
 from snapper.application.services.candle_query import CandleQueryResult
 from snapper.application.services.candle_query import CandleQueryRow
 from snapper.application.services.candle_query import CandleReadPolicy
+from snapper.application.services.candle_query import densify_range_result
 from snapper.application.services.candle_query import fetch_cache_only as fetch_cache_only_candles
 from snapper.application.services.candle_query import fetch_candles as fetch_candle_query
 from snapper.application.services.candle_query import fetch_db_only as fetch_db_only_candles
@@ -1954,15 +1955,22 @@ async def _handle_get_candles(
     try:
         cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
         if start is not None and end is not None:
-            result = await fetch_db_range_candles(
-                repo=repo,
-                exchange=cast(AllExchange, exchange),
-                native_symbol=instrument,
-                timeframe=timeframe,
-                start=start,
-                end=end,
-                limit=limit,
-                as_of=as_of,
+            policy = _resolve_candle_read_policy(request)
+            result = densify_range_result(
+                await fetch_db_range_candles(
+                    repo=repo,
+                    exchange=cast(AllExchange, exchange),
+                    native_symbol=instrument,
+                    timeframe=timeframe,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    as_of=as_of,
+                ),
+                timeframe,
+                as_of,
+                policy.gap_fill_minutes,
+                limit,
             )
         else:
             result = await fetch_candle_query(
