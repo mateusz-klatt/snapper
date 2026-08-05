@@ -26,6 +26,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.messaging.publishers import base as base_module
+from snapper.messaging.publishers.base import _SWEEP_YIELD_EVERY
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
@@ -1547,3 +1548,138 @@ class TestPublisherSweep:
         health = publisher._venue_feed_health()
         assert health.meta == {}
         assert health.degraded is False
+
+
+class _StubOwedEmitter:
+    """Emitter double that owes a fixed set of flat bars on the next sweep."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        """Record the symbols this double will produce a bar for.
+
+        Args:
+            symbols: Native symbols to owe one flat bar each.
+        """
+        self._symbols = symbols
+        self.publish_failures = 0
+        self.witnessed = 0
+
+    def due_flat_bars(self, _now: float) -> list[CandleUpdate]:
+        """Return one flat bar per configured symbol.
+
+        Args:
+            _now: Sweep wall clock, unused by the double.
+
+        Returns:
+            One flat bar per symbol, in configuration order.
+        """
+        minute = datetime.fromtimestamp(float(_BASE), tz=UTC)
+        return [build_flat_minute_bar(symbol, minute, 100.0) for symbol in self._symbols]
+
+    def observe_feed_frame(self, now: float | None = None) -> None:
+        """Count a witnessed inbound frame.
+
+        Args:
+            now: Receipt time, unused by the double.
+        """
+        self.witnessed += 1
+
+    def mark_publish_failed(self) -> None:
+        """Count a publish failure the way the real emitter does."""
+        self.publish_failures += 1
+
+
+class TestPublisherEmitterWiring:
+    """The three publisher methods that drive the emitter during a live feed.
+
+    Everything else in this module builds a :class:`MinuteCompletionEmitter`
+    and calls it directly, which leaves the publisher's own wiring — the code
+    that actually runs in production — unexecuted. That is the same gap the
+    roster hooks had, and it is why these three lines carried no coverage when
+    the feature branch was measured against its own modules rather than
+    against ``publishers/base``.
+    """
+
+    def test_every_inbound_frame_witnesses_the_venue(self) -> None:
+        """The message hook is what feeds the witness gate its evidence.
+
+        Given a publisher with an emitter attached,
+        When an inbound frame is marked,
+        Then the emitter is told, once per frame.
+
+        This is the whole basis of the "we were listening" claim. Without the
+        forward from publisher to emitter the witness ring stays empty, every
+        minute fails the observation gate, and the feature silently emits
+        nothing at all rather than failing loudly. The forward itself is what
+        is asserted, because the forward is what was untested.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        emitter = _StubOwedEmitter([])
+        publisher._minute_emitter = cast(MinuteCompletionEmitter, emitter)
+        publisher._mark_feed_message()
+        publisher._mark_feed_message()
+        assert emitter.witnessed == 2
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_publishes_every_bar_the_emitter_owes(self) -> None:
+        """The sweep drains the emitter rather than taking only the first bar.
+
+        Given an emitter owing flat bars for several symbols,
+        When the 1m sweep runs,
+        Then one bar is published per symbol, in order.
+
+        A partial drain would leave part of the venue's plane incomplete on
+        exactly the minutes the feature exists to complete, and would do it
+        silently. Sized past ``_SWEEP_YIELD_EVERY`` so the cooperative yield
+        actually fires: a real sweep spans roughly 1500 symbols and would
+        otherwise hold the event loop for the whole venue, and a handful of
+        symbols never reaches that branch.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        published: list[CandleUpdate] = []
+
+        async def _capture(flat: CandleUpdate, _exchange: object, _emitter: object) -> None:
+            published.append(flat)
+
+        symbols = [f"SYM{index}-USD" for index in range(_SWEEP_YIELD_EVERY + 2)]
+        emitter = _StubOwedEmitter(symbols)
+        publisher._minute_emitter = cast(MinuteCompletionEmitter, emitter)
+        publisher._publish_one_flat_bar = _capture
+        await publisher._sweep_completed_minute(ExchangeEnum.WALUTOMAT, "1m")
+        assert [bar.symbol for bar in published] == symbols
+
+    @pytest.mark.asyncio
+    async def test_flat_minutes_are_folded_into_the_rollup_they_close(self) -> None:
+        """Flat bars are folded and published, not published raw.
+
+        Given a publisher with a 5m aggregator and an attached emitter,
+        When seven consecutive flat minutes are published,
+        Then all seven 1m bars go out AND the 5m window they close is
+            published from the same fold.
+
+        Publishing the 1m row without folding would leave the rollups to
+        diverge from the plane they are derived from — the dual-source hazard
+        the rest of the candle work exists to close. Seven minutes rather than
+        one because a rollup only appears once a bar arrives PAST the window
+        end — the 12:00 window closes on the 12:06 bar, not the 12:05 one —
+        and that closing publish is the half a single-bar test never reaches.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        publisher._candle_aggregator = CandleAggregator(["5m"])
+        emitter = _StubOwedEmitter([])
+        sent: list[tuple[CandleUpdate, str]] = []
+
+        async def _record(candle: CandleUpdate, _exchange: object, timeframe: str) -> None:
+            sent.append((candle, timeframe))
+
+        publisher._publish_synthesized_candle = _record
+        for step in range(7):
+            minute = datetime.fromtimestamp(float(_BASE + step * _MINUTE), tz=UTC)
+            await publisher._publish_one_flat_bar(
+                build_flat_minute_bar("BTC-USD", minute, 100.0),
+                ExchangeEnum.WALUTOMAT,
+                cast(MinuteCompletionEmitter, emitter),
+            )
+        timeframes = [timeframe for _candle, timeframe in sent]
+        assert timeframes.count("1m") == 7
+        assert "5m" in timeframes
+        assert all(candle.symbol == "BTC-USD" for candle, _timeframe in sent)

@@ -1049,12 +1049,20 @@ Key properties:
     straddling the gap is therefore MISSING rather than truncated or flat-filled:
     a hole is honest, a fabricated bar is not. Forward-fill resumes on its own
     once a fresh real bar re-seeds the carry, so a break costs only the windows
-    it actually spans. Three call sites feed it: stall detection, confirmed
+    it actually spans. Four call sites feed it: stall detection, confirmed
     recovery (which moves the epoch to when data really resumed, closing the
-    one-window hole detection alone would leave), and the kraken SDK reconnect
-    hook — SDK-internal reconnects never reach the liveness watchdog at all,
-    because the socket returns on its own and messages resume with no stall ever
-    detected.
+    one-window hole detection alone would leave), the forced WebSocket restart
+    (where meaningful time can pass between detection and the actual teardown),
+    and the kraken SDK reconnect hook — SDK-internal reconnects never reach the
+    liveness watchdog at all, because the socket returns on its own and messages
+    resume with no stall ever detected.
+    Every one of those four sites ALSO opens a minute-completion feed break, and
+    the pairing is not decorative. The two hooks bar different things — the epoch
+    governs higher-TF forward-fill, the break window governs 1m completion — and
+    the minute bar is a sliding `now + resubscribe_settle`, so an outage longer
+    than that window would see the bar set at detection expire before data
+    resumed. Re-marking at confirmed recovery is what covers the
+    subscription-replay window.
 - **Minute completion on the base `1m` plane (opt-in, default off)** — with
     `candle_minute_completion` enabled, a venue whose 1m source is trade-driven and
     whose market never closes (Kraken spot in `trade_built` mode, Kraken futures)

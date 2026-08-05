@@ -555,6 +555,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             client = self._exchange_client
             if client is None:
                 return
+            self._suspend_candle_synthesis_across_break()
             self._mark_minute_feed_break()
             try:
                 await client.disconnect_websocket()

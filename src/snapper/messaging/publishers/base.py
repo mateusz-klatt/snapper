@@ -1773,7 +1773,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     def _suspend_candle_synthesis_across_break(self) -> None:
         """Re-arm the aggregator's live epoch around a feed break.
 
-        Three call sites feed it. A break the liveness watchdog SEES drives
+        Four call sites feed it. A break the liveness watchdog SEES drives
         two of them, and both are load-bearing:
 
         - When a stall is DETECTED, which disarms forward-fill immediately.
@@ -1792,6 +1792,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         is just as real and the carried close just as stale. That path calls
         this once, not twice, because there is no separate detection moment to
         call it from.
+
+        The fourth is the forced WebSocket restart, which tears the socket down
+        and rebuilds it. Detection has usually already re-armed the epoch by
+        then, but not always close in time: reached through liveness recovery,
+        attempts carry timeouts and backoff, so minutes can elapse between
+        detection and teardown and any bucket opened in that span would
+        otherwise count as trustworthy.
 
         A no-op when no aggregator exists (native-candle venues, or before
         synthesis is configured), so every venue can call it unconditionally.
@@ -1884,6 +1891,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                         f"attempt(s) (reason={reason})"
                     )
                     self._suspend_candle_synthesis_across_break()
+                    self._mark_minute_feed_break()
                     return
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2.0, _RECOVERY_BACKOFF_CAP_S)

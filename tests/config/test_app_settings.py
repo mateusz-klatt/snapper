@@ -443,6 +443,25 @@ class TestAppSettingsTradingProperties:
         )
         assert enabled.candle_forward_fill is True
 
+    def test_candle_minute_completion_defaults_false_and_reads_value(self) -> None:
+        """Verify candle_minute_completion defaults to False and reads the DB value.
+
+        Given a service without and with candle_minute_completion set,
+        When accessing settings.candle_minute_completion,
+        Then the default False and the configured value are returned.
+
+        The default matters more than usual here: enabling this multiplies the
+        daily ``candles`` row count several-fold on a table that has no
+        retention policy, so the flag must stay off until P3 lands.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_minute_completion is False
+        enabled = AppSettings(
+            bootstrap, settings_service=MockSettingsService({"candle_minute_completion": True})
+        )
+        assert enabled.candle_minute_completion is True
+
     def test_persist_intermediate_candles_defaults_false_and_coerces(self) -> None:
         """Verify persist_intermediate_candles defaults False and coerces values.
 

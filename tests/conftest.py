@@ -332,6 +332,7 @@ def _build_mock_settings() -> Mock:
     }
     mock_settings.timeframes = ["1m"]
     mock_settings.candle_forward_fill = False
+    mock_settings.candle_minute_completion = False
     mock_settings.spot_trade_built_shadow_enabled = False
     mock_settings.spot_candle_source = "native"
     mock_settings.trade_built_finalize_grace_seconds = 12
