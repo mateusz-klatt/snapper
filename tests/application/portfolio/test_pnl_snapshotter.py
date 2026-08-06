@@ -1832,6 +1832,36 @@ class TestEvidenceAndPartition:
         assert json.loads(first["audit_json"])["coverage"]["leveraged_inventory_excluded"] is True
 
 
+class TestVersionRestamping:
+    """A row the current algorithm reproduces must not stay on an older version."""
+
+    def test_matching_values_on_an_older_version_are_not_settled(self) -> None:
+        """Otherwise every read filtering on calc_version stops seeing the row.
+
+        That includes the scope's own progress read, which keeps stale_version
+        true, which re-schedules the same from-t0 recompute every tick — a loop
+        that is guaranteed, not hypothetical, whenever a version bump lands on a
+        series whose values do not change.
+        """
+        existing = _persisted_sample(_minute(1), status="complete")
+        existing["calc_version"] = "5B.1"
+        replacement = _persisted_sample(_minute(1), status="complete")
+        assert pnl_snapshotter._sample_values_equal(existing, replacement)
+        assert not pnl_snapshotter._sample_is_settled(existing, replacement)
+
+    def test_matching_values_on_the_same_version_are_settled(self) -> None:
+        """The ordinary case: an identical recompute writes nothing."""
+        existing = _persisted_sample(_minute(1), status="complete")
+        replacement = _persisted_sample(_minute(1), status="complete")
+        assert pnl_snapshotter._sample_is_settled(existing, replacement)
+
+    def test_changed_values_are_never_settled(self) -> None:
+        """A real value change supersedes regardless of version agreement."""
+        existing = _persisted_sample(_minute(1), status="complete", realized=1.0)
+        replacement = _persisted_sample(_minute(1), status="complete", realized=2.0)
+        assert not pnl_snapshotter._sample_is_settled(existing, replacement)
+
+
 class TestRowPreservingWithholds:
     """Which withhold causes may keep an already-persisted minute's row."""
 

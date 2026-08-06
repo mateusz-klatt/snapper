@@ -863,7 +863,7 @@ class PortfolioPnlSnapshotter:
                     return True
                 continue
             replacement = self._to_row(sample, ctx, watermarks_json)
-            if _sample_values_equal(existing, replacement):
+            if _sample_is_settled(existing, replacement):
                 continue
             if await self._supersede(repo, ctx, replacement, existing):
                 return True
@@ -1234,6 +1234,37 @@ def _sample_values_equal(
     left = cast(Mapping[str, object], existing)
     right = cast(Mapping[str, object], replacement)
     return all(left[key] == right[key] for key in _SAMPLE_VALUE_KEYS)
+
+
+def _sample_is_settled(existing: PortfolioPnlSampleRow, replacement: PortfolioPnlSampleRow) -> bool:
+    """Return whether a recompute leaves a persisted minute needing no write.
+
+    Equal VALUES are not sufficient. The read surfaces filter on
+    ``calc_version``, so a row the current algorithm reproduces exactly but
+    which is still stamped with an older version is invisible to every
+    version-pinned read — including the scope's own progress. That keeps
+    ``stale_version`` true, which re-schedules the same from-``t0`` recompute on
+    every tick, which reproduces the same rows, forever. A version bump on a
+    series whose values do not change is precisely the case that loops.
+
+    Restamping such a row is honest rather than cosmetic: the current algorithm
+    ran over the same evidence and produced the same number, so the new version
+    genuinely verified it. The rows this must NOT touch never arrive here — a
+    minute the arithmetic can no longer reproduce is withheld, lands in the
+    ``sample is None`` branch, and is settled by :func:`_preserves_persisted_row`
+    instead.
+
+    Args:
+        existing: The persisted row.
+        replacement: The row the recompute produced for the same minute.
+
+    Returns:
+        Whether both the values and the algorithm version already agree.
+    """
+    return (
+        _sample_values_equal(existing, replacement)
+        and existing["calc_version"] == replacement["calc_version"]
+    )
 
 
 def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]:
