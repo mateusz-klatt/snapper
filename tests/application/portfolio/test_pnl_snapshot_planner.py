@@ -1203,6 +1203,71 @@ class TestPlanChunkSamples:
         assert plan.samples == ()
         assert plan.peak == 42.0
 
+    def test_untrusted_minute_is_reported_with_its_reasons(self) -> None:
+        """A withheld minute is REPORTED, not merely dropped.
+
+        A withheld minute persists nothing at all — the writer rejects a row whose
+        ``realized_pnl`` is null — so this tuple is the only place its causal
+        reasons survive. Without it a scope that withholds every minute is, at the
+        caller, indistinguishable from a scope with no minutes to plan, which is
+        exactly how a live wallet stayed dark for twenty-two hours in silence.
+        """
+        minute_inputs = [MinuteInputs(_untrusted_point(_M1), _attempts(_M1), _crypto_evidence())]
+        plan = plan_chunk_samples(minute_inputs, frozenset({"kraken"}), (), 42.0)
+        assert len(plan.withheld) == 1
+        assert plan.withheld[0].point_time == _M1
+        assert plan.withheld[0].reasons == ("fill_evidence_gap[global]",)
+
+    def test_a_planned_minute_is_never_reported_as_withheld(self) -> None:
+        """A minute that yields a row — even an incomplete one — is not a hole.
+
+        The distinction the alarm depends on: an ``incomplete`` sample IS
+        persisted and carries its reasons into the row, so it is visible and
+        self-healable. Reporting it as withheld would drown the real signal.
+        """
+        minute_inputs = [
+            MinuteInputs(_complete_point(_M1), _attempts(_M1), _crypto_evidence()),
+            MinuteInputs(_mark_incomplete_point(_M2), _attempts(_M2), _crypto_evidence()),
+        ]
+        plan = plan_chunk_samples(minute_inputs, frozenset({"kraken"}), (), None)
+        assert len(plan.samples) == 2
+        assert plan.withheld == ()
+
+    def test_instrument_scoped_reason_is_qualified_by_its_scope(self) -> None:
+        """An instrument-scoped cause is distinguishable from a scope-wide one.
+
+        This is the difference between "one venue is broken" and "the arithmetic
+        refused", and it decides whether an operator looks at a venue or at the
+        reconciliation. Collapsing both to a bare reason name would have cost the
+        whole diagnostic value of the alarm.
+        """
+        point = PnlTimelinePoint(
+            point_time=_M1,
+            realized_pnl=None,
+            fee_pnl=None,
+            accrual_pnl=None,
+            unrealized_pnl=None,
+            net_pnl=None,
+            valuation_status="incomplete",
+            incompleteness_reasons=(
+                PnlIncompletenessReasonEntry(
+                    reason="cumulative_non_finite",
+                    withholding_tier="untrusted",
+                    withholding_scope="instrument",
+                    trigger_instrument_public_id="0000face-0000-7000-8000-0000000000b1",
+                ),
+            ),
+            per_instrument=(),
+            attribution=(),
+        )
+        plan = plan_chunk_samples(
+            [MinuteInputs(point, _attempts(_M1), _crypto_evidence())],
+            frozenset({"kraken"}),
+            (),
+            None,
+        )
+        assert plan.withheld[0].reasons == ("cumulative_non_finite[instrument]",)
+
 
 class TestReasonCodeContract:
     """The single canonical reason-code declaration and its partition.

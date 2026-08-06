@@ -15,6 +15,7 @@ import pytest
 
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
+from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter import _extract_reason_codes
 from snapper.application.portfolio.pnl_snapshotter import _observed_currencies
@@ -1768,3 +1769,113 @@ class TestEvidenceAndPartition:
         assert first["position_value_usd"] == 0.0
         assert first["cash_usd"] == pytest.approx(11000.0)
         assert json.loads(first["audit_json"])["coverage"]["leveraged_inventory_excluded"] is True
+
+
+class TestWithheldMinuteAlarm:
+    """The alarm for a scope that plans minutes and can value none of them.
+
+    This is the signal whose absence let a live wallet stay dark for twenty-two
+    hours: a withheld minute persists nothing, the catch-up loop skips an empty
+    row list with ``continue``, and no failure class covers "the window was open
+    and I committed nothing". The outage was noticed on a chart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fully_withheld_tick_names_count_earliest_and_reason(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A tick that writes nothing says so, with the causal reason attached."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+
+        def fake(*args: Any, **kwargs: Any) -> Any:
+            del kwargs
+            from_time, to_time = args[3], args[4]
+
+            async def _run() -> PnlWalletSeriesResult:
+                return _series(from_time, to_time, metadata=_meta(), untrusted=True)
+
+            return _run()
+
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
+        with caplog.at_level("WARNING", logger="snapper.application.portfolio.pnl_snapshotter"):
+            await snap._tick_once()
+        assert repo.recorded == []
+        withheld = [r for r in caplog.records if "withheld" in r.message]
+        assert len(withheld) == 1
+        assert "fill_evidence_gap[global]" in withheld[0].getMessage()
+        assert "wrote_rows=False" in withheld[0].getMessage()
+
+    def test_an_unchanged_cause_stays_quiet_across_ticks(self) -> None:
+        """A growing window under one unchanged cause is ONE incident, not many.
+
+        The streak deliberately keys on (earliest hole, reason set) rather than on
+        the count, because the count grows every tick while the scope falls
+        behind. Keying on it would re-alarm forever and train the operator to
+        ignore the line.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        more = (
+            WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),
+            WithheldMinute(point_time=_minute(2), reasons=("a[global]",)),
+        )
+        with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
+            snap._report_withheld(_WALLET, holes, False)
+            snap._report_withheld(_WALLET, more, False)
+        assert warn.call_count == 1
+
+    def test_a_new_cause_speaks_even_mid_streak(self) -> None:
+        """A new reason is a new incident and must not be swallowed by the streak."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        first = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        second = (WithheldMinute(point_time=_minute(1), reasons=("b[global]",)),)
+        with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
+            snap._report_withheld(_WALLET, first, False)
+            snap._report_withheld(_WALLET, second, False)
+        assert warn.call_count == 2
+
+    def test_a_clean_committed_tick_rearms_the_alarm(self) -> None:
+        """Recovery clears the streak so a RECURRENCE alarms again.
+
+        Without this a scope that recovers and relapses stays silent forever,
+        because the signature it relapses with was already logged.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
+            snap._report_withheld(_WALLET, holes, False)
+            snap._report_withheld(_WALLET, (), True)
+            snap._report_withheld(_WALLET, holes, False)
+        assert warn.call_count == 2
+
+    def test_a_quiet_scope_with_nothing_to_plan_never_alarms(self) -> None:
+        """No planned minutes is not a hole — it is an idle scope."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
+            snap._report_withheld(_WALLET, (), False)
+        assert warn.call_count == 0
+
+    def test_a_partial_tick_reports_its_holes_and_says_it_wrote(self) -> None:
+        """Committing SOME rows does not excuse the minutes that produced none."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        holes = (WithheldMinute(point_time=_minute(3), reasons=("a[global]",)),)
+        with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
+            snap._report_withheld(_WALLET, holes, True)
+        assert warn.call_count == 1
+        assert "wrote_rows=True" in warn.call_args.args[0] % warn.call_args.args[1:]
+
+    def test_a_departed_wallet_drops_its_streak_state(self) -> None:
+        """Scope state is pruned with the wallet, as every other log-once set is."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        snap._report_withheld(_WALLET, holes, False)
+        assert _WALLET in snap._withheld_logged
+        snap._prune_absent_scopes(set())
+        assert snap._withheld_logged == {}

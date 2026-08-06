@@ -437,7 +437,7 @@ def _parse_balance_entries(
     """
     try:
         payload = json.loads(balances_json)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return _GateFailure("basket_payload_invalid", "balances_json_unparseable")
     if not isinstance(payload, list):
         return _GateFailure("basket_payload_invalid", "balances_payload_not_a_list")
@@ -487,7 +487,7 @@ def _parse_margin_entries(
         return _GateFailure("position_book_unproven", "position_book_evidence_missing")
     try:
         positions = _parse_positions(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return _GateFailure("position_book_unproven", "position_book_incoherent")
     legs: list[tuple[str, str, float]] = []
     for position in positions:
@@ -1275,11 +1275,47 @@ def _assemble_complete_minute(
 
 
 @dataclass(frozen=True, slots=True)
+class WithheldMinute:
+    """A minute the 5A engine refused to value at all, with its causal reasons.
+
+    Distinct from an ``incomplete`` sample, which IS persisted and carries its
+    reason codes into the row. A withheld minute persists NOTHING — the writer
+    rejects a row with a null ``realized_pnl`` outright — so this is the only
+    place its reasons survive long enough to be reported.
+    """
+
+    point_time: datetime
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkPlan:
-    """One chunk's ordered planned rows and the peak carried past it."""
+    """One chunk's ordered planned rows, the peak carried past it, and its holes."""
 
     samples: tuple[PlannedSample, ...]
     peak: float | None
+    withheld: tuple[WithheldMinute, ...]
+
+
+def _withheld_reasons(point: PnlTimelinePoint) -> tuple[str, ...]:
+    """Name a withheld minute's causal reasons, scope-qualified and deduplicated.
+
+    An instrument-scoped reason is qualified with its trigger so an alarm can
+    distinguish one bad instrument from a scope-wide arithmetic refusal — the
+    distinction that decides whether an operator looks at one venue or at the
+    reconciliation itself.
+
+    Args:
+        point: The withheld P&L point carrying its causal reason entries.
+
+    Returns:
+        The distinct qualified reason names, sorted for a stable alarm signature.
+    """
+    return tuple(
+        sorted(
+            {f"{entry.reason}[{entry.withholding_scope}]" for entry in point.incompleteness_reasons}
+        )
+    )
 
 
 def plan_chunk_samples(
@@ -1295,6 +1331,11 @@ def plan_chunk_samples(
     CAUSAL peak strictly before the chunk start, so a recompute never borrows a
     later minute's equity (A1).
 
+    Withheld minutes are reported alongside the rows rather than merely dropped.
+    A chunk that plans minutes and emits no sample is indistinguishable, at the
+    caller, from a chunk that had no minutes to plan — and that ambiguity is what
+    let a scope stay dark for twenty-two hours without emitting a single line.
+
     Args:
         minute_inputs: The chunk's per-minute inputs in ascending minute order.
         expected_venues: The caller-resolved spot venue set.
@@ -1302,13 +1343,22 @@ def plan_chunk_samples(
         prior_peak: The causal peak from complete samples before the chunk start.
 
     Returns:
-        The ordered planned rows and the peak carried past the chunk.
+        The ordered planned rows, the peak carried past the chunk, and the
+        minutes that produced no row at all.
     """
     samples: list[PlannedSample] = []
+    withheld: list[WithheldMinute] = []
     peak = prior_peak
     for inputs in minute_inputs:
         plan = assemble_minute_sample(inputs, expected_venues, position_versions, peak)
         peak = plan.peak
-        if plan.sample is not None:
-            samples.append(plan.sample)
-    return ChunkPlan(samples=tuple(samples), peak=peak)
+        if plan.sample is None:
+            withheld.append(
+                WithheldMinute(
+                    point_time=inputs.point.point_time,
+                    reasons=_withheld_reasons(inputs.point),
+                )
+            )
+            continue
+        samples.append(plan.sample)
+    return ChunkPlan(samples=tuple(samples), peak=peak, withheld=tuple(withheld))

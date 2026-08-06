@@ -79,6 +79,7 @@ from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
+from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_chunks
 from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_window
 from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_samples
@@ -282,6 +283,7 @@ class PortfolioPnlSnapshotter:
         self._no_anchor_logged: set[str] = set()
         self._failure_logged: set[tuple[str, str]] = set()
         self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
+        self._withheld_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
         self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
         self._fx_shadow_context: FxShadowPinContext | None = None
 
@@ -449,6 +451,11 @@ class PortfolioPnlSnapshotter:
         self._self_heal_logged = {
             wallet: value
             for wallet, value in self._self_heal_logged.items()
+            if wallet in current_wallets
+        }
+        self._withheld_logged = {
+            wallet: value
+            for wallet, value in self._withheld_logged.items()
             if wallet in current_wallets
         }
         self._baselines = {
@@ -874,24 +881,78 @@ class PortfolioPnlSnapshotter:
         retries next tick and re-plans from the last contiguous committed chunk.
         The baseline advances only when every chunk committed cleanly (B1/C1).
 
+        Every chunk's withheld minutes are collected whether or not it wrote, so
+        the alarm reports the whole tick's holes rather than the last chunk's.
+
         Returns:
             Whether a chunk's batch write reported a conflict.
         """
+        withheld: list[WithheldMinute] = []
+        committed = False
+        conflicted = False
         for chunk, result in catchup.chunks:
             watermarks_json = _watermarks_json(result.replay_metadata)
             prior_peak = await repo.get_portfolio_pnl_sample_peak(ctx.query, chunk.start)
             plan = await self._plan_chunk(repo, ctx, result, chunk, prior_peak)
+            withheld.extend(plan.withheld)
             rows = [self._to_row(sample, ctx, watermarks_json) for sample in plan.samples]
             if not rows:
                 continue
             outcome = await repo.record_portfolio_pnl_samples(rows, ctx.scope)
             if outcome["conflicts"]:
                 self._log_class(ctx.wallet_public_id, "catchup_conflict", outcome["conflicts"])
-                return True
+                conflicted = True
+                break
+            committed = True
+        self._report_withheld(ctx.wallet_public_id, withheld, committed)
+        if conflicted:
+            return True
         self._baselines[scope_key] = (
             catchup.metadata.max_scope_sequence_by_exchange if catchup.metadata is not None else {}
         )
         return False
+
+    def _report_withheld(
+        self, wallet: str, withheld: Sequence[WithheldMinute], committed: bool
+    ) -> None:
+        """Alarm on minutes a scope planned and could not value, once per streak.
+
+        Deliberately NOT routed through :meth:`_log_class`. That set is cleared by
+        :meth:`_reset_scope_logs` on any tick that reports no conflict — and a
+        scope withholding every minute reports no conflict at all, so the alarm
+        would re-fire every tick and become the noise it exists to escape.
+
+        The streak is keyed on what an operator would act on: the earliest hole
+        and its causal reasons. A growing count under an unchanged cause is the
+        same incident and stays quiet; a new earliest minute or a new reason is a
+        new incident and speaks. The count still rides on the message, because a
+        window that grows while the cause holds is the signature of a scope that
+        is falling behind rather than one that briefly stumbled.
+
+        Args:
+            wallet: The scope's wallet public id.
+            withheld: Every minute this tick planned and could not value.
+            committed: Whether this tick wrote any row for this scope.
+        """
+        if not withheld:
+            if committed:
+                self._withheld_logged.pop(wallet, None)
+            return
+        earliest = min(minute.point_time for minute in withheld)
+        reasons = tuple(sorted({reason for minute in withheld for reason in minute.reasons}))
+        signature = (earliest, reasons)
+        if self._withheld_logged.get(wallet) == signature:
+            return
+        self._withheld_logged[wallet] = signature
+        logger.warning(
+            "PortfolioPnlSnapshotter: wallet %s withheld %s planned minute(s) from %s; "
+            "wrote_rows=%s reasons=%s",
+            wallet,
+            len(withheld),
+            earliest,
+            committed,
+            reasons,
+        )
 
     async def _plan_chunk(
         self,
