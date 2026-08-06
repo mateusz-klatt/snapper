@@ -1879,3 +1879,42 @@ class TestWithheldMinuteAlarm:
         assert _WALLET in snap._withheld_logged
         snap._prune_absent_scopes(set())
         assert snap._withheld_logged == {}
+
+    @pytest.mark.asyncio
+    async def test_a_withheld_minute_holds_the_late_fill_baseline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unwritten minute must not let the late-fill detector move past it.
+
+        Advancing the baseline over the executions that produced an unwritten
+        minute destroys the only trigger that would ever revisit it: catch-up
+        resumes after the latest ACTIVE row, and self-heal can only see minutes
+        that persisted an ``incomplete`` row — which a withheld minute never
+        does. The hole would be both silent and permanent.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+
+        def fake(*args: Any, **kwargs: Any) -> Any:
+            del kwargs
+            from_time, to_time = args[3], args[4]
+
+            async def _run() -> PnlWalletSeriesResult:
+                return _series(from_time, to_time, metadata=_meta(), untrusted=True)
+
+            return _run()
+
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
+        await snap._tick_once()
+        assert repo.recorded == []
+        assert snap._baselines == {}
+
+    @pytest.mark.asyncio
+    async def test_a_fully_written_tick_still_advances_the_baseline(self) -> None:
+        """The hold is scoped to holes: a clean tick keeps its late-fill progress."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        with _patched_series():
+            await snap._tick_once()
+        assert repo.recorded
+        assert snap._baselines != {}

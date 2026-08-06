@@ -884,6 +884,21 @@ class PortfolioPnlSnapshotter:
         Every chunk's withheld minutes are collected whether or not it wrote, so
         the alarm reports the whole tick's holes rather than the last chunk's.
 
+        A tick that leaves ANY planned minute unwritten also leaves the baseline
+        alone. The baseline is a late-fill DETECTOR, and advancing it past the
+        executions that produced an unwritten minute destroys the only trigger
+        that would ever revisit that minute: catch-up resumes after the latest
+        ACTIVE row, so a retracted interior minute is already behind the resume
+        point, and self-heal can only see minutes that persisted an ``incomplete``
+        row — which a withheld minute never does. The result would be a hole that
+        is silent AND permanent.
+
+        The cost is small, which is not obvious and was got wrong once:
+        ``_recompute_forward`` ends at ``ctx.last_minute``, the last PERSISTED
+        minute, and :func:`plan_late_fill_recompute` refuses an affected minute
+        later than that. So an unadvanced baseline re-runs a span bounded by the
+        persisted tip, never the whole dark tail.
+
         Returns:
             Whether a chunk's batch write reported a conflict.
         """
@@ -905,8 +920,8 @@ class PortfolioPnlSnapshotter:
                 break
             committed = True
         self._report_withheld(ctx.wallet_public_id, withheld, committed)
-        if conflicted:
-            return True
+        if conflicted or withheld:
+            return conflicted
         self._baselines[scope_key] = (
             catchup.metadata.max_scope_sequence_by_exchange if catchup.metadata is not None else {}
         )
