@@ -86,7 +86,9 @@ _POINT_REASON_TO_SAMPLE_CODE: Final[dict[PnlIncompletenessReason, SampleReasonCo
     "execution_price_provenance_unproven": "pnl_point_withheld",
     "execution_size_invalid": "pnl_point_withheld",
     "attribution_reconciliation_failed": "pnl_point_withheld",
+    "attribution_sum_unrepresentable": "pnl_point_withheld",
     "instrument_reconciliation_failed": "pnl_point_withheld",
+    "instrument_sum_unrepresentable": "pnl_point_withheld",
 }
 """Total mapping of 5A causal provenance to persisted reason codes.
 
@@ -1282,10 +1284,19 @@ class WithheldMinute:
     reason codes into the row. A withheld minute persists NOTHING — the writer
     rejects a row with a null ``realized_pnl`` outright — so this is the only
     place its reasons survive long enough to be reported.
+
+    ``reasons`` is scope-qualified text for alarms; ``reason_codes`` is the same
+    causes unformatted. Both are carried because they answer different
+    questions, and neither is derivable from the other without parsing: an alarm
+    needs to tell one bad instrument from a scope-wide refusal, while a caller
+    deciding whether a persisted row may survive needs the causes themselves.
+    Re-deriving codes by splitting the qualified strings would make a display
+    format load-bearing for a retraction decision.
     """
 
     point_time: datetime
     reasons: tuple[str, ...]
+    reason_codes: tuple[PnlIncompletenessReason, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1316,6 +1327,21 @@ def _withheld_reasons(point: PnlTimelinePoint) -> tuple[str, ...]:
             {f"{entry.reason}[{entry.withholding_scope}]" for entry in point.incompleteness_reasons}
         )
     )
+
+
+def _withheld_reason_codes(point: PnlTimelinePoint) -> tuple[PnlIncompletenessReason, ...]:
+    """Name a withheld minute's causal reasons unqualified and deduplicated.
+
+    Sorted for the same reason the qualified form is: a caller comparing two
+    ticks must see a stable sequence, not one that reorders with set iteration.
+
+    Args:
+        point: The withheld P&L point carrying its causal reason entries.
+
+    Returns:
+        The distinct causal reasons, without their withholding scope.
+    """
+    return tuple(sorted({entry.reason for entry in point.incompleteness_reasons}))
 
 
 def plan_chunk_samples(
@@ -1357,6 +1383,7 @@ def plan_chunk_samples(
                 WithheldMinute(
                     point_time=inputs.point.point_time,
                     reasons=_withheld_reasons(inputs.point),
+                    reason_codes=_withheld_reason_codes(inputs.point),
                 )
             )
             continue

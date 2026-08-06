@@ -90,6 +90,7 @@ from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNI
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
@@ -141,6 +142,42 @@ _FAILURE_MESSAGES: Final[dict[str, str]] = {
 }
 """Per-failure-class log-once message templates (B4/C2): the first ``%s`` is the
 wallet, the second (conflict classes only) the offending minute(s)."""
+
+
+_ROW_PRESERVING_WITHHOLD_REASONS: Final[frozenset[PnlIncompletenessReason]] = frozenset(
+    {"attribution_sum_unrepresentable", "instrument_sum_unrepresentable"}
+)
+"""Withhold causes that must NOT cost a already-persisted minute its row.
+
+Both mean the buckets and the aggregate agree exactly and no float assignment
+can express that agreement. Nothing about the money is in doubt, so retracting
+a row that was published under an arithmetic which COULD express it would
+destroy history to satisfy a representation limit.
+
+Every other member of :data:`PnlIncompletenessReason` is excluded deliberately,
+including the ``*_reconciliation_failed`` pair: those mean the two sides
+disagree about how much money there is, which is exactly the stale-row case
+N1 exists to clear.
+"""
+
+
+def _preserves_persisted_row(withheld: WithheldMinute) -> bool:
+    """Return whether a withheld minute may keep an already-persisted row.
+
+    Fails closed toward N1 in both directions: a minute with NO recorded reason
+    is not preserved, because an unexplained withhold is not evidence that the
+    money is sound, and a mixed reason set is not preserved either, because one
+    representable-sum cause does not neutralise a co-occurring basis fault.
+
+    Args:
+        withheld: One minute the planner produced no row for.
+
+    Returns:
+        Whether every recorded cause is a representation limit.
+    """
+    return bool(withheld.reason_codes) and all(
+        code in _ROW_PRESERVING_WITHHOLD_REASONS for code in withheld.reason_codes
+    )
 
 
 def is_futures_class_exchange(exchange: str) -> bool:
@@ -740,14 +777,20 @@ class PortfolioPnlSnapshotter:
         conflict the recompute STOPS (leaving the tip's watermark untouched) and
         returns ``True`` so the scope skips catch-up and retries next tick (C1).
 
+        The persisted side is read at ANY version, always. Reconciling only
+        against rows stamped with the current version would leave a row written
+        under a previous one invisible: the merge would then treat its minute as
+        absent, take the INSERT path against a row that is still active, and
+        conflict on every tick with no path forward, while a retraction that
+        minute genuinely needed could never fire. ``stale_version`` cannot stand
+        in for this, because it is derived from the LATEST active row alone and
+        goes false again as soon as newer minutes are written above an older row
+        left in the middle of the window.
+
         Returns:
             Whether any chunk hit a reconcile conflict.
         """
-        rows = (
-            await repo.get_active_portfolio_pnl_samples_any_version(ctx.scope, start, tip)
-            if ctx.stale_version
-            else await repo.get_portfolio_pnl_samples(ctx.query, start, tip)
-        )
+        rows = await repo.get_active_portfolio_pnl_samples_any_version(ctx.scope, start, tip)
         current = {row["point_time"]: row for row in rows}
         pending: deque[ChunkWindow] = deque(
             plan_catchup_chunks(
@@ -785,6 +828,20 @@ class PortfolioPnlSnapshotter:
         contaminating the causal peak (N1); an identical recompute is skipped. The
         FIRST conflict (lost CAS or batch conflict) aborts and returns ``True`` (C1).
 
+        N1 has ONE exception, and it exists because retraction here is
+        operationally irreversible: the write is an SCD2 close with no successor,
+        catch-up can never revisit a withheld minute, and self-heal only finds
+        persisted ``incomplete`` rows while a withheld minute persists nothing at
+        all. A minute withheld SOLELY because no float assignment can express an
+        agreement the arithmetic still reaches
+        (:func:`_preserves_persisted_row`) keeps its persisted row. Every other
+        withheld reason, any mixed reason set, and absence from the plan
+        entirely still retract — so a genuine basis change, a scope-order
+        regression or a disagreement about how much money there is all behave
+        exactly as before. The preserved row is left at the version that wrote
+        it; restamping it would claim an arithmetic verified a value it provably
+        cannot reproduce.
+
         Returns:
             Whether a reconcile conflict occurred.
         """
@@ -792,11 +849,16 @@ class PortfolioPnlSnapshotter:
         prior_peak = await repo.get_portfolio_pnl_sample_peak(ctx.query, chunk.start)
         plan = await self._plan_chunk(repo, ctx, result, chunk, prior_peak)
         planned = {sample.point_time: sample for sample in plan.samples}
+        preserved = {
+            minute.point_time for minute in plan.withheld if _preserves_persisted_row(minute)
+        }
         for point_time, existing in sorted(current.items()):
             if not chunk.start <= point_time <= chunk.end:
                 continue
             sample = planned.get(point_time)
             if sample is None:
+                if point_time in preserved:
+                    continue
                 if await self._retract(repo, ctx, point_time, existing):
                     return True
                 continue

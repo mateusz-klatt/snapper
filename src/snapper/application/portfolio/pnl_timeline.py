@@ -174,10 +174,26 @@ PnlIncompletenessReason = Literal[
     "net_non_finite",
     "attribution_value_non_finite",
     "attribution_reconciliation_failed",
+    "attribution_sum_unrepresentable",
     "instrument_reconciliation_failed",
+    "instrument_sum_unrepresentable",
     "late_pre_activation_execution",
 ]
-"""Closed causal taxonomy for a withheld P&L timeline value."""
+"""Closed causal taxonomy for a withheld P&L timeline value.
+
+The two ``*_sum_unrepresentable`` members separate a refusal that carries NO
+suspicion about the underlying money from the ``*_reconciliation_failed`` pair,
+which does. A reconciliation failure means the buckets and the aggregate
+disagree about how much money there is — an engine or evidence fault. An
+unrepresentable sum means they agree exactly and no float assignment can express
+that agreement, so the minute is withheld while the arithmetic remains sound.
+
+The distinction is not cosmetic: a recompute that withholds a previously
+published minute retracts its persisted row
+(``pnl_snapshotter._reconcile_changed``), and doing that for a value the
+arithmetic still believes would destroy history to satisfy a representation
+limit. Only these two members are safe to preserve a row through.
+"""
 
 PnlWithholdingTier = Literal["mark_incomplete", "untrusted"]
 """Weakest honest withholding tier established at the causal site."""

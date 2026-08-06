@@ -171,6 +171,29 @@ def _complete_point(point_time: datetime) -> PnlTimelinePoint:
     )
 
 
+def _unrepresentable_point(point_time: datetime) -> PnlTimelinePoint:
+    """Build a point withheld ONLY because no float can express a sound sum."""
+    return PnlTimelinePoint(
+        point_time=point_time,
+        realized_pnl=None,
+        fee_pnl=None,
+        accrual_pnl=None,
+        unrealized_pnl=None,
+        net_pnl=None,
+        valuation_status="incomplete",
+        incompleteness_reasons=(
+            PnlIncompletenessReasonEntry(
+                reason="instrument_sum_unrepresentable",
+                withholding_tier="untrusted",
+                withholding_scope="global",
+                trigger_instrument_public_id=None,
+            ),
+        ),
+        per_instrument=(),
+        attribution=(),
+    )
+
+
 def _untrusted_point(point_time: datetime) -> PnlTimelinePoint:
     """Build an untrusted P&L point (no row)."""
     return PnlTimelinePoint(
@@ -230,12 +253,16 @@ def _series(
     *,
     metadata: PnlSeriesReplayMetadata | None = None,
     untrusted: bool = False,
+    unrepresentable: bool = False,
 ) -> PnlWalletSeriesResult:
     """Build a canned series result covering ``[from_time .. to_time]``."""
     points: list[PnlTimelinePoint] = []
     cursor = from_time
     while cursor <= to_time:
-        points.append(_untrusted_point(cursor) if untrusted else _complete_point(cursor))
+        if unrepresentable:
+            points.append(_unrepresentable_point(cursor))
+        else:
+            points.append(_untrusted_point(cursor) if untrusted else _complete_point(cursor))
         cursor += timedelta(minutes=1)
     return PnlWalletSeriesResult(
         points=tuple(points),
@@ -1432,6 +1459,40 @@ class TestCatchupAndCorrections:
         assert repo.superseded == []
 
     @pytest.mark.asyncio
+    async def test_unrepresentable_recompute_keeps_the_persisted_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sum no float can express must not cost a published minute its row.
+
+        The arithmetic still reaches the same answer; only the rendering fails.
+        Retraction here is irreversible — the write is an SCD2 close with no
+        successor, catch-up never revisits a withheld minute, and self-heal only
+        finds persisted ``incomplete`` rows — so a representation limit must not
+        be allowed to delete history.
+        """
+        latest = _persisted_sample(_minute(3), status="complete")
+        persisted = [_persisted_sample(_minute(2), status="complete"), latest]
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
+        )
+        snap = _snapshotter(repo, _minute(6))
+
+        def fake(*args: Any, **kwargs: Any) -> Any:
+            del kwargs
+            from_time, to_time = args[3], args[4]
+
+            async def _run() -> PnlWalletSeriesResult:
+                if from_time == _minute(2):
+                    return _series(from_time, to_time, metadata=_meta(), unrepresentable=True)
+                return _series(from_time, to_time, metadata=_meta(seq=9, affected=_minute(2)))
+
+            return _run()
+
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
+        await snap._tick_once()
+        assert repo.retracted == []
+
+    @pytest.mark.asyncio
     async def test_retract_cas_conflict_is_logged_and_skipped(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1771,6 +1832,50 @@ class TestEvidenceAndPartition:
         assert json.loads(first["audit_json"])["coverage"]["leveraged_inventory_excluded"] is True
 
 
+class TestRowPreservingWithholds:
+    """Which withhold causes may keep an already-persisted minute's row."""
+
+    def test_only_representation_limits_preserve_a_row(self) -> None:
+        """A sum no float can express is the only cause that spares the row."""
+        preserved = pnl_snapshotter._preserves_persisted_row(
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("instrument_sum_unrepresentable[global]",),
+                reason_codes=("instrument_sum_unrepresentable",),
+            )
+        )
+        assert preserved
+
+    def test_a_disagreement_about_the_money_still_retracts(self) -> None:
+        """A reconciliation failure means the two sides disagree; N1 must fire."""
+        preserved = pnl_snapshotter._preserves_persisted_row(
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("instrument_reconciliation_failed[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            )
+        )
+        assert not preserved
+
+    def test_a_mixed_cause_set_still_retracts(self) -> None:
+        """One representable-sum cause does not neutralise a co-occurring fault."""
+        preserved = pnl_snapshotter._preserves_persisted_row(
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("fill_evidence_gap[global]", "instrument_sum_unrepresentable[global]"),
+                reason_codes=("fill_evidence_gap", "instrument_sum_unrepresentable"),
+            )
+        )
+        assert not preserved
+
+    def test_an_unexplained_withhold_still_retracts(self) -> None:
+        """No recorded cause is not evidence that the money is sound."""
+        preserved = pnl_snapshotter._preserves_persisted_row(
+            WithheldMinute(point_time=_minute(1), reasons=(), reason_codes=())
+        )
+        assert not preserved
+
+
 class TestWithheldMinuteAlarm:
     """The alarm for a scope that plans minutes and can value none of them.
 
@@ -1816,10 +1921,24 @@ class TestWithheldMinuteAlarm:
         """
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
-        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        holes = (
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
         more = (
-            WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),
-            WithheldMinute(point_time=_minute(2), reasons=("a[global]",)),
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+            WithheldMinute(
+                point_time=_minute(2),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
         )
         with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
             snap._report_withheld(_WALLET, holes, False)
@@ -1830,8 +1949,20 @@ class TestWithheldMinuteAlarm:
         """A new reason is a new incident and must not be swallowed by the streak."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
-        first = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
-        second = (WithheldMinute(point_time=_minute(1), reasons=("b[global]",)),)
+        first = (
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
+        second = (
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("b[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
         with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
             snap._report_withheld(_WALLET, first, False)
             snap._report_withheld(_WALLET, second, False)
@@ -1845,7 +1976,13 @@ class TestWithheldMinuteAlarm:
         """
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
-        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        holes = (
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
         with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
             snap._report_withheld(_WALLET, holes, False)
             snap._report_withheld(_WALLET, (), True)
@@ -1864,7 +2001,13 @@ class TestWithheldMinuteAlarm:
         """Committing SOME rows does not excuse the minutes that produced none."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
-        holes = (WithheldMinute(point_time=_minute(3), reasons=("a[global]",)),)
+        holes = (
+            WithheldMinute(
+                point_time=_minute(3),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
         with mock.patch.object(pnl_snapshotter.logger, "warning") as warn:
             snap._report_withheld(_WALLET, holes, True)
         assert warn.call_count == 1
@@ -1874,7 +2017,13 @@ class TestWithheldMinuteAlarm:
         """Scope state is pruned with the wallet, as every other log-once set is."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
-        holes = (WithheldMinute(point_time=_minute(1), reasons=("a[global]",)),)
+        holes = (
+            WithheldMinute(
+                point_time=_minute(1),
+                reasons=("a[global]",),
+                reason_codes=("instrument_reconciliation_failed",),
+            ),
+        )
         snap._report_withheld(_WALLET, holes, False)
         assert _WALLET in snap._withheld_logged
         snap._prune_absent_scopes(set())
