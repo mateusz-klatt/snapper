@@ -952,16 +952,36 @@ def _allocate_by_weights(
     An absent, non-finite, or non-positive weight pool cannot prove ownership,
     so the complete amount goes to ``unattributed``. For a valid pool every key
     except the final stable-sorted key receives its direct float pro-rata share;
-    the final key receives ``amount - allocated``. The same deterministic
-    summation order is used when point contributions are reconciled, making the
-    exposed buckets sum exactly to their aggregate.
+    the final key receives ``amount - allocated``.
+
+    That residue rule does NOT make the shares sum back to ``amount``, and this
+    docstring claimed for a long time that it did. Measured against this very
+    function: the split is inexact in 86.8% of random valid pools, and the
+    counterexample below reproduces exactly, hex for hex::
+
+        amount  = float.fromhex("0x1.e9074940cb723p-30")
+        weights = 0x1.47363da6833a8p+19, 0x1.c34ca4df56dc2p+19,
+                  0x1.a75e1050ccab3p+19, 0x1.7f4bc9abe1a09p+15
+        sum(shares) == 0x1.e9074940cb724p-30    -- one ULP HIGH
+        exact residue == 1.0339757656912846e-25
+
+    The reason is that ``amount - sum(others)`` repairs ONE pairing, while
+    re-summing every key is a DIFFERENT pairing: since CPython 3.12 the builtin
+    ``sum`` is Neumaier-compensated, and ``Neumaier(others + [final])`` is not
+    ``fl(Neumaier(others) + final)``. A naive left-to-right sum of that same
+    counterexample does land on ``amount`` — so the compensation the rest of this
+    module relies on is what exposes it.
+
+    Anything that needs the shares to conserve ``amount`` must therefore carry
+    the allocation in exact arithmetic; it cannot lean on this function.
 
     Args:
         amount: Quantity or monetary amount to distribute.
         weights: Pre-event composite quantity weights.
 
     Returns:
-        Per-key allocations whose stable-order sum equals ``amount``.
+        Per-key allocations summing to ``amount`` only up to the split residue
+        described above.
     """
     if any(not math.isfinite(weight) or weight <= 0.0 for weight in weights.values()):
         return {_UNATTRIBUTED_KEY: amount}

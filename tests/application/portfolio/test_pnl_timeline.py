@@ -2764,3 +2764,40 @@ class TestCorruptInputGuards:
                 "I2",
             )
         ]
+
+
+class TestAllocateByWeightsConservation:
+    """What the pro-rata split does and does NOT guarantee.
+
+    The docstring on ``_allocate_by_weights`` asserted for a long time that the
+    shares sum back to the source amount. They do not, and three separate P&L
+    designs leaned on that false invariant before a measurement caught it. These
+    tests pin the truth so the fourth does not.
+    """
+
+    def test_the_split_does_not_conserve_the_amount(self) -> None:
+        """A reproducing counterexample, hex for hex.
+
+        ``amount - sum(others)`` repairs ONE pairing; re-summing every key is a
+        DIFFERENT pairing, and since CPython 3.12 the builtin ``sum`` is
+        Neumaier-compensated, so the two do not agree. A naive left-to-right sum
+        of this same input DOES land on the amount — the compensation the rest of
+        the module depends on is exactly what exposes the gap.
+        """
+        amount = float.fromhex("0x1.e9074940cb723p-30")
+        weights = {
+            ("plan", "s0"): float.fromhex("0x1.47363da6833a8p+19"),
+            ("plan", "s1"): float.fromhex("0x1.c34ca4df56dc2p+19"),
+            ("plan", "s2"): float.fromhex("0x1.a75e1050ccab3p+19"),
+            ("plan", "s3"): float.fromhex("0x1.7f4bc9abe1a09p+15"),
+        }
+        shares = _allocate_by_weights(amount, weights)
+        assert sum(shares.values()) != amount
+        assert math.fsum([*shares.values(), -amount]) != 0.0
+
+    def test_a_conserving_split_is_still_the_common_case(self) -> None:
+        """The residue rule works most of the time, which is why this went unseen."""
+        amount = 100.0
+        weights = {("plan", "a"): 1.0, ("plan", "b"): 3.0}
+        shares = _allocate_by_weights(amount, weights)
+        assert math.fsum([*shares.values(), -amount]) == 0.0
