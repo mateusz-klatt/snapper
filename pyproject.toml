@@ -26,7 +26,7 @@ aiohttp = "^3.14.3"
 httpx = {extras = ["http2", "socks"], version = "^0.28.1"}
 pydantic = "^2.13.4"
 pydantic-settings = "^2.15.0"
-sqlalchemy = {extras = ["asyncio"], version = "^2.0.51"}
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.52"}
 aiosqlite = "^0.22.1"
 pandas = "^3.0.5"
 numpy = "^2.5.2"
@@ -39,7 +39,7 @@ uvicorn = {extras = ["standard"], version = "^0.52.1"}
 pyzmq = "^27.1.0"
 pyjwt = "^2.13.0"
 TA-Lib = "^0.7.1"
-ccxt = "^4.5.71"
+ccxt = "^4.5.73"
 python-kraken-sdk = "^3.3.0"
 massive = "^2.8.0"
 bcrypt = "^5.0.0"
@@ -49,7 +49,7 @@ mcp = "^2.0.0"
 aioapns = "^4.0"
 psutil = "^7.2.2"
 statsmodels = "^0.14.6"
-python-socks = {extras = ["asyncio"], version = "^2.8.2"}
+python-socks = {extras = ["asyncio"], version = "^3.0.0"}
 PySocks = "^1.7.1"
 pyroute2 = "^0.9.6"
 websockets = "^17.0.1"
