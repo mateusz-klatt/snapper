@@ -325,6 +325,38 @@ class TestAppSettingsAuthProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.auth_algorithm == "HS512"
 
+    def test_mcp_oauth_bootstrap_properties_are_projected(self) -> None:
+        """Verify AppSettings exposes every bootstrap OAuth control.
+
+        Given a bootstrap loader with an enabled read-only OAuth deployment,
+        When callers read the unified AppSettings facade,
+        Then exact URLs, lifetimes, flags, and normalized hosts are projected.
+        """
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            MCP_OAUTH_ENABLED=True,
+            MCP_PUBLIC_RESOURCE_URL="https://snapper.ch/api/mcp",
+            MCP_OAUTH_ISSUER="https://snapper.ch/api/mcp",
+            MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS=600,
+            MCP_OAUTH_REFRESH_TOKEN_TTL_DAYS=30,
+            MCP_OAUTH_CODE_TTL_SECONDS=90,
+            MCP_OAUTH_REQUEST_TTL_SECONDS=240,
+            MCP_OAUTH_DCR_ENABLED=False,
+            MCP_CHATGPT_READ_ONLY=True,
+            MCP_ALLOWED_HOSTS="snapper.ch, api.snapper.ch",
+        )
+        settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert settings.mcp_oauth_enabled is True
+        assert settings.mcp_public_resource_url == "https://snapper.ch/api/mcp"
+        assert settings.mcp_oauth_issuer == "https://snapper.ch/api/mcp"
+        assert settings.mcp_oauth_access_token_ttl_seconds == 600
+        assert settings.mcp_oauth_refresh_token_ttl_days == 30
+        assert settings.mcp_oauth_code_ttl_seconds == 90
+        assert settings.mcp_oauth_request_ttl_seconds == 240
+        assert settings.mcp_oauth_dcr_enabled is False
+        assert settings.mcp_chatgpt_read_only is True
+        assert settings.mcp_allowed_hosts == ["snapper.ch", "api.snapper.ch"]
+
     def test_auth_access_token_expire_minutes_returns_value(self) -> None:
         """Verify auth_access_token_expire_minutes returns configured value.
 

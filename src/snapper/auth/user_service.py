@@ -15,6 +15,7 @@ import bcrypt
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import has_effective_permission
@@ -23,6 +24,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import get_settings
+from snapper.data.models import OAuthGrant
+from snapper.data.models import OAuthRefreshToken
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
 from snapper.data.repository import close_and_insert
@@ -757,6 +760,7 @@ class UserService:
                 new_values=new_values,
                 bus_time=now,
             )
+            await self._revoke_oauth_authority(session, user_public_id, now)
             token_manager = get_token_manager()
             await token_manager.revoke_user_sessions(user_public_id, self.repository)
             await session.commit()
@@ -766,6 +770,39 @@ class UserService:
             deactivated_at=now,
         )
         return True
+
+    @staticmethod
+    async def _revoke_oauth_authority(
+        session: AsyncSession,
+        delegate_user_public_id: str,
+        revoked_at: datetime,
+    ) -> None:
+        """Revoke every OAuth grant and refresh token for one delegate.
+
+        Args:
+            session: User-deactivation transaction.
+            delegate_user_public_id: Deactivated OAuth delegate identity.
+            revoked_at: UTC deactivation boundary.
+        """
+        grant_ids = select(OAuthGrant.public_id).where(
+            OAuthGrant.delegate_user_public_id == delegate_user_public_id
+        )
+        await session.execute(
+            update(OAuthRefreshToken)
+            .where(
+                OAuthRefreshToken.grant_public_id.in_(grant_ids),
+                OAuthRefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
+        await session.execute(
+            update(OAuthGrant)
+            .where(
+                OAuthGrant.delegate_user_public_id == delegate_user_public_id,
+                OAuthGrant.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
 
     async def _publish_user_deactivated(
         self,

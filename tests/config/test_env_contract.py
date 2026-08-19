@@ -69,6 +69,8 @@ class TestKnownEnvKeys:
         assert "MASTER_PASSWORD" in KNOWN_ENV_KEYS
         assert "SERVER_PORT" in KNOWN_ENV_KEYS
         assert "SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS" in KNOWN_ENV_KEYS
+        assert "MCP_OAUTH_ENABLED" in KNOWN_ENV_KEYS
+        assert "MCP_PUBLIC_RESOURCE_URL" in KNOWN_ENV_KEYS
 
     def test_includes_delegate_profile_keys(self) -> None:
         """The optional Compose profile contributes only its host inputs."""

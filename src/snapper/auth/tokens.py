@@ -39,6 +39,7 @@ from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.tokens import MCPOAuthAccessTokenClaims
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.config.settings import AppSettings
@@ -637,6 +638,63 @@ class LongLivedTokenResult:
     expires_in: int
 
 
+@dataclass(slots=True, frozen=True)
+class MCPOAuthAccessTokenResult:
+    """Fresh short-lived MCP OAuth access token and its typed claims.
+
+    Attributes:
+        access_token: Signed audience-bound JWT.
+        claims: Exact claims encoded into the token.
+        expires_at: UTC expiration timestamp.
+        expires_in: Access-token lifetime in seconds.
+    """
+
+    access_token: str
+    claims: MCPOAuthAccessTokenClaims
+    expires_at: datetime
+    expires_in: int
+
+
+@dataclass(slots=True, frozen=True)
+class MCPOAuthAccessTokenRequest:
+    """Complete validated input required to mint one MCP OAuth JWT.
+
+    Attributes:
+        user: Dedicated OAuth delegate principal.
+        client_id: Pre-registered OAuth client identifier.
+        grant_id: Stable public identity of the backing grant.
+        issuer: Exact authorization-server issuer URL.
+        audience: Exact MCP protected-resource URL.
+        scopes: Deduplicated OAuth scope grant candidates.
+        issued_at: UTC transaction boundary time.
+        ttl_seconds: Positive access-token lifetime.
+        permissions: Existing Snapper permission ceiling for the delegate.
+    """
+
+    user: AuthPrincipal
+    client_id: str
+    grant_id: str
+    issuer: str
+    audience: str
+    scopes: tuple[str, ...]
+    issued_at: datetime
+    ttl_seconds: int
+    permissions: tuple[Permission | str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class OAuthOpaqueTokenResult:
+    """Opaque OAuth credential returned raw once and stored as a hash.
+
+    Attributes:
+        token: High-entropy credential returned to the OAuth client.
+        token_hash: SHA-256 digest persisted by the provider.
+    """
+
+    token: str
+    token_hash: str
+
+
 def hash_token(raw_token: str) -> str:
     """Return the SHA-256 hex digest of a raw JWT.
 
@@ -900,6 +958,118 @@ class TokenManager:
             jti=jti,
             expires_in=expires_in,
         )
+
+    def create_mcp_oauth_access_token(
+        self,
+        request: MCPOAuthAccessTokenRequest,
+    ) -> MCPOAuthAccessTokenResult:
+        """Mint a short-lived, audience-bound MCP OAuth access JWT.
+
+        Args:
+            request: Complete principal, grant, binding, scope, and lifetime.
+
+        Returns:
+            Signed token, typed claims, and expiration metadata.
+
+        Raises:
+            ValueError: If the lifetime, identity, URL, or scope is empty.
+        """
+        scope_values = list(dict.fromkeys(request.scopes))
+        if request.ttl_seconds <= 0:
+            raise ValueError("MCP OAuth access token TTL must be positive")
+        if not all((request.client_id, request.grant_id, request.issuer, request.audience)):
+            raise ValueError("MCP OAuth token identity and URLs must be non-empty")
+        if not scope_values or any(not scope.strip() for scope in scope_values):
+            raise ValueError("MCP OAuth access token requires non-empty scopes")
+        permission_scope = _resolve_permission_scope(request.user.role, request.permissions)
+        expires_at = request.issued_at + timedelta(seconds=request.ttl_seconds)
+        issued_at_epoch = int(request.issued_at.timestamp())
+        claims = MCPOAuthAccessTokenClaims(
+            sub=request.user.user_public_id,
+            username=request.user.username,
+            role=request.user.role,
+            permissions=[permission.value for permission in permission_scope],
+            permission_scope_version=PERMISSION_SCOPE_VERSION,
+            exp=int(expires_at.timestamp()),
+            iat=issued_at_epoch,
+            jti=str(uuid.uuid7()),
+            sid=request.grant_id,
+            user_public_id=request.user.user_public_id,
+            operator_public_ids=request.user.operator_public_ids,
+            operator_membership_public_ids=request.user.operator_membership_public_ids,
+            primary_operator_public_id=request.user.primary_operator_public_id,
+            active_wallet_public_id=request.user.active_wallet_public_id,
+            iss=request.issuer,
+            aud=request.audience,
+            scope=" ".join(scope_values),
+            client_id=request.client_id,
+            azp=request.client_id,
+            nbf=issued_at_epoch,
+            grant_id=request.grant_id,
+        )
+        access_token = jwt.encode(
+            claims.model_dump(),
+            self.settings.auth_secret_key,
+            algorithm=self.settings.auth_algorithm,
+        )
+        return MCPOAuthAccessTokenResult(
+            access_token=access_token,
+            claims=claims,
+            expires_at=expires_at,
+            expires_in=request.ttl_seconds,
+        )
+
+    def verify_mcp_oauth_access_token(
+        self,
+        token: str,
+        *,
+        issuer: str,
+        audience: str,
+        client_id: str | None = None,
+    ) -> MCPOAuthAccessTokenClaims | None:
+        """Verify an MCP OAuth JWT under exact issuer, audience, and client.
+
+        Args:
+            token: Encoded OAuth access JWT.
+            issuer: Exact expected authorization-server issuer.
+            audience: Exact expected protected resource.
+            client_id: Optional exact expected OAuth client. When omitted,
+                the signed ``client_id`` claim remains authoritative and is
+                returned for a separate live-grant lookup.
+
+        Returns:
+            Typed claims when every cryptographic and semantic check passes,
+            otherwise ``None``.
+        """
+        try:
+            payload = jwt.decode(
+                token,
+                self.settings.auth_secret_key,
+                algorithms=[self.settings.auth_algorithm],
+                audience=audience,
+                issuer=issuer,
+                options={"require": ["exp", "iat", "nbf", "iss", "aud", "jti"]},
+            )
+            claims = MCPOAuthAccessTokenClaims.model_validate_json(json_mod.dumps(payload))
+            valid_audience = claims.aud == audience or claims.aud == [audience]
+            valid_client = claims.azp in (None, claims.client_id) and (
+                client_id is None or claims.client_id == client_id
+            )
+            if not valid_audience or not valid_client:
+                return None
+            return claims
+        except (jwt.PyJWTError, ValidationError):
+            return None
+
+    @staticmethod
+    def mint_oauth_refresh_token() -> OAuthOpaqueTokenResult:
+        """Generate a high-entropy opaque refresh credential.
+
+        Returns:
+            Raw token for one-time delivery and its persistence hash.
+        """
+        token = secrets.token_urlsafe(48)
+        return OAuthOpaqueTokenResult(token=token, token_hash=hash_token(token))
 
     def decode_fresh_token(self, token: str) -> TokenClaims:
         """Public alias for :meth:`_decode_fresh_token`.

@@ -37,6 +37,7 @@ from snapper.application.ai_delegates.service import DelegateOperatorBindingErro
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
+from snapper.application.ai_delegates.service import OAuthDelegateRequest
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -46,6 +47,7 @@ from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.core.ids import is_uuid7
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import OAuthGrant
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
@@ -169,6 +171,168 @@ class TestCreateDelegate:
         assert {t.token_type for t in tokens} == {"access"}
         token_hashes = {t.token_hash for t in tokens}
         assert hash_token(payload.access_token) in token_hashes
+
+    @pytest.mark.asyncio
+    async def test_oauth_delegate_binding_is_idempotent_and_has_no_pat(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """The same OAuth binding reuses one delegate without minting a PAT.
+
+        Given an owner and a read-only OAuth client binding,
+        When the connector resolves that binding twice,
+        Then both calls return one delegate and grant with no active-token row.
+        """
+        await _seed_owner(repo, public_id="owner-oauth", username="oauth-owner")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        request = OAuthDelegateRequest(
+            client_id="chatgpt-client",
+            resource="https://snapper.ch/api/mcp",
+            scopes=("snapper.read", "offline_access"),
+            label="ChatGPT",
+        )
+
+        first = await service.get_or_create_oauth_delegate(
+            _make_owner_principal("owner-oauth"),
+            request,
+        )
+        second = await service.get_or_create_oauth_delegate(
+            _make_owner_principal("owner-oauth"),
+            request,
+        )
+
+        assert first.delegate.public_id == second.delegate.public_id
+        assert first.grant_public_id == second.grant_public_id
+        assert first.principal.user_public_id == first.delegate.public_id
+        loaded = await service.get_oauth_delegate_by_grant(
+            first.grant_public_id,
+            "chatgpt-client",
+        )
+        assert loaded is not None
+        assert loaded.delegate.public_id == first.delegate.public_id
+        assert (
+            await service.get_oauth_delegate_by_grant(
+                first.grant_public_id,
+                "wrong-client",
+            )
+            is None
+        )
+        async with repo.session() as session:
+            token_rows = (
+                await session.execute(
+                    _sel(UserActiveToken).where(
+                        UserActiveToken.user_public_id == first.delegate.public_id
+                    )
+                )
+            ).scalars()
+            grant_rows = (
+                await session.execute(
+                    _sel(OAuthGrant).where(OAuthGrant.owner_user_public_id == "owner-oauth")
+                )
+            ).scalars()
+            delegate_rows = (
+                await session.execute(
+                    _sel(User).where(User.created_by_user_public_id == "owner-oauth")
+                )
+            ).scalars()
+            assert list(token_rows) == []
+            assert len(list(grant_rows)) == 1
+            assert len(list(delegate_rows)) == 1
+
+    @pytest.mark.asyncio
+    async def test_oauth_delegate_replaces_deactivated_binding(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """A dead OAuth delegate retires its grant before replacement.
+
+        Given an existing OAuth binding whose delegate is deactivated,
+        When the same client reconnects under the same owner and operator,
+        Then a new delegate and grant are created while the old grant is revoked.
+        """
+        await _seed_owner(repo, public_id="owner-oauth-replace", username="oauth-replace")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        owner = _make_owner_principal("owner-oauth-replace")
+        request = OAuthDelegateRequest(
+            client_id="chatgpt-client",
+            resource="https://snapper.ch/api/mcp",
+            scopes=("snapper.read",),
+        )
+        first = await service.get_or_create_oauth_delegate(owner, request)
+        async with repo.session() as session:
+            await session.execute(
+                _up(User).where(User.public_id == first.delegate.public_id).values(is_active=False)
+            )
+            await session.commit()
+        assert (
+            await service.get_oauth_delegate_by_grant(
+                first.grant_public_id,
+                "chatgpt-client",
+            )
+            is None
+        )
+
+        replacement = await service.get_or_create_oauth_delegate(owner, request)
+
+        assert replacement.delegate.public_id != first.delegate.public_id
+        assert replacement.grant_public_id != first.grant_public_id
+        async with repo.session() as session:
+            grants = (
+                await session.execute(
+                    _sel(OAuthGrant)
+                    .where(OAuthGrant.owner_user_public_id == "owner-oauth-replace")
+                    .order_by(OAuthGrant.created_at)
+                )
+            ).scalars()
+            grant_rows = list(grants)
+        assert len(grant_rows) == 2
+        assert grant_rows[0].revoked_at is not None
+        assert grant_rows[1].revoked_at is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "oauth_request",
+        [
+            OAuthDelegateRequest(
+                client_id="",
+                resource="https://snapper.ch/api/mcp",
+                scopes=("snapper.read",),
+            ),
+            OAuthDelegateRequest(
+                client_id="chatgpt-client",
+                resource="",
+                scopes=("snapper.read",),
+            ),
+            OAuthDelegateRequest(
+                client_id="chatgpt-client",
+                resource="https://snapper.ch/api/mcp",
+                scopes=(),
+            ),
+            OAuthDelegateRequest(
+                client_id="chatgpt-client",
+                resource="https://snapper.ch/api/mcp",
+                scopes=("",),
+            ),
+        ],
+    )
+    async def test_oauth_delegate_rejects_incomplete_binding(
+        self,
+        repo: SQLAlchemyRepository,
+        oauth_request: OAuthDelegateRequest,
+    ) -> None:
+        """Incomplete OAuth binding input fails before any identity is inserted.
+
+        Given a request missing a client, resource, or usable scope,
+        When OAuth delegate resolution runs,
+        Then it raises and leaves the owner with no delegate rows.
+        """
+        await _seed_owner(repo, public_id="owner-oauth-invalid", username="oauth-invalid")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        with pytest.raises(ValueError):
+            await service.get_or_create_oauth_delegate(
+                _make_owner_principal("owner-oauth-invalid"),
+                oauth_request,
+            )
 
     def test_create_body_rejects_legacy_long_lived_field(self) -> None:
         """Schema guard: FastAPI maps this extra body field to HTTP 422."""

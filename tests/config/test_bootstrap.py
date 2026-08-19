@@ -75,6 +75,68 @@ class TestCoordinatorInstanceId:
         assert loader.coordinator_instance_id == 3
 
 
+class TestMCPOAuthBootstrap:
+    """MCP OAuth bootstrap settings remain dark and canonical by default."""
+
+    def test_defaults_keep_oauth_dark_with_local_canonical_urls(self, tmp_path: Path) -> None:
+        """Verify safe local defaults do not expose OAuth.
+
+        Given no environment file or explicit MCP OAuth variables,
+        When bootstrap settings are loaded,
+        Then OAuth is disabled and canonical local URLs and lifetimes are used.
+        """
+        loader = BootstrapSettingsLoader(_env_file=None)
+        assert loader.mcp_oauth_enabled is False
+        assert loader.mcp_public_resource_url == "http://localhost:8000/api/mcp"
+        assert loader.mcp_oauth_issuer == "http://localhost:8000/api/mcp"
+        assert loader.mcp_oauth_access_token_ttl_seconds == 900
+        assert loader.mcp_oauth_refresh_token_ttl_days == 90
+        assert loader.mcp_oauth_code_ttl_seconds == 120
+        assert loader.mcp_oauth_request_ttl_seconds == 300
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "snapper.ch/api/mcp",
+            "ftp://snapper.ch/api/mcp",
+            "https://snapper.ch/api/mcp/",
+            "https://snapper.ch/api/mcp?tenant=x",
+            "https://snapper.ch/api/mcp#fragment",
+        ],
+    )
+    def test_noncanonical_oauth_urls_are_rejected(self, url: str) -> None:
+        """Verify exact issuer/resource comparison cannot be misconfigured.
+
+        Given a relative, unsupported, slash-suffixed, queried, or fragmented URL,
+        When it is supplied as the OAuth issuer,
+        Then bootstrap validation rejects it before the server builds routes.
+        """
+        with pytest.raises(ValidationError, match="MCP OAuth URLs"):
+            BootstrapSettingsLoader(_env_file=None, MCP_OAUTH_ISSUER=url)
+
+    def test_explicit_oauth_values_round_trip(self) -> None:
+        """Verify production-shaped OAuth bootstrap values survive parsing.
+
+        Given exact HTTPS issuer/resource values and custom TTLs and hosts,
+        When bootstrap settings are loaded,
+        Then every value remains available without trailing-slash normalization.
+        """
+        loader = BootstrapSettingsLoader(
+            _env_file=None,
+            MCP_OAUTH_ENABLED=True,
+            MCP_PUBLIC_RESOURCE_URL="https://snapper.ch/api/mcp",
+            MCP_OAUTH_ISSUER="https://snapper.ch/api/mcp",
+            MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS=600,
+            MCP_OAUTH_REFRESH_TOKEN_TTL_DAYS=30,
+            MCP_ALLOWED_HOSTS="snapper.ch,api.snapper.ch",
+        )
+        assert loader.mcp_oauth_enabled is True
+        assert loader.mcp_public_resource_url == "https://snapper.ch/api/mcp"
+        assert loader.mcp_oauth_access_token_ttl_seconds == 600
+        assert loader.mcp_oauth_refresh_token_ttl_days == 30
+        assert loader.mcp_allowed_hosts == "snapper.ch,api.snapper.ch"
+
+
 class TestCoordinatorInstanceCount:
     """``SNAPPER_COORDINATOR_INSTANCE_COUNT`` env round-trip."""
 

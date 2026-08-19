@@ -194,6 +194,98 @@ class AppSettings:
         return self._bootstrap.server_forwarded_allow_ips
 
     @property
+    def mcp_oauth_enabled(self) -> bool:
+        """Return whether the OAuth authorization server is exposed.
+
+        Returns:
+            True only when OAuth routes should be published.
+        """
+        return self._bootstrap.mcp_oauth_enabled
+
+    @property
+    def mcp_public_resource_url(self) -> str:
+        """Return the exact public MCP protected-resource URL.
+
+        Returns:
+            Canonical resource URL without a trailing slash.
+        """
+        return self._bootstrap.mcp_public_resource_url
+
+    @property
+    def mcp_oauth_issuer(self) -> str:
+        """Return the exact MCP OAuth authorization-server issuer.
+
+        Returns:
+            Canonical issuer URL without a trailing slash.
+        """
+        return self._bootstrap.mcp_oauth_issuer
+
+    @property
+    def mcp_oauth_access_token_ttl_seconds(self) -> int:
+        """Return the MCP OAuth access-token lifetime in seconds.
+
+        Returns:
+            Positive access-token lifetime.
+        """
+        return self._bootstrap.mcp_oauth_access_token_ttl_seconds
+
+    @property
+    def mcp_oauth_refresh_token_ttl_days(self) -> int:
+        """Return the opaque refresh-token lifetime in days.
+
+        Returns:
+            Positive refresh-family lifetime.
+        """
+        return self._bootstrap.mcp_oauth_refresh_token_ttl_days
+
+    @property
+    def mcp_oauth_code_ttl_seconds(self) -> int:
+        """Return the authorization-code lifetime in seconds.
+
+        Returns:
+            Positive one-time code lifetime.
+        """
+        return self._bootstrap.mcp_oauth_code_ttl_seconds
+
+    @property
+    def mcp_oauth_request_ttl_seconds(self) -> int:
+        """Return the pending browser authorization lifetime in seconds.
+
+        Returns:
+            Positive pending-request lifetime.
+        """
+        return self._bootstrap.mcp_oauth_request_ttl_seconds
+
+    @property
+    def mcp_oauth_dcr_enabled(self) -> bool:
+        """Return whether dynamic OAuth client registration is enabled.
+
+        Returns:
+            True only when DCR should be exposed.
+        """
+        return self._bootstrap.mcp_oauth_dcr_enabled
+
+    @property
+    def mcp_chatgpt_read_only(self) -> bool:
+        """Return whether ChatGPT OAuth grants are constrained to reads.
+
+        Returns:
+            True when write scopes must not be granted.
+        """
+        return self._bootstrap.mcp_chatgpt_read_only
+
+    @property
+    def mcp_allowed_hosts(self) -> list[str]:
+        """Return normalized Host values accepted by MCP transport security.
+
+        Returns:
+            Non-empty comma-separated host entries after normalization.
+        """
+        return [
+            host.strip() for host in self._bootstrap.mcp_allowed_hosts.split(",") if host.strip()
+        ]
+
+    @property
     def zmq_broker_xsub(self) -> str:
         """Return ZMQ broker XSUB endpoint from bootstrap settings.
 

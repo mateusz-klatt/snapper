@@ -4869,6 +4869,170 @@ class UserActiveToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
+class OAuthClient(Base):
+    """Pre-registered OAuth client allowed to request MCP grants."""
+
+    __tablename__ = "oauth_clients"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_oauth_clients_public_id"),
+        UniqueConstraint("client_id", name="uq_oauth_clients_client_id"),
+        CheckConstraint(
+            "token_endpoint_auth_method IN ('client_secret_basic', 'client_secret_post')",
+            name="ck_oauth_clients_token_auth_method",
+        ),
+        Index("ix_oauth_clients_active", "is_active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    client_secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    redirect_uris: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    allowed_scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+class OAuthGrant(Base):
+    """Revocable resource-owner grant backing one MCP connector."""
+
+    __tablename__ = "oauth_grants"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_oauth_grants_public_id"),
+        CheckConstraint("length(trim(resource)) > 0", name="ck_oauth_grants_resource_nonempty"),
+        Index(
+            "uq_oauth_grants_active_binding",
+            "owner_user_public_id",
+            "operator_public_id",
+            "client_id",
+            unique=True,
+            sqlite_where=text("revoked_at IS NULL"),
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index("ix_oauth_grants_delegate", "delegate_user_public_id"),
+        Index("ix_oauth_grants_client", "client_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    owner_user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    delegate_user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource: Mapped[str] = mapped_column(String(2048), nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    operator_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class OAuthAuthorizationRequest(Base):
+    """Hashed pending browser authorization request awaiting consent."""
+
+    __tablename__ = "oauth_authorization_requests"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_oauth_authorization_requests_public_id"),
+        UniqueConstraint("request_hash", name="uq_oauth_authorization_requests_hash"),
+        CheckConstraint(
+            "length(request_hash) = 64",
+            name="ck_oauth_authorization_requests_hash_length",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('approved', 'denied')",
+            name="ck_oauth_authorization_requests_decision",
+        ),
+        CheckConstraint(
+            "(decision IS NULL AND resolved_at IS NULL) OR "
+            "(decision IS NOT NULL AND resolved_at IS NOT NULL)",
+            name="ck_oauth_authorization_requests_resolution",
+        ),
+        Index("ix_oauth_authorization_requests_expires", "expires_at"),
+        Index("ix_oauth_authorization_requests_client", "client_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource: Mapped[str] = mapped_column(String(2048), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    decision: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class OAuthAuthorizationCode(Base):
+    """One-time hashed authorization code bound to PKCE S256."""
+
+    __tablename__ = "oauth_authorization_codes"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_oauth_authorization_codes_public_id"),
+        UniqueConstraint("code_hash", name="uq_oauth_authorization_codes_code_hash"),
+        CheckConstraint(
+            "length(code_hash) = 64",
+            name="ck_oauth_authorization_codes_hash_length",
+        ),
+        CheckConstraint(
+            "code_challenge_method = 'S256'",
+            name="ck_oauth_authorization_codes_pkce_method",
+        ),
+        Index("ix_oauth_authorization_codes_grant", "grant_public_id"),
+        Index("ix_oauth_authorization_codes_expires", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    grant_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_challenge_method: Mapped[str] = mapped_column(String(8), nullable=False)
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class OAuthRefreshToken(Base):
+    """Opaque hashed refresh token participating in a rotation family."""
+
+    __tablename__ = "oauth_refresh_tokens"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_oauth_refresh_tokens_public_id"),
+        UniqueConstraint("token_hash", name="uq_oauth_refresh_tokens_token_hash"),
+        CheckConstraint(
+            "length(token_hash) = 64",
+            name="ck_oauth_refresh_tokens_hash_length",
+        ),
+        CheckConstraint(
+            "replaced_by_public_id IS NULL OR used_at IS NOT NULL",
+            name="ck_oauth_refresh_tokens_replacement_used",
+        ),
+        Index("ix_oauth_refresh_tokens_family", "family_public_id"),
+        Index("ix_oauth_refresh_tokens_grant", "grant_public_id"),
+        Index("ix_oauth_refresh_tokens_expiry", "expires_at", "revoked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    family_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    grant_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    replaced_by_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+
+
 class NotificationDevice(TemporalMixin, Base):
     """Temporal (SCD2) inventory of iOS devices registered for APNs push.
 

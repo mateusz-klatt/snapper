@@ -4,6 +4,8 @@ This module defines Pydantic schemas for JWT token claims
 and token pair responses.
 """
 
+from typing import Literal
+
 from pydantic import Field
 
 from snapper.api.schemas.base import StrictBody
@@ -62,6 +64,31 @@ class TokenClaims(StrictBody):
     operator_membership_public_ids: dict[str, str] = Field(default={})
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
+
+
+class MCPOAuthAccessTokenClaims(TokenClaims):
+    """Audience-bound claims carried only by MCP OAuth access tokens.
+
+    Attributes:
+        iss: Exact OAuth authorization-server issuer URL.
+        aud: Exact protected-resource audience or audience list.
+        scope: Space-delimited OAuth scope grant.
+        client_id: OAuth client that obtained the grant.
+        azp: Optional authorized-party alias for the OAuth client.
+        nbf: Unix timestamp before which the token is invalid.
+        grant_id: Stable public identity of the backing OAuth grant.
+        token_use: Immutable purpose marker separating OAuth access
+            credentials from REST, WebSocket, and delegate PAT tokens.
+    """
+
+    iss: str
+    aud: str | list[str]
+    scope: str
+    client_id: str
+    azp: str | None = None
+    nbf: int
+    grant_id: str
+    token_use: Literal["mcp_oauth_access"] = "mcp_oauth_access"
 
 
 class TokenPair(StrictBody):

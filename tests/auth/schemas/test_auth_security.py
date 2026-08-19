@@ -2,7 +2,12 @@
 
 import contextlib
 
+import pytest
+from pydantic import ValidationError
+
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.security import CsrfToken
+from snapper.auth.schemas.tokens import MCPOAuthAccessTokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.config.settings import get_settings
 from snapper.data.models import Order
@@ -79,6 +84,37 @@ class TestUtilitiesCoverage:
         """
         assert TokenPair is not None
         assert CsrfToken is not None
+
+    def test_mcp_oauth_claims_reject_wrong_token_purpose(self) -> None:
+        """Verify MCP OAuth claims cannot decode as another token purpose.
+
+        Given a complete audience-bound MCP OAuth access-token payload,
+        When it is validated with its default purpose and a wrong purpose,
+        Then the OAuth purpose is preserved and the wrong value is rejected.
+        """
+        payload: dict[str, object] = {
+            "sub": "delegate-user",
+            "username": "chatgpt-reader",
+            "role": UserRole.AI_DELEGATE,
+            "permissions": ["read:market_data"],
+            "exp": 2_000_000_900,
+            "iat": 2_000_000_000,
+            "jti": "oauth-jti",
+            "sid": "oauth-session",
+            "iss": "https://snapper.ch/api/mcp",
+            "aud": "https://snapper.ch/api/mcp",
+            "scope": "snapper.read offline_access",
+            "client_id": "chatgpt-client",
+            "nbf": 2_000_000_000,
+            "grant_id": "grant-public-id",
+        }
+        claims = MCPOAuthAccessTokenClaims.model_validate(payload)
+        assert claims.token_use == "mcp_oauth_access"
+        assert claims.aud == "https://snapper.ch/api/mcp"
+
+        payload["token_use"] = "access"
+        with pytest.raises(ValidationError):
+            MCPOAuthAccessTokenClaims.model_validate(payload)
 
     def test_repository_import(self) -> None:
         """Verify repository function can be imported.

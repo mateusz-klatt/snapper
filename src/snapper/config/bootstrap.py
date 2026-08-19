@@ -49,6 +49,7 @@ Example:
 
 from typing import Any
 from typing import Self
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic import field_validator
@@ -198,6 +199,38 @@ class BootstrapSettingsLoader(BaseSettings):
     )
     server_proxy_headers: bool = Field(default=True, alias="SERVER_PROXY_HEADERS")
     server_forwarded_allow_ips: str = Field(default="127.0.0.1", alias="SERVER_FORWARDED_ALLOW_IPS")
+    mcp_oauth_enabled: bool = Field(default=False, alias="MCP_OAUTH_ENABLED")
+    mcp_public_resource_url: str = Field(
+        default="http://localhost:8000/api/mcp",
+        alias="MCP_PUBLIC_RESOURCE_URL",
+    )
+    mcp_oauth_issuer: str = Field(
+        default="http://localhost:8000/api/mcp",
+        alias="MCP_OAUTH_ISSUER",
+    )
+    mcp_oauth_access_token_ttl_seconds: int = Field(
+        default=900,
+        gt=0,
+        alias="MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS",
+    )
+    mcp_oauth_refresh_token_ttl_days: int = Field(
+        default=90,
+        gt=0,
+        alias="MCP_OAUTH_REFRESH_TOKEN_TTL_DAYS",
+    )
+    mcp_oauth_code_ttl_seconds: int = Field(
+        default=120,
+        gt=0,
+        alias="MCP_OAUTH_CODE_TTL_SECONDS",
+    )
+    mcp_oauth_request_ttl_seconds: int = Field(
+        default=300,
+        gt=0,
+        alias="MCP_OAUTH_REQUEST_TTL_SECONDS",
+    )
+    mcp_oauth_dcr_enabled: bool = Field(default=False, alias="MCP_OAUTH_DCR_ENABLED")
+    mcp_chatgpt_read_only: bool = Field(default=True, alias="MCP_CHATGPT_READ_ONLY")
+    mcp_allowed_hosts: str = Field(default="localhost,127.0.0.1", alias="MCP_ALLOWED_HOSTS")
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")
     zmq_broker_bind_xsub: str = Field(default="", alias="ZMQ_BROKER_BIND_XSUB")
@@ -258,6 +291,19 @@ class BootstrapSettingsLoader(BaseSettings):
             supported = ", ".join(sorted(SUPPORTED_ENVIRONMENTS))
             raise ValueError(f"SNAPPER_ENV must be one of {supported}, got {value!r}")
         return normalized
+
+    @field_validator("mcp_public_resource_url", "mcp_oauth_issuer")
+    @classmethod
+    def _validate_mcp_oauth_url(cls, value: str) -> str:
+        """Require one exact canonical HTTP(S) URL without a trailing slash."""
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("MCP OAuth URLs must be absolute HTTP(S) URLs")
+        if parsed.query or parsed.fragment:
+            raise ValueError("MCP OAuth URLs cannot contain query strings or fragments")
+        if value.endswith("/"):
+            raise ValueError("MCP OAuth URLs must not end with a slash")
+        return value
 
     @model_validator(mode="after")
     def _validate_production_secret_defaults(self) -> Self:

@@ -14,6 +14,7 @@ client; Snapper does not store it.
 import asyncio
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import ClassVar
@@ -21,6 +22,7 @@ from uuid import uuid7
 
 import bcrypt
 from loguru import logger
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +42,7 @@ from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.core.json_types import JsonObject
 from snapper.data.models import AiDelegate
+from snapper.data.models import OAuthGrant
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
@@ -107,6 +110,60 @@ class InvalidOwnerPrincipalError(Exception):
     can surface a clean 401 instead of silently minting ownerless
     rows.
     """
+
+
+@dataclass(slots=True, frozen=True)
+class OAuthDelegateRequest:
+    """Input required to resolve one idempotent OAuth delegate binding.
+
+    Attributes:
+        client_id: Pre-registered OAuth client identifier.
+        resource: Exact protected-resource URL.
+        scopes: Requested OAuth scope grant.
+        operator_public_id: Optional explicit operator binding.
+        label: Human-readable delegate label used only on first creation.
+    """
+
+    client_id: str
+    resource: str
+    scopes: tuple[str, ...]
+    operator_public_id: str | None = None
+    label: str = "chatgpt"
+
+
+@dataclass(slots=True, frozen=True)
+class OAuthDelegateIdentity:
+    """OAuth delegate and grant identities without any legacy PAT.
+
+    Attributes:
+        delegate: Public delegate projection.
+        principal: Principal used to mint short-lived OAuth access tokens.
+        grant_public_id: Stable public identity of the backing OAuth grant.
+    """
+
+    delegate: DelegateRead
+    principal: AuthPrincipal
+    grant_public_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class _DelegateIdentityCreateRequest:
+    """Internal transaction input for one delegate identity insertion."""
+
+    owner: AuthPrincipal
+    body: DelegateCreateBody
+    bound_operator_public_id: str
+    now: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class _DelegateIdentityBundle:
+    """Rows and projections produced before credential issuance."""
+
+    user_row: User
+    caps_row: UserTradingCaps
+    principal: AuthPrincipal
+    delegate: DelegateRead
 
 
 class DelegateService:
@@ -269,72 +326,25 @@ class DelegateService:
         """
         async with self.repository.session() as session:
             await self._guard_proliferation(session, owner.user_public_id)
-            username = await self._reserve_unique_username(session, body.label)
             now = datetime.now(UTC)
-            placeholder_password_hash = self._mint_unusable_password_hash()
-            delegate_user = User(
-                username=username,
-                email=None,
-                password_hash=placeholder_password_hash,
-                role=UserRole.AI_DELEGATE.value,
-                is_active=True,
-                created_at=now,
-                created_by_user_public_id=owner.user_public_id,
-                timestamp=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
-            )
-            session.add(delegate_user)
-            await session.flush()
-            caps_row = UserTradingCaps(
-                user_public_id=delegate_user.public_id,
-                max_order_quantity_per_instrument=body.caps.max_order_quantity_per_instrument,
-                max_open_orders=body.caps.max_open_orders,
-                max_daily_notional_usd=body.caps.max_daily_notional_usd,
-                max_cancels_per_minute=body.caps.max_cancels_per_minute,
-                timestamp=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
-            )
-            session.add(caps_row)
-            membership_row = UserOperatorMembership(
-                user_public_id=delegate_user.public_id,
-                operator_public_id=bound_operator_public_id,
-                is_primary=True,
-                timestamp=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
-            )
-            session.add(membership_row)
-            await session.flush()
-            session.add(
-                AiDelegate(
-                    public_id=str(uuid.uuid7()),
-                    user_public_id=delegate_user.public_id,
-                    last_seen_at=None,
-                    active_reviews_count=0,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            delegate_principal = AuthPrincipal(
-                username=delegate_user.username,
-                role=UserRole.AI_DELEGATE,
-                is_active=True,
-                user_public_id=delegate_user.public_id,
-                operator_public_ids=[bound_operator_public_id],
-                operator_membership_public_ids={bound_operator_public_id: membership_row.public_id},
-                primary_operator_public_id=bound_operator_public_id,
+            identity = await self._create_delegate_identity(
+                session,
+                _DelegateIdentityCreateRequest(
+                    owner=owner,
+                    body=body,
+                    bound_operator_public_id=bound_operator_public_id,
+                    now=now,
+                ),
             )
             pat = self.token_manager.create_delegate_access_token(
-                delegate_principal,
+                identity.principal,
                 issued_at=now,
                 permissions=body.permissions,
             )
             session.add(
                 UserActiveToken(
                     public_id=str(uuid.uuid7()),
-                    user_public_id=delegate_user.public_id,
+                    user_public_id=identity.user_row.public_id,
                     jti=pat.jti,
                     token_hash=hash_token(pat.access_token),
                     token_type=TOKEN_TYPE_ACCESS,
@@ -343,21 +353,304 @@ class DelegateService:
                 )
             )
             await session.commit()
-            delegate_read = self._delegate_read_from_rows(
-                user_row=delegate_user,
-                caps_row=caps_row,
-                label=self._label_from_username(delegate_user.username),
-            )
         logger.info(
             "create_delegate: owner={} delegate={} username={}",
             owner.user_public_id,
-            delegate_user.public_id,
-            delegate_user.username,
+            identity.user_row.public_id,
+            identity.user_row.username,
         )
         return DelegateCreatedPayload(
-            delegate=delegate_read,
+            delegate=identity.delegate,
             access_token=pat.access_token,
             expires_in=pat.expires_in,
+        )
+
+    async def get_or_create_oauth_delegate(
+        self,
+        owner: AuthPrincipal,
+        request: OAuthDelegateRequest,
+    ) -> OAuthDelegateIdentity:
+        """Return one idempotent OAuth delegate and active grant binding.
+
+        Args:
+            owner: Authenticated resource owner authorizing the connector.
+            request: Client, resource, scope, operator, and first-use label.
+
+        Returns:
+            Existing or newly created OAuth delegate identity and grant.
+
+        Raises:
+            ValueError: If client, resource, or scope is empty.
+            InvalidOwnerPrincipalError: If the owner lacks a stable identity.
+            DelegateOperatorBindingError: If the requested operator is invalid.
+            DelegateProliferationError: If creating a new identity exceeds cap.
+        """
+        self._guard_owner(owner.user_public_id)
+        if not request.client_id or not request.resource:
+            raise ValueError("OAuth delegate client and resource must be non-empty")
+        if not request.scopes or any(not scope.strip() for scope in request.scopes):
+            raise ValueError("OAuth delegate requires non-empty scopes")
+        body = DelegateCreateBody(
+            label=request.label,
+            caps=DelegateCapsBody(),
+            operator_public_id=request.operator_public_id,
+        )
+        bound_operator_public_id = self._resolve_operator_binding(owner, body)
+        async with (
+            self._get_owner_lock(owner.user_public_id),
+            self.repository.session() as session,
+        ):
+            existing = await self._load_oauth_delegate(
+                session,
+                owner_public_id=owner.user_public_id,
+                operator_public_id=bound_operator_public_id,
+                client_id=request.client_id,
+            )
+            if existing is not None:
+                return existing
+            await self._guard_proliferation(session, owner.user_public_id)
+            now = datetime.now(UTC)
+            identity = await self._create_delegate_identity(
+                session,
+                _DelegateIdentityCreateRequest(
+                    owner=owner,
+                    body=body,
+                    bound_operator_public_id=bound_operator_public_id,
+                    now=now,
+                ),
+            )
+            grant = OAuthGrant(
+                public_id=str(uuid.uuid7()),
+                owner_user_public_id=owner.user_public_id,
+                delegate_user_public_id=identity.user_row.public_id,
+                client_id=request.client_id,
+                resource=request.resource,
+                scopes=list(dict.fromkeys(request.scopes)),
+                operator_public_id=bound_operator_public_id,
+                created_at=now,
+            )
+            session.add(grant)
+            await session.commit()
+            return OAuthDelegateIdentity(
+                delegate=identity.delegate,
+                principal=identity.principal,
+                grant_public_id=grant.public_id,
+            )
+
+    async def _create_delegate_identity(
+        self,
+        session: AsyncSession,
+        request: _DelegateIdentityCreateRequest,
+    ) -> _DelegateIdentityBundle:
+        """Insert user, caps, membership, and operational identity rows."""
+        username = await self._reserve_unique_username(session, request.body.label)
+        delegate_user = User(
+            username=username,
+            email=None,
+            password_hash=self._mint_unusable_password_hash(),
+            role=UserRole.AI_DELEGATE.value,
+            is_active=True,
+            created_at=request.now,
+            created_by_user_public_id=request.owner.user_public_id,
+            timestamp=request.now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
+        )
+        session.add(delegate_user)
+        await session.flush()
+        caps_row = UserTradingCaps(
+            user_public_id=delegate_user.public_id,
+            max_order_quantity_per_instrument=(request.body.caps.max_order_quantity_per_instrument),
+            max_open_orders=request.body.caps.max_open_orders,
+            max_daily_notional_usd=request.body.caps.max_daily_notional_usd,
+            max_cancels_per_minute=request.body.caps.max_cancels_per_minute,
+            timestamp=request.now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
+        )
+        session.add(caps_row)
+        membership_row = UserOperatorMembership(
+            user_public_id=delegate_user.public_id,
+            operator_public_id=request.bound_operator_public_id,
+            is_primary=True,
+            timestamp=request.now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
+        )
+        session.add(membership_row)
+        await session.flush()
+        session.add(
+            AiDelegate(
+                public_id=str(uuid.uuid7()),
+                user_public_id=delegate_user.public_id,
+                last_seen_at=None,
+                active_reviews_count=0,
+                created_at=request.now,
+                updated_at=request.now,
+            )
+        )
+        principal = AuthPrincipal(
+            username=delegate_user.username,
+            role=UserRole.AI_DELEGATE,
+            is_active=True,
+            user_public_id=delegate_user.public_id,
+            operator_public_ids=[request.bound_operator_public_id],
+            operator_membership_public_ids={
+                request.bound_operator_public_id: membership_row.public_id
+            },
+            primary_operator_public_id=request.bound_operator_public_id,
+        )
+        delegate = self._delegate_read_from_rows(
+            user_row=delegate_user,
+            caps_row=caps_row,
+            label=self._label_from_username(delegate_user.username),
+        )
+        return _DelegateIdentityBundle(
+            user_row=delegate_user,
+            caps_row=caps_row,
+            principal=principal,
+            delegate=delegate,
+        )
+
+    async def get_oauth_delegate_by_grant(
+        self,
+        grant_public_id: str,
+        client_id: str,
+    ) -> OAuthDelegateIdentity | None:
+        """Load an active OAuth grant and its active delegate principal.
+
+        Args:
+            grant_public_id: Stable grant identity from the access JWT.
+            client_id: Exact client identity from the access JWT.
+
+        Returns:
+            Active delegate and grant projection, otherwise ``None``.
+        """
+        async with self.repository.session() as session:
+            grant = (
+                await session.execute(
+                    select(OAuthGrant).where(
+                        OAuthGrant.public_id == grant_public_id,
+                        OAuthGrant.client_id == client_id,
+                        OAuthGrant.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if grant is None:
+                return None
+            identity = await self._load_oauth_delegate_rows(
+                session,
+                grant.delegate_user_public_id,
+                grant.operator_public_id,
+            )
+            if identity is None:
+                return None
+            return OAuthDelegateIdentity(
+                delegate=identity.delegate,
+                principal=identity.principal,
+                grant_public_id=grant.public_id,
+            )
+
+    async def _load_oauth_delegate(
+        self,
+        session: AsyncSession,
+        *,
+        owner_public_id: str,
+        operator_public_id: str,
+        client_id: str,
+    ) -> OAuthDelegateIdentity | None:
+        """Load an active OAuth binding or retire one with a dead delegate."""
+        grant = (
+            await session.execute(
+                select(OAuthGrant)
+                .where(
+                    OAuthGrant.owner_user_public_id == owner_public_id,
+                    OAuthGrant.operator_public_id == operator_public_id,
+                    OAuthGrant.client_id == client_id,
+                    OAuthGrant.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if grant is None:
+            return None
+        identity = await self._load_oauth_delegate_rows(
+            session,
+            grant.delegate_user_public_id,
+            operator_public_id,
+        )
+        if identity is None:
+            grant.revoked_at = datetime.now(UTC)
+            await session.flush()
+            return None
+        return OAuthDelegateIdentity(
+            delegate=identity.delegate,
+            principal=identity.principal,
+            grant_public_id=grant.public_id,
+        )
+
+    async def _load_oauth_delegate_rows(
+        self,
+        session: AsyncSession,
+        user_public_id: str,
+        operator_public_id: str,
+    ) -> _DelegateIdentityBundle | None:
+        """Project one active delegate's identity rows for OAuth reuse."""
+        now = datetime.now(UTC)
+        user_ts, user_known_to = where_active(User, now)
+        caps_ts, caps_known_to = where_active(UserTradingCaps, now)
+        membership_ts, membership_known_to = where_active(UserOperatorMembership, now)
+        row = (
+            await session.execute(
+                select(User, UserTradingCaps, UserOperatorMembership)
+                .join(AiDelegate, AiDelegate.user_public_id == User.public_id)
+                .join(
+                    UserTradingCaps,
+                    and_(
+                        UserTradingCaps.user_public_id == User.public_id,
+                        caps_ts,
+                        caps_known_to,
+                    ),
+                )
+                .join(
+                    UserOperatorMembership,
+                    and_(
+                        UserOperatorMembership.user_public_id == User.public_id,
+                        UserOperatorMembership.operator_public_id == operator_public_id,
+                        membership_ts,
+                        membership_known_to,
+                    ),
+                )
+                .where(
+                    User.public_id == user_public_id,
+                    User.is_active,
+                    user_ts,
+                    user_known_to,
+                )
+            )
+        ).first()
+        if row is None:
+            return None
+        user_row, caps_row, membership_row = row
+        principal = AuthPrincipal(
+            username=user_row.username,
+            role=UserRole.AI_DELEGATE,
+            is_active=True,
+            user_public_id=user_row.public_id,
+            operator_public_ids=[operator_public_id],
+            operator_membership_public_ids={operator_public_id: membership_row.public_id},
+            primary_operator_public_id=operator_public_id,
+        )
+        delegate = self._delegate_read_from_rows(
+            user_row=user_row,
+            caps_row=caps_row,
+            label=self._label_from_username(user_row.username),
+        )
+        return _DelegateIdentityBundle(
+            user_row=user_row,
+            caps_row=caps_row,
+            principal=principal,
+            delegate=delegate,
         )
 
     def _resolve_operator_binding(
