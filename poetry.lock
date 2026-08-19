@@ -776,14 +776,14 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.73"
+version = "4.5.74"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.73-py3-none-any.whl", hash = "sha256:a644b81adca7fdb49ee5a765002ea4371df3ba599877775d4dae369e00101b6f"},
-    {file = "ccxt-4.5.73.tar.gz", hash = "sha256:0698f915201f5c18f0c0b24cc5d062e06fab4d5f68109bd9899ea8f049c5cb61"},
+    {file = "ccxt-4.5.74-py3-none-any.whl", hash = "sha256:5de0f1abeaefa452200813124cf4ccd5b65b4b8d818f6921857a1ff6b373eeb8"},
+    {file = "ccxt-4.5.74.tar.gz", hash = "sha256:3e4e4e878fce4457ffb37ed6e41942391e454d36bdf2b74edb40a7620a400d78"},
 ]
 
 [package.dependencies]
@@ -2142,15 +2142,15 @@ trio = ["trio (>=0.22.0,<1.0)"]
 
 [[package]]
 name = "httpcore2"
-version = "2.10.0"
+version = "2.12.0"
 description = "A minimal low-level HTTP client."
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
 markers = "sys_platform != \"emscripten\""
 files = [
-    {file = "httpcore2-2.10.0-py3-none-any.whl", hash = "sha256:7df06cfb34070cae4f7c89be69dc1095eca138e9704ceffb98d25c1912ab6f01"},
-    {file = "httpcore2-2.10.0.tar.gz", hash = "sha256:13c0cc3d1919d4f28457f60cd2c2abe04113a8af184ccf1142811beba936f9dc"},
+    {file = "httpcore2-2.12.0-py3-none-any.whl", hash = "sha256:7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb"},
+    {file = "httpcore2-2.12.0.tar.gz", hash = "sha256:9293522bba0aa7c4c8e9e3f040c16575bd8868e155a77fa30c7a9085a5eae648"},
 ]
 
 [package.dependencies]
@@ -2252,30 +2252,30 @@ zstd = ["zstandard (>=0.18.0)"]
 
 [[package]]
 name = "httpx2"
-version = "2.10.0"
+version = "2.12.0"
 description = "The next generation HTTP client."
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
 files = [
-    {file = "httpx2-2.10.0-py3-none-any.whl", hash = "sha256:5e3194a432701e1cc6f69a8b1b2fa199ef907013fede8d9a09a2c5b7b8141a18"},
-    {file = "httpx2-2.10.0.tar.gz", hash = "sha256:8741d7329fe2c7885fc9ceb61c8217acfb87a85f75723714b89ebf7ad7196338"},
+    {file = "httpx2-2.12.0-py3-none-any.whl", hash = "sha256:cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36"},
+    {file = "httpx2-2.12.0.tar.gz", hash = "sha256:7631fe9887a8a2275f4a2540e053aa670fcc50742864a9ae7c66e609fdcf12cf"},
 ]
 
 [package.dependencies]
 anyio = {version = ">=4.10", markers = "sys_platform != \"emscripten\""}
-httpcore2 = {version = "2.10.0", markers = "sys_platform != \"emscripten\""}
+httpcore2 = {version = "2.12.0", markers = "sys_platform != \"emscripten\""}
 httpx2-jsfetch = {version = "*", markers = "sys_platform == \"emscripten\" and python_version >= \"3.12\""}
 idna = ">=3.18"
 truststore = {version = ">=0.10", markers = "sys_platform != \"emscripten\""}
 
 [package.extras]
-brotli = ["brotli ; platform_python_implementation == \"CPython\"", "brotlicffi ; platform_python_implementation != \"CPython\""]
+brotli = ["brotli (>=1.2.0) ; platform_python_implementation == \"CPython\"", "brotlicffi (>=1.2.0.0) ; platform_python_implementation != \"CPython\""]
 cli = ["click (>=8.4.2)", "pygments (==2.*)", "rich (>=10,<16)"]
 http2 = ["h2 (>=3,<5)"]
 socks = ["socksio (==1.*)"]
 ws = ["wsproto (>=1.2)"]
-zstd = ["zstandard (>=0.18.0) ; python_version <= \"3.13\""]
+zstd = ["backports-zstd (>=1.0.0) ; python_version <= \"3.13\""]
 
 [[package]]
 name = "httpx2-jsfetch"
@@ -5222,18 +5222,18 @@ testing = ["process-tests", "pytest-xdist", "virtualenv"]
 
 [[package]]
 name = "pytest-timeout"
-version = "2.5.0"
+version = "2.4.0"
 description = "pytest plugin to abort hanging tests"
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.7"
 groups = ["dev"]
 files = [
-    {file = "pytest_timeout-2.5.0-py3-none-any.whl", hash = "sha256:030217c22532b6cb88917518f07afa7e3623476ab5afb5a8c0d0dccf6cd9b2de"},
-    {file = "pytest_timeout-2.5.0.tar.gz", hash = "sha256:68c9d82dfe95fa65712e107010c9344e7d8b4afe8c975a7be0d273d939583a93"},
+    {file = "pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2"},
+    {file = "pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a"},
 ]
 
 [package.dependencies]
-pytest = ">=8.4.0"
+pytest = ">=7.0.0"
 
 [[package]]
 name = "pytest-xdist"
@@ -6790,14 +6790,14 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 
 [[package]]
 name = "uvicorn"
-version = "0.52.3"
+version = "0.52.4"
 description = "The lightning-fast ASGI server."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "uvicorn-0.52.3-py3-none-any.whl", hash = "sha256:116af2710dbf47c80f463cd20ee4884b6662f4c9f227d797ddc7279d2fcc2c7c"},
-    {file = "uvicorn-0.52.3.tar.gz", hash = "sha256:18857b9e6579300be55c91c0a1cfd37d9a2cf0cabea33b88275f199eb73b8b58"},
+    {file = "uvicorn-0.52.4-py3-none-any.whl", hash = "sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1"},
+    {file = "uvicorn-0.52.4.tar.gz", hash = "sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86"},
 ]
 
 [package.dependencies]
@@ -7627,4 +7627,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "3f2a79dbaa84bf101318dc8958241a29037c34bfe5cb46e53a060768d443b6e6"
+content-hash = "76b2a9aecec2d400a117decffe1d7b5d40e596b21db4baea762b681ac72cadd9"
