@@ -9,10 +9,11 @@ before the settings service has finished initialising — so the
 MCP endpoint is reachable on a fresh install without manual setup.
 Operators flip the flag at runtime to disable it without
 restarting the API server.
-The auth middleware reuses the REST bearer-header extractor and token
-manager, then translates missing or invalid credentials into
-MCP-compatible JSON error responses. Per-tool fine-grained
-authorization is handled by the individual tool wrappers.
+The parent app normalizes the exact mount path without a redirect. The
+auth middleware reuses the REST bearer-header extractor and token manager,
+then translates missing or invalid credentials into MCP-compatible JSON
+error responses. Per-tool fine-grained authorization is handled by the
+individual tool wrappers.
 """
 
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
+from starlette.types import Scope
 
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
@@ -44,7 +46,10 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _MCP_SERVER_NAME = "snapper"
 _MCP_SERVER_VERSION = "0.1.0"
+_MCP_MOUNT_PATH = "/api/mcp"
 _FEATURE_FLAG_KEY = "ai_integration_enabled"
+_MISSING_BEARER_CHALLENGE = "Bearer"
+_INVALID_BEARER_CHALLENGE = 'Bearer error="invalid_token"'
 
 TOKEN_CLAIMS_CTX: ContextVar[TokenClaims | None] = ContextVar("mcp_token_claims", default=None)
 """ContextVar carrying the authenticated :class:`TokenClaims` to tool handlers.
@@ -187,6 +192,7 @@ def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
     if rejection_reason == REJECTION_REASON_USER_DEACTIVATED:
         return JSONResponse(
             status_code=401,
+            headers={"WWW-Authenticate": _INVALID_BEARER_CHALLENGE},
             content={
                 "error_code": "user_deactivated",
                 "detail": (
@@ -197,6 +203,7 @@ def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
         )
     return JSONResponse(
         status_code=401,
+        headers={"WWW-Authenticate": _INVALID_BEARER_CHALLENGE},
         content={
             "error_code": "invalid_bearer_token",
             "detail": "Bearer token failed verification. Refresh via POST /api/auth/refresh.",
@@ -278,6 +285,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if token is None:
             return JSONResponse(
                 status_code=401,
+                headers={"WWW-Authenticate": _MISSING_BEARER_CHALLENGE},
                 content={
                     "error_code": "missing_bearer_token",
                     "detail": (
@@ -316,6 +324,27 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             TOKEN_CLAIMS_CTX.reset(ctx_token)
 
 
+def _relative_subapp_path(request: Request) -> str:
+    """Return the request path relative to the mounted MCP sub-application."""
+    path = str(request.scope.get("path", ""))
+    root_path = str(request.scope.get("root_path", ""))
+    if root_path and path.startswith(root_path):
+        path = path[len(root_path) :]
+    return path or "/"
+
+
+def normalize_mcp_mount_path(scope: Scope) -> None:
+    """Normalize the exact MCP mount path without an HTTP redirect.
+
+    Args:
+        scope: Mutable ASGI request scope owned by the parent HTTP middleware.
+    """
+    if scope.get("path") != _MCP_MOUNT_PATH:
+        return
+    scope["path"] = f"{_MCP_MOUNT_PATH}/"
+    scope["raw_path"] = f"{_MCP_MOUNT_PATH}/".encode()
+
+
 class StandaloneSseGetRejectionMiddleware(BaseHTTPMiddleware):
     """Answer the client's standalone SSE ``GET`` stream with 405.
 
@@ -343,7 +372,7 @@ class StandaloneSseGetRejectionMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
-        """Return 405 for ``GET``; forward every other method.
+        """Return 405 for a root ``GET``; forward every other request.
 
         Args:
             request: Incoming Starlette request.
@@ -353,7 +382,7 @@ class StandaloneSseGetRejectionMiddleware(BaseHTTPMiddleware):
             A 405 :class:`JSONResponse` carrying an ``Allow`` header for
             ``GET``, or the downstream response for any other method.
         """
-        if request.method == "GET":
+        if request.method == "GET" and _relative_subapp_path(request) == "/":
             return JSONResponse(
                 status_code=405,
                 headers={"Allow": "POST, DELETE"},
@@ -376,15 +405,17 @@ def build_mcp_app(
 ) -> Starlette:
     """Return the Starlette sub-app to be mounted under ``/api/mcp``.
 
-    Composition order matters (outermost middleware runs first)
-        1. :class:`FeatureFlagMiddleware` — cheapest reject path
-           short-circuits when the flag is off so disabled
-           deployments don't even verify JWTs.
-        2. :class:`BearerAuthMiddleware` — auth gate; populates
+     Composition order matters (outermost middleware runs first)
+          1. :class:`StandaloneSseGetRejectionMiddleware` — rejects only
+              the root standalone SSE stream while preserving child routes.
+          2. :class:`FeatureFlagMiddleware` — cheapest stateful reject path
+              short-circuits when the flag is off so disabled deployments
+              don't verify JWTs.
+          3. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
-        3. :class:`PrincipalRateLimitMiddleware` — per-principal
-           throttle keyed off the claims set by (2).
-        4. Downstream MCPServer Streamable HTTP app with tools
+          4. :class:`PrincipalRateLimitMiddleware` — per-principal
+              throttle keyed off the claims set by (3).
+          5. Downstream MCPServer Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 
     Args:

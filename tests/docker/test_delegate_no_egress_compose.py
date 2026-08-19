@@ -527,9 +527,30 @@ def test_caddy_control_bridge_has_exact_source_route_and_method_allowlist() -> N
     assert public_route.index("respond @delegate_control_on_public 403") < public_route.index(
         "encode gzip zstd"
     )
-    assert public_route.index("encode gzip zstd") < public_route.index("handle /api/*")
+    assert public_route.index("encode gzip zstd") < public_route.index("@mcp_exact path /api/mcp")
+    assert public_route.index("@mcp_exact path /api/mcp") < public_route.index(
+        "rewrite @mcp_exact /api/mcp/"
+    )
+    assert public_route.index("rewrite @mcp_exact /api/mcp/") < public_route.index(
+        "handle /.well-known/oauth-protected-resource*"
+    )
+    assert public_route.index("handle /.well-known/oauth-protected-resource*") < public_route.index(
+        "handle /.well-known/oauth-authorization-server*"
+    )
+    assert public_route.index(
+        "handle /.well-known/oauth-authorization-server*"
+    ) < public_route.index("handle /api/*")
     assert public_route.count("respond @delegate_control_on_public 403") == 1
-    assert public_route.count("\n\t\thandle") == 6
+    assert public_route.count("\n\t\thandle") == 8
+    protected_resource_block = _brace_block(
+        public_route, "handle /.well-known/oauth-protected-resource*"
+    )
+    authorization_server_block = _brace_block(
+        public_route, "handle /.well-known/oauth-authorization-server*"
+    )
+    assert "reverse_proxy snapper:8000" in protected_resource_block
+    assert "reverse_proxy snapper:8000" in authorization_server_block
+    assert "/.well-known/openid-configuration" not in public_route
     assert "\n\trespond @delegate_control_on_public 403" not in public_block
     public_log = _brace_block(public_block, "log")
     assert public_log not in public_route

@@ -202,6 +202,7 @@ from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.mcp.server import build_mcp_app
+from snapper.mcp.server import normalize_mcp_mount_path
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -1479,6 +1480,12 @@ def _safe_get_caps_enforcer() -> TradingCapsEnforcer | None:
         return None
 
 
+def _prepare_request_context(request: Request) -> None:
+    """Normalize the MCP mount path and initialize API log context."""
+    normalize_mcp_mount_path(request.scope)
+    set_log_context("api")
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -1503,7 +1510,7 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def set_request_context(request: Request, call_next: Any) -> Any:
-        set_log_context("api")
+        _prepare_request_context(request)
         response = await call_next(request)
         return response
 

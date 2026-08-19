@@ -146,6 +146,7 @@ class TestBearerAuthMiddleware:
         assert response.status_code == 401
         body = response.json()
         assert body["error_code"] == "missing_bearer_token"
+        assert response.headers["www-authenticate"] == "Bearer"
 
     def test_non_bearer_scheme_returns_401(self) -> None:
         """``Authorization: Basic ...`` → 401 ``missing_bearer_token``.
@@ -251,6 +252,7 @@ class TestBearerAuthMiddleware:
             )
         assert response.status_code == 401
         assert response.json()["error_code"] == "user_deactivated"
+        assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
 
     def test_invalid_bearer_token_returns_401_invalid_bearer(self) -> None:
         """Unverifiable JWT → 401 ``invalid_bearer_token``.
@@ -284,6 +286,7 @@ class TestBearerAuthMiddleware:
             )
         assert response.status_code == 401
         assert response.json()["error_code"] == "invalid_bearer_token"
+        assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
 
     def test_valid_bearer_stashes_claims_on_request_state(self) -> None:
         """Valid JWT → middleware stack admits and exposes claims downstream.
@@ -356,6 +359,15 @@ class TestStandaloneSseGetRejection:
         assert response.status_code == 405
         assert response.headers["allow"] == "POST, DELETE"
         assert response.json()["error_code"] == "method_not_allowed"
+
+    def test_nested_get_passes_through_to_auth(self) -> None:
+        """A nested ``GET`` is not mistaken for the standalone SSE stream."""
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        response = client.get("/.well-known/oauth-protected-resource")
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "missing_bearer_token"
 
     def test_post_still_passes_through_to_auth(self) -> None:
         """A ``POST`` is forwarded past the method gate to auth.

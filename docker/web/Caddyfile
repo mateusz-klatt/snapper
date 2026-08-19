@@ -7,6 +7,15 @@
 	route {
 		respond @delegate_control_on_public 403
 		encode gzip zstd
+		@mcp_exact path /api/mcp
+		rewrite @mcp_exact /api/mcp/
+
+		handle /.well-known/oauth-protected-resource* {
+			reverse_proxy snapper:8000
+		}
+		handle /.well-known/oauth-authorization-server* {
+			reverse_proxy snapper:8000
+		}
 
 		handle /api/* {
 			reverse_proxy snapper:8000
