@@ -428,6 +428,14 @@ action:
   after 60 s of message silence (their wildcard/continuous universes
   always tick, so 60 s reliably means a dark feed); Kraken Equities uses
   120 s and is fully suppressed during scheduled CME closure windows.
+- **Kraken Equities live-trade age guard.** Each live WebSocket trade is
+  parsed against one reception timestamp shared by its frame. Trades more
+  than 24 hours old are rejected before they can refresh feed health, enter
+  the raw-trade queue, or update the calculated-candle builder; a trade
+  exactly 24 hours old is accepted. This leaves ample room for the public
+  feed's normal ~10-minute delay while blocking historical replay after a
+  reconnect. Rejections are emitted as rate-limited warning summaries.
+  Historical recovery remains the responsibility of the REST backfill path.
 - **Native-candle liveness.** The message watchdog above shares one
   watermark across ticks, trades, and candles, so a venue whose 1m bars
   arrive on a dedicated native channel (Kraken Spot's `ohlc:1m`) can have

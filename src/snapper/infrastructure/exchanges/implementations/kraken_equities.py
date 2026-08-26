@@ -46,6 +46,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from time import monotonic
 from typing import Any
 from typing import cast
@@ -150,6 +151,12 @@ on the builder's activity counter, not watermark movement) the aggregator
 flushes whatever remains so the last bar is not stranded until the next
 session reopens.
 """
+
+_LIVE_TRADE_MAX_AGE = timedelta(hours=24)
+"""Maximum accepted age for a Kraken Equities live WebSocket trade."""
+
+_STALE_TRADE_LOG_INTERVAL_S = 60.0
+"""Minimum interval between stale live-trade rejection summaries."""
 
 _WS_THROTTLE_MS = 5000
 _WS_CLOSE_TIMEOUT_S = 10.0
@@ -467,6 +474,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._ws_connection_generation = 0
         self._ws_closing = False
         self._realtime_ws_token_proxy_lock = threading.RLock()
+        self._stale_trade_reject_count = 0
+        self._stale_trade_last_log_at = float("-inf")
 
     async def connect(self) -> None:
         """Establish connection (no-op until WS subscription).
@@ -686,6 +695,27 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable equities ticker: {exc}")
 
+    def _record_stale_trade_rejections(self, count: int, received_at: datetime) -> None:
+        """Accumulate stale live trades and emit a bounded warning summary.
+
+        Args:
+            count: Number of stale trades rejected from the current frame.
+            received_at: UTC reception timestamp shared by the frame.
+        """
+        self._stale_trade_reject_count += count
+        observed_at = monotonic()
+        if observed_at - self._stale_trade_last_log_at < _STALE_TRADE_LOG_INTERVAL_S:
+            return
+        logger.warning(
+            "Rejected {} stale Kraken Equities live trade update(s) older than {}s; "
+            "received_at={}",
+            self._stale_trade_reject_count,
+            int(_LIVE_TRADE_MAX_AGE.total_seconds()),
+            received_at.isoformat(),
+        )
+        self._stale_trade_reject_count = 0
+        self._stale_trade_last_log_at = observed_at
+
     def _handle_trade_message(self, message: dict[str, Any]) -> None:
         """Parse, enqueue, and fold equities trade updates into the candle builder.
 
@@ -696,19 +726,35 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         synthesized from the trade stream. Kraken Equities has no WS
         OHLC channel, and REST polling 100+ FCM contracts every minute
         risks rate-limit / IP-ban on the iapi endpoint.
+
+        Trades older than the bounded live-ingest window are rejected before
+        health, queue, and candle-builder state can change. One reception time
+        is shared across every item in a frame so mixed frames have a coherent
+        boundary while each item remains independently admissible.
         """
+        received_at = datetime.now(UTC)
+        oldest_accepted_at = received_at - _LIVE_TRADE_MAX_AGE
+        stale_trade_count = 0
         for item in message.get("data", []):
+            wire_symbol: str | None = None
             if isinstance(item, dict):
-                wire_symbol = item.get("symbol")
-                if isinstance(wire_symbol, str):
-                    self._health_tracker.mark_data_seen("trade", wire_symbol)
+                raw_symbol = item.get("symbol")
+                if isinstance(raw_symbol, str):
+                    wire_symbol = raw_symbol
             try:
                 trade = parse_kraken_equities_trade(item)
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable equities trade: {exc}")
                 continue
+            if trade.timestamp < oldest_accepted_at:
+                stale_trade_count += 1
+                continue
+            if wire_symbol is not None:
+                self._health_tracker.mark_data_seen("trade", wire_symbol)
             _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
             self._candle_builder.update(trade)
+        if stale_trade_count:
+            self._record_stale_trade_rejections(stale_trade_count, received_at)
 
     def _prune_recent_ws_tokens(self) -> None:
         """Drop expired token-redaction values from the bounded cache."""

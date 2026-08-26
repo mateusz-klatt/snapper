@@ -341,8 +341,8 @@ class TestKrakenEquitiesHealthMarks:
             await iterator.aclose()
         client._health_tracker.mark_pending.assert_called_once_with("ticker", "MNQM6.CME")
 
-    def test_data_seen_uses_wire_symbols_before_parse(self) -> None:
-        """Data observer uses raw wire symbols.
+    def test_data_seen_uses_wire_symbols_after_trade_validation(self) -> None:
+        """Data observer uses raw wire symbols after trade validation.
 
         Given: Raw ticker and trade frames,
         When: Handlers process them,

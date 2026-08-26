@@ -8,6 +8,7 @@ from datetime import datetime as _dt
 from datetime import timedelta as _td
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import httpx
@@ -2753,7 +2754,7 @@ class TestOnWsMessage:
                     quantity=1.0,
                     price=90.12,
                     ord_type="fill",
-                    timestamp=MagicMock(),
+                    timestamp=_dt.now(_UTC),
                     trade_id="7623847138430121307",
                 ),
             ),
@@ -2891,6 +2892,7 @@ class TestOnWsMessage:
             "type": "update",
             "data": ["not-a-dict", {"price": 90.12}],
         }
+        received_at = _dt.now(_UTC)
         trades = [
             TradeUpdate(
                 symbol="CLM6-NYMEX",
@@ -2898,7 +2900,7 @@ class TestOnWsMessage:
                 quantity=1.0,
                 price=90.12,
                 ord_type="fill",
-                timestamp=_dt(2026, 6, 29, 12, 0, tzinfo=_UTC),
+                timestamp=received_at,
                 trade_id="trade-1",
             ),
             TradeUpdate(
@@ -2907,7 +2909,7 @@ class TestOnWsMessage:
                 quantity=1.0,
                 price=90.13,
                 ord_type="fill",
-                timestamp=_dt(2026, 6, 29, 12, 1, tzinfo=_UTC),
+                timestamp=received_at - _td(minutes=1),
                 trade_id="trade-2",
             ),
         ]
@@ -2918,6 +2920,157 @@ class TestOnWsMessage:
         ):
             await client._on_ws_message(msg)
         assert client._trade_queue.qsize() == 2
+
+    def test_trade_age_boundary_and_public_delay_are_accepted(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Accept the exact age boundary and the public delayed feed.
+
+        Given: Live trades exactly 24 hours and 600.7 seconds old,
+        When: One trade frame is handled,
+        Then: Both trades update health, the raw queue, and the candle builder.
+        """
+        received_at = _dt(2026, 8, 26, 18, 0, tzinfo=_UTC)
+        boundary_trade = TradeUpdate(
+            symbol="CLM6-NYMEX",
+            side="buy",
+            quantity=1.0,
+            price=90.12,
+            ord_type="fill",
+            timestamp=received_at - _td(hours=24),
+            trade_id="boundary",
+        )
+        delayed_trade = TradeUpdate(
+            symbol="MESM6-CME",
+            side="sell",
+            quantity=2.0,
+            price=6500.0,
+            ord_type="fill",
+            timestamp=received_at - _td(seconds=600.7),
+            trade_id="delayed",
+        )
+        client._health_tracker = MagicMock()
+        client._candle_builder = MagicMock()
+        with (
+            patch.object(ke, "datetime") as datetime_type,
+            patch.object(
+                ke,
+                "parse_kraken_equities_trade",
+                side_effect=[boundary_trade, delayed_trade],
+            ),
+        ):
+            datetime_type.now.return_value = received_at
+            client._handle_trade_message(
+                {"data": [{"symbol": "CLM6.NYMEX"}, {"symbol": "MESM6.CME"}]}
+            )
+        datetime_type.now.assert_called_once_with(_UTC)
+        assert [client._trade_queue.get_nowait(), client._trade_queue.get_nowait()] == [
+            boundary_trade,
+            delayed_trade,
+        ]
+        assert client._health_tracker.mark_data_seen.call_args_list == [
+            call("trade", "CLM6.NYMEX"),
+            call("trade", "MESM6.CME"),
+        ]
+        assert client._candle_builder.update.call_args_list == [
+            call(boundary_trade),
+            call(delayed_trade),
+        ]
+
+    def test_stale_trade_isolated_from_fresh_sibling_and_all_side_effects(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Reject only the stale item before every downstream side effect.
+
+        Given: A frame with one trade 24 hours plus 1 ms old and one fresh trade,
+        When: The frame is handled using one reception timestamp,
+        Then: Only the fresh sibling reaches health, queue, and candle state.
+        """
+        received_at = _dt(2026, 8, 26, 18, 0, tzinfo=_UTC)
+        stale_trade = TradeUpdate(
+            symbol="NQH7-CME",
+            side="buy",
+            quantity=1.0,
+            price=6500.0,
+            ord_type="fill",
+            timestamp=received_at - _td(hours=24, milliseconds=1),
+            trade_id="stale",
+        )
+        fresh_trade = TradeUpdate(
+            symbol="MESM6-CME",
+            side="sell",
+            quantity=2.0,
+            price=6501.0,
+            ord_type="fill",
+            timestamp=received_at - _td(seconds=1),
+            trade_id="fresh",
+        )
+        client._health_tracker = MagicMock()
+        client._candle_builder = MagicMock()
+        with (
+            patch.object(ke, "datetime") as datetime_type,
+            patch.object(
+                ke,
+                "parse_kraken_equities_trade",
+                side_effect=[stale_trade, fresh_trade],
+            ),
+        ):
+            datetime_type.now.return_value = received_at
+            client._handle_trade_message(
+                {"data": [{"symbol": "NQH7.CME"}, {"symbol": "MESM6.CME"}]}
+            )
+        datetime_type.now.assert_called_once_with(_UTC)
+        assert client._trade_queue.get_nowait() is fresh_trade
+        assert client._trade_queue.empty()
+        client._health_tracker.mark_data_seen.assert_called_once_with("trade", "MESM6.CME")
+        client._candle_builder.update.assert_called_once_with(fresh_trade)
+
+    def test_stale_trade_warning_is_aggregated_and_rate_limited(
+        self,
+        client: KrakenEquitiesExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Collapse repeated stale-replay warnings into bounded summaries.
+
+        Given: Three stale frames arriving inside and after the warning interval,
+        When: Each frame is rejected,
+        Then: Two summaries report the first drop and the two accumulated drops.
+        """
+        received_at = _dt(2026, 8, 26, 18, 0, tzinfo=_UTC)
+        stale_trade = TradeUpdate(
+            symbol="NQH7-CME",
+            side="buy",
+            quantity=1.0,
+            price=6500.0,
+            ord_type="fill",
+            timestamp=received_at - _td(days=2),
+            trade_id="stale",
+        )
+        client._health_tracker = MagicMock()
+        client._candle_builder = MagicMock()
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            with (
+                patch.object(ke, "datetime") as datetime_type,
+                patch.object(ke, "monotonic", side_effect=[100.0, 110.0, 161.0]),
+                patch.object(ke, "parse_kraken_equities_trade", return_value=stale_trade),
+            ):
+                datetime_type.now.return_value = received_at
+                for _ in range(3):
+                    client._handle_trade_message({"data": [{"symbol": "NQH7.CME"}]})
+        finally:
+            logger.remove(sink_id)
+        summaries = [
+            record.message
+            for record in caplog.records
+            if "stale Kraken Equities live trade" in record.message
+        ]
+        assert len(summaries) == 2
+        assert "Rejected 1" in summaries[0]
+        assert "Rejected 2" in summaries[1]
+        client._health_tracker.mark_data_seen.assert_not_called()
+        client._candle_builder.update.assert_not_called()
+        assert client._trade_queue.empty()
 
     @pytest.mark.asyncio
     async def test_heartbeat_ignored(self, client: KrakenEquitiesExchangeClient) -> None:
@@ -3384,24 +3537,38 @@ class TestOnWsMessage:
         assert client._tick_queue.empty()
 
     @pytest.mark.asyncio
-    async def test_unparseable_trade_skipped(self, client: KrakenEquitiesExchangeClient) -> None:
-        """Skip trade messages that fail parsing.
+    async def test_unparseable_trade_isolated_from_fresh_sibling(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Skip an unparseable trade without dropping its fresh sibling.
 
-        Given: WS trade message that causes ValueError in parser,
+        Given: A WS frame with an unparseable item followed by a fresh trade,
         When: _on_ws_message is called,
-        Then: No items in trade_queue and no exception raised.
+        Then: Only the fresh trade reaches health and the queue.
         """
+        client._health_tracker = MagicMock()
+        fresh_trade = TradeUpdate(
+            symbol="MESM6-CME",
+            side="buy",
+            quantity=1.0,
+            price=6500.0,
+            ord_type="fill",
+            timestamp=_dt.now(_UTC),
+            trade_id="fresh",
+        )
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_equities.parse_kraken_equities_trade",
-            side_effect=ValueError("parse error"),
+            side_effect=[ValueError("parse error"), fresh_trade],
         ):
             msg = {
                 "channel": "trade",
                 "type": "update",
-                "data": [{"symbol": "INVALID"}],
+                "data": [{"symbol": "INVALID"}, {"symbol": "MESM6.CME"}],
             }
             await client._on_ws_message(msg)
+        assert client._trade_queue.get_nowait() is fresh_trade
         assert client._trade_queue.empty()
+        client._health_tracker.mark_data_seen.assert_called_once_with("trade", "MESM6.CME")
 
 
 class TestFetchInstrumentsRest:
