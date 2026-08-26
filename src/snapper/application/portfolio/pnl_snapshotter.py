@@ -72,8 +72,6 @@ from snapper.application.portfolio.basket_valuation import PositionInventoryEntr
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
-from snapper.application.portfolio.fx_rates import currency_pair_key
-from snapper.application.portfolio.observation_stream import fold_observation_attempts
 from snapper.application.portfolio.pnl_snapshot_planner import SELF_HEAL_LOOKBACK
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkPlan
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -90,10 +88,8 @@ from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_mi
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
-from snapper.application.portfolio.pnl_snapshotter_config import SCOPE_DEADLINE_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
-from snapper.application.portfolio.pnl_snapshotter_config import resolve_scope_deadline
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
@@ -142,9 +138,6 @@ _FAILURE_MESSAGES: Final[dict[str, str]] = {
     ),
     "catchup_conflict": (
         "PortfolioPnlSnapshotter: wallet %s catch-up conflicts at %s; not advancing baseline"
-    ),
-    "scope_deadline": (
-        "PortfolioPnlSnapshotter: wallet %s exceeded its per-scope deadline; resuming next tick"
     ),
 }
 """Per-failure-class log-once message templates (B4/C2): the first ``%s`` is the
@@ -314,9 +307,6 @@ class PortfolioPnlSnapshotter:
             disabled = not resolve_enabled(os.environ.get(ENABLED_ENV_VAR))
         self._repo = repo if not disabled else None
         self._interval_seconds = interval_seconds
-        self._scope_deadline_seconds = resolve_scope_deadline(
-            os.environ.get(SCOPE_DEADLINE_ENV_VAR)
-        )
         self._disabled = disabled
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._settings_service = settings_service
@@ -425,20 +415,13 @@ class PortfolioPnlSnapshotter:
         failures = 0
         for wallet in sorted(venues_by_wallet):
             try:
-                conflicted = await asyncio.wait_for(
-                    self._process_wallet(
-                        repo,
-                        wallet,
-                        venues_by_wallet[wallet],
-                        as_of,
-                        wallet in mint_excluded_wallets,
-                    ),
-                    timeout=self._scope_deadline_seconds,
+                conflicted = await self._process_wallet(
+                    repo,
+                    wallet,
+                    venues_by_wallet[wallet],
+                    as_of,
+                    wallet in mint_excluded_wallets,
                 )
-            except TimeoutError:
-                failures += 1
-                self._log_class(wallet, "scope_deadline")
-                continue
             except Exception:
                 failures += 1
                 self._log_class(wallet, "sample_failed", is_exception=True)
@@ -1115,41 +1098,23 @@ class PortfolioPnlSnapshotter:
         ctx: _ScopeContext,
         chunk: ChunkWindow,
     ) -> tuple[
-        dict[datetime, Mapping[str, VenueAccountObservationAttemptRow]],
+        dict[datetime, dict[str, VenueAccountObservationAttemptRow]],
         ValuationEvidence,
     ]:
-        """Load the temporal basket per minute and the routed price planes.
-
-        One bounded stream query replaces one temporal query per grid minute;
-        the cursor-fold equivalence was proven by a production probe (zero
-        mismatches over sixty minutes) before this path switched. Currencies
-        are derived from the reconstructed maps rather than the raw stream
-        rows, because a raw row may already be superseded at every grid
-        minute. Each currency is then routed to the loader that will actually
-        serve it: the valuator never reads a crypto plane for a currency with
-        a fiat pin, so requesting one was provably dead work — the fiat load
-        therefore comes FIRST and the crypto plane is asked only for the
-        remainder. Measured in production: dropping the fiat-pinned
-        currencies took the plane query from >240 s to 3.4 s, and under
-        recovery load the unrouted query held a chunk for >12 minutes.
-        """
+        """Load the temporal basket per minute and the shared crypto price plane."""
         exchanges = sorted(ctx.expected_venues)
-        minutes: list[datetime] = []
+        observations: dict[datetime, dict[str, VenueAccountObservationAttemptRow]] = {}
+        currencies: set[str] = set()
         minute = chunk.start
         while minute <= chunk.end:
-            minutes.append(minute)
-            minute += _MINUTE
-        rows = await repo.get_venue_account_observation_attempt_stream(
-            ctx.wallet_public_id, exchanges, _LIVE_MODE, chunk.start, chunk.end
-        )
-        attempts_per_minute = fold_observation_attempts(
-            rows, ctx.wallet_public_id, _LIVE_MODE, frozenset(exchanges), minutes
-        )
-        observations = dict(zip(minutes, attempts_per_minute, strict=True))
-        currencies: set[str] = set()
-        for attempts in observations.values():
+            attempts = await repo.get_venue_account_observation_attempts_at(
+                ctx.wallet_public_id, exchanges, _LIVE_MODE, minute
+            )
+            observations[minute] = attempts
             for attempt in attempts.values():
                 currencies |= _observed_currencies(attempt)
+            minute += _MINUTE
+        crypto_planes = await self._load_crypto_planes(repo, ctx, chunk, currencies)
         fiat_rates, fiat_venues, fiat_versions = await load_basket_fiat_evidence(
             repo,
             frozenset(currencies),
@@ -1157,12 +1122,6 @@ class PortfolioPnlSnapshotter:
             chunk.end,
             ctx.as_of,
         )
-        crypto_currencies = {
-            currency
-            for currency in currencies
-            if currency_pair_key(currency, "USD") not in fiat_venues
-        }
-        crypto_planes = await self._load_crypto_planes(repo, ctx, chunk, crypto_currencies)
         evidence = ValuationEvidence(
             fiat_rates=fiat_rates,
             fiat_venues=fiat_venues,

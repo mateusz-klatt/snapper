@@ -295,7 +295,6 @@ class _FakeRepo:
         self.persisted = list(persisted or [])
         self._balances_json = balances_json
         self.crypto_rows: list[dict[str, Any]] = []
-        self.crypto_plane_requests: list[tuple[str, ...]] = []
         self.position_versions: list[dict[str, Any]] = []
         self.fx_rows: list[dict[str, Any]] = []
         self.conflict_batch = False
@@ -402,38 +401,25 @@ class _FakeRepo:
             and (status is None or row["valuation_status"] == status)
         ]
 
-    async def get_venue_account_observation_attempt_stream(
-        self,
-        wallet: str,
-        exchanges: Sequence[str],
-        mode: str,
-        window_start: datetime,
-        window_end: datetime,
-    ) -> list[VenueAccountObservationAttemptRow]:
-        """Return one authoritative attempt per exchange per grid minute."""
+    async def get_venue_account_observation_attempts_at(
+        self, wallet: str, exchanges: Sequence[str], mode: str, at: datetime
+    ) -> dict[str, VenueAccountObservationAttemptRow]:
+        """Return an authoritative kraken attempt at the requested minute."""
         del mode
+        self.observation_cuts.append(at)
         self.observation_scopes.append((wallet, tuple(exchanges)))
-        rows: list[VenueAccountObservationAttemptRow] = []
-        identifier = 0
-        minute = window_start
-        while minute <= window_end:
-            self.observation_cuts.append(minute)
-            for exchange in exchanges:
-                identifier += 1
-                attempt = _attempt(minute, wallet)
-                attempt["balances_json"] = self._balances_json
-                attempt["exchange"] = exchange
-                attempt["id"] = identifier
-                rows.append(attempt)
-            minute += timedelta(minutes=1)
-        return rows
+        attempts: dict[str, VenueAccountObservationAttemptRow] = {}
+        for exchange in exchanges:
+            attempt = _attempt(at, wallet)
+            attempt["balances_json"] = self._balances_json
+            attempts[exchange] = attempt
+        return attempts
 
     async def get_pnl_crypto_usd_plane_candles(
         self, currencies: Sequence[str], start: datetime, end: datetime, as_of: datetime
     ) -> list[Any]:
-        """Return the canned crypto plane rows, recording the routed request."""
-        del start, end, as_of
-        self.crypto_plane_requests.append(tuple(currencies))
+        """Return the canned crypto plane rows."""
+        del currencies, start, end, as_of
         return self.crypto_rows
 
     async def get_pnl_scope_position_inventory_window(
@@ -1844,55 +1830,6 @@ class TestEvidenceAndPartition:
         assert first["position_value_usd"] == 0.0
         assert first["cash_usd"] == pytest.approx(11000.0)
         assert json.loads(first["audit_json"])["coverage"]["leveraged_inventory_excluded"] is True
-
-    @pytest.mark.asyncio
-    async def test_fiat_pinned_currencies_never_reach_the_crypto_plane(self) -> None:
-        """Routing by consumer: a fiat-pinned currency is dead work for crypto.
-
-        The valuator never reads a crypto plane for a currency whose fiat pin
-        exists, so the loader must not ask for one — the measured cost of
-        asking was two orders of magnitude of the chunk's evidence load.
-        """
-        balances = '[{"currency":"EUR","total":10000.0},{"currency":"BTC","total":1.0}]'
-        repo = _FakeRepo(credentials=[_cred("walutomat")], anchor=_anchor(), balances_json=balances)
-        repo.fx_rows = [_fx_row("EUR", "USD", minute, 1.1, "kraken") for minute in (1, 2, 3)]
-        snap = _snapshotter(repo, _minute(5))
-        with _patched_series():
-            await snap._tick_once()
-        assert repo.crypto_plane_requests
-        for requested in repo.crypto_plane_requests:
-            assert "EUR" not in requested
-            assert "BTC" in requested
-
-    @pytest.mark.asyncio
-    async def test_a_fully_fiat_pinned_basket_skips_the_crypto_plane(self) -> None:
-        """With every currency fiat-pinned the crypto plane is never queried."""
-        balances = '[{"currency":"EUR","total":10000.0}]'
-        repo = _FakeRepo(credentials=[_cred("walutomat")], anchor=_anchor(), balances_json=balances)
-        repo.fx_rows = [_fx_row("EUR", "USD", minute, 1.1, "kraken") for minute in (1, 2, 3)]
-        snap = _snapshotter(repo, _minute(5))
-        with _patched_series():
-            await snap._tick_once()
-        assert repo.crypto_plane_requests == []
-
-    @pytest.mark.asyncio
-    async def test_scope_deadline_becomes_its_own_failure_class(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A hanging scope times out, is logged once, and the tick survives."""
-        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
-        snap = _snapshotter(repo, _minute(5))
-        snap._scope_deadline_seconds = 0
-
-        async def hang(*args: object, **kwargs: object) -> bool:
-            """Simulate one scope that never finishes inside the deadline."""
-            await asyncio.sleep(60)
-            return False
-
-        monkeypatch.setattr(snap, "_process_wallet", hang)
-        await snap._tick_once()
-        assert (_WALLET, "scope_deadline") in snap._failure_logged
-        assert repo.recorded == []
 
 
 class TestVersionRestamping:
