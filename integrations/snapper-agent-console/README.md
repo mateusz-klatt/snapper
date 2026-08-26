@@ -67,8 +67,10 @@ compose does not make.
 
 ## Never publish this image
 
-The built image embeds proprietary vendor binaries (Claude Code, Codex,
-Copilot, Kimi, agy, Cursor, Grok). Their licenses do not grant redistribution:
+The built image embeds vendor CLI binaries. Codex CLI is Apache-2.0
+(open source; redistribution permitted with notices) and Node.js is MIT, but
+Claude Code, Copilot, Kimi, agy, Cursor and Grok are proprietary and their
+licenses do not grant redistribution:
 the image is local/private-registry only; the recipe (this directory) is what
 may be shared. `snapper-mcp` is MIT and ships with its LICENSE at
 `/usr/local/lib/snapper-mcp/LICENSE`.
@@ -79,9 +81,12 @@ may be shared. `snapper-mcp` is MIT and ships with its LICENSE at
 of the idle PTY holder. That mode additionally needs the blackbox delegate's
 own configuration (`SNAPPER_DELEGATE_*` environment references and its
 `/run/secrets/delegate` files, exactly as the blackbox compose supplies them) —
-without those pid1 has nothing to connect to. This file intentionally does not
-duplicate that wiring; copy it from the blackbox deployment when enabling the
-mode.
+without those pid1 has nothing to connect to. Compose passes
+`AGENT_CONSOLE_MODE` through from the host environment, but the delegate
+secrets/network wiring intentionally lives with the blackbox deployment —
+copy it from there into an override file when enabling the mode; until then
+setting the variable yields a pid1 that starts and exits on missing config,
+which is the intended fail-closed signal.
 
 ## Shared-home risk (accepted)
 
@@ -89,8 +94,11 @@ All vendor CLIs share one `$HOME` volume, so any CLI (or anything it runs) can
 read every other CLI's login state. This is inherent to the operator-mandated
 single-image, single-home design and is accepted for this operator-supervised
 console; do NOT reuse this image for mutually untrusted agents. The
-`snapper-mcp` PAT is mounted read-only, which prevents mutation but not
-reading.
+`snapper-mcp` PAT is mounted read-only with `create_host_path: false` (a
+missing host file fails the mount instead of silently creating a directory);
+the host file must be readable by uid 888 (e.g. `chown :888` + mode 0640 —
+0600 owned by another user will NOT be readable in the container). Read-only
+prevents mutation but not reading by co-resident CLIs.
 
 ## Ollama
 

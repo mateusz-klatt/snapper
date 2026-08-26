@@ -25,6 +25,7 @@ ARG BASE_IMAGE=snapper-delegate:blackbox
 FROM ${BASE_IMAGE} AS base
 
 USER root
+RUN [ "$(uname -m)" = "x86_64" ] || { echo "agent-console: all pinned CLI artifacts are x86_64; refusing $(uname -m) build" >&2; exit 1; }
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl tini tmux git zstd less procps \

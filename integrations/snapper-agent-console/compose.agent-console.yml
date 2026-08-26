@@ -7,10 +7,15 @@ services:
       dockerfile: snapper-agent-console/Dockerfile
     container_name: snapper-agent-console
     environment:
-      AGENT_CONSOLE_MODE: idle
+      AGENT_CONSOLE_MODE: ${AGENT_CONSOLE_MODE:-idle}
     volumes:
       - agent-console-home:/home/delegate
-      - ${AGENT_CONSOLE_PAT_CONFIG:-./pat-config.json}:/run/secrets/snapper-mcp/config.json:ro
+      - type: bind
+        source: ${AGENT_CONSOLE_PAT_CONFIG:-./pat-config.json}
+        target: /run/secrets/snapper-mcp/config.json
+        read_only: true
+        bind:
+          create_host_path: false
       - ${AGENT_CONSOLE_WORKSPACE:-./workspace}:/workspace
     working_dir: /workspace
     security_opt:
