@@ -28,13 +28,13 @@ USER root
 RUN [ "$(uname -m)" = "x86_64" ] || { echo "agent-console: all pinned CLI artifacts are x86_64; refusing $(uname -m) build" >&2; exit 1; }
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl tini tmux git zstd less procps \
+        ca-certificates curl git less procps tini tmux zstd \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base AS cli-claude
 ARG CLAUDE_VERSION=2.1.246
 ARG CLAUDE_SHA256=1a0a662dc1bb938eaec38545abce9a4a69113d7d7f7c5e1a553ea276617b906a
-RUN curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" \
         -o /usr/local/bin/claude \
     && echo "${CLAUDE_SHA256}  /usr/local/bin/claude" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/claude
@@ -42,7 +42,7 @@ RUN curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSIO
 FROM base AS cli-codex
 ARG CODEX_VERSION=0.150.0
 ARG CODEX_SHA256=2d27b8569ca760eeb2bf21fa12bd31f59ac42b81617b340cf8958e9b38d743d5
-RUN curl -fsSL "https://releases.openai.com/codex/releases/${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://releases.openai.com/codex/releases/${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz" \
         -o /tmp/codex.tar.gz \
     && echo "${CODEX_SHA256}  /tmp/codex.tar.gz" | sha256sum -c - \
     && mkdir -p /usr/local/lib/codex \
@@ -54,7 +54,7 @@ RUN curl -fsSL "https://releases.openai.com/codex/releases/${CODEX_VERSION}/code
 FROM base AS cli-copilot
 ARG COPILOT_VERSION=1.0.80
 ARG COPILOT_SHA256=039933c9247686131c4406abb1d439bdbf68103edc1ff585bd70d5b0dc940f72
-RUN curl -fsSL "https://github.com/github/copilot-cli/releases/download/v${COPILOT_VERSION}/copilot-linux-x64.tar.gz" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/github/copilot-cli/releases/download/v${COPILOT_VERSION}/copilot-linux-x64.tar.gz" \
         -o /tmp/copilot.tar.gz \
     && echo "${COPILOT_SHA256}  /tmp/copilot.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/copilot.tar.gz -C /usr/local/bin copilot \
@@ -64,7 +64,7 @@ RUN curl -fsSL "https://github.com/github/copilot-cli/releases/download/v${COPIL
 FROM base AS cli-kimi
 ARG KIMI_VERSION=0.38.0
 ARG KIMI_SHA256=7f18b701ea751d14bf051776747ca0339f8d59693aec9051276933067a914b00
-RUN curl -fsSL "https://code.kimi.ai/kimi-code/binaries/${KIMI_VERSION}/kimi-code-linux-x64" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://code.kimi.ai/kimi-code/binaries/${KIMI_VERSION}/kimi-code-linux-x64" \
         -o /usr/local/bin/kimi \
     && echo "${KIMI_SHA256}  /usr/local/bin/kimi" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/kimi
@@ -72,7 +72,7 @@ RUN curl -fsSL "https://code.kimi.ai/kimi-code/binaries/${KIMI_VERSION}/kimi-cod
 FROM base AS cli-agy
 ARG AGY_VERSION=1.1.21-6424454201475072
 ARG AGY_SHA512=3de7552ef089c136c0f570cdc9c04652278e02c1d41ed3911ad5f9f1b8c3bd567643aa401a1916060ea32a1b17fbaf90cbb417071db33f467880fcd848868d92
-RUN curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}/linux-x64/cli_linux_x64.tar.gz" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}/linux-x64/cli_linux_x64.tar.gz" \
         -o /tmp/agy.tar.gz \
     && echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c - \
     && mkdir -p /tmp/agy && tar -xzf /tmp/agy.tar.gz -C /tmp/agy \
@@ -82,7 +82,7 @@ RUN curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cl
 FROM base AS cli-cursor
 ARG CURSOR_VERSION=2026.08.25-3e8eec8
 ARG CURSOR_SHA256=7a212e5a17ff9316f5acc78808e33c536940d5455645022e6388d99ba48c8425
-RUN curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/x64/agent-cli-package.tar.gz" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/x64/agent-cli-package.tar.gz" \
         -o /tmp/cursor.tar.gz \
     && echo "${CURSOR_SHA256}  /tmp/cursor.tar.gz" | sha256sum -c - \
     && mkdir -p /usr/local/lib/cursor-agent \
@@ -94,12 +94,13 @@ RUN curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/x64/age
 
 FROM node:26-slim AS mcp-build
 COPY snapper-mcp /build/snapper-mcp
-RUN cd /build/snapper-mcp && npm ci && npm run build && npm prune --omit=dev
+WORKDIR /build/snapper-mcp
+RUN npm ci --ignore-scripts && npm run build && npm prune --omit=dev
 
 FROM base AS cli-grok
 ARG GROK_VERSION=1.0.5
 ARG GROK_SHA256=9ba87444e1819e8f6104adbbf4676a870c204380aa5c3e1c38a926c4ea677238
-RUN curl -fsSL "https://x.ai/cli/grok-${GROK_VERSION}-linux-x86_64" \
+RUN curl -fsSL --proto '=https' --tlsv1.2 "https://x.ai/cli/grok-${GROK_VERSION}-linux-x86_64" \
         -o /usr/local/bin/grok \
     && echo "${GROK_SHA256}  /usr/local/bin/grok" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/grok
