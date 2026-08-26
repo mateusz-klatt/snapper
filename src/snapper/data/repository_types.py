@@ -982,8 +982,15 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5B.2"
+PNL_SAMPLE_CALC_VERSION = "5C.1"
 """Algorithm version stamped on every persisted Phase-5B sample point.
+
+``5C.1`` marks the exact-accumulation cutover: cumulative flows sum in exact
+``2**-1074`` units, allocations conserve by unit residue, and published values
+are faithful roundings chosen so the persisted breakdowns re-sum to the
+persisted totals. ``5B.2`` rows computed by the drifting ``+=`` accumulators
+reproduce value-identical in almost every minute and are restamped in place by
+the settled-sample rule rather than superseded.
 
 Independent of the anchor read gate's frozen ``5A.13`` timeline contract: the
 forward-only sample writer carries its own version. A persisted sample is only

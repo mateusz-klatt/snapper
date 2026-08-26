@@ -152,6 +152,10 @@ from typing import cast
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.average_cost import PoolFillOutcome
 from snapper.application.portfolio.average_cost import apply_fill
+from snapper.application.portfolio.exact_sum import ExactSum
+from snapper.application.portfolio.exact_sum import exact_units_of
+from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.exact_sum import project_units
 from snapper.core.numeric import is_positive_finite
 
 ValuationStatus = Literal["complete", "incomplete"]
@@ -1024,13 +1028,43 @@ def _allocate_by_weights(
     return allocations
 
 
-def _add_allocations(
-    target: defaultdict[AttributionKey, float],
-    allocations: Mapping[AttributionKey, float],
-) -> None:
-    """Accumulate one allocation mapping into a composite cumulative map."""
-    for key, amount in allocations.items():
-        target[key] += amount
+def _allocate_flow(
+    target: defaultdict[AttributionKey, ExactSum],
+    amount: float,
+    weights: Mapping[AttributionKey, float],
+) -> Mapping[AttributionKey, float]:
+    """Allocate one flow delta into exact attribution buckets, conserving units.
+
+    The float shares for all but the last key are exactly the shares
+    :func:`_allocate_by_weights` computes, but the last bucket receives the
+    exact unit residue of the whole amount instead of that function's rounded
+    float, so the buckets sum to the amount BY CONSTRUCTION — the same
+    construction that lets the point publication reconcile families without a
+    tolerance. Every fallback inside the share computation puts the whole
+    amount in one bucket, which conserves trivially, and a non-finite amount
+    rides through :meth:`ExactSum.add` so it latches instead of raising.
+
+    Args:
+        target: The exact per-key cumulative buckets to accumulate into.
+        amount: The flow delta to split.
+        weights: Candidate positive ownership weights; empty forces the
+            unattributed fallback, which is how ambiguous ownership is spelled.
+
+    Returns:
+        The float shares by key, for seen-key tracking by the caller.
+    """
+    shares = _allocate_by_weights(amount, weights)
+    keys = _sorted_attribution_keys(set(shares))
+    final_key = keys[-1]
+    if not math.isfinite(amount):
+        target[final_key].add(shares[final_key])
+        return shares
+    residue_units = exact_units_of(amount)
+    for key in keys[:-1]:
+        target[key].add(shares[key])
+        residue_units -= exact_units_of(shares[key])
+    target[final_key].add_units(residue_units)
+    return shares
 
 
 def _reconcile_weights(
@@ -1122,6 +1156,126 @@ def _values_with_residue[KeyT: Hashable](
         if sum(reconciled[key] for key in keys) == total:
             return reconciled
     return None
+
+
+def _reconciled_buckets[KeyT: Hashable](
+    units_by_key: Mapping[KeyT, int],
+    keys: Sequence[KeyT],
+    total: float,
+) -> dict[KeyT, float] | None:
+    """Project exact buckets onto doubles whose stable-order sum equals the total.
+
+    Every bucket except the last is its own correct rounding. The last bucket
+    tries its correct rounding first and then its two adjacent doubles, because
+    the stable-order compensated sum of the others can round in the opposite
+    direction by one unit in the last place. Anything farther than a neighbour
+    is not a rounding of the bucket's exact value and is never published.
+
+    An empty key list is only reachable with a zero exact total, whose one
+    faithful rounding is ``0.0``, so it needs no total check of its own.
+
+    Args:
+        units_by_key: Exact per-key unit counts; absent keys hold zero units.
+        keys: Caller-provided deterministic key order.
+        total: The faithful-rounding candidate the buckets must sum to.
+
+    Returns:
+        The published buckets, or ``None`` when no allowed final-bucket
+        rounding makes the float sum land exactly on the candidate total.
+    """
+    if not keys:
+        return {}
+    published = {key: project_units(units_by_key.get(key, 0)) for key in keys[:-1]}
+    final_key = keys[-1]
+    base = project_units(units_by_key.get(final_key, 0))
+    for candidate in (
+        base,
+        math.nextafter(base, math.inf),
+        math.nextafter(base, -math.inf),
+    ):
+        published[final_key] = candidate
+        if sum(published[key] for key in keys) == total:
+            return published
+    return None
+
+
+@dataclass(frozen=True)
+class _ExactCumulatives:
+    """One flow family's exact accumulators, shared with the live replay state.
+
+    The references are the mutable accumulators themselves, not copies; that is
+    safe for the same reason the float snapshot has always shared live dicts —
+    every point is valued immediately after its events apply and before the
+    next event mutates anything.
+    """
+
+    by_instrument: Mapping[str, ExactSum]
+    by_attribution: Mapping[AttributionKey, ExactSum]
+    total: ExactSum
+
+
+@dataclass(frozen=True)
+class _PublishedFlowFamily:
+    """One flow family's chosen representable projection for one point."""
+
+    total: float
+    by_instrument: Mapping[str, float]
+    by_attribution: Mapping[AttributionKey, float]
+
+
+def _published_flow_family(
+    exact: _ExactCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+) -> _PublishedFlowFamily | PnlIncompletenessReason:
+    """Choose one self-consistent projection of a flow family, or refuse.
+
+    Conservation is checked in units first, where it holds by construction:
+    every delta lands in the total and in exactly one bucket of each
+    dimension, and allocation residues travel as exact units. A violation can
+    therefore only mean corrupted accumulation, and it fails closed under the
+    ``*_reconciliation_failed`` reasons, which carry that suspicion. After
+    conservation, the only remaining question is float representability: the
+    published total must be a faithful rounding of the exact total, and both
+    dimensions must reach it with the same candidate, since the point publishes
+    one total that both breakdowns are checked against.
+
+    Args:
+        exact: The family's exact accumulators.
+        instrument_keys: Deterministic instrument publication order.
+        attribution_keys: Deterministic attribution publication order.
+
+    Returns:
+        The chosen projection, or the exact withhold reason.
+    """
+    total_units = exact.total.exact_units()
+    instrument_units = {
+        key: accumulator.exact_units() for key, accumulator in exact.by_instrument.items()
+    }
+    attribution_units = {
+        key: accumulator.exact_units() for key, accumulator in exact.by_attribution.items()
+    }
+    if sum(instrument_units.get(key, 0) for key in instrument_keys) != total_units:
+        return "instrument_reconciliation_failed"
+    if sum(attribution_units.get(key, 0) for key in attribution_keys) != total_units:
+        return "attribution_reconciliation_failed"
+    instruments_failed_every_total = True
+    for total_candidate in faithful_roundings(total_units):
+        instruments = _reconciled_buckets(instrument_units, instrument_keys, total_candidate)
+        if instruments is None:
+            continue
+        instruments_failed_every_total = False
+        attributions = _reconciled_buckets(attribution_units, attribution_keys, total_candidate)
+        if attributions is None:
+            continue
+        return _PublishedFlowFamily(
+            total=total_candidate,
+            by_instrument=instruments,
+            by_attribution=attributions,
+        )
+    if instruments_failed_every_total:
+        return "instrument_sum_unrepresentable"
+    return "attribution_sum_unrepresentable"
 
 
 def _minute_grid(from_time: datetime, to_time: datetime) -> list[datetime]:
@@ -1372,7 +1526,14 @@ def _combined_instrument_weights(
 
 @dataclass(frozen=True)
 class _PointCumulatives:
-    """Immutable cumulative flows supplied to one point valuation."""
+    """Immutable cumulative flows supplied to one point valuation.
+
+    The float maps and totals are per-point projections of the exact
+    accumulators — each value correctly rounded once — and every trust and
+    finiteness screen still reads them. The exact families ride alongside for
+    the publication step, which reconciles in units rather than comparing
+    rounded floats against rounded floats.
+    """
 
     realized_by_instrument: Mapping[str, float]
     fee_by_instrument: Mapping[str, float]
@@ -1383,6 +1544,9 @@ class _PointCumulatives:
     realized_total: float
     fee_total: float
     accrual_total: float
+    realized_exact: _ExactCumulatives
+    fee_exact: _ExactCumulatives
+    accrual_exact: _ExactCumulatives
 
 
 @dataclass(frozen=True)
@@ -1409,15 +1573,21 @@ class _PointValuationContext:
 
 @dataclass(frozen=True)
 class _PointPreparation:
-    """Validated and reconciled cumulative inputs for instrument valuation."""
+    """Validated and reconciled cumulative inputs for instrument valuation.
+
+    When any instrument is untrusted the families carry raw per-key
+    projections with no publication choice made, exactly as the raw maps were
+    carried before; the untrusted point withholds every aggregate anyway and
+    only the independently useful per-instrument rows are read.
+    """
 
     instrument_untrusted_reasons: Mapping[
         str,
         Collection[PnlIncompletenessReasonEntry],
     ]
-    realized_by_instrument: Mapping[str, float]
-    fee_by_instrument: Mapping[str, float]
-    accrual_by_instrument: Mapping[str, float]
+    realized: _PublishedFlowFamily
+    fee: _PublishedFlowFamily
+    accrual: _PublishedFlowFamily
     attribution_keys: Sequence[AttributionKey]
 
 
@@ -1513,39 +1683,58 @@ def _point_cumulatives_are_finite(context: _PointValuationContext) -> bool:
     )
 
 
-def _reconcile_point_instrument_cumulatives(
-    context: _PointValuationContext,
-    instrument_untrusted_reasons: Mapping[
-        str,
-        Collection[PnlIncompletenessReasonEntry],
-    ],
-) -> tuple[Mapping[str, float], Mapping[str, float], Mapping[str, float]] | None:
-    """Reconcile finite instrument flows, retaining maps when any is untrusted."""
-    cumulatives = context.cumulatives
-    if instrument_untrusted_reasons:
-        return (
-            cumulatives.realized_by_instrument,
-            cumulatives.fee_by_instrument,
-            cumulatives.accrual_by_instrument,
-        )
-    realized = _values_with_residue(
-        cumulatives.realized_by_instrument,
-        context.seen,
-        cumulatives.realized_total,
+def _raw_point_flows(
+    cumulatives: _PointCumulatives,
+) -> tuple[_PublishedFlowFamily, _PublishedFlowFamily, _PublishedFlowFamily]:
+    """Carry unreconciled projections for a point that withholds aggregates."""
+    return (
+        _PublishedFlowFamily(
+            total=cumulatives.realized_total,
+            by_instrument=cumulatives.realized_by_instrument,
+            by_attribution=cumulatives.realized_by_attribution,
+        ),
+        _PublishedFlowFamily(
+            total=cumulatives.fee_total,
+            by_instrument=cumulatives.fee_by_instrument,
+            by_attribution=cumulatives.fee_by_attribution,
+        ),
+        _PublishedFlowFamily(
+            total=cumulatives.accrual_total,
+            by_instrument=cumulatives.accrual_by_instrument,
+            by_attribution=cumulatives.accrual_by_attribution,
+        ),
     )
-    fee = _values_with_residue(
-        cumulatives.fee_by_instrument,
-        context.seen,
-        cumulatives.fee_total,
-    )
-    accrual = _values_with_residue(
-        cumulatives.accrual_by_instrument,
-        context.seen,
-        cumulatives.accrual_total,
-    )
-    if realized is None or fee is None or accrual is None:
-        return None
-    return realized, fee, accrual
+
+
+def _published_point_flows(
+    cumulatives: _PointCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+) -> tuple[_PublishedFlowFamily, _PublishedFlowFamily, _PublishedFlowFamily] | (
+    PnlIncompletenessReason
+):
+    """Choose representable projections for all three families, or refuse.
+
+    Args:
+        cumulatives: The point's cumulative snapshot with exact families.
+        instrument_keys: Deterministic instrument publication order.
+        attribution_keys: Deterministic attribution publication order.
+
+    Returns:
+        The three chosen projections in ``(realized, fee, accrual)`` order, or
+        the first family's exact withhold reason.
+    """
+    families: list[_PublishedFlowFamily] = []
+    for exact in (
+        cumulatives.realized_exact,
+        cumulatives.fee_exact,
+        cumulatives.accrual_exact,
+    ):
+        family = _published_flow_family(exact, instrument_keys, attribution_keys)
+        if isinstance(family, str):
+            return family
+        families.append(family)
+    return families[0], families[1], families[2]
 
 
 def _point_attribution_keys(context: _PointValuationContext) -> list[AttributionKey]:
@@ -1598,23 +1787,17 @@ def _prepare_point_valuation(
                 )
             },
         )
-    reconciled = _reconcile_point_instrument_cumulatives(context, instrument_reasons)
-    if reconciled is None:
-        return _context_untrusted_point(
-            context,
-            context.attribution_seen,
-            {
-                _global_incompleteness_reason(
-                    "instrument_reconciliation_failed",
-                    "untrusted",
-                )
-            },
-        )
     attribution_keys = _point_attribution_keys(context)
-    if not instrument_reasons and not _point_attribution_flows_are_finite(
-        context,
-        attribution_keys,
-    ):
+    if instrument_reasons:
+        realized, fee, accrual = _raw_point_flows(context.cumulatives)
+        return _PointPreparation(
+            instrument_untrusted_reasons=instrument_reasons,
+            realized=realized,
+            fee=fee,
+            accrual=accrual,
+            attribution_keys=attribution_keys,
+        )
+    if not _point_attribution_flows_are_finite(context, attribution_keys):
         return _context_untrusted_point(
             context,
             attribution_keys,
@@ -1625,12 +1808,24 @@ def _prepare_point_valuation(
                 )
             },
         )
-    realized, fee, accrual = reconciled
+    published = _published_point_flows(context.cumulatives, context.seen, attribution_keys)
+    if isinstance(published, str):
+        return _context_untrusted_point(
+            context,
+            attribution_keys,
+            {
+                _global_incompleteness_reason(
+                    published,
+                    "untrusted",
+                )
+            },
+        )
+    realized, fee, accrual = published
     return _PointPreparation(
         instrument_untrusted_reasons=instrument_reasons,
-        realized_by_instrument=realized,
-        fee_by_instrument=fee,
-        accrual_by_instrument=accrual,
+        realized=realized,
+        fee=fee,
+        accrual=accrual,
         attribution_keys=attribution_keys,
     )
 
@@ -1861,9 +2056,9 @@ def _append_instrument_contribution(
             instrument_public_id=instrument_public_id,
             native_symbol=None,
             exchange=None,
-            realized_pnl=preparation.realized_by_instrument.get(instrument_public_id, 0.0),
-            fee_pnl=preparation.fee_by_instrument.get(instrument_public_id, 0.0),
-            accrual_pnl=preparation.accrual_by_instrument.get(instrument_public_id, 0.0),
+            realized_pnl=preparation.realized.by_instrument.get(instrument_public_id, 0.0),
+            fee_pnl=preparation.fee.by_instrument.get(instrument_public_id, 0.0),
+            accrual_pnl=preparation.accrual.by_instrument.get(instrument_public_id, 0.0),
             unrealized_pnl=instrument_unrealized,
         )
     )
@@ -1950,28 +2145,20 @@ def _reconcile_instrument_unrealized(
 
 def _reconcile_attribution(
     context: _PointValuationContext,
+    preparation: _PointPreparation,
     accumulator: _PointAccumulator,
     attribution_keys: Sequence[AttributionKey],
 ) -> _ReconciledAttribution | None:
-    """Reconcile all attribution components or refuse an unprovable residue."""
-    cumulatives = context.cumulatives
-    realized = _values_with_residue(
-        cumulatives.realized_by_attribution,
-        attribution_keys,
-        cumulatives.realized_total,
-    )
-    fee = _values_with_residue(
-        cumulatives.fee_by_attribution,
-        attribution_keys,
-        cumulatives.fee_total,
-    )
-    accrual = _values_with_residue(
-        cumulatives.accrual_by_attribution,
-        attribution_keys,
-        cumulatives.accrual_total,
-    )
-    if realized is None or fee is None or accrual is None:
-        return None
+    """Reconcile unrealized attribution or refuse an unprovable residue.
+
+    The three flow families arrive already published: their attribution maps
+    were chosen against the same totals the point publishes, and any key this
+    complete list adds beyond the preparation list — mark allocations, current
+    inventory ownership — has zero cumulative flow, so filling it with ``0.0``
+    cannot move the stable-order sums those maps were chosen by. Only the
+    per-point unrealized component still reconciles here, float against float,
+    because marks are valued fresh each minute rather than accumulated.
+    """
     if (
         not accumulator.point_reasons
         and math.isfinite(accumulator.unrealized_total)
@@ -1987,9 +2174,11 @@ def _reconcile_attribution(
     else:
         unrealized = dict(accumulator.unrealized_by_attribution)
     return _ReconciledAttribution(
-        realized=realized,
-        fee=fee,
-        accrual=accrual,
+        realized={
+            key: preparation.realized.by_attribution.get(key, 0.0) for key in attribution_keys
+        },
+        fee={key: preparation.fee.by_attribution.get(key, 0.0) for key in attribution_keys},
+        accrual={key: preparation.accrual.by_attribution.get(key, 0.0) for key in attribution_keys},
         unrealized=unrealized,
     )
 
@@ -2018,17 +2207,17 @@ def _attribution_contributions(
 
 
 def _mark_incomplete_point(
-    context: _PointValuationContext,
+    preparation: _PointPreparation,
+    point_time: datetime,
     accumulator: _PointAccumulator,
     attribution: tuple[PnlAttributionContribution, ...],
 ) -> PnlTimelinePoint:
     """Build a mark-incomplete point while preserving trusted cumulatives."""
-    cumulatives = context.cumulatives
     return PnlTimelinePoint(
-        point_time=context.point_time,
-        realized_pnl=cumulatives.realized_total,
-        fee_pnl=cumulatives.fee_total,
-        accrual_pnl=cumulatives.accrual_total,
+        point_time=point_time,
+        realized_pnl=preparation.realized.total,
+        fee_pnl=preparation.fee.total,
+        accrual_pnl=preparation.accrual.total,
         unrealized_pnl=None,
         net_pnl=None,
         valuation_status="incomplete",
@@ -2039,18 +2228,24 @@ def _mark_incomplete_point(
 
 
 def _finalize_valued_point(
-    context: _PointValuationContext,
+    preparation: _PointPreparation,
+    point_time: datetime,
     accumulator: _PointAccumulator,
     attribution: tuple[PnlAttributionContribution, ...],
 ) -> PnlTimelinePoint:
-    """Build a complete point or withhold non-finite unrealized and net values."""
+    """Build a complete point or withhold non-finite unrealized and net values.
+
+    The flow totals are the preparation's published choices, not fresh
+    projections: when the exact total sits between two doubles the publication
+    may have chosen the farther faithful rounding to keep the breakdowns
+    summable, and the point must state that same value everywhere.
+    """
     if accumulator.point_reasons:
-        return _mark_incomplete_point(context, accumulator, attribution)
-    cumulatives = context.cumulatives
+        return _mark_incomplete_point(preparation, point_time, accumulator, attribution)
     net = (
-        cumulatives.realized_total
-        + cumulatives.fee_total
-        + cumulatives.accrual_total
+        preparation.realized.total
+        + preparation.fee.total
+        + preparation.accrual.total
         + accumulator.unrealized_total
     )
     if not math.isfinite(accumulator.unrealized_total):
@@ -2068,12 +2263,12 @@ def _finalize_valued_point(
             )
         )
     if accumulator.point_reasons:
-        return _mark_incomplete_point(context, accumulator, attribution)
+        return _mark_incomplete_point(preparation, point_time, accumulator, attribution)
     return PnlTimelinePoint(
-        point_time=context.point_time,
-        realized_pnl=cumulatives.realized_total,
-        fee_pnl=cumulatives.fee_total,
-        accrual_pnl=cumulatives.accrual_total,
+        point_time=point_time,
+        realized_pnl=preparation.realized.total,
+        fee_pnl=preparation.fee.total,
+        accrual_pnl=preparation.accrual.total,
         unrealized_pnl=accumulator.unrealized_total,
         net_pnl=net,
         valuation_status="complete",
@@ -2122,6 +2317,7 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
         )
     reconciled_attribution = _reconcile_attribution(
         context,
+        prepared,
         accumulator,
         attribution_keys,
     )
@@ -2142,7 +2338,7 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
         accumulator.unrealized_incomplete,
         attribution_keys,
     )
-    return _finalize_valued_point(context, accumulator, attribution)
+    return _finalize_valued_point(prepared, context.point_time, accumulator, attribution)
 
 
 def _downsample(points: Sequence[PnlTimelinePoint], step: int) -> list[PnlTimelinePoint]:
@@ -2199,25 +2395,27 @@ class _TimelineBuildState:
     pool_keys_by_instrument: defaultdict[str, set[PoolKey]] = field(
         default_factory=lambda: defaultdict(set)
     )
-    realized_by_instrument: defaultdict[str, float] = field(
-        default_factory=lambda: defaultdict(float)
+    realized_by_instrument: defaultdict[str, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
     )
-    fee_by_instrument: defaultdict[str, float] = field(default_factory=lambda: defaultdict(float))
-    accrual_by_instrument: defaultdict[str, float] = field(
-        default_factory=lambda: defaultdict(float)
+    fee_by_instrument: defaultdict[str, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
     )
-    realized_by_attribution: defaultdict[AttributionKey, float] = field(
-        default_factory=lambda: defaultdict(float)
+    accrual_by_instrument: defaultdict[str, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
     )
-    fee_by_attribution: defaultdict[AttributionKey, float] = field(
-        default_factory=lambda: defaultdict(float)
+    realized_by_attribution: defaultdict[AttributionKey, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
     )
-    accrual_by_attribution: defaultdict[AttributionKey, float] = field(
-        default_factory=lambda: defaultdict(float)
+    fee_by_attribution: defaultdict[AttributionKey, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
     )
-    realized_total: float = 0.0
-    fee_total: float = 0.0
-    accrual_total: float = 0.0
+    accrual_by_attribution: defaultdict[AttributionKey, ExactSum] = field(
+        default_factory=lambda: defaultdict(ExactSum)
+    )
+    realized_total: ExactSum = field(default_factory=ExactSum)
+    fee_total: ExactSum = field(default_factory=ExactSum)
+    accrual_total: ExactSum = field(default_factory=ExactSum)
 
 
 @dataclass(frozen=True)
@@ -2519,14 +2717,14 @@ def _record_execution_realized(
         if outcome.closed_qty > 0.0 and application.pre_fill_basis_reasons
         else outcome.realized_delta
     )
-    state.realized_by_instrument[application.instrument_public_id] += realized_delta
-    state.realized_total += realized_delta
+    state.realized_by_instrument[application.instrument_public_id].add(realized_delta)
+    state.realized_total.add(realized_delta)
     if outcome.closed_qty > 0.0:
-        allocation = _allocate_by_weights(
+        allocation = _allocate_flow(
+            state.realized_by_attribution,
             realized_delta,
             application.pre_fill_weights,
         )
-        _add_allocations(state.realized_by_attribution, allocation)
         state.attribution_seen.update(allocation)
 
 
@@ -2538,27 +2736,31 @@ def _record_execution_fee(
     execution = application.execution
     outcome = application.outcome
     fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
-    state.fee_by_instrument[application.instrument_public_id] += fee_pnl
-    state.fee_total += fee_pnl
+    state.fee_by_instrument[application.instrument_public_id].add(fee_pnl)
+    state.fee_total.add(fee_pnl)
     opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
     if opened_opposite_side:
-        closing_fee_pnl = fee_pnl * outcome.closed_qty / application.position_size
-        allocation = _allocate_by_weights(
+        closing_fee_pnl = fee_pnl * (outcome.closed_qty / application.position_size)
+        allocation = _allocate_flow(
+            state.fee_by_attribution,
             closing_fee_pnl,
             application.pre_fill_weights,
         )
-        _add_allocations(state.fee_by_attribution, allocation)
         state.attribution_seen.update(allocation)
-        state.fee_by_attribution[application.attribution_key] += fee_pnl - closing_fee_pnl
+        opening_bucket = state.fee_by_attribution[application.attribution_key]
+        if math.isfinite(fee_pnl):
+            opening_bucket.add_units(exact_units_of(fee_pnl) - exact_units_of(closing_fee_pnl))
+        else:
+            opening_bucket.add(fee_pnl - closing_fee_pnl)
     elif outcome.closed_qty > 0.0:
-        allocation = _allocate_by_weights(
+        allocation = _allocate_flow(
+            state.fee_by_attribution,
             fee_pnl,
             application.pre_fill_weights,
         )
-        _add_allocations(state.fee_by_attribution, allocation)
         state.attribution_seen.update(allocation)
     else:
-        state.fee_by_attribution[application.attribution_key] += fee_pnl
+        state.fee_by_attribution[application.attribution_key].add(fee_pnl)
 
 
 def _execution_post_fill_weights(
@@ -2639,18 +2841,21 @@ def _apply_accrual_event(
             accrual.incompleteness_reason,
         )
     accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
-    state.accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
-    state.accrual_total += accrual_pnl
+    state.accrual_by_instrument[accrual.instrument_public_id].add(accrual_pnl)
+    state.accrual_total.add(accrual_pnl)
     state.seen.add(accrual.instrument_public_id)
-    if attribution_is_ambiguous:
-        allocation = {_UNATTRIBUTED_KEY: accrual_pnl}
-    else:
-        accrual_weights = _combined_instrument_weights(
-            pool_index.get(accrual.instrument_public_id, ()),
-            state.weights_by_pool,
-        )
-        allocation = _allocate_by_weights(accrual_pnl, accrual_weights)
-    _add_allocations(state.accrual_by_attribution, allocation)
+    allocation = _allocate_flow(
+        state.accrual_by_attribution,
+        accrual_pnl,
+        (
+            {}
+            if attribution_is_ambiguous
+            else _combined_instrument_weights(
+                pool_index.get(accrual.instrument_public_id, ()),
+                state.weights_by_pool,
+            )
+        ),
+    )
     state.attribution_seen.update(allocation)
 
 
@@ -2769,6 +2974,19 @@ def _point_global_reasons(
     return reasons
 
 
+def _projected[KeyT: Hashable](accumulators: Mapping[KeyT, ExactSum]) -> dict[KeyT, float]:
+    """Project one exact accumulator map onto correctly rounded doubles.
+
+    Args:
+        accumulators: The live exact per-key accumulators.
+
+    Returns:
+        Each key's running total rounded exactly once, non-finite latches
+        included, so every existing float screen keeps its meaning.
+    """
+    return {key: accumulator.to_float() for key, accumulator in accumulators.items()}
+
+
 def _point_valuation_context(
     state: _TimelineBuildState,
     evidence: _TimelineBuildEvidence,
@@ -2786,15 +3004,30 @@ def _point_valuation_context(
         seen=sorted(state.seen),
         attribution_seen=_sorted_attribution_keys(state.attribution_seen),
         cumulatives=_PointCumulatives(
-            realized_by_instrument=state.realized_by_instrument,
-            fee_by_instrument=state.fee_by_instrument,
-            accrual_by_instrument=state.accrual_by_instrument,
-            realized_by_attribution=state.realized_by_attribution,
-            fee_by_attribution=state.fee_by_attribution,
-            accrual_by_attribution=state.accrual_by_attribution,
-            realized_total=state.realized_total,
-            fee_total=state.fee_total,
-            accrual_total=state.accrual_total,
+            realized_by_instrument=_projected(state.realized_by_instrument),
+            fee_by_instrument=_projected(state.fee_by_instrument),
+            accrual_by_instrument=_projected(state.accrual_by_instrument),
+            realized_by_attribution=_projected(state.realized_by_attribution),
+            fee_by_attribution=_projected(state.fee_by_attribution),
+            accrual_by_attribution=_projected(state.accrual_by_attribution),
+            realized_total=state.realized_total.to_float(),
+            fee_total=state.fee_total.to_float(),
+            accrual_total=state.accrual_total.to_float(),
+            realized_exact=_ExactCumulatives(
+                by_instrument=state.realized_by_instrument,
+                by_attribution=state.realized_by_attribution,
+                total=state.realized_total,
+            ),
+            fee_exact=_ExactCumulatives(
+                by_instrument=state.fee_by_instrument,
+                by_attribution=state.fee_by_attribution,
+                total=state.fee_total,
+            ),
+            accrual_exact=_ExactCumulatives(
+                by_instrument=state.accrual_by_instrument,
+                by_attribution=state.accrual_by_attribution,
+                total=state.accrual_total,
+            ),
         ),
         activation_time=state.activation_time,
         global_reasons=global_reasons,

@@ -1247,7 +1247,7 @@ class TestEquityOverlayResponse:
             "complete_minutes": 3,
             "first_minute": "2026-07-20T10:00:00Z",
             "last_minute": "2026-07-20T10:02:00Z",
-            "sample_calc_version": "5B.2",
+            "sample_calc_version": PNL_SAMPLE_CALC_VERSION,
             "valuation_basis": "USD",
             "converted_from": None,
             "conversion_rate_source": None,

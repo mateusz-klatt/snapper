@@ -8,7 +8,9 @@ from snapper.application.portfolio.exact_sum import _MIN_SUBNORMAL
 from snapper.application.portfolio.exact_sum import _SCALE_DENOMINATOR
 from snapper.application.portfolio.exact_sum import _SCALE_EXPONENT
 from snapper.application.portfolio.exact_sum import ExactSum
-from snapper.application.portfolio.exact_sum import _exact_units
+from snapper.application.portfolio.exact_sum import exact_units_of
+from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.exact_sum import project_units
 
 _MAX_DOUBLE = 1.7976931348623157e308
 
@@ -43,7 +45,7 @@ class TestScale:
             -_MAX_DOUBLE,
             -0.011365700000000001,
         ):
-            assert _exact_units(value) / _SCALE_DENOMINATOR == value
+            assert exact_units_of(value) / _SCALE_DENOMINATOR == value
 
 
 class TestExactAccumulation:
@@ -91,7 +93,7 @@ class TestExactAccumulation:
         """
         accumulator = _summed([_MAX_DOUBLE, _MAX_DOUBLE, -_MAX_DOUBLE])
         assert accumulator.is_finite()
-        assert accumulator.exact_units() == _exact_units(_MAX_DOUBLE)
+        assert accumulator.exact_units() == exact_units_of(_MAX_DOUBLE)
         assert accumulator.to_float() == _MAX_DOUBLE
 
 
@@ -153,3 +155,64 @@ class TestNonFiniteLatching:
             naive += value
         assert math.isinf(naive)
         assert _summed(values).to_float() == 0.0
+
+
+class TestUnitResidue:
+    """The exact remainder of a split rides in units, never as a double."""
+
+    def test_a_split_with_a_unit_residue_conserves_exactly(self) -> None:
+        """An allocation's final bucket recovers precisely what rounding lost."""
+        whole = 0.1
+        part = 0.1 / 3.0
+        bucket_a = ExactSum()
+        bucket_a.add(part)
+        bucket_b = ExactSum()
+        bucket_b.add(part)
+        bucket_c = ExactSum()
+        bucket_c.add_units(exact_units_of(whole) - 2 * exact_units_of(part))
+        total = bucket_a.exact_units() + bucket_b.exact_units() + bucket_c.exact_units()
+        assert total == exact_units_of(whole)
+
+    def test_a_negative_residue_subtracts(self) -> None:
+        """Residues carry sign, because rounding can overshoot either way."""
+        accumulator = ExactSum()
+        accumulator.add(1.0)
+        accumulator.add_units(-exact_units_of(1.0))
+        assert accumulator.exact_units() == 0
+        assert accumulator.is_finite()
+
+
+class TestProjection:
+    """One correctly rounded divide, and honest infinities past the range."""
+
+    def test_projection_is_correctly_rounded(self) -> None:
+        """Round-tripping a double through units is the identity."""
+        for value in (0.1, -0.011365700000000001, _MAX_DOUBLE, -_MIN_SUBNORMAL):
+            assert project_units(exact_units_of(value)) == value
+
+    def test_projection_overflows_to_the_signed_infinity(self) -> None:
+        """Past the double range the naive loop answered ``inf``; so does this."""
+        beyond = 2 * exact_units_of(_MAX_DOUBLE)
+        assert project_units(beyond) == math.inf
+        assert project_units(-beyond) == -math.inf
+
+
+class TestFaithfulRoundings:
+    """Only the two doubles bracketing the exact sum may be published."""
+
+    def test_a_representable_total_has_one_candidate(self) -> None:
+        """When the exact sum IS a double there is nothing to bracket."""
+        assert faithful_roundings(exact_units_of(1.5)) == (1.5,)
+        assert faithful_roundings(0) == (0.0,)
+
+    def test_an_unrepresentable_total_has_two_ordered_candidates(self) -> None:
+        """Nearest first, then the neighbour on the exact value's other side."""
+        units = exact_units_of(1.0) + 1
+        candidates = faithful_roundings(units)
+        assert candidates == (1.0, math.nextafter(1.0, math.inf))
+
+    def test_the_second_candidate_tracks_the_residue_sign(self) -> None:
+        """A residue below the nearest double brackets downward, not upward."""
+        units = exact_units_of(1.0) - 1
+        candidates = faithful_roundings(units)
+        assert candidates == (1.0, math.nextafter(1.0, -math.inf))

@@ -20,6 +20,9 @@ import pytest
 
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
+from snapper.application.portfolio.exact_sum import ExactSum
+from snapper.application.portfolio.exact_sum import exact_units_of
+from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
@@ -34,10 +37,13 @@ from snapper.application.portfolio.pnl_timeline import TimelineOpening
 from snapper.application.portfolio.pnl_timeline import TimelineOpeningDerivation
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import _allocate_by_weights
+from snapper.application.portfolio.pnl_timeline import _ExactCumulatives
 from snapper.application.portfolio.pnl_timeline import _PointCumulatives
 from snapper.application.portfolio.pnl_timeline import _PointValuationContext
 from snapper.application.portfolio.pnl_timeline import _Pool
 from snapper.application.portfolio.pnl_timeline import _prepare_executions
+from snapper.application.portfolio.pnl_timeline import _published_flow_family
+from snapper.application.portfolio.pnl_timeline import _PublishedFlowFamily
 from snapper.application.portfolio.pnl_timeline import _reconcile_weights
 from snapper.application.portfolio.pnl_timeline import _regression_shadow_deltas
 from snapper.application.portfolio.pnl_timeline import _regression_shadow_trigger_changes
@@ -55,6 +61,11 @@ _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 def _m(minute: int) -> datetime:
     """Return the grid minute ``_T0 + minute``."""
     return _T0 + timedelta(minutes=minute)
+
+
+def _empty_exact_cumulatives() -> _ExactCumulatives:
+    """Return one empty exact flow family for hand-built point contexts."""
+    return _ExactCumulatives(by_instrument={}, by_attribution={}, total=ExactSum())
 
 
 def _exec(
@@ -412,6 +423,9 @@ class TestMachineReadableIncompletenessReasons:
                 realized_total=0.0,
                 fee_total=0.0,
                 accrual_total=0.0,
+                realized_exact=_empty_exact_cumulatives(),
+                fee_exact=_empty_exact_cumulatives(),
+                accrual_exact=_empty_exact_cumulatives(),
             ),
             activation_time=None,
             global_reasons=(),
@@ -734,7 +748,16 @@ class TestAttribution:
         _assert_exact_attribution_sums(point)
 
     def test_unrepresentable_float_residue_withholds_the_point(self) -> None:
-        """A complete point never exposes buckets that cannot equal their aggregate."""
+        """A complete point never exposes buckets that cannot equal their aggregate.
+
+        The momentum bucket's exact value is ``1e20 - 1``, which no double can
+        hold, and no faithful rounding of it makes the stable-order bucket sum
+        land on the exact total of ``1.0``. The exact accumulators prove the
+        money conserves, so the refusal carries no suspicion — it is stamped
+        ``attribution_sum_unrepresentable``, the row-preserving reason, rather
+        than the reconciliation failure this exact case produced when the
+        accumulators themselves drifted.
+        """
         executions = (
             _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e20),
             _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=1e20),
@@ -757,11 +780,17 @@ class TestAttribution:
         assert all(bucket.accrual_pnl is None for bucket in point.attribution)
         assert all(bucket.unrealized_pnl is None for bucket in point.attribution)
         assert _reason_rows(point) == [
-            ("attribution_reconciliation_failed", "untrusted", "global", None)
+            ("attribution_sum_unrepresentable", "untrusted", "global", None)
         ]
 
-    def test_reversed_cancellation_cannot_transport_fee_residue(self) -> None:
-        """Large cancellation cannot fabricate a zero-fee final bucket."""
+    def test_reversed_cancellation_recovers_the_exact_fee_total(self) -> None:
+        """Catastrophic cancellation across buckets publishes the true total.
+
+        A running ``+=`` absorbed the 5000 into ``1e20`` and answered ``0.0``,
+        and the point rightly withheld rather than publish that lie. The exact
+        accumulators cancel the two ``1e20`` fees to a true zero in the plan
+        bucket, so the point now publishes the number the money actually says.
+        """
         executions = (
             _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=1e20),
             _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=5000.0),
@@ -775,9 +804,11 @@ class TestAttribution:
             "order-I4-4": TimelineExecutionLineage("strategy", None, None, "live", None),
         }
         point = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
-        assert point.valuation_status == "incomplete"
-        assert point.fee_pnl is None
-        assert all(bucket.fee_pnl is None for bucket in point.attribution)
+        assert point.valuation_status == "complete"
+        assert point.fee_pnl == -5000.0
+        fee_by_origin = {bucket.origin: bucket.fee_pnl for bucket in point.attribution}
+        assert fee_by_origin == {"manual": -5000.0, "plan": 0.0, "system": 0.0}
+        _assert_exact_attribution_sums(point)
 
     def test_unrepresentable_unrealized_residue_withholds_the_point(self) -> None:
         """Unrealized attribution also fails closed under catastrophic cancellation."""
@@ -840,8 +871,15 @@ class TestAttribution:
         assert reconciled[keys[-1]] == math.nextafter(values[keys[-1]], -math.inf)
         assert sum(reconciled[key] for key in keys) == total
 
-    def test_unrepresentable_instrument_cancellation_withholds_aggregate(self) -> None:
-        """Chronological totals are not rewritten to match a sorted instrument sum."""
+    def test_instrument_cancellation_no_longer_depends_on_event_order(self) -> None:
+        """Exact accumulation makes chronological and sorted sums one number.
+
+        This exact stream once withheld: the chronological ``+=`` total
+        absorbed the ``-1.0`` into ``-1e16`` and answered ``0.0``, while the
+        sorted instrument sum recovered ``1.0``, and neither could be proven
+        right. In exact units there is only one total — ``1.0`` — and the
+        published instrument buckets re-sum to it in stable order.
+        """
         executions = (
             replace(
                 _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e16),
@@ -857,14 +895,13 @@ class TestAttribution:
             ),
         )
         point = build_pnl_timeline(executions, (), {}, _window(1, 1)).points[0]
-        assert point.realized_pnl is None
-        assert point.fee_pnl is None
-        assert point.accrual_pnl is None
-        assert point.unrealized_pnl is None
-        assert point.net_pnl is None
-        assert _reason_rows(point) == [
-            ("instrument_reconciliation_failed", "untrusted", "global", None)
-        ]
+        assert point.valuation_status == "complete"
+        assert point.fee_pnl == 1.0
+        assert point.net_pnl == 1.0
+        fee_rows = {row.instrument_public_id: row.fee_pnl for row in point.per_instrument}
+        assert fee_rows == {"I1": 1e16, "I2": 1.0, "I3": -1e16}
+        assert sum(fee_rows[key] for key in sorted(fee_rows)) == 1.0
+        _assert_exact_attribution_sums(point)
 
     def test_adjacent_unrealized_instrument_residue_is_reconciled(self) -> None:
         """A one-ULP instrument correction makes complete unrealized sums exact."""
@@ -2801,3 +2838,125 @@ class TestAllocateByWeightsConservation:
         weights = {("plan", "a"): 1.0, ("plan", "b"): 3.0}
         shares = _allocate_by_weights(amount, weights)
         assert math.fsum([*shares.values(), -amount]) == 0.0
+
+
+def _exact(units: int) -> ExactSum:
+    """Return an accumulator holding ``units`` exact scale units."""
+    accumulator = ExactSum()
+    accumulator.add_units(units)
+    return accumulator
+
+
+class TestPublishedFlowFamily:
+    """The publication rule: conservation, faithful totals, neighbour finals."""
+
+    def test_a_conservation_violation_fails_with_suspicion(self) -> None:
+        """A bucket the key list cannot see is corruption, not rounding."""
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={},
+                by_attribution={},
+                total=_exact(exact_units_of(1.0)),
+            ),
+            ["I1"],
+            [("manual", None)],
+        )
+        assert family == "instrument_reconciliation_failed"
+
+    def test_attribution_conservation_is_checked_separately(self) -> None:
+        """Instrument buckets conserving cannot excuse attribution buckets."""
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={"I1": _exact(exact_units_of(1.0))},
+                by_attribution={},
+                total=_exact(exact_units_of(1.0)),
+            ),
+            ["I1"],
+            [("manual", None)],
+        )
+        assert family == "attribution_reconciliation_failed"
+
+    def test_unrepresentable_instrument_buckets_fail_without_suspicion(self) -> None:
+        """A bucket of exactly ``1e20 - 1`` has no faithful float projection."""
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={
+                    "I1": _exact(-exact_units_of(1e20)),
+                    "I2": _exact(exact_units_of(1e20) - exact_units_of(1.0)),
+                },
+                by_attribution={("manual", None): _exact(-exact_units_of(1.0))},
+                total=_exact(-exact_units_of(1.0)),
+            ),
+            ["I1", "I2"],
+            [("manual", None)],
+        )
+        assert family == "instrument_sum_unrepresentable"
+
+    def test_the_second_faithful_rounding_can_carry_the_point(self) -> None:
+        """When the nearest double cannot be summed to, its neighbour may be.
+
+        The bucket units come from a measured constellation whose exact total
+        sits between two doubles, and only the farther faithful rounding is
+        reachable by the stable-order sum. Publishing it is legitimate — it
+        still brackets the exact value — where any third candidate would not
+        be a rounding at all.
+        """
+        bucket_units = (
+            exact_units_of(-0.047064),
+            exact_units_of(-0.013618) - 2,
+            exact_units_of(0.041677) - 2,
+        )
+        total_units = sum(bucket_units)
+        candidates = faithful_roundings(total_units)
+        assert candidates == (-0.019005000000000005, -0.019005)
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={
+                    "I1": _exact(bucket_units[0]),
+                    "I2": _exact(bucket_units[1]),
+                    "I3": _exact(bucket_units[2]),
+                },
+                by_attribution={("manual", None): _exact(total_units)},
+                total=_exact(total_units),
+            ),
+            ["I1", "I2", "I3"],
+            [("manual", None)],
+        )
+        assert isinstance(family, _PublishedFlowFamily)
+        assert family.total == -0.019005
+        instrument_values = [family.by_instrument[key] for key in ("I1", "I2", "I3")]
+        assert sum(instrument_values) == family.total
+        assert sum(family.by_attribution.values()) == family.total
+
+    def test_an_infinite_accrual_latches_instead_of_raising(self) -> None:
+        """A non-finite flow rides the allocation's latch path and withholds.
+
+        ``math.fsum`` would raise here; the exact accumulators must instead
+        latch the unattributed bucket and let the point withhold under the
+        established non-finite reason.
+        """
+        executions = (_exec("I1", 1, 0, "buy", 1.0, 100.0),)
+        accruals = (TimelineAccrual("I1", _m(0) + timedelta(seconds=30), math.inf),)
+        marks: MarkMap = {("I1", _m(1)): 100.0}
+        point = build_pnl_timeline(executions, accruals, marks, _window(0, 1)).points[1]
+        assert point.valuation_status == "incomplete"
+        assert point.accrual_pnl is None
+        assert ("cumulative_non_finite", "untrusted", "instrument", "I1") in _reason_rows(point)
+
+    def test_an_infinite_fee_on_a_flip_latches_the_opening_bucket(self) -> None:
+        """The flip split cannot express a non-finite fee in exact units.
+
+        The closing share and the opening remainder both inherit the
+        infinity, so the whole attribution family latches and the point
+        withholds under the instrument's non-finite reason instead of raising
+        inside ``as_integer_ratio``.
+        """
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            _exec("I1", 2, 0, "sell", 2.0, 100.0, fee=math.inf),
+        )
+        marks: MarkMap = {("I1", _m(0)): 100.0}
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.fee_pnl is None
+        assert ("cumulative_non_finite", "untrusted", "instrument", "I1") in _reason_rows(point)

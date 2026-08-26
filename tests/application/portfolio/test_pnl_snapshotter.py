@@ -1185,7 +1185,7 @@ class TestCatchupAndCorrections:
             _minute(1),
             _minute(2),
         ]
-        assert all(row[0]["calc_version"] == "5B.2" for row in repo.superseded)
+        assert all(row[0]["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in repo.superseded)
 
     @pytest.mark.asyncio
     async def test_stale_transition_ignores_a_newer_foreign_epoch_tip(self) -> None:
