@@ -23,7 +23,7 @@
 
 ARG BASE_IMAGE=snapper-delegate:blackbox
 
-FROM --platform=linux/amd64 ${BASE_IMAGE} AS base
+FROM ${BASE_IMAGE} AS base
 ARG TARGETARCH
 USER root
 RUN [ "${TARGETARCH:-amd64}" = "amd64" ] && [ "$(uname -m)" = "x86_64" ] \
@@ -125,11 +125,24 @@ COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
 COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
-RUN mkdir -p /usr/local/share/licenses/codex-cli \
+RUN mkdir -p /usr/local/share/licenses/codex-cli /usr/local/share/licenses/ripgrep /usr/local/share/licenses/bubblewrap /usr/local/share/licenses/zsh \
     && curl -fsSL --proto '=https' --tlsv1.2 \
         "https://raw.githubusercontent.com/openai/codex/rust-v0.150.0/LICENSE" \
         -o /usr/local/share/licenses/codex-cli/LICENSE \
-    && grep -q "Apache License" /usr/local/share/licenses/codex-cli/LICENSE
+    && grep -q "Apache License" /usr/local/share/licenses/codex-cli/LICENSE \
+    && { curl -fsSL --proto '=https' --tlsv1.2 \
+        "https://raw.githubusercontent.com/openai/codex/rust-v0.150.0/NOTICE" \
+        -o /usr/local/share/licenses/codex-cli/NOTICE \
+        || printf 'Upstream tag rust-v0.150.0 ships no NOTICE file at repo root at authoring time.\n' > /usr/local/share/licenses/codex-cli/NOTICE; } \
+    && curl -fsSL --proto '=https' --tlsv1.2 \
+        "https://raw.githubusercontent.com/BurntSushi/ripgrep/master/LICENSE-MIT" \
+        -o /usr/local/share/licenses/ripgrep/LICENSE-MIT \
+    && curl -fsSL --proto '=https' --tlsv1.2 \
+        "https://raw.githubusercontent.com/containers/bubblewrap/main/COPYING" \
+        -o /usr/local/share/licenses/bubblewrap/COPYING \
+    && curl -fsSL --proto '=https' --tlsv1.2 \
+        "https://raw.githubusercontent.com/zsh-users/zsh/master/LICENCE" \
+        -o /usr/local/share/licenses/zsh/LICENCE
 COPY snapper-agent-console/snapper-mcp-wrapper.sh /usr/local/bin/snapper-mcp
 RUN chmod 0755 /usr/local/bin/snapper-mcp
 COPY snapper-agent-console/entrypoint.sh /usr/local/bin/agent-console-entrypoint
