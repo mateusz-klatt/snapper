@@ -29,8 +29,10 @@ claims are only a login-time snapshot.
 """
 
 import datetime as dt
+import functools
 import json
 from collections.abc import Callable
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -42,6 +44,8 @@ from uuid import uuid7
 from fastapi import HTTPException
 from loguru import logger
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -2067,6 +2071,48 @@ async def _list_recent_signals_tool(
     )
 
 
+def _anticipated[**ParamsT, ResultT](
+    fn: Callable[ParamsT, Coroutine[Any, Any, ResultT]],
+) -> Callable[ParamsT, Coroutine[Any, Any, ResultT]]:
+    """Mark every deliberate tool rejection as anticipated for the MCP SDK.
+
+    mcp 2.1.1 surfaces only :class:`ToolError` messages to the client and
+    masks every other exception as ``Error executing tool <name>``. This
+    server's tools deliberately raise typed domain rejections —
+    :class:`PermissionError` carrying stable classifier codes,
+    :class:`ValueError` for argument rejections, :class:`RuntimeError` for
+    lifecycle faults — whose exact messages ARE the client contract asserted
+    by the MCP test suite. Re-raising them as ``ToolError`` restores that
+    contract under the new SDK without changing what the client reads. A
+    protocol-level :class:`MCPError` still propagates unchanged, and so does
+    :class:`HTTPException`, which the surrounding ASGI stack maps to its own
+    status code (the 409 idempotency conflict) rather than to a tool error.
+
+    Args:
+        fn: The undecorated async tool function.
+
+    Returns:
+        The wrapped tool function, signature-preserving so the SDK still
+        derives the input schema from the original annotations.
+    """
+
+    @functools.wraps(fn)
+    async def surfaced(*args: ParamsT.args, **kwargs: ParamsT.kwargs) -> ResultT:
+        """Invoke the tool, converting deliberate raises into tool errors.
+
+        Returns:
+            The tool function's result, unchanged.
+        """
+        try:
+            return await fn(*args, **kwargs)
+        except (ToolError, MCPError, HTTPException):
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+
+    return surfaced
+
+
 def register_mcp_tools(
     mcp_server: MCPServer,
     *,
@@ -2104,6 +2150,7 @@ def register_mcp_tools(
     _tracker_getter: Callable[[], SequenceTracker | None] = tracker_getter or (lambda: None)
 
     @mcp_server.tool()
+    @_anticipated
     async def list_instruments(exchange: str) -> dict[str, Any]:
         """List native instrument symbols for a venue.
 
@@ -2131,6 +2178,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def submit_manual_order(
         exchange: str,
         instrument: str,
@@ -2293,6 +2341,7 @@ def register_mcp_tools(
         return sanitized
 
     @mcp_server.tool()
+    @_anticipated
     async def submit_ai_review_decision(
         review_id: str,
         decision: str,
@@ -2344,6 +2393,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def submit_market_view(
         research_round_public_id: str,
         payload: JsonObject,
@@ -2370,6 +2420,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def get_latest_research() -> CallToolResult:
         """Return the latest market view eligible at the server clock.
 
@@ -2384,6 +2435,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def list_orders(
         wallet_public_id: str | None = None,
         status: str | None = None,
@@ -2431,6 +2483,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def get_order_status(command_public_id: str) -> CallToolResult:
         """Fetch full state of a single order by command_public_id.
 
@@ -2460,6 +2513,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def list_positions(
         wallet_public_id: str | None = None,
         exchange: str | None = None,
@@ -2496,6 +2550,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def list_venue_account_states(
         wallet_public_id: str | None = None,
         exchange: str | None = None,
@@ -2543,6 +2598,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def get_position_cycle(cycle_public_id: str) -> CallToolResult:
         """Fetch a position cycle by its public_id.
 
@@ -2569,6 +2625,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def get_ai_review_aftermath(review_public_id: str) -> CallToolResult:
         """Return what happened after a terminal AI review was created.
 
@@ -2594,6 +2651,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def cancel_order(
         plan_public_id: str,
         idempotency_key: str,
@@ -2640,6 +2698,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def get_ohlcv(
         exchange: str,
         instrument: str,
@@ -2696,6 +2755,7 @@ def register_mcp_tools(
         )
 
     @mcp_server.tool()
+    @_anticipated
     async def list_recent_signals(
         since: str,
         instrument: str | None = None,
