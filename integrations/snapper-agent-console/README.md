@@ -43,7 +43,7 @@ The runtime user has no login shell (`nologin`), so the image sets
 `SHELL=/bin/bash` and the attach command names the shell explicitly.
 
 `tmux` keeps the session across disconnects; a second pane typically runs
-`snapper-mcp watch`. PID1 is a neutral idle process under `tini` — no CLI
+`snapper-mcp` (stdio MCP server; the mounted PAT config at /run/secrets/snapper-mcp/config.json is picked up by default). PID1 is a neutral idle process under `tini` — no CLI
 autostarts, the human picks one.
 
 ## Auth
@@ -53,6 +53,17 @@ Each CLI keeps its own login state under the mounted home volume
 PTY. Nothing vendor-specific is baked into the image. The Snapper PAT config
 for `snapper-mcp` is a separate read-only mount — see
 `compose.agent-console.yml`.
+
+## Codex sandbox under the hardened posture
+
+With `cap_drop: ALL` + `no-new-privileges`, `bwrap` cannot create a user
+namespace, so `codex sandbox` is unavailable INSIDE this container by design —
+the container itself is the isolation boundary here. Run codex with its
+sandbox disabled (`--sandbox danger-full-access`) and rely on the container
+posture, or, if in-container bwrap is genuinely needed, relax the service
+with `security_opt: ["seccomp=unconfined"]` plus a kernel allowing
+unprivileged user namespaces — an explicit, documented trade the default
+compose does not make.
 
 ## Never publish this image
 

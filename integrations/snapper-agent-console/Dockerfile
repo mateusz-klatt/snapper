@@ -120,7 +120,7 @@ COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
 COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
-RUN printf '#!/bin/sh\nexec node /usr/local/lib/snapper-mcp/dist/index.js "$@"\n' \
+RUN printf '#!/bin/sh\n# Default to the compose-mounted PAT config unless the caller picks one.\nPAT=/run/secrets/snapper-mcp/config.json\ncase " $* " in *" --config"*|*"--config="*|*" --base-url"*|*"--base-url="*) exec node /usr/local/lib/snapper-mcp/dist/index.js "$@" ;; esac\nif [ -r "$PAT" ]; then exec node /usr/local/lib/snapper-mcp/dist/index.js --config "$PAT" "$@"; fi\nexec node /usr/local/lib/snapper-mcp/dist/index.js "$@"\n' \
         > /usr/local/bin/snapper-mcp \
     && chmod 0755 /usr/local/bin/snapper-mcp
 COPY snapper-agent-console/entrypoint.sh /usr/local/bin/agent-console-entrypoint
