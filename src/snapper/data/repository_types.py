@@ -17,6 +17,7 @@ from typing import Required
 from typing import TypedDict
 
 from snapper.core.json_types import JsonObject
+from snapper.core.types import AllExchange
 from snapper.core.types import OrderExchange
 
 TradeIntegrityMonitor = Literal["m1", "m2"]
@@ -352,6 +353,19 @@ class CandleRow(TypedDict):
     timestamp: datetime
     session_id: str
     sequence_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class CandleWindowQuery:
+    """One active-native-symbol candle read with a required positive row cap."""
+
+    native_symbol: str
+    timeframe: str
+    window_start: datetime
+    window_end: datetime
+    exchange: AllExchange
+    as_of: datetime
+    limit: int
 
 
 class TradeRow(TypedDict):

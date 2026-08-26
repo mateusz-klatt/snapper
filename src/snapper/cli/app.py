@@ -34,6 +34,7 @@ Portfolio Evidence:
     - ``pnl-minimum-gate check``: Evaluate a future standing-alarm threshold
 
 Data Updates:
+    - ``audit-candles``: Audit one bounded persisted candle window
     - ``update-kraken-symbols``: Sync Kraken symbol mappings
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
     - ``polygon-backfill-aggregates``: Backfill historical data
@@ -136,6 +137,7 @@ from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdate
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
+from snapper.cli.candle_audit import audit_candles
 from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
@@ -212,6 +214,7 @@ _CLI_SYMBOL_SOURCE_SETTINGS = "specified/settings"
 _CLI_RESUME_FLAG = "--resume/--no-resume"
 
 app = typer.Typer(add_completion=False, help="Snapper CLI")
+app.command(name="audit-candles")(audit_candles)
 
 
 def validate_api_keys_for_trader(paper: bool = False) -> bool:

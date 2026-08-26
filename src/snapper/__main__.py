@@ -40,6 +40,11 @@ _COMMAND_LOGFILES: dict[str, str] = {
 }
 
 
+def _machine_stdout_requested(argv: list[str]) -> bool:
+    """Return whether this invocation reserves stdout for one data document."""
+    return len(argv) > 1 and argv[1] == "audit-candles" and "--json" in argv[2:]
+
+
 def _resolve_logfile(argv: list[str]) -> str:
     """Return the logfile path appropriate for the current CLI invocation.
 
@@ -98,7 +103,12 @@ def main() -> int:
     """
     logfile = resolve_logfile_from_environment(_resolve_logfile(sys.argv))
     os.environ[LOGFILE_ENV_VAR] = logfile
-    setup_logging(level="INFO", json_logs=False, logfile=logfile)
+    setup_logging(
+        level="INFO",
+        json_logs=False,
+        logfile=logfile,
+        console_to_stderr=_machine_stdout_requested(sys.argv),
+    )
     log_kraken_sdk_patches_status()
     app()
     return 0

@@ -245,29 +245,42 @@ def _serialize_json_record(record: object) -> str:
     return json.dumps(payload)
 
 
-def _add_json_logging(level: str) -> None:
+def _stderr_sink(message: object) -> None:
+    """Write one Loguru-rendered message to standard error."""
+    print(message, end="", file=sys.stderr)
+
+
+def _formatted_stderr_sink(message: Any) -> None:
+    """Format one Loguru record and write it to standard error."""
+    print(_format_message(message.record), end="", file=sys.stderr)
+
+
+def _add_json_logging(level: str, console_to_stderr: bool) -> None:
     """Add the JSON stdout Loguru sink.
 
     Args:
         level: Minimum log level.
+        console_to_stderr: Whether the console sink must preserve machine stdout.
     """
     logger.add(
-        lambda msg: print(msg, end=""),
+        _stderr_sink if console_to_stderr else lambda msg: print(msg, end=""),
         level=level,
         format=_serialize_json_record,
         filter=_filter_cancelled_errors,
     )
 
 
-def _add_text_logging(level: str) -> None:
+def _add_text_logging(level: str, console_to_stderr: bool) -> None:
     """Add the terminal-appropriate text Loguru sink.
 
     Args:
         level: Minimum log level.
+        console_to_stderr: Whether the console sink must preserve machine stdout.
     """
-    if sys.stdout.isatty():
+    console = sys.stderr if console_to_stderr else sys.stdout
+    if console.isatty():
         logger.add(
-            _colorized_sink,
+            _colorized_stderr_sink if console_to_stderr else _colorized_sink,
             level=level,
             format=_MSG_ONLY_FMT,
             colorize=False,
@@ -275,7 +288,11 @@ def _add_text_logging(level: str) -> None:
         )
         return
     logger.add(
-        lambda msg: print(_format_message(msg.record), end=""),
+        (
+            _formatted_stderr_sink
+            if console_to_stderr
+            else lambda msg: print(_format_message(msg.record), end="")
+        ),
         level=level,
         format=_MSG_ONLY_FMT,
         filter=_filter_cancelled_errors,
@@ -290,6 +307,16 @@ def _colorized_sink(message: Any) -> None:
     """
     formatted = _colorize_record(message.record)
     print(formatted, end="")
+
+
+def _colorized_stderr_sink(message: Any) -> None:
+    """Print a colorized Loguru message to standard error.
+
+    Args:
+        message: Loguru message object with a record attribute.
+    """
+    formatted = _colorize_record(message.record)
+    print(formatted, end="", file=sys.stderr)
 
 
 def _add_file_logging(level: str, logfile: str) -> None:
@@ -326,7 +353,13 @@ def _file_sink(logfile: str) -> Callable[[Any], None]:
     return sink
 
 
-def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | None = None) -> None:
+def setup_logging(
+    level: str = "INFO",
+    json_logs: bool = False,
+    logfile: str | None = None,
+    *,
+    console_to_stderr: bool = False,
+) -> None:
     """Configure application-wide logging.
 
     Sets up Loguru with appropriate handlers based on environment:
@@ -350,15 +383,17 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
         level: Minimum log level ('DEBUG', 'INFO', 'WARNING', etc.).
         json_logs: If True, output JSON instead of formatted text.
         logfile: Optional file path for additional file logging.
+        console_to_stderr: Preserve stdout for a machine-readable command by
+            routing its console logs to stderr. File logging is unchanged.
     """
     _FILE_SINK_READY[0] = False
     _configure_stdlib_logging(level)
     logger.remove()
     logger.configure(extra={"context": "main"})
     if json_logs:
-        _add_json_logging(level)
+        _add_json_logging(level, console_to_stderr)
     else:
-        _add_text_logging(level)
+        _add_text_logging(level, console_to_stderr)
     if logfile:
         _add_file_logging(level, logfile)
         _FILE_SINK_READY[0] = True

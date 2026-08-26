@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -266,6 +267,77 @@ def test_setup_logging_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
     assert callable(first_call["sink"])
     assert first_call["level"] == "INFO"
     assert first_call["format"] == "{message}" or callable(first_call["format"])
+
+
+@pytest.mark.parametrize(
+    ("json_logs", "tty"),
+    [(True, False), (False, False), (False, True)],
+)
+def test_setup_logging_can_reserve_stdout_for_machine_output(
+    monkeypatch: pytest.MonkeyPatch,
+    json_logs: bool,
+    tty: bool,
+) -> None:
+    """Every console formatter can route its rendered line to stderr.
+
+    Given: JSON, plain non-TTY, or colorized TTY logging in machine mode.
+    When: The selected Loguru sink emits one record.
+    Then: Standard error receives it and standard output remains untouched.
+    """
+
+    class DummyLogger:
+        def __init__(self) -> None:
+            self.sinks: list[object] = []
+
+        def remove(self) -> None:
+            return None
+
+        def configure(self, **kwargs: object) -> None:
+            del kwargs
+
+        def add(self, sink: object, *args: object, **kwargs: object) -> int:
+            del args, kwargs
+            self.sinks.append(sink)
+            return 1
+
+    class CapturedStderr(StringIO):
+        def isatty(self) -> bool:
+            return tty
+
+    dummy_logger = DummyLogger()
+    stdout = StringIO()
+    stderr = CapturedStderr()
+    monkeypatch.setattr(logging, "logger", dummy_logger)
+    monkeypatch.setattr(stdlib_logging, "basicConfig", lambda **_kwargs: None)
+    monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setattr("sys.stderr", stderr)
+    logging.setup_logging(
+        level="INFO",
+        json_logs=json_logs,
+        logfile=None,
+        console_to_stderr=True,
+    )
+    assert len(dummy_logger.sinks) == 1
+    sink = cast(Callable[[object], None], dummy_logger.sinks[0])
+    if json_logs:
+        sink("machine-log\n")
+    else:
+        sink(
+            SimpleNamespace(
+                record={
+                    "time": datetime(2026, 8, 26, tzinfo=UTC),
+                    "level": SimpleNamespace(name="INFO"),
+                    "process": 123,
+                    "module": "tests",
+                    "function": "machine_mode",
+                    "line": 1,
+                    "message": "machine-log",
+                    "exception": None,
+                }
+            )
+        )
+    assert "machine-log" in stderr.getvalue()
+    assert stdout.getvalue() == ""
 
 
 def test_format_message_appends_exception(monkeypatch: pytest.MonkeyPatch) -> None:

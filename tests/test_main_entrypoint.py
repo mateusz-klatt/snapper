@@ -1,9 +1,13 @@
 """Unit tests for Snapper package entry point."""
 
+import asyncio
+import json
 import os
 import runpy
 import subprocess
 import sys
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -13,6 +17,9 @@ import pytest
 import snapper.__main__
 from snapper.__main__ import main
 from snapper.cli.app import app
+from snapper.data.models import Symbol
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.utils.logging import LOGFILE_ENV_VAR
 from snapper.utils.logging import setup_logging
 
@@ -26,6 +33,42 @@ def _clear_logfile_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     Then the variable is absent until that test explicitly supplies it.
     """
     monkeypatch.delenv(LOGFILE_ENV_VAR, raising=False)
+
+
+async def _seed_active_aapl(database_url: str, active_at: datetime) -> None:
+    """Create one active Polygon target without candles for a subprocess audit."""
+    repository = SQLAlchemyRepository(database_url)
+    await repository.create_all()
+    try:
+        async with repository.session() as session:
+            session.add(
+                Symbol(
+                    native_symbol="AAPL",
+                    base="AAPL",
+                    quote="USD",
+                    asset_type="equity",
+                    created_at=active_at,
+                    timestamp=active_at,
+                    session_id="entrypoint-test",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        symbol_public_id = await resolve_symbol_public_id(
+            repository,
+            "AAPL",
+            as_of=active_at,
+        )
+        assert symbol_public_id is not None
+        await repository.ensure_instrument(
+            symbol_public_id=symbol_public_id,
+            exchange="polygon",
+            session_id="entrypoint-test",
+            sequence_id=1,
+            timestamp=active_at,
+        )
+    finally:
+        await repository.engine.dispose()
 
 
 def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,8 +101,41 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
         "level": "INFO",
         "json_logs": False,
         "logfile": "data/log/snapper/snapper.log",
+        "console_to_stderr": False,
     }
     assert app_calls == [((), {})]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["snapper", "audit-candles", "--json"], True),
+        (["snapper", "audit-candles"], False),
+        (["snapper", "server", "--json"], False),
+    ],
+)
+def test_main_reserves_machine_stdout_only_for_json_candle_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected: bool,
+) -> None:
+    """Only the machine candle report routes console logs to stderr.
+
+    Given: A JSON candle invocation or a nearby human/non-candle invocation.
+    When: The package entry point configures logging.
+    Then: The stderr-console flag matches the exact machine-output contract.
+    """
+    captured: dict[str, object] = {}
+
+    def fake_setup_logging(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", argv)
+    main()
+    assert captured["console_to_stderr"] is expected
 
 
 def test_main_egress_subcommand_uses_egress_logfile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,6 +505,7 @@ class TestMain:
             level="INFO",
             json_logs=False,
             logfile="data/log/snapper/snapper.log",
+            console_to_stderr=False,
         )
         mock_log_patches_status.assert_called_once_with()
         mock_app.assert_called_once()
@@ -502,3 +579,59 @@ class TestMain:
             assert (
                 "Usage:" in output or "snapper" in output.lower()
             ), f"Unexpected output: {output!r}"
+
+
+def test_json_candle_audit_subprocess_reserves_stdout_for_one_document(tmp_path: Path) -> None:
+    """The real package entry point never mixes log lines into machine output.
+
+    Given: An active SQLite-backed target with no candles in a closed window.
+    When: ``python -m snapper audit-candles --json`` completes with an anomaly.
+    Then: Standard output is exactly one parseable JSON document despite INFO logs.
+    """
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'audit.db').as_posix()}"
+    active_at = datetime(2026, 6, 30, tzinfo=UTC)
+    asyncio.run(_seed_active_aapl(database_url, active_at))
+    env = os.environ.copy()
+    env["DB_URL"] = database_url
+    env["SNAPPER_ENV"] = "test"
+    env[LOGFILE_ENV_VAR] = str(tmp_path / "audit.log")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(
+            None,
+            [
+                str(Path(__file__).resolve().parents[1] / "src"),
+                env.get("PYTHONPATH", ""),
+            ],
+        )
+    )
+    run_cwd = tmp_path / "audit-runroot"
+    run_cwd.mkdir()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "snapper",
+            "audit-candles",
+            "--target",
+            "polygon",
+            "AAPL",
+            "--timeframe",
+            "1m",
+            "--window",
+            "2026-07-01T13:30:00+00:00",
+            "2026-07-01T13:31:00+00:00",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        cwd=run_cwd,
+        env=env,
+    )
+    assert result.returncode == 1, result.stderr
+    assert result.stdout.count("\n") == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "anomalies"
+    assert payload["anomalies"][0]["type"] == "empty_window"

@@ -40,6 +40,9 @@ _MICROS_PER_SECOND: int = 1_000_000
 class CandleAnomalyType(Enum):
     """Classes of candle data-quality anomaly."""
 
+    EMPTY_WINDOW = "empty_window"
+    WINDOW_BOUNDARY_GAP = "window_boundary_gap"
+    INCOMPLETE_CANDLE = "incomplete_candle"
     OHLC_INVARIANT = "ohlc_invariant"
     NON_POSITIVE_PRICE = "non_positive_price"
     NEGATIVE_VOLUME = "negative_volume"
@@ -93,6 +96,25 @@ def _timeframe_to_seconds(timeframe: str) -> int:
     return seconds
 
 
+def candle_timeframe_seconds(timeframe: str) -> int:
+    """Return the supported candle timeframe length in seconds.
+
+    This public wrapper lets read-only service layers validate bounded audit
+    requests against the exact interval vocabulary used by the pure auditor,
+    avoiding a second timeframe table that could drift.
+
+    Args:
+        timeframe: Supported candle timeframe.
+
+    Returns:
+        The interval length in whole seconds.
+
+    Raises:
+        ValueError: If the timeframe is not supported.
+    """
+    return _timeframe_to_seconds(timeframe)
+
+
 def _as_utc(moment: datetime) -> datetime:
     """Return ``moment`` in UTC; a naive value is assumed to already be UTC."""
     if moment.tzinfo is None:
@@ -120,6 +142,33 @@ def _is_on_grid(open_at: datetime, interval_seconds: int, anchor_offset_seconds:
     total_micros = (delta.days * _ONE_DAY_SECONDS + delta.seconds) * _MICROS_PER_SECOND
     total_micros += delta.microseconds - anchor_offset_seconds * _MICROS_PER_SECOND
     return total_micros % (interval_seconds * _MICROS_PER_SECOND) == 0
+
+
+def is_candle_open_on_grid(
+    open_at: datetime,
+    timeframe: str,
+    *,
+    anchor_offset_seconds: int = 0,
+) -> bool:
+    """Return whether a candle open lands on the auditor's timeframe grid.
+
+    Args:
+        open_at: Candle open time; naive values are interpreted as UTC exactly
+            like :func:`audit_candle_series`.
+        timeframe: Supported candle timeframe.
+        anchor_offset_seconds: Grid-origin offset from the UNIX epoch.
+
+    Returns:
+        True when the normalized timestamp lands exactly on the selected grid.
+
+    Raises:
+        ValueError: If the timeframe is not supported.
+    """
+    return _is_on_grid(
+        _as_utc(open_at),
+        candle_timeframe_seconds(timeframe),
+        anchor_offset_seconds,
+    )
 
 
 def _grid_slot(open_at: datetime, interval_seconds: int, anchor_offset_seconds: int) -> int:

@@ -71,7 +71,9 @@ from snapper.data.repository import venue_event_fill_identity
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import CandleWindowQuery
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import MarketSnapshotRow
@@ -1943,6 +1945,14 @@ class DummyRepository(Repository):
         """Get candles - returns empty list."""
         return []
 
+    async def get_candle_window_for_active_symbol(
+        self,
+        query: CandleWindowQuery,
+    ) -> list[CandleRow] | None:
+        """Return an active target with no candles for the dummy boundary."""
+        del query
+        return []
+
     async def iter_trades(
         self,
         instrument: str,
@@ -3126,6 +3136,14 @@ class _MinimalRepository(Repository):
         limit: int | None = None,
         order: str = "asc",
     ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_candle_window_for_active_symbol(
+        self,
+        query: CandleWindowQuery,
+    ) -> list[CandleRow] | None:
+        """Return an active target with no candles for the minimal boundary."""
+        del query
         return []
 
     async def iter_trades(

@@ -952,6 +952,42 @@ snapper polygon-load-grouped-candles --exchange kraken --cut-date 2026-06-16 -s 
 make run-polygon-grouped-candles EXCHANGE=kraken CUT_DATE=2026-06-16
 ```
 
+### `audit-candles`
+
+Audits one explicit persisted candle window without modifying the database.
+Both `--window` values are inclusive expected candle opens and must include a
+UTC offset. The command freezes one `as_of` instant, verifies the native symbol
+is active on the selected exchange in the same database statement that reads
+the bounded range, and checks empty or missing window edges,
+incomplete rows, OHLC/price/volume invariants, timestamp alignment, duplicates,
+ordering, interior gaps, and split suspects.
+
+```bash
+snapper audit-candles \
+  --target polygon AAPL \
+  --timeframe 1m \
+  --window 2026-07-01T13:30:00+00:00 2026-07-01T19:59:00+00:00
+```
+
+Use `--json` for one stable machine-readable document. Exit status is `0` for
+a complete clean audit, `1` for a complete audit with anomalies, `2` for
+invalid command usage, and `3` when the audit cannot be completed. Windows are
+bounded to 100,000 expected slots and must contain only candles already closed
+at the captured `as_of`.
+
+Intraday grids default to a zero-second UNIX-epoch anchor. Pass
+`--anchor-offset-seconds N` when a venue's opens use a different explicit
+anchor; the canonical range is `0 <= N < timeframe_seconds`. Daily audits
+require offset zero and are limited to one slot until a calendar-aware expected
+open contract exists.
+
+The gap policy is deliberately `unsuppressed`: every missing slot is an
+anomaly. Polygon carries equities, crypto, and FX, so the command never guesses
+a session calendar from the exchange name. For an intraday session market,
+request one expected trading session at a time. Calendar-aware multi-session
+audits, scheduling, automatic repair, and cache-directory continuity remain
+outside this command.
+
 ### `verify-candle-coverage`
 
 Read-only gate that verifies the persisted `candles` plane is ready to be the

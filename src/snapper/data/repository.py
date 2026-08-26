@@ -294,6 +294,7 @@ from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CancelClaimResult
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import CandleWindowQuery
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import CreateWalletUserReadGrantRequest
@@ -2427,8 +2428,8 @@ def _pnl_order_minimum_orphan_spec_rows(
 def _candle_row_from_result(r: Row[Any]) -> CandleRow:
     """Project one candles SELECT result row to a :class:`CandleRow`.
 
-    The caller's SELECT MUST project exactly the fifteen columns below,
-    in this order. ``Row[Any]`` sits in the permitted
+    The caller's SELECT MUST project at least the fifteen named columns below.
+    Additional boundary-marker columns are ignored. ``Row[Any]`` sits in the permitted
     SQLAlchemy-expression-internals boundary for ``Any``.
 
     Deliberately NOT wired into :meth:`SQLAlchemyRepository.get_candles`,
@@ -3727,6 +3728,32 @@ class Repository(ABC):
         provisional intermediate persists), so latest-N reads return
         an exact count of complete bars; ``None`` applies no
         completeness predicate (legacy behavior).
+        """
+        ...
+
+    @abstractmethod
+    async def get_candle_window_for_active_symbol(
+        self,
+        query: CandleWindowQuery,
+    ) -> list[CandleRow] | None:
+        """Read one exact active native-symbol window in a single snapshot.
+
+        The result distinguishes an inactive target (``None``) from an active
+        target with no visible candles (an empty list). Implementations must
+        resolve the target and materialize the bounded candle rows atomically;
+        a separate target lookup followed by a candle query is not equivalent.
+        A non-positive cap or more than one target active at the horizon must
+        fail instead of collapsing into the inactive/empty states.
+
+        Args:
+            query: Exact target, time window, knowledge horizon, and row cap.
+
+        Returns:
+            The ascending candle rows, an empty list, or ``None``.
+
+        Raises:
+            ValueError: If the requested row cap is not positive.
+            RuntimeError: If more than one target identity is active.
         """
         ...
 
@@ -11864,6 +11891,92 @@ class SQLAlchemyRepository(Repository):
                 }
                 for r in rows
             ]
+
+    async def get_candle_window_for_active_symbol(
+        self,
+        query: CandleWindowQuery,
+    ) -> list[CandleRow] | None:
+        """Read an active native-symbol target and its candles atomically.
+
+        A target CTE and a candle ``LEFT JOIN`` live in one SQL statement, so
+        both PostgreSQL READ COMMITTED and SQLite answer from one statement
+        snapshot. Every candle predicate stays in the join condition: moving a
+        range or temporal predicate to ``WHERE`` would erase the active-empty
+        sentinel row and collapse it into an unknown target.
+
+        Args:
+            query: Exact target, inclusive window, horizon, and materialization cap.
+
+        Returns:
+            Ascending visible candles, an empty list for an active target with
+            no rows, or ``None`` when the target is not active at ``as_of``.
+
+        Raises:
+            ValueError: If the requested materialization limit is not positive.
+            RuntimeError: If temporal corruption makes the target ambiguous.
+        """
+        if query.limit <= 0:
+            raise ValueError("candle window limit must be positive")
+        symbol_active = where_active(Symbol, query.as_of)
+        instrument_active = where_active(Instrument, query.as_of)
+        target = (
+            select(
+                Instrument.public_id.label("instrument_public_id"),
+                func.count().over().label("target_candidate_count"),
+            )
+            .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+            .where(
+                Symbol.native_symbol == query.native_symbol,
+                Instrument.exchange == query.exchange,
+                *symbol_active,
+                *instrument_active,
+            )
+            .order_by(Instrument.id.asc())
+            .limit(1)
+            .cte("active_candle_window_target")
+        )
+        statement = (
+            select(
+                target.c.instrument_public_id.label("target_instrument_public_id"),
+                target.c.target_candidate_count,
+                Candle.open_at,
+                Candle.timeframe,
+                Candle.open,
+                Candle.high,
+                Candle.low,
+                Candle.close,
+                Candle.volume,
+                Candle.vwap,
+                Candle.trades,
+                Candle.source,
+                Candle.complete,
+                Candle.public_id,
+                Candle.timestamp,
+                Candle.session_id,
+                Candle.sequence_id,
+            )
+            .select_from(target)
+            .outerjoin(
+                Candle,
+                and_(
+                    Candle.instrument_public_id == target.c.instrument_public_id,
+                    Candle.timeframe == query.timeframe,
+                    Candle.open_at >= query.window_start,
+                    Candle.open_at <= query.window_end,
+                    Candle.timestamp <= query.as_of,
+                    Candle.known_to > query.as_of,
+                ),
+            )
+            .order_by(Candle.open_at.asc(), Candle.id.asc())
+            .limit(query.limit)
+        )
+        async with self.session() as session:
+            rows = (await session.execute(statement)).all()
+        if not rows:
+            return None
+        if int(rows[0].target_candidate_count) != 1:
+            raise RuntimeError("candle audit target identity is temporally ambiguous")
+        return [_candle_row_from_result(row) for row in rows if row.open_at is not None]
 
     async def get_latest_candles_for_instruments(
         self,
