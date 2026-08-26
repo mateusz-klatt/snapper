@@ -2928,6 +2928,66 @@ class TestPublishedFlowFamily:
         assert sum(instrument_values) == family.total
         assert sum(family.by_attribution.values()) == family.total
 
+    def test_the_production_outage_head_minutes_publish_after_widening(self) -> None:
+        """The 2026-08-04 22:04-22:06Z constellation, in its exact unit states.
+
+        The whole attribution total sits in the manual bucket while the
+        unattributed bucket is an exact zero, so the final-bucket absorber has
+        nothing to absorb with, and the two instrument fee buckets only re-sum
+        under a one-ULP deviation of a NON-final bucket. The narrow pass
+        withheld these three dark minutes; the widened single-bucket-absorber
+        pass publishes them at the nearest faithful total with both dimensions
+        re-summing exactly. Unit states captured read-only from production by
+        the holzera session on 2026-08-26.
+        """
+        first_instrument_units = int(
+            "-31378767094001690293669370977473783373828376043451609560158"
+            "628152779256245858175634088633858837577766606739788017970483"
+            "758397051507786221916898114386704187961460738307888839501061"
+            "639150440069930251252338841490926609350634857959490270239661"
+            "618829403922788457461004232236273328372288263456057836202531"
+            "188462363667119076278272"
+        )
+        second_instrument_units = int(
+            "-23004432904149005275989883835267863685199748614853026719369"
+            "402429353451572236394680734334070877075510514934425463958816"
+            "670144897911112238929110868360190382790233175362177792664256"
+            "662437508953565813481030854454027271402589357426186717040838"
+            "910386903924883751047883161899729303769771926429298156189185"
+            "36861490481317049008128"
+        )
+        first_key = "019e874c-d555-72c3-847d-915741bc8d0e"
+        second_key = "019e874d-cf71-72f4-9771-aae3856fea0a"
+        total_units = first_instrument_units + second_instrument_units
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={
+                    first_key: _exact(first_instrument_units),
+                    second_key: _exact(second_instrument_units),
+                },
+                by_attribution={
+                    ("manual", None): _exact(total_units),
+                    ("unattributed", None): _exact(0),
+                },
+                total=_exact(total_units),
+            ),
+            [first_key, second_key],
+            [("manual", None), ("unattributed", None)],
+        )
+        assert isinstance(family, _PublishedFlowFamily)
+        assert family.total == -0.1663974083
+        assert family.by_instrument[first_key] + family.by_instrument[second_key] == family.total
+        assert (
+            sum(
+                (
+                    family.by_attribution[("manual", None)],
+                    family.by_attribution[("unattributed", None)],
+                )
+            )
+            == family.total
+        )
+        assert family.by_attribution[("unattributed", None)] == 0.0
+
     def test_an_infinite_accrual_latches_instead_of_raising(self) -> None:
         """A non-finite flow rides the allocation's latch path and withholds.
 

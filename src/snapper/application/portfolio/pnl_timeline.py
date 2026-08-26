@@ -1162,14 +1162,21 @@ def _reconciled_buckets[KeyT: Hashable](
     units_by_key: Mapping[KeyT, int],
     keys: Sequence[KeyT],
     total: float,
+    widen: bool,
 ) -> dict[KeyT, float] | None:
     """Project exact buckets onto doubles whose stable-order sum equals the total.
 
-    Every bucket except the last is its own correct rounding. The last bucket
-    tries its correct rounding first and then its two adjacent doubles, because
-    the stable-order compensated sum of the others can round in the opposite
-    direction by one unit in the last place. Anything farther than a neighbour
-    is not a rounding of the bucket's exact value and is never published.
+    At most ONE bucket deviates from its own correct rounding, and by at most
+    one unit in the last place — the absorber for the stable-order compensated
+    sum rounding the opposite way. The narrow pass gives that role to the
+    final key alone, which is the historical contract every published point
+    was chosen under. The widened pass lets each bucket take the role in
+    turn, final first, because the flexibility a point needs can sit in a
+    non-final bucket: production's 2026-08-04 22:04Z constellation holds the
+    whole attribution total in its first bucket while the final bucket is an
+    exact zero whose neighbours are absorbed. Anything farther than a
+    neighbour is not a rounding of the bucket's exact value and is never
+    published.
 
     An empty key list is only reachable with a zero exact total, whose one
     faithful rounding is ``0.0``, so it needs no total check of its own.
@@ -1178,24 +1185,29 @@ def _reconciled_buckets[KeyT: Hashable](
         units_by_key: Exact per-key unit counts; absent keys hold zero units.
         keys: Caller-provided deterministic key order.
         total: The faithful-rounding candidate the buckets must sum to.
+        widen: Whether every bucket may take the absorber role, not just the
+            final one.
 
     Returns:
-        The published buckets, or ``None`` when no allowed final-bucket
+        The published buckets, or ``None`` when no allowed single-bucket
         rounding makes the float sum land exactly on the candidate total.
     """
     if not keys:
         return {}
-    published = {key: project_units(units_by_key.get(key, 0)) for key in keys[:-1]}
-    final_key = keys[-1]
-    base = project_units(units_by_key.get(final_key, 0))
-    for candidate in (
-        base,
-        math.nextafter(base, math.inf),
-        math.nextafter(base, -math.inf),
-    ):
-        published[final_key] = candidate
-        if sum(published[key] for key in keys) == total:
-            return published
+    nearest = {key: project_units(units_by_key.get(key, 0)) for key in keys}
+    last = len(keys) - 1
+    positions = (last, *range(last)) if widen else (last,)
+    for position in positions:
+        published = dict(nearest)
+        base = nearest[keys[position]]
+        for candidate in (
+            base,
+            math.nextafter(base, math.inf),
+            math.nextafter(base, -math.inf),
+        ):
+            published[keys[position]] = candidate
+            if sum(published[key] for key in keys) == total:
+                return published
     return None
 
 
@@ -1238,7 +1250,10 @@ def _published_flow_family(
     conservation, the only remaining question is float representability: the
     published total must be a faithful rounding of the exact total, and both
     dimensions must reach it with the same candidate, since the point publishes
-    one total that both breakdowns are checked against.
+    one total that both breakdowns are checked against. The search runs in two
+    passes: the narrow final-bucket-absorber pass first, alone, so every point
+    that ever published keeps its exact published bits, and the widened
+    any-single-bucket-absorber pass only for points the narrow pass withholds.
 
     Args:
         exact: The family's exact accumulators.
@@ -1260,19 +1275,24 @@ def _published_flow_family(
     if sum(attribution_units.get(key, 0) for key in attribution_keys) != total_units:
         return "attribution_reconciliation_failed"
     instruments_failed_every_total = True
-    for total_candidate in faithful_roundings(total_units):
-        instruments = _reconciled_buckets(instrument_units, instrument_keys, total_candidate)
-        if instruments is None:
-            continue
-        instruments_failed_every_total = False
-        attributions = _reconciled_buckets(attribution_units, attribution_keys, total_candidate)
-        if attributions is None:
-            continue
-        return _PublishedFlowFamily(
-            total=total_candidate,
-            by_instrument=instruments,
-            by_attribution=attributions,
-        )
+    for widen in (False, True):
+        for total_candidate in faithful_roundings(total_units):
+            instruments = _reconciled_buckets(
+                instrument_units, instrument_keys, total_candidate, widen
+            )
+            if instruments is None:
+                continue
+            instruments_failed_every_total = False
+            attributions = _reconciled_buckets(
+                attribution_units, attribution_keys, total_candidate, widen
+            )
+            if attributions is None:
+                continue
+            return _PublishedFlowFamily(
+                total=total_candidate,
+                by_instrument=instruments,
+                by_attribution=attributions,
+            )
     if instruments_failed_every_total:
         return "instrument_sum_unrepresentable"
     return "attribution_sum_unrepresentable"
