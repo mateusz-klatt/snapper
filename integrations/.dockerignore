@@ -1,0 +1,9 @@
+*
+!snapper-agent-console/Dockerfile
+!snapper-agent-console/cli-manifest.toml
+!snapper-agent-console/entrypoint.sh
+!snapper-mcp/dist/
+!snapper-mcp/src/
+!snapper-mcp/package.json
+!snapper-mcp/package-lock.json
+!snapper-mcp/tsconfig.json

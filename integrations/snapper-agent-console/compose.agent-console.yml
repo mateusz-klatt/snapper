@@ -1,0 +1,21 @@
+services:
+  agent-console:
+    image: snapper-agent-console
+    build:
+      context: ..
+      dockerfile: snapper-agent-console/Dockerfile
+    container_name: snapper-agent-console
+    environment:
+      AGENT_CONSOLE_MODE: idle
+    volumes:
+      - agent-console-home:/home/delegate
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+volumes:
+  agent-console-home:

@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!cli-manifest.toml
+!entrypoint.sh

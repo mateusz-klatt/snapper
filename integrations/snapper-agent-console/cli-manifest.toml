@@ -1,0 +1,76 @@
+# Lock manifest for the agent-console image.
+#
+# Source of truth for every CLI the image ships. Facts verified 2026-08-26 by
+# reading each vendor installer script and release metadata (nothing was
+# executed); the Dockerfile ARG defaults mirror this file. checksum kind
+# "vendor" means the value comes from the vendor's published manifest and the
+# build MUST verify it; "tofu" means the vendor publishes no checksum, so the
+# value was frozen at first fetch (trust-on-first-use) and a later mismatch
+# means the artifact changed upstream — investigate before bumping.
+#
+# Deliberately absent: ollama. It is a model server (bin + mandatory lib tree
+# with CUDA, 3.5-4.5 GB unpacked), not an agent CLI — run the official
+# ollama/ollama image as a sibling service instead.
+
+[claude-code]
+version = "2.1.246"
+artifact = "https://downloads.claude.ai/claude-code-releases/2.1.246/linux-x64/claude"
+sha256 = "1a0a662dc1bb938eaec38545abce9a4a69113d7d7f7c5e1a553ea276617b906a"
+sha256_kind = "vendor"
+manifest = "https://downloads.claude.ai/claude-code-releases/2.1.246/manifest.json"
+install = "/usr/local/bin/claude"
+disable_update = "DISABLE_AUTOUPDATER=1"
+license_note = "proprietary binary; do not redistribute the image publicly"
+
+[codex-cli]
+version = "0.150.0"
+artifact = "https://releases.openai.com/codex/releases/0.150.0/codex-package-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "2d27b8569ca760eeb2bf21fa12bd31f59ac42b81617b340cf8958e9b38d743d5"
+sha256_kind = "vendor"
+install = "/usr/local/lib/codex (package tree), symlink /usr/local/bin/codex"
+disable_update = "config.toml check_for_update_on_startup=false (seeded by entrypoint)"
+components = "codex + codex-code-mode-host + rg + bwrap + zsh (operator accepted multi-binary)"
+
+[copilot-cli]
+version = "1.0.80"
+artifact = "https://github.com/github/copilot-cli/releases/download/v1.0.80/copilot-linux-x64.tar.gz"
+sha256 = "039933c9247686131c4406abb1d439bdbf68103edc1ff585bd70d5b0dc940f72"
+sha256_kind = "vendor"
+install = "/usr/local/bin/copilot"
+disable_update = "COPILOT_AUTO_UPDATE=false"
+runtime_note = "Node SEA: first run self-extracts ~218 MB into ~/.cache/copilot/pkg (home volume)"
+
+[kimi-code]
+version = "0.38.0"
+artifact = "https://code.kimi.ai/kimi-code/binaries/0.38.0/kimi-code-linux-x64"
+sha256 = "7f18b701ea751d14bf051776747ca0339f8d59693aec9051276933067a914b00"
+sha256_kind = "vendor"
+install = "/usr/local/bin/kimi"
+disable_update = "none needed (no self-update); KIMI_NO_MODIFY_PATH=1"
+runtime_note = "entrypoint seeds ~/.kimi-code/region=global (code.kimi.com script would write mainland-cn)"
+
+[antigravity-agy]
+version = "1.1.21-6424454201475072"
+artifact = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.21-6424454201475072/linux-x64/cli_linux_x64.tar.gz"
+sha512 = "3de7552ef089c136c0f570cdc9c04652278e02c1d41ed3911ad5f9f1b8c3bd567643aa401a1916060ea32a1b17fbaf90cbb417071db33f467880fcd848868d92"
+sha512_kind = "vendor"
+install = "/usr/local/bin/agy"
+disable_update = "NO off switch exists -> binary is root-owned, runtime user cannot overwrite it"
+
+[cursor-agent]
+version = "2026.08.25-3e8eec8"
+artifact = "https://downloads.cursor.com/lab/2026.08.25-3e8eec8/linux/x64/agent-cli-package.tar.gz"
+sha256 = "7a212e5a17ff9316f5acc78808e33c536940d5455645022e6388d99ba48c8425"
+sha256_kind = "tofu"
+install = "/usr/local/lib/cursor-agent (node app tree), wrapper /usr/local/bin/cursor-agent"
+disable_update = "wrapper always passes --disable-auto-update (no env off switch)"
+conflict_note = "package ships an `agent` alias colliding with grok's; the alias is NOT installed"
+
+[grok-cli]
+version = "1.0.5"
+artifact = "https://x.ai/cli/grok-1.0.5-linux-x86_64"
+sha256 = "9ba87444e1819e8f6104adbbf4676a870c204380aa5c3e1c38a926c4ea677238"
+sha256_kind = "tofu"
+install = "/usr/local/bin/grok"
+disable_update = "GROK_DISABLE_AUTOUPDATER=1"
+runtime_note = "the only fully static musl binary of the seven"
