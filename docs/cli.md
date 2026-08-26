@@ -1386,6 +1386,46 @@ portfolio truth.
 
 ## AI Integration
 
+### `mcp-oauth provision-client`
+
+Pre-registers one confidential MCP OAuth client in the configured database.
+Run migration `0052` before using the command. It generates a 256-bit client
+identifier and a 384-bit client secret, stores only the secret's bcrypt hash,
+and prints the raw secret exactly once after the database commit succeeds.
+
+```bash
+snapper mcp-oauth provision-client \
+    --name "Private ChatGPT" \
+    --redirect-uri "https://chatgpt.com/connector/oauth/callback"
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--name NAME` | string | required | Exact client name for the future consent screen |
+| `--redirect-uri URI` | string, repeatable | required | Exact registered callback URI |
+| `--auth-method METHOD` | string | `client_secret_basic` | `client_secret_basic` or `client_secret_post` |
+| `--scope SCOPE` | string, repeatable | `snapper.read`, `offline_access` | Initial-release ceiling: only `snapper.read` or `offline_access` |
+
+Redirect URIs are stored without normalization because the authorization flow
+must compare them exactly. The command accepts HTTPS URIs and HTTP only for the
+exact loopback hosts `localhost`, `127.0.0.1`, and `[::1]`; it rejects fragments,
+userinfo, whitespace, noncanonical spellings, and duplicates. Scope and redirect
+URI duplicates are refusals rather than silent deduplication.
+The dormant first connector is strictly read-only: provisioning rejects
+`snapper.account.read` and every write scope even though those names already
+exist in the future OAuth scope catalog.
+
+Successful stdout is a one-line JSON object containing `client_id`,
+`client_secret`, and the registered public metadata. Save it immediately in the
+client's secret store: Snapper cannot recover or print the raw secret again. A
+validation failure or generated-ID collision exits `1` and prints no secret.
+
+This command only creates the dormant client row. It does not enable
+`MCP_OAUTH_ENABLED`, publish OAuth metadata, or add authorize/token/revoke
+routes. Existing delegate PAT clients are unchanged.
+
 ### `dev-mint-pat`
 
 Mints a long-lived AI delegate JWT into `data/dev-pat.json`

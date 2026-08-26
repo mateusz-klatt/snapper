@@ -140,6 +140,7 @@ from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.fx_proofs import fx_proofs_app
+from snapper.cli.mcp_oauth import mcp_oauth_app
 from snapper.cli.pnl_minimum_activation_gate import pnl_minimum_gate_app
 from snapper.cli.token_preflight import token_app
 from snapper.cli.trade_projection_checkpoints import retire_trade_projection_checkpoints
@@ -3008,6 +3009,7 @@ app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_
 app.add_typer(annulment_app, name="annulment")
 app.add_typer(daily_partitions_app, name="daily-partitions")
 app.add_typer(fx_proofs_app, name="fx-proofs")
+app.add_typer(mcp_oauth_app, name="mcp-oauth")
 app.add_typer(pnl_minimum_gate_app, name="pnl-minimum-gate")
 app.add_typer(token_app, name="token")
 
