@@ -856,16 +856,9 @@ class PortfolioPnlSnapshotter:
             if not chunk.start <= point_time <= chunk.end:
                 continue
             sample = planned.get(point_time)
-            if sample is None:
-                if point_time in preserved:
-                    continue
-                if await self._retract(repo, ctx, point_time, existing):
-                    return True
+            if sample is None and point_time in preserved:
                 continue
-            replacement = self._to_row(sample, ctx, watermarks_json)
-            if _sample_is_settled(existing, replacement):
-                continue
-            if await self._supersede(repo, ctx, replacement, existing):
+            if await self._reconcile_minute(repo, ctx, existing, sample, watermarks_json):
                 return True
         inserts = [
             self._to_row(sample, ctx, watermarks_json)
@@ -873,6 +866,31 @@ class PortfolioPnlSnapshotter:
             if point_time not in current
         ]
         return bool(inserts) and await self._record_recompute_inserts(repo, ctx, inserts)
+
+    async def _reconcile_minute(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        existing: PortfolioPnlSampleRow,
+        sample: PlannedSample | None,
+        watermarks_json: str,
+    ) -> bool:
+        """Retract, supersede, or keep one persisted minute against its plan.
+
+        The caller has already excluded the one minute that keeps its row (a
+        row-preserving withhold with no planned sample), so ``None`` here
+        means the recompute genuinely no longer produces the minute and the
+        N1 retraction applies.
+
+        Returns:
+            Whether a reconcile conflict occurred.
+        """
+        if sample is None:
+            return await self._retract(repo, ctx, existing["point_time"], existing)
+        replacement = self._to_row(sample, ctx, watermarks_json)
+        if _sample_is_settled(existing, replacement):
+            return False
+        return await self._supersede(repo, ctx, replacement, existing)
 
     async def _record_recompute_inserts(
         self, repo: Repository, ctx: _ScopeContext, rows: list[PortfolioPnlSampleRow]

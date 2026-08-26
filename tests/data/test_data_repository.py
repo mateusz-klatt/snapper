@@ -137,10 +137,7 @@ class TestPolygonSmallBranches:
 
         with monkeypatch.context() as interrupting_sleep:
             interrupting_sleep.setattr(asyncio, "sleep", fake_sleep)
-            try:
-                await client.poll_tickers(symbols=["X:BTCUSD"], interval_seconds=0.01)
-            except KeyboardInterrupt:
-                pytest.fail("KeyboardInterrupt should be handled inside poll_tickers")
+            await client.poll_tickers(symbols=["X:BTCUSD"], interval_seconds=0.01)
 
     @pytest.mark.asyncio
     async def test_subscribe_instruments_builds_ticker_dict(self) -> None:

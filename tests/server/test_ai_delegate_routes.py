@@ -328,11 +328,9 @@ class TestCreateDelegate:
         """
         await _seed_owner(repo, public_id="owner-oauth-invalid", username="oauth-invalid")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        principal = _make_owner_principal("owner-oauth-invalid")
         with pytest.raises(ValueError):
-            await service.get_or_create_oauth_delegate(
-                _make_owner_principal("owner-oauth-invalid"),
-                oauth_request,
-            )
+            await service.get_or_create_oauth_delegate(principal, oauth_request)
 
     def test_create_body_rejects_legacy_long_lived_field(self) -> None:
         """Schema guard: FastAPI maps this extra body field to HTTP 422."""

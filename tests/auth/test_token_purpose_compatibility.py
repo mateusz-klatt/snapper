@@ -30,7 +30,6 @@ Read together the cases assert both halves of the contract:
 """
 
 import uuid
-from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -356,14 +355,14 @@ async def _ws_upgrade(
 def refresh_route_app(
     repo: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[TestClient]:
+) -> TestClient:
     """Real auth router wired to a real repo, with account lookup stubbed.
 
     The verifier, the inventory read and ``rotate_tokens`` are all real —
     only ``UserService``, which this change does not touch, is stubbed.
     """
     monkeypatch.setattr(routes, "get_user_service", lambda: StubUserService(_delegate_profile()))
-    yield _rest_client(repo)
+    return _rest_client(repo)
 
 
 class TestLiveShapedDelegateCredentialStillWorks:

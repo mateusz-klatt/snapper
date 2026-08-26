@@ -2,7 +2,6 @@
 
 import json
 import sys
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -114,11 +113,11 @@ def oss_seeded_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def oss_seeded_db_url(
     tmp_path: Path,
     oss_seeded_template: Path,
-) -> Iterator[URL]:
+) -> URL:
     """Clone the pristine OSS baseline for one isolated test."""
     database_path = tmp_path / "pnl-uat.db"
     copy2(oss_seeded_template, database_path)
-    yield make_url(f"sqlite+aiosqlite:///{database_path}")
+    return make_url(f"sqlite+aiosqlite:///{database_path}")
 
 
 async def _add_wallet(

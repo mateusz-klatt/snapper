@@ -12,7 +12,6 @@ Covers:
 """
 
 import asyncio
-from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
@@ -42,12 +41,12 @@ def _clear_singleton() -> Iterator[None]:
 
 
 @pytest.fixture
-async def repo(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
+async def repo(tmp_path: Path) -> SQLAlchemyRepository:
     """Provide a fresh SQLite repository per test."""
     db_path = tmp_path / "supersede_reaper_scanner.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path.as_posix()}")
     await r.create_all()
-    yield r
+    return r
 
 
 def _now() -> datetime:

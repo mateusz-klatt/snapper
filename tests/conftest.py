@@ -889,7 +889,7 @@ async def cleanup_all() -> AsyncGenerator[None]:
         _repository_cache.clear()
 
 
-@pytest.fixture(autouse=True, scope="function")
+@pytest.fixture(autouse=True)
 def cleanup_zmq_sockets() -> Generator[None]:
     """Close all ZMQ sockets after each test function."""
     yield

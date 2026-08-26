@@ -1,6 +1,5 @@
 """Unit tests for SignalReadService."""
 
-from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +29,7 @@ class TestSignalService:
     """Test cases for SignalReadService basic functionality."""
 
     @pytest.fixture
-    async def test_repository(self, tmp_path: Path) -> AsyncGenerator[SQLAlchemyRepository]:
+    async def test_repository(self, tmp_path: Path) -> SQLAlchemyRepository:
         """Create test SQLAlchemy repository with temporary database."""
         db_path = tmp_path / "test.db"
         url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
@@ -56,7 +55,7 @@ class TestSignalService:
                     )
                 )
             await s.commit()
-        yield repo
+        return repo
 
     @pytest.fixture
     def signal_service(self, test_repository: SQLAlchemyRepository) -> SignalReadService:

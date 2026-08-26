@@ -524,18 +524,17 @@ class DelegateRunner:
         applied = self._control.applied
         if directive is None:
             logger.warning("Delegate control state unknown; remaining held")
-            return applied
-        if not changed:
-            return applied
-        if directive.state is ControlState.ACTIVE:
+        elif changed and directive.state is ControlState.ACTIVE:
             logger.info("Delegate control state active at revision {}", directive.revision)
             await self._start_catch_up_sweep()
-            return applied
-        logger.warning("Delegate held at revision {}; declining new consults", directive.revision)
-        await self._cancel_startup_sweep()
-        inbox = self._inbox
-        if inbox is not None:
-            await inbox.drain_pending()
+        elif changed:
+            logger.warning(
+                "Delegate held at revision {}; declining new consults", directive.revision
+            )
+            await self._cancel_startup_sweep()
+            inbox = self._inbox
+            if inbox is not None:
+                await inbox.drain_pending()
         return applied
 
     async def _start_catch_up_sweep(self) -> None:
@@ -552,10 +551,14 @@ class DelegateRunner:
 
         A fresh socket is not an accepting delegate. The catch-up sweep is the
         first thing that would spend tokens on work, so it waits for a control
-        directive rather than riding on subscription alone.
+        directive rather than riding on subscription alone. The closing yield
+        point keeps the coroutine honest about being one — the wake client's
+        callback contract is ``Callable[[], Awaitable[None]]`` — and matches
+        ``_on_ws_state``.
         """
         self._ws_connected = True
         self._set_operational_state()
+        await asyncio.sleep(0)
 
     async def _on_heartbeat(self) -> None:
         """Count one successfully sent application liveness ping."""

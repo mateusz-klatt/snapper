@@ -292,12 +292,12 @@ async def bare_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]
 @pytest.fixture
 async def repository(
     bare_repository: SQLAlchemyRepository,
-) -> AsyncIterator[SQLAlchemyRepository]:
-    """Yield a repository whose scope already carries its verified USD anchor."""
+) -> SQLAlchemyRepository:
+    """Return a repository whose scope already carries its verified USD anchor."""
     async with bare_repository.session() as s:
         s.add(_anchor_orm())
         await s.commit()
-    yield bare_repository
+    return bare_repository
 
 
 async def _active_samples(repository: SQLAlchemyRepository) -> list[PortfolioPnlPoint]:

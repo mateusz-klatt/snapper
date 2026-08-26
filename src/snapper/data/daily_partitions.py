@@ -2581,7 +2581,7 @@ def _detach_with_retries(
                 raise DailyPartitionError(
                     f"plain DETACH failed after {attempt + 1} attempt(s): {error}"
                 ) from error
-            time.sleep(0.25 * (attempt + 1))
+            time.sleep(0.25 + 0.25 * attempt)
     raise DailyPartitionError("plain DETACH exhausted its bounded retry loop")
 
 

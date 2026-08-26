@@ -3,7 +3,6 @@
 import json
 import time
 import typing
-from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -507,7 +506,7 @@ class TestOrderStatusPayloadContract:
 
 
 @pytest.fixture(autouse=True)
-def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch symbol data functions at validation module level.
 
     Patches the already-imported references in validation.py, not the
@@ -545,7 +544,6 @@ def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             }
         ),
     )
-    yield
 
 
 def test_validate_topic_market_success() -> None:

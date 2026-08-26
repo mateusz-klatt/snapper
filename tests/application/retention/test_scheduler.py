@@ -14,7 +14,6 @@ Covers:
 """
 
 import asyncio
-from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +32,7 @@ from snapper.server.app import _stop_retention_scheduler
 
 
 @pytest.fixture(autouse=True)
-def _clear_retention_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+def _clear_retention_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drop retention env vars so each test starts from defaults."""
     for key in (
         "RETENTION_INTERVAL_SECONDS",
@@ -42,7 +41,6 @@ def _clear_retention_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
         "RETENTION_OUTPUT_DIR",
     ):
         monkeypatch.delenv(key, raising=False)
-    yield
 
 
 def _build_fake_summary() -> RetentionRunSummary:
@@ -367,7 +365,7 @@ class TestSchedulerEnvDefaults:
         fake_service.last_run_summary = None
         fake_service.close = AsyncMock()
 
-        with patch.object(scheduler_module, "RetentionService", lambda **_kwargs: fake_service):
+        with patch.object(scheduler_module, "RetentionService", return_value=fake_service):
             scheduler = RetentionScheduler(db_url="sqlite+aiosqlite:///:memory:")
 
         assert scheduler.interval_seconds == 120.0
@@ -379,7 +377,7 @@ class TestSchedulerEnvDefaults:
         fake_service = AsyncMock()
         fake_service.last_run_summary = None
 
-        with patch.object(scheduler_module, "RetentionService", lambda **_kwargs: fake_service):
+        with patch.object(scheduler_module, "RetentionService", return_value=fake_service):
             scheduler = RetentionScheduler(
                 db_url="sqlite+aiosqlite:///:memory:",
                 base_dir=Path("/explicit/base"),

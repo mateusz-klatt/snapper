@@ -1573,9 +1573,7 @@ class TestAvailableSymbolsSetCache:
             first = get_available_symbols_set()
             assert first == frozenset({"BTC-USD"})
             mapper = SymbolMapperService.get_instance()
-            with patch.object(
-                SymbolMapperService, "load_cache_if_needed", lambda self, fail_fast=False: None
-            ):
+            with patch.object(SymbolMapperService, "load_cache_if_needed", return_value=None):
                 mapper.trigger_cache_invalidation(fail_fast=False)
         with (
             patch(

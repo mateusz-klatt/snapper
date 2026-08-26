@@ -806,6 +806,52 @@ def _manual_order_modifier_refusal_result(refusal: ModifierRefusal) -> CallToolR
     )
 
 
+async def _resolve_manual_order_route(
+    repo: Repository,
+    claims: TokenClaims,
+    order: _ManualOrderInput,
+    manual_order_mode: ExecutionModeEnum,
+    created_at: datetime,
+) -> tuple[str, str] | CallToolResult:
+    """Resolve the wallet and execution venue for one manual order, or refuse.
+
+    Returns:
+        The resolved ``(wallet_public_id, execution_exchange)`` pair, or the
+        canonical refusal envelope when resolution fails.
+    """
+    if order.wallet_public_id is not None and order.wallet_public_id.strip() == "":
+        return _manual_order_wallet_blank_result()
+    if order.wallet_public_id is None and not claims.operator_public_ids:
+        return _manual_order_wallet_unresolved_result()
+    try:
+        wallet_public_id = await resolve_wallet_or_default(
+            repo,
+            explicit_wallet_public_id=order.wallet_public_id,
+            operator_public_ids=list(claims.operator_public_ids),
+            mode=manual_order_mode,
+            as_of=created_at,
+        )
+    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+        return _manual_order_wallet_resolution_result(exc)
+    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    try:
+        execution_exchange = await resolve_execution_venue(
+            repo,
+            order.exchange,
+            manual_order_mode,
+            wallet_public_id,
+            created_at,
+        )
+    except ExecutionVenueError as exc:
+        return to_call_tool_result(
+            success=False,
+            error_code=exc.error_code,
+            message=str(exc.details["reason"]),
+            details=sanitize_output(exc.details),
+        )
+    return wallet_public_id, execution_exchange
+
+
 async def _prepare_manual_order(
     *,
     repository_getter: Callable[[], Repository | None],
@@ -854,36 +900,10 @@ async def _prepare_manual_order(
     created_at = datetime.now(UTC)
     manual_order_mode = derive_manual_execution_mode(order.exchange)
     ensure_operator_in_claims(claims, order.operator_public_id)
-    if order.wallet_public_id is not None and order.wallet_public_id.strip() == "":
-        return _manual_order_wallet_blank_result()
-    if order.wallet_public_id is None and not claims.operator_public_ids:
-        return _manual_order_wallet_unresolved_result()
-    try:
-        wallet_public_id = await resolve_wallet_or_default(
-            repo,
-            explicit_wallet_public_id=order.wallet_public_id,
-            operator_public_ids=list(claims.operator_public_ids),
-            mode=manual_order_mode,
-            as_of=created_at,
-        )
-    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
-        return _manual_order_wallet_resolution_result(exc)
-    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
-    try:
-        execution_exchange = await resolve_execution_venue(
-            repo,
-            order.exchange,
-            manual_order_mode,
-            wallet_public_id,
-            created_at,
-        )
-    except ExecutionVenueError as exc:
-        return to_call_tool_result(
-            success=False,
-            error_code=exc.error_code,
-            message=str(exc.details["reason"]),
-            details=sanitize_output(exc.details),
-        )
+    route = await _resolve_manual_order_route(repo, claims, order, manual_order_mode, created_at)
+    if isinstance(route, CallToolResult):
+        return route
+    wallet_public_id, execution_exchange = route
     refusal = modifier_refusal(
         execution_exchange,
         order_type=order.order_type,

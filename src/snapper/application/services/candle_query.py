@@ -645,7 +645,8 @@ def densify_range_result(
         return result
     filled = densify_rows(result.rows, gap_fill_minutes)
     trimmed = filled[:limit] if len(filled) > limit else filled
-    return replace(result, rows=trimmed, sample_count=len(trimmed))
+    densified: CandleQueryResult = replace(result, rows=trimmed, sample_count=len(trimmed))
+    return densified
 
 
 async def fetch_cache_only(

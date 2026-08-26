@@ -382,14 +382,30 @@ def _database_sqlstate(exc: Exception) -> str | None:
     if isinstance(exc, DBAPIError):
         sources.insert(0, exc.orig)
     for source in sources:
-        for attribute in ("sqlstate", "pgcode"):
-            value = getattr(source, attribute, None)
-            if isinstance(value, str):
-                return value
-        diag = getattr(source, "diag", None)
-        diag_sqlstate = getattr(diag, "sqlstate", None)
-        if isinstance(diag_sqlstate, str):
-            return diag_sqlstate
+        sqlstate = _driver_sqlstate(source)
+        if sqlstate is not None:
+            return sqlstate
+    return None
+
+
+def _driver_sqlstate(source: object) -> str | None:
+    """Probe one driver-level object for a structured SQLSTATE.
+
+    The probe is duck-typed on purpose: psycopg exposes ``pgcode`` and
+    ``diag.sqlstate``, other drivers expose ``sqlstate`` directly, and the
+    object may be any driver's exception or ``None``.
+
+    Returns:
+        The first structured SQLSTATE found, or ``None`` when unavailable.
+    """
+    for attribute in ("sqlstate", "pgcode"):
+        value = getattr(source, attribute, None)
+        if isinstance(value, str):
+            return value
+    diag = getattr(source, "diag", None)
+    diag_sqlstate = getattr(diag, "sqlstate", None)
+    if isinstance(diag_sqlstate, str):
+        return diag_sqlstate
     return None
 
 

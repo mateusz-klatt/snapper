@@ -123,8 +123,8 @@ def _build_service_with_fake(
     """
     fake_repo = MagicMock()
     with (
-        patch.object(service_module, "EventArchiver", lambda _repo, _base_dir: fake),
-        patch.object(service_module, "DatabaseRepository", lambda _db_url: fake_repo),
+        patch.object(service_module, "EventArchiver", return_value=fake),
+        patch.object(service_module, "DatabaseRepository", return_value=fake_repo),
     ):
         return RetentionService(db_url=db_url, base_dir=base_dir or Path("data"))
 
@@ -335,7 +335,7 @@ class TestEvaluatePolicy:
         """
         monkeypatch.delenv("RETENTION_DRY_RUN", raising=False)
         repo = MagicMock()
-        with patch.object(service_module, "DatabaseRepository", lambda _db_url: repo):
+        with patch.object(service_module, "DatabaseRepository", return_value=repo):
             service = RetentionService(
                 db_url="sqlite+aiosqlite:///:memory:",
                 base_dir=Path("data"),
@@ -450,8 +450,8 @@ class TestClose:
         """``close`` calls ``repo.dispose`` exactly once via ``to_thread``."""
         fake_repo = MagicMock()
         with (
-            patch.object(service_module, "DatabaseRepository", lambda _db_url: fake_repo),
-            patch.object(service_module, "EventArchiver", lambda _repo, _base_dir: _FakeArchiver()),
+            patch.object(service_module, "DatabaseRepository", return_value=fake_repo),
+            patch.object(service_module, "EventArchiver", return_value=_FakeArchiver()),
         ):
             service = RetentionService(db_url="sqlite+aiosqlite:///:memory:", base_dir=Path("data"))
             await service.close()
@@ -654,11 +654,11 @@ async def test_to_thread_keeps_event_loop_responsive() -> None:
     fake_archiver.export = _slow_export
 
     with (
-        patch.object(service_module, "DatabaseRepository", lambda _db_url: fake_repo),
+        patch.object(service_module, "DatabaseRepository", return_value=fake_repo),
         patch.object(
             service_module,
             "EventArchiver",
-            lambda _repo, _base_dir: fake_archiver,
+            return_value=fake_archiver,
         ),
     ):
         service = RetentionService(db_url="sqlite+aiosqlite:///:memory:", base_dir=Path("data"))

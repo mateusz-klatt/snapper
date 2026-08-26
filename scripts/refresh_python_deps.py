@@ -149,14 +149,14 @@ def main() -> int:
     project_path = root / _PROJECT_FILE_NAME
     if not lock_path.is_file() or not project_path.is_file():
         print("refresh-python-deps: no lock or project file; nothing to bump")
-        return 0
-    direct_names = direct_dependency_names(project_path.read_text(encoding="utf-8"))
-    excluded = exactly_pinned_dependencies(lock_path.read_text(encoding="utf-8"), direct_names)
-    if excluded:
-        print(f"refresh-python-deps: holding exactly-pinned constraints: {', '.join(excluded)}")
-    completed = subprocess.run(build_command(excluded), cwd=root, check=False)
-    if completed.returncode != 0:
-        print(f"refresh-python-deps: constraint bump reported {completed.returncode}")
+    else:
+        direct_names = direct_dependency_names(project_path.read_text(encoding="utf-8"))
+        excluded = exactly_pinned_dependencies(lock_path.read_text(encoding="utf-8"), direct_names)
+        if excluded:
+            print(f"refresh-python-deps: holding exactly-pinned constraints: {', '.join(excluded)}")
+        completed = subprocess.run(build_command(excluded), cwd=root, check=False)
+        if completed.returncode != 0:
+            print(f"refresh-python-deps: constraint bump reported {completed.returncode}")
     return 0
 
 
