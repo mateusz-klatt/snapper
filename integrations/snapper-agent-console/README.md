@@ -31,9 +31,16 @@ agent) at a PTY.
 ## Attach
 
 ```bash
-docker compose --profile agent-console up -d snapper-agent-console
-docker compose exec -it snapper-agent-console tmux new-session -A -s agent
+cd integrations/snapper-agent-console
+AGENT_CONSOLE_PAT_CONFIG=/path/to/pat-config.json \
+AGENT_CONSOLE_WORKSPACE=/path/to/worktree \
+  docker compose -f compose.agent-console.yml --profile agent-console up -d agent-console
+docker compose -f compose.agent-console.yml exec -it agent-console \
+  tmux new-session -A -s agent /bin/bash
 ```
+
+The runtime user has no login shell (`nologin`), so the image sets
+`SHELL=/bin/bash` and the attach command names the shell explicitly.
 
 `tmux` keeps the session across disconnects; a second pane typically runs
 `snapper-mcp watch`. PID1 is a neutral idle process under `tini` — no CLI
@@ -46,6 +53,33 @@ Each CLI keeps its own login state under the mounted home volume
 PTY. Nothing vendor-specific is baked into the image. The Snapper PAT config
 for `snapper-mcp` is a separate read-only mount — see
 `compose.agent-console.yml`.
+
+## Never publish this image
+
+The built image embeds proprietary vendor binaries (Claude Code, Codex,
+Copilot, Kimi, agy, Cursor, Grok). Their licenses do not grant redistribution:
+the image is local/private-registry only; the recipe (this directory) is what
+may be shared. `snapper-mcp` is MIT and ships with its LICENSE at
+`/usr/local/lib/snapper-mcp/LICENSE`.
+
+## Delegate mode
+
+`AGENT_CONSOLE_MODE=delegate` execs `python -m snapper_delegate.pid1` instead
+of the idle PTY holder. That mode additionally needs the blackbox delegate's
+own configuration (`SNAPPER_DELEGATE_*` environment references and its
+`/run/secrets/delegate` files, exactly as the blackbox compose supplies them) —
+without those pid1 has nothing to connect to. This file intentionally does not
+duplicate that wiring; copy it from the blackbox deployment when enabling the
+mode.
+
+## Shared-home risk (accepted)
+
+All vendor CLIs share one `$HOME` volume, so any CLI (or anything it runs) can
+read every other CLI's login state. This is inherent to the operator-mandated
+single-image, single-home design and is accepted for this operator-supervised
+console; do NOT reuse this image for mutually untrusted agents. The
+`snapper-mcp` PAT is mounted read-only, which prevents mutation but not
+reading.
 
 ## Ollama
 

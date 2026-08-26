@@ -45,9 +45,10 @@ RUN curl -fsSL "https://releases.openai.com/codex/releases/${CODEX_VERSION}/code
         -o /tmp/codex.tar.gz \
     && echo "${CODEX_SHA256}  /tmp/codex.tar.gz" | sha256sum -c - \
     && mkdir -p /usr/local/lib/codex \
-    && tar -xzf /tmp/codex.tar.gz -C /usr/local/lib/codex --strip-components=1 \
+    && tar -xzf /tmp/codex.tar.gz -C /usr/local/lib/codex \
     && rm /tmp/codex.tar.gz \
-    && ln -s /usr/local/lib/codex/codex /usr/local/bin/codex
+    && test -x /usr/local/lib/codex/bin/codex \
+    && ln -s /usr/local/lib/codex/bin/codex /usr/local/bin/codex
 
 FROM base AS cli-copilot
 ARG COPILOT_VERSION=1.0.80
@@ -92,7 +93,7 @@ RUN curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/x64/age
 
 FROM node:26-slim AS mcp-build
 COPY snapper-mcp /build/snapper-mcp
-RUN cd /build/snapper-mcp && npm ci --omit=dev && npm run build 2>/dev/null || true
+RUN cd /build/snapper-mcp && npm ci && npm run build && npm prune --omit=dev
 
 FROM base AS cli-grok
 ARG GROK_VERSION=1.0.5
@@ -107,7 +108,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=cli-claude /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=cli-codex /usr/local/lib/codex /usr/local/lib/codex
-RUN ln -s /usr/local/lib/codex/codex /usr/local/bin/codex
+RUN ln -s /usr/local/lib/codex/bin/codex /usr/local/bin/codex
 COPY --from=cli-copilot /usr/local/bin/copilot /usr/local/bin/copilot
 COPY --from=cli-kimi /usr/local/bin/kimi /usr/local/bin/kimi
 COPY --from=cli-agy /usr/local/bin/agy /usr/local/bin/agy
@@ -118,6 +119,7 @@ COPY --from=node:26-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
+COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
 RUN printf '#!/bin/sh\nexec node /usr/local/lib/snapper-mcp/dist/index.js "$@"\n' \
         > /usr/local/bin/snapper-mcp \
     && chmod 0755 /usr/local/bin/snapper-mcp
@@ -126,6 +128,7 @@ RUN chmod 0755 /usr/local/bin/agent-console-entrypoint \
     && mkdir -p /home/delegate && chown 888:888 /home/delegate
 
 ENV HOME=/home/delegate \
+    SHELL=/bin/bash \
     DISABLE_AUTOUPDATER=1 \
     COPILOT_AUTO_UPDATE=false \
     GROK_DISABLE_AUTOUPDATER=1 \

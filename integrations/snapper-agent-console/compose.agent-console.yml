@@ -1,5 +1,6 @@
 services:
   agent-console:
+    profiles: ["agent-console"]
     image: snapper-agent-console
     build:
       context: ..
@@ -9,6 +10,9 @@ services:
       AGENT_CONSOLE_MODE: idle
     volumes:
       - agent-console-home:/home/delegate
+      - ${AGENT_CONSOLE_PAT_CONFIG:-./pat-config.json}:/run/secrets/snapper-mcp/config.json:ro
+      - ${AGENT_CONSOLE_WORKSPACE:-./workspace}:/workspace
+    working_dir: /workspace
     security_opt:
       - no-new-privileges:true
     cap_drop:
