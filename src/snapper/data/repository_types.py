@@ -982,15 +982,25 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5C.1"
+PNL_SAMPLE_CALC_VERSION = "5C.2"
 """Algorithm version stamped on every persisted Phase-5B sample point.
 
-``5C.1`` marks the exact-accumulation cutover: cumulative flows sum in exact
+``5C.2`` is a deliberately cosmetic bump: the arithmetic is exactly ``5C.1``'s
+after the widened absorber pass. It exists because the always-on writer ticked
+under the PRE-widening image and fossilised a three-minute interior gap at the
+head of the 2026-08-04 recovery window — a gap neither catch-up (which starts
+after the latest active row) nor self-heal (which needs a persisted incomplete
+row) can ever revisit. The bump flips ``stale_version`` for every scope, and
+the from-``t0 + 1m`` recompute both INSERTS the gap minutes, which now publish,
+and re-settles every other row through the settled-sample rule, terminating
+once the active tip carries this version.
+
+``5C.1`` marked the exact-accumulation cutover: cumulative flows sum in exact
 ``2**-1074`` units, allocations conserve by unit residue, and published values
 are faithful roundings chosen so the persisted breakdowns re-sum to the
 persisted totals. ``5B.2`` rows computed by the drifting ``+=`` accumulators
-reproduce value-identical in almost every minute and are restamped in place by
-the settled-sample rule rather than superseded.
+reproduce value-identical in almost every minute and are restamped through
+the settled-sample rule.
 
 Independent of the anchor read gate's frozen ``5A.13`` timeline contract: the
 forward-only sample writer carries its own version. A persisted sample is only
