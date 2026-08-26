@@ -50,6 +50,7 @@ from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
+from snapper.mcp.tools import _anticipated
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
 from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
@@ -137,6 +138,40 @@ def _build_server(
         claims_getter=lambda: claims or _make_claims(),
     )
     return server
+
+
+class TestAnticipatedDecorator:
+    """The closed rejection vocabulary and the crash-masking opt-in."""
+
+    @pytest.mark.asyncio
+    async def test_a_tool_error_passes_through_unwrapped(self) -> None:
+        """A ToolError raised inside a tool keeps its identity and text."""
+
+        @_anticipated
+        async def failing() -> None:
+            """Raise an already-anticipated tool error."""
+            raise ToolError("already anticipated")
+
+        with pytest.raises(ToolError, match="already anticipated") as exc:
+            await failing()
+        assert exc.value.__cause__ is None
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_crash_stays_a_crash(self) -> None:
+        """A type outside the closed vocabulary is NOT converted.
+
+        The SDK then masks it as ``Error executing tool <name>``, which is
+        the one improvement of mcp 2.1.1 worth keeping: arbitrary crash text
+        (tracebacks, SQL, internal hosts) never reaches the client.
+        """
+
+        @_anticipated
+        async def crashing() -> None:
+            """Raise a genuinely unexpected crash type."""
+            raise TypeError("internal detail that must stay masked")
+
+        with pytest.raises(TypeError):
+            await crashing()
 
 
 class TestGetCurrentClaims:
@@ -1591,11 +1626,14 @@ class TestSubmitManualOrderTool:
             ``pgcode='23505'`` (PostgreSQL standard SQLSTATE for
             unique-constraint violation),
         When: the write tool runs,
-        Then: :class:`fastapi.HTTPException` with ``status_code=409``
-            bubbles up. Detection uses structured inspection of
-            ``orig.pgcode``, NOT substring matching — a reformatted
-            message from a psycopg version bump won't silently break
-            this.
+        Then: the client-visible :class:`ToolError` carries the 409
+            conflict detail, with the ``status_code=409``
+            :class:`fastapi.HTTPException` as its cause — on the
+            JSON-RPC tool path no ASGI handler exists, so the message
+            is the only channel a retrying client can read. Detection
+            uses structured inspection of ``orig.pgcode``, NOT
+            substring matching — a reformatted message from a psycopg
+            version bump won't silently break this.
         """
 
         class _PgOrigError(Exception):
@@ -1626,9 +1664,12 @@ class TestSubmitManualOrderTool:
                     "idempotency_key": "idem-dup-pg",
                 },
             )
-        cause = exc.value.__cause__
-        assert isinstance(cause, HTTPException)
-        assert cause.status_code == 409
+        assert "Idempotency key already used" in str(exc.value)
+        anticipated = exc.value.__cause__
+        assert isinstance(anticipated, ToolError)
+        http_cause = anticipated.__cause__
+        assert isinstance(http_cause, HTTPException)
+        assert http_cause.status_code == 409
 
     @pytest.mark.asyncio
     async def test_idempotency_conflict_sqlite_extcode_maps_to_http_409(self) -> None:
@@ -1639,8 +1680,8 @@ class TestSubmitManualOrderTool:
             ``sqlite_errorcode=2067``
             (``SQLITE_CONSTRAINT_UNIQUE``),
         When: the write tool runs,
-        Then: HTTP 409 — parallel path to the PostgreSQL test using
-            the SQLite-native code.
+        Then: the client-visible conflict detail — parallel path to
+            the PostgreSQL test using the SQLite-native code.
         """
 
         class _SqliteOrigError(Exception):
@@ -1671,9 +1712,12 @@ class TestSubmitManualOrderTool:
                     "idempotency_key": "idem-dup-sqlite",
                 },
             )
-        cause = exc.value.__cause__
-        assert isinstance(cause, HTTPException)
-        assert cause.status_code == 409
+        assert "Idempotency key already used" in str(exc.value)
+        anticipated = exc.value.__cause__
+        assert isinstance(anticipated, ToolError)
+        http_cause = anticipated.__cause__
+        assert isinstance(http_cause, HTTPException)
+        assert http_cause.status_code == 409
 
     @pytest.mark.asyncio
     async def test_plan_integrity_error_non_unique_reraises(self) -> None:

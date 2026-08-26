@@ -2071,6 +2071,29 @@ async def _list_recent_signals_tool(
     )
 
 
+_ANTICIPATED_REJECTIONS: tuple[type[Exception], ...] = (
+    CapsViolationError,
+    HTTPException,
+    IntegrityError,
+    LookupError,
+    PermissionError,
+    RuntimeError,
+    ValueError,
+)
+"""Deliberate rejection types whose messages ARE the MCP client contract.
+
+The list is closed on purpose: a genuinely unexpected crash (``TypeError``,
+``AttributeError``, …) falls through to the SDK's masking and reaches the
+client only as ``Error executing tool <name>``, which is the one improvement
+of mcp 2.1.1 worth keeping. ``HTTPException`` belongs here rather than being
+re-raised: on the JSON-RPC tool path no ASGI handler ever sees it — the SDK
+would mask it as a crash — and its ``str`` carries the status and detail the
+retrying client needs to tell the 409 idempotency conflict from a failure.
+Both adversarial reviewers independently proved the pass-through variant
+masked exactly that conflict.
+"""
+
+
 def _anticipated[**ParamsT, ResultT](
     fn: Callable[ParamsT, Coroutine[Any, Any, ResultT]],
 ) -> Callable[ParamsT, Coroutine[Any, Any, ResultT]]:
@@ -2080,13 +2103,15 @@ def _anticipated[**ParamsT, ResultT](
     masks every other exception as ``Error executing tool <name>``. This
     server's tools deliberately raise typed domain rejections —
     :class:`PermissionError` carrying stable classifier codes,
-    :class:`ValueError` for argument rejections, :class:`RuntimeError` for
-    lifecycle faults — whose exact messages ARE the client contract asserted
-    by the MCP test suite. Re-raising them as ``ToolError`` restores that
-    contract under the new SDK without changing what the client reads. A
-    protocol-level :class:`MCPError` still propagates unchanged, and so does
-    :class:`HTTPException`, which the surrounding ASGI stack maps to its own
-    status code (the 409 idempotency conflict) rather than to a tool error.
+    :class:`ValueError` for argument rejections (including unexpected
+    repository ones, which a pinned test requires to stay observable),
+    :class:`RuntimeError` for lifecycle faults, :class:`IntegrityError`
+    re-raises, and the 409 :class:`HTTPException` idempotency conflict —
+    whose messages ARE the client contract asserted by the MCP test suite.
+    Re-raising them as ``ToolError`` restores that contract under the new
+    SDK; anything outside :data:`_ANTICIPATED_REJECTIONS` stays masked as
+    the crash it is, and a protocol-level :class:`MCPError` propagates
+    unchanged.
 
     Args:
         fn: The undecorated async tool function.
@@ -2105,9 +2130,9 @@ def _anticipated[**ParamsT, ResultT](
         """
         try:
             return await fn(*args, **kwargs)
-        except (ToolError, MCPError, HTTPException):
+        except (ToolError, MCPError):
             raise
-        except Exception as exc:
+        except _ANTICIPATED_REJECTIONS as exc:
             raise ToolError(str(exc)) from exc
 
     return surfaced
