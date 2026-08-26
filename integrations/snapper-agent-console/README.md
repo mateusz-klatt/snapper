@@ -85,8 +85,10 @@ without those pid1 has nothing to connect to. Compose passes
 `AGENT_CONSOLE_MODE` through from the host environment, but the delegate
 secrets/network wiring intentionally lives with the blackbox deployment —
 copy it from there into an override file when enabling the mode; until then
-setting the variable yields a pid1 that starts and exits on missing config,
-which is the intended fail-closed signal.
+the entrypoint preflights the mode: with no `SNAPPER_DELEGATE_*` env and no
+`/run/secrets/delegate`, it logs CRITICAL and exits non-zero instead of
+idling as a fake-healthy delegate (under `restart: unless-stopped` that shows
+up as a visible restart loop, which is the point).
 
 ## Shared-home risk (accepted)
 

@@ -9,3 +9,4 @@
 !snapper-mcp/tsup.config.ts
 !snapper-mcp/eslint.config.js
 !snapper-mcp/LICENSE
+!snapper-agent-console/snapper-mcp-wrapper.sh
