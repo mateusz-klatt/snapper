@@ -194,11 +194,18 @@ def faithful_roundings(units: int) -> tuple[float, ...]:
             whose reverse conversion raises rather than lies.
 
     Returns:
-        The faithful candidates, nearest first.
+        The faithful candidates, nearest first. A count beyond the largest
+        double (but still rounding to it) has exactly one: its bracketing
+        neighbour would be an infinity, which is not a published value but an
+        overflow marker, and an adversarial review showed that offering it
+        here let a finite exact total publish as ``inf``.
     """
     nearest = project_units(units)
     nearest_units = exact_units_of(nearest)
     if nearest_units == units:
         return (nearest,)
     direction = math.inf if units > nearest_units else -math.inf
-    return (nearest, math.nextafter(nearest, direction))
+    neighbour = math.nextafter(nearest, direction)
+    if math.isinf(neighbour):
+        return (nearest,)
+    return (nearest, neighbour)

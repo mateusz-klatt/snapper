@@ -216,3 +216,13 @@ class TestFaithfulRoundings:
         units = exact_units_of(1.0) - 1
         candidates = faithful_roundings(units)
         assert candidates == (1.0, math.nextafter(1.0, -math.inf))
+
+    def test_an_infinite_neighbour_is_never_offered(self) -> None:
+        """A count just past the largest double has one candidate, not two.
+
+        Offering the infinite neighbour let a finite exact total publish as
+        ``inf`` — the adversarial review's counterexample. An infinity is an
+        overflow marker, never a faithful rounding of a finite value.
+        """
+        assert faithful_roundings(exact_units_of(_MAX_DOUBLE) + 1) == (_MAX_DOUBLE,)
+        assert faithful_roundings(-exact_units_of(_MAX_DOUBLE) - 1) == (-_MAX_DOUBLE,)

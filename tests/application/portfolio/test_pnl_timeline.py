@@ -2943,6 +2943,33 @@ class TestPublishedFlowFamily:
         assert point.accrual_pnl is None
         assert ("cumulative_non_finite", "untrusted", "instrument", "I1") in _reason_rows(point)
 
+    def test_a_finite_total_never_publishes_an_infinity(self) -> None:
+        """The reviewer's counterexample: buckets whose float sum overflows.
+
+        The exact total is finite (one unit above the largest double's count),
+        but the stable-order bucket sum overflows every candidate. Before the
+        infinite-neighbour fix the ``inf`` faithful-rounding candidate matched
+        that overflow and the point PUBLISHED ``inf`` under a mark-failure
+        reason, escaping the row-preserving withhold set. It must refuse as a
+        pure representability failure instead.
+        """
+        max_units = exact_units_of(1.7976931348623157e308)
+        bucket_units = (max_units, max_units, -max_units + 1)
+        family = _published_flow_family(
+            _ExactCumulatives(
+                by_instrument={
+                    "I1": _exact(bucket_units[0]),
+                    "I2": _exact(bucket_units[1]),
+                    "I3": _exact(bucket_units[2]),
+                },
+                by_attribution={("manual", None): _exact(sum(bucket_units))},
+                total=_exact(sum(bucket_units)),
+            ),
+            ["I1", "I2", "I3"],
+            [("manual", None)],
+        )
+        assert family == "instrument_sum_unrepresentable"
+
     def test_an_infinite_fee_on_a_flip_latches_the_opening_bucket(self) -> None:
         """The flip split cannot express a non-finite fee in exact units.
 
