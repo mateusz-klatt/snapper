@@ -31,6 +31,7 @@ from snapper.application.portfolio.basket_realizability import RuleWithheldCause
 from snapper.application.portfolio.basket_realizability import VenueOrderMinimumVersion
 from snapper.application.portfolio.basket_realizability import partition_realizable_balances
 from snapper.application.portfolio.basket_realizability import resolve_venue_order_minimums
+from snapper.application.portfolio.observation_stream import fold_observation_attempts
 from snapper.application.portfolio.pnl_snapshot_planner import evaluate_basket
 from snapper.application.portfolio.pnl_snapshotter import is_futures_class_exchange
 from snapper.application.portfolio.pnl_snapshotter import resolve_spot_venues
@@ -1069,28 +1070,13 @@ def reconstruct_observation_attempts(
     Returns:
         One latest-at-minute exchange map for every requested grid minute.
     """
-    allowed_exchanges = frozenset(request.exchanges)
-    end = request.minutes[-1]
-    for row in rows:
-        if row["wallet_public_id"] != request.wallet_public_id:
-            raise ValueError("observation stream contains a foreign wallet")
-        if row["mode"] != request.mode:
-            raise ValueError("observation stream contains a foreign mode")
-        if row["exchange"] not in allowed_exchanges:
-            raise ValueError("observation stream contains an unexpected exchange")
-        if row["timestamp"] > end:
-            raise ValueError("observation stream extends beyond the requested window")
-    ordered = sorted(rows, key=lambda row: (row["timestamp"], row["id"]))
-    cursor: dict[str, VenueAccountObservationAttemptRow] = {}
-    snapshots: list[Mapping[str, VenueAccountObservationAttemptRow]] = []
-    position = 0
-    for minute in request.minutes:
-        while position < len(ordered) and ordered[position]["timestamp"] <= minute:
-            row = ordered[position]
-            cursor[row["exchange"]] = row
-            position += 1
-        snapshots.append(dict(cursor))
-    return tuple(snapshots)
+    return fold_observation_attempts(
+        rows,
+        request.wallet_public_id,
+        request.mode,
+        frozenset(request.exchanges),
+        request.minutes,
+    )
 
 
 async def _load_baskets(

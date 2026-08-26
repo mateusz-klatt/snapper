@@ -15,9 +15,13 @@ INTERVAL_MAX_SECONDS: Final[int] = 3600
 INTERVAL_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_INTERVAL_SECONDS"
 ENABLED_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_ENABLED"
 FX_SHADOW_PINNING_ENV_VAR: Final[str] = "PNL_FX_SHADOW_PINNING_ENABLED"
+DEFAULT_SCOPE_DEADLINE_SECONDS: Final[int] = 900
+SCOPE_DEADLINE_MIN_SECONDS: Final[int] = 60
+SCOPE_DEADLINE_MAX_SECONDS: Final[int] = 86400
+SCOPE_DEADLINE_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_SCOPE_DEADLINE_SECONDS"
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
 ENV_VARS: Final[frozenset[str]] = frozenset(
-    {INTERVAL_ENV_VAR, ENABLED_ENV_VAR, FX_SHADOW_PINNING_ENV_VAR}
+    {INTERVAL_ENV_VAR, ENABLED_ENV_VAR, FX_SHADOW_PINNING_ENV_VAR, SCOPE_DEADLINE_ENV_VAR}
 )
 """Public allowlist of env vars this snapshotter reads via ``os.environ``.
 
@@ -52,6 +56,38 @@ def resolve_interval(env_value: str | None) -> int:
         raise ValueError(
             f"{INTERVAL_ENV_VAR}={value} out of range "
             f"[{INTERVAL_MIN_SECONDS}, {INTERVAL_MAX_SECONDS}]"
+        )
+    return value
+
+
+def resolve_scope_deadline(env_value: str | None) -> int:
+    """Coerce ``PNL_SNAPSHOTTER_SCOPE_DEADLINE_SECONDS`` to ``[60, 86400]``.
+
+    The deadline bounds one wallet's share of one tick, so a scope mid-recovery
+    yields the loop to its siblings and resumes next tick from its own durable
+    progress instead of starving them. Empty or unset values fall back to
+    :data:`DEFAULT_SCOPE_DEADLINE_SECONDS`; a malformed value raises so it
+    fails loud at lifespan startup, exactly like the interval.
+
+    Args:
+        env_value: Raw env-var value, or ``None`` when unset.
+
+    Returns:
+        The per-scope deadline in seconds.
+
+    Raises:
+        ValueError: When the raw value is not an integer or is out of range.
+    """
+    if env_value is None or env_value.strip() == "":
+        return DEFAULT_SCOPE_DEADLINE_SECONDS
+    try:
+        value = int(env_value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{SCOPE_DEADLINE_ENV_VAR}={env_value!r} is not an integer") from exc
+    if value < SCOPE_DEADLINE_MIN_SECONDS or value > SCOPE_DEADLINE_MAX_SECONDS:
+        raise ValueError(
+            f"{SCOPE_DEADLINE_ENV_VAR}={value} out of range "
+            f"[{SCOPE_DEADLINE_MIN_SECONDS}, {SCOPE_DEADLINE_MAX_SECONDS}]"
         )
     return value
 
