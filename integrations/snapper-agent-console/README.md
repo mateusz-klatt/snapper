@@ -94,8 +94,9 @@ and `licenses/PROVENANCE.md`):
 - **Redistribution permitted with notices**: Codex CLI (Apache-2.0, and its
   upstream NOTICE travels with it in `licenses/codex-cli-NOTICE`), Node.js
   (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`).
-  Kimi's upstream (`MoonshotAI/kimi-cli`) is Apache-2.0, but binary 0.38.0
-  has no matching public tag, so its grant is treated as unconfirmed.
+  Kimi CLI is Apache-2.0 with its source state publicly mapped: the shipped
+  binary's version corresponds to upstream tag `0.38`, whose licence text is
+  bit-identical to the vendored one.
 - **Conditional**: Copilot CLI — the GitHub Copilot CLI License permits
   unmodified copies only as part of an application or service and prohibits
   standalone distribution.

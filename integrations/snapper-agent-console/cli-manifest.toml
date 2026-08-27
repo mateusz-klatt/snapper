@@ -50,7 +50,7 @@ sha256_kind = "vendor"
 install = "/usr/local/bin/kimi"
 disable_update = "none needed (no self-update); KIMI_NO_MODIFY_PATH=1"
 runtime_note = "entrypoint seeds ~/.kimi-code/region=global (code.kimi.com script would write mainland-cn)"
-license_note = "upstream MoonshotAI/kimi-cli is Apache-2.0 (text vendored in licenses/), but binary 0.38.0 has no matching public tag - redistribution grant unconfirmed"
+license_note = "Apache-2.0; upstream tag 0.38 (commit 83579fd3) matches the shipped binary version, licence text vendored in licenses/ and digest-pinned"
 
 [antigravity-agy]
 version = "1.1.21-6424454201475072"

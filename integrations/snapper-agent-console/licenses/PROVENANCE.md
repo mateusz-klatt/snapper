@@ -32,7 +32,7 @@ every digest against the committed file.
 | `libcap-2.75-License` | `libcap` @ tag `libcap-2.75` `/License` — dual `BSD-3-Clause OR GPL-2.0-only` in one upstream file, both texts inside. Double-pinned: bit-identical to `libcap-2.75/License` inside `https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.75.tar.xz`, whose own digest `de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632` matches the pin in `openai/codex` @ `rust-v0.150.0` `/.github/scripts/install-musl-build-tools.sh` (verified: same digest via `https://git.kernel.org/pub/scm/libs/libcap/libcap.git/plain/License?h=libcap-2.75`) | `68467e731f4744bd6e0bb69e8df9c3a994e09cd6b203d0c41327ac6d079c581d` |
 | `zsh-5.9.0.3-test-LICENCE` | `zsh-users/zsh` @ commit `77045ef899e53b9598bebc5a41db93a548a40ca6` `/LICENCE` — the exact source commit the codex zsh asset is built from (see below); bit-identical to the same file at tag `zsh-5.9.0.3-test` (verified: same digest) | `d06fdf3ef9b1ec69d6b9e170b0a9516fbad3523261ff1668bde3bfea6e0ef5f5` |
 | `ratatui-0.30.2-LICENSE` | `ratatui/ratatui` @ `ratatui-v0.30.2` `/LICENSE` (MIT) | `50eb43e8d742c9c61a9391e42b2184fce54dbd1893a1bb1c85b8c9ee217ab1f5` |
-| `kimi-cli-LICENSE` | `MoonshotAI/kimi-cli` @ commit `c4f2102a51448f5041caa445c8a804d97279debe` `/LICENSE` (Apache-2.0) | `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` |
+| `kimi-cli-LICENSE` | `MoonshotAI/kimi-cli` @ tag **`0.38`** (peels to commit `83579fd33d4c3bb136be1f0373e574697b91e3d3`) `/LICENSE` (Apache-2.0) — the tag matching the shipped binary's reported version; bit-identical to the same file at commit `c4f2102a51448f5041caa445c8a804d97279debe` (verified: same digest) | `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` |
 
 ## The zsh helper is a PATCHED codex asset, not a stock zsh build
 
@@ -64,11 +64,17 @@ commit + patch + workflow triple, not from a release tag of stock zsh.
   build of the tree vendored at
   `https://github.com/openai/codex/tree/rust-v0.150.0/codex-rs/vendor/bubblewrap`.
   That pinned tree is the corresponding source.
-- **kimi-cli**: the shipped binary reports 0.38.0, a version with no matching
-  public tag in `MoonshotAI/kimi-cli` (releases there are numbered 1.x). The
-  upstream project is Apache-2.0 (text pinned to the commit above), but the
-  exact source state of binary 0.38.0 is not publicly mapped; treat the
-  binary's redistribution grant as unconfirmed. The image stays private
-  regardless (see README "Never publish this image").
+- **kimi-cli — a SECOND CORRECTED claim.** Earlier revisions stated that the
+  shipped 0.38.0 binary had "no matching public tag" and that its
+  redistribution grant was therefore unconfirmed. That was WRONG, and it was
+  wrong for a mundane reason worth recording: the tag is named `0.38`, and the
+  probes behind the claim only tried `0.38.0`, `v0.38.0` and
+  `kimi-code-0.38.0`, plus a tag listing that was not paginated to the end.
+  Exhaustive enumeration (146 tags across 5 pages) finds `0.38`, whose
+  `/LICENSE` returns 200 and is bit-identical to the vendored text. The
+  upstream source state IS publicly mapped and the Apache-2.0 grant applies.
+  Lesson for the next absence claim in this file: enumerate exhaustively and
+  exhaust the plausible NAMING FORMS before recording "does not exist" — a
+  probe of three guessed spellings is not a search.
 - **node LICENSE** is copied in the Dockerfile from the `node:26-slim` image
   itself (the artifact carries its own text), not from this directory.
