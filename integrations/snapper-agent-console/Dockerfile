@@ -107,9 +107,37 @@ RUN curl -fsSL --proto '=https' --tlsv1.2 "https://x.ai/cli/grok-${GROK_VERSION}
     && echo "${GROK_SHA256}  /usr/local/bin/grok" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/grok
 
+# Pin the inherited base to THIS checkout. BASE_IMAGE is a mutable tag, and the
+# console's own tests exercise the working tree's pid1 — so a base built from an
+# older delegate would let every test pass while the image shipped different
+# code. This stage refuses that: the module set must match (registration.py is
+# excluded from the context exactly as the blackbox build excludes it) and every
+# module must be byte-identical. Runtime depends on the digest manifest this
+# produces, so the check cannot be skipped, and the delegate sources never enter
+# a runtime layer.
+FROM base AS lineage
+COPY snapper-delegate/src/snapper_delegate /tmp/expected-delegate
+RUN set -eu; \
+    shipped="$(cd /app/src/snapper_delegate && ls *.py | sort | tr '\n' ' ')"; \
+    expected="$(cd /tmp/expected-delegate && ls *.py | sort | tr '\n' ' ')"; \
+    if [ "$shipped" != "$expected" ]; then \
+        echo "agent-console: BASE_IMAGE delegate module set [$shipped] does not match this checkout [$expected]" >&2; \
+        exit 1; \
+    fi; \
+    for module in /app/src/snapper_delegate/*.py; do \
+        if ! cmp -s "$module" "/tmp/expected-delegate/$(basename "$module")"; then \
+            echo "agent-console: BASE_IMAGE carries a different $(basename "$module") than this checkout — rebuild snapper-delegate:blackbox first" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    mkdir -p /out; \
+    (cd /app/src/snapper_delegate && sha256sum *.py) > /out/delegate-lineage.sha256; \
+    rm -rf /tmp/expected-delegate
+
 FROM base AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=lineage /out/delegate-lineage.sha256 /usr/local/share/agent-console/delegate-lineage.sha256
 COPY --from=cli-claude /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=cli-codex /usr/local/lib/codex /usr/local/lib/codex
 RUN ln -s /usr/local/lib/codex/bin/codex /usr/local/bin/codex
@@ -125,10 +153,12 @@ COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
 COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
-# License texts are vendored in the repo (licenses/PROVENANCE.md records the
-# pinned source ref and SHA-256 of every file; versions were read from the
-# bundled binaries, not assumed from tags) so this layer needs no network and
+# License texts are vendored in the repo so this layer needs no network and
 # can never substitute a synthetic fallback for a fetch failure.
+# licenses/PROVENANCE.md records the pinned source ref and SHA-256 of every
+# text, and states the version evidence PER COMPONENT: rg and zsh report their
+# versions from the binary, bwrap's is inferred from the vendored meson source,
+# ratatui's comes from the Cargo.lock.
 COPY snapper-agent-console/licenses /usr/local/share/licenses/vendored
 COPY snapper-agent-console/codex-requirements.toml /etc/codex/requirements.toml
 COPY snapper-agent-console/snapper-mcp-wrapper.sh /usr/local/bin/snapper-mcp

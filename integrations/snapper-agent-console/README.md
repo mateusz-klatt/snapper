@@ -21,6 +21,14 @@ agent) at a PTY.
 - `Dockerfile` — one fetch stage per CLI so a version bump invalidates only
   its own layer; every artifact is checksum-verified against
   `cli-manifest.toml` and no vendor install.sh executes during the build.
+  A `lineage` stage pins the inherited base to the working tree: `BASE_IMAGE`
+  is a mutable tag, so a stale `snapper-delegate:blackbox` would let the
+  console's pid1 tests pass against code the image does not actually ship.
+  The stage compares the delegate module set and every module byte-for-byte
+  and fails the build with a named remedy if they diverge; the runtime stage
+  depends on the digest manifest it emits (`/usr/local/share/agent-console/
+  delegate-lineage.sha256`), so the check cannot be skipped, and no delegate
+  source enters a runtime layer.
 - `cli-manifest.toml` — the lock manifest: exact version, resolved artifact
   URL, checksum (vendor-published, or TOFU-frozen for cursor and grok whose
   vendors publish none), install path, update switch-off, notes.
@@ -83,7 +91,8 @@ The built image embeds vendor CLI binaries with mixed redistribution terms
 (verified against each vendor's published license, see `cli-manifest.toml`
 and `licenses/PROVENANCE.md`):
 
-- **Redistribution permitted with notices**: Codex CLI (Apache-2.0), Node.js
+- **Redistribution permitted with notices**: Codex CLI (Apache-2.0, and its
+  upstream NOTICE travels with it in `licenses/codex-cli-NOTICE`), Node.js
   (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`).
   Kimi's upstream (`MoonshotAI/kimi-cli`) is Apache-2.0, but binary 0.38.0
   has no matching public tag, so its grant is treated as unconfirmed.
@@ -96,6 +105,13 @@ and `licenses/PROVENANCE.md`):
 The last group alone forces the conclusion: the image is local/private-registry
 only; the recipe (this directory, including the vendored license texts) is
 what may be shared.
+
+Note that "Codex CLI is Apache-2.0" understates what its package contains: the
+sandbox helper `bwrap` is three layers — an Apache-2.0 Rust crate whose
+`build.rs` embeds bubblewrap's **LGPL-2.0-or-later** C and statically links
+**libcap (BSD-3-Clause OR GPL-2.0-only)**. The copyleft layers are exactly why
+`licenses/PROVENANCE.md` pins the corresponding source (the vendored tree) and
+the exact libcap tarball rather than only naming a license.
 
 ## Delegate mode
 

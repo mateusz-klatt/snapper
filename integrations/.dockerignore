@@ -4,6 +4,9 @@
 !snapper-agent-console/entrypoint.sh
 !snapper-agent-console/licenses/
 !snapper-agent-console/codex-requirements.toml
+!snapper-delegate/src/snapper_delegate/
+snapper-delegate/src/snapper_delegate/registration.py
+snapper-delegate/src/snapper_delegate/**/__pycache__/
 !snapper-mcp/src/
 !snapper-mcp/package.json
 !snapper-mcp/package-lock.json
