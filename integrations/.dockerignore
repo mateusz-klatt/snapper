@@ -7,6 +7,11 @@
 !snapper-delegate/src/snapper_delegate/
 snapper-delegate/src/snapper_delegate/registration.py
 snapper-delegate/src/snapper_delegate/**/__pycache__/
+# The lineage stage compares BASE_IMAGE against the base build inputs, so the
+# lock and the base recipe have to reach the console build context too. Both
+# are read-only inputs to that stage and never enter a runtime layer.
+!snapper-delegate/requirements.lock
+!snapper-delegate/Dockerfile
 !snapper-mcp/src/
 !snapper-mcp/package.json
 !snapper-mcp/package-lock.json

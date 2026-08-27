@@ -50,7 +50,7 @@ sha256_kind = "vendor"
 install = "/usr/local/bin/kimi"
 disable_update = "none needed (no self-update); KIMI_NO_MODIFY_PATH=1"
 runtime_note = "entrypoint seeds ~/.kimi-code/region=global (code.kimi.com script would write mainland-cn)"
-license_note = "Apache-2.0; upstream tag 0.38 (commit 83579fd3) matches the shipped binary version, licence text vendored in licenses/ and digest-pinned"
+license_note = "redistribution grant UNCONFIRMED: no licence found for this exact artifact. The binary is a Node.js bundle (measured); the similarly-numbered MoonshotAI/kimi-cli tag 0.38 is the separate legacy Python project, not this one"
 
 [antigravity-agy]
 version = "1.1.21-6424454201475072"

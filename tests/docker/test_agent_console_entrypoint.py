@@ -9,24 +9,49 @@ load, a TOML rewriter, or silently editing a licensed text fails these pins.
 
 The token blacklists below are a cheap first line only; they are trivially
 bypassed by renaming a helper or by assembling the codex user-config path from
-fragments. The authoritative pin is therefore behavioural: the real
-``entrypoint.sh`` is executed against a throwaway ``$HOME`` and a fake ``PATH``
-whose ``python``/``sleep`` shims append one audit row per invocation to a
-registry file (a file, not a pipe, because the script ``exec``s and so replaces
-itself). Byte-comparing the codex user config across that run kills any
-rewriter regardless of what it is called or how it spells the path, and
-comparing the whole registry against an exact expected tuple kills any extra
-preflight process and any drift in the strict-mode flag.
+fragments. Two behavioural harnesses back them up. They prove different things,
+and neither claim may be stretched into the other.
+
+The PATH harness runs the real ``entrypoint.sh`` against a throwaway ``$HOME``
+and a fake ``PATH`` whose ``python``/``python3``/``sleep`` shims append one
+audit row per invocation to a registry file (a file, not a pipe, because the
+script ``exec``s and so replaces itself). What it proves is narrow but sharp:
+of the programs reached *through a PATH lookup under those three names*,
+exactly one runs, and it is the strict-flagged delegate. It is blind by
+construction to anything started by absolute path, such as
+``/usr/local/bin/python -c ...``, ``/bin/true``, or ``/bin/sh -c ...``, so on
+its own it cannot support a claim about the exact process list.
+
+The strace harness closes exactly that hole. It runs the same script under
+``strace -f -e trace=execve`` with the transcript written to a file (again
+because the script ``exec``s), follows every descendant, and compares the
+*complete* list of successfully executed programs, resolved path plus argv,
+against an exact expected tuple. Since ``execve`` is the only way a POSIX
+process can start a program, an absolute-path preflight is recorded there
+whether or not PATH was consulted and whether it runs before, between, or after
+the mode branches.
+
+Neither harness sees work that never reaches ``execve``: a rewriter written
+purely with shell builtins and a redirection performs no exec at all. That case
+is covered instead by byte-comparing the codex user config across every run,
+which both harnesses assert and which is indifferent to how the write was
+spelled. Neither harness observes the image; they pin the script's behaviour
+under the host ``/bin/sh``, and the Dockerfile pins are what tie that script to
+the image.
 """
 
 import hashlib
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+
+import pytest
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
 _CONSOLE_DIR: Final[Path] = _REPO_ROOT / "integrations" / "snapper-agent-console"
@@ -53,8 +78,25 @@ _STRICT_BLOCK: Final[str] = (
 )
 
 _SYSTEM_PATH: Final[str] = "/usr/local/bin:/usr/bin:/bin"
+_SHELL: Final[str] = "/bin/sh"
 _SHIMMED_PROGRAMS: Final[tuple[str, ...]] = ("python", "python3", "sleep")
+_KIMI_STATE_RELATIVE: Final[str] = ".kimi-code"
 _RUN_TIMEOUT_SECONDS: Final[float] = 15.0
+_STRACE_PATH: Final[str | None] = shutil.which("strace")
+_TRACE_STRING_LIMIT: Final[str] = "4096"
+_EXECVE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r'^(?:\d+\s+)?execve\("(?P<path>[^"]*)", \[(?P<argv>.*)\], 0x[0-9a-f]+[^)]*\) = 0$',
+    re.MULTILINE,
+)
+_TRACE_STRING_PATTERN: Final[re.Pattern[str]] = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_TRACE_ESCAPE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\\(.)")
+_TRACE_ESCAPES: Final[dict[str, str]] = {
+    "\\": "\\",
+    '"': '"',
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
 _USER_CONFIG_RELATIVE: Final[str] = ".codex/config.toml"
 _USER_CONFIG_TEXT: Final[str] = '''check_for_update_on_startup = true
 
@@ -90,6 +132,38 @@ class _HarnessRun:
     config_after: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _Execution:
+    """One program the kernel actually started, as reported by ``execve``."""
+
+    program: str
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Sandbox:
+    """The throwaway HOME, shim directory, and PATH one entrypoint run uses."""
+
+    home: Path
+    user_config: Path
+    config_before: bytes
+    shim_dir: Path
+    registry: Path
+    search_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TracedRun:
+    """The observable outcome of executing the entrypoint under strace."""
+
+    returncode: int
+    executions: tuple[_Execution, ...]
+    trace_text: str
+    sandbox: _Sandbox
+    config_before: bytes
+    config_after: bytes
+
+
 def _recorder_source(registry: Path) -> str:
     """Build a shim that appends one tab-separated audit row and exits cleanly.
 
@@ -116,20 +190,19 @@ def _parse_invocation(row: str) -> _Invocation:
     )
 
 
-def _run_entrypoint(script: Path, workspace: Path, console_mode: str | None) -> _HarnessRun:
-    """Execute one entrypoint script against an isolated HOME and shimmed PATH.
+def _build_sandbox(workspace: Path) -> _Sandbox:
+    """Plant a throwaway HOME, a codex user config, and the recording shims.
 
-    A non-trivial codex user config is planted and snapshotted first, then the
-    script runs with only HOME, PATH, and the optional console mode in its
-    environment. Shims for ``python``/``python3``/``sleep`` sit ahead of the
-    system path so every exec target is recorded and returns immediately,
-    which keeps the idle branch deterministic instead of racing a timeout.
+    A non-trivial codex user config is written and snapshotted so any rewriter
+    shows up as a byte difference. Shims for ``python``/``python3``/``sleep``
+    sit ahead of the system path so those exec targets are recorded and return
+    immediately, which keeps the idle branch deterministic instead of racing a
+    timeout.
     """
     home = workspace / "home"
     user_config = home / _USER_CONFIG_RELATIVE
     user_config.parent.mkdir(parents=True)
     user_config.write_text(_USER_CONFIG_TEXT, encoding="utf-8")
-    config_before = user_config.read_bytes()
 
     shim_dir = workspace / "shims"
     shim_dir.mkdir()
@@ -141,12 +214,49 @@ def _run_entrypoint(script: Path, workspace: Path, console_mode: str | None) -> 
         shim.write_text(source, encoding="utf-8")
         shim.chmod(0o755)
 
-    environment = {"HOME": str(home), "PATH": f"{shim_dir}:{_SYSTEM_PATH}"}
+    return _Sandbox(
+        home=home,
+        user_config=user_config,
+        config_before=user_config.read_bytes(),
+        shim_dir=shim_dir,
+        registry=registry,
+        search_path=f"{shim_dir}:{_SYSTEM_PATH}",
+    )
+
+
+def _sandbox_environment(sandbox: _Sandbox, console_mode: str | None) -> dict[str, str]:
+    """Build the entire environment the traced script is allowed to observe."""
+    environment = {"HOME": str(sandbox.home), "PATH": sandbox.search_path}
     if console_mode is not None:
         environment["AGENT_CONSOLE_MODE"] = console_mode
+    return environment
+
+
+def _resolve_on_path(program: str, sandbox: _Sandbox) -> str:
+    """Resolve a program the way the sandboxed shell resolves it.
+
+    Expected executions name absolute paths because that is what ``execve``
+    reports, and the absolute path of a system tool such as ``mkdir`` differs
+    between distributions. Resolving through the sandbox PATH keeps the pin
+    exact without hard-coding one host's layout.
+    """
+    located = shutil.which(program, path=sandbox.search_path)
+    assert located is not None, f"{program} is not reachable on the sandbox PATH"
+    return located
+
+
+def _run_entrypoint(script: Path, workspace: Path, console_mode: str | None) -> _HarnessRun:
+    """Execute one entrypoint script against an isolated HOME and shimmed PATH.
+
+    Only programs found by a PATH lookup under a shimmed name are recorded, so
+    this run answers "which of python/python3/sleep ran, with what argv"; it
+    deliberately does not answer "which processes ran". The strace runner below
+    answers the second question.
+    """
+    sandbox = _build_sandbox(workspace)
     completed = subprocess.run(
-        ["/bin/sh", str(script)],
-        env=environment,
+        [_SHELL, str(script)],
+        env=_sandbox_environment(sandbox, console_mode),
         capture_output=True,
         text=True,
         timeout=_RUN_TIMEOUT_SECONDS,
@@ -156,11 +266,168 @@ def _run_entrypoint(script: Path, workspace: Path, console_mode: str | None) -> 
         returncode=completed.returncode,
         invocations=tuple(
             _parse_invocation(row)
-            for row in registry.read_text(encoding="utf-8").splitlines()
+            for row in sandbox.registry.read_text(encoding="utf-8").splitlines()
             if row
         ),
-        config_before=config_before,
-        config_after=user_config.read_bytes(),
+        config_before=sandbox.config_before,
+        config_after=sandbox.user_config.read_bytes(),
+    )
+
+
+def _unescape_trace_string(text: str) -> str:
+    """Undo the C-style quoting strace applies to the strings it prints.
+
+    Only the escapes an argv can realistically carry are decoded; anything else
+    is left verbatim rather than guessed at. Expected values contain no escapes
+    at all, so this decoding is the identity on them and cannot loosen a
+    comparison, but it keeps a quoted mutant argv readable in the diff that
+    reports it.
+    """
+    return _TRACE_ESCAPE_PATTERN.sub(
+        lambda match: _TRACE_ESCAPES.get(match.group(1), match.group(0)),
+        text,
+    )
+
+
+def _parse_executions(trace_text: str) -> tuple[_Execution, ...]:
+    """Extract every program the kernel actually started from an strace log.
+
+    Only records ending in ``= 0`` are kept, because a failed ``execve`` starts
+    no program; counting those would report the shell's PATH probing rather
+    than the script's behaviour. Nothing else is dropped. In particular the
+    shims are ``#!/bin/sh`` scripts, yet on Linux the kernel's script handling
+    is transparent to ``execve``, so running one costs a single record naming
+    the shim and no separate interpreter record. Verified on this host: a shim
+    run appears once, as its own path. A ``/bin/sh`` record is therefore always
+    a real shell start, never shim overhead, and is matched by argv rather than
+    by program path so that an absolute ``/bin/sh -c ...`` preflight stays
+    distinguishable from the harness starting the script.
+
+    Tracing ``execve`` alone is enough even though Linux also offers
+    ``execveat``: reaching the second syscall requires a process that is
+    already running, and that process can only have been started by an
+    ``execve`` recorded here.
+    """
+    return tuple(
+        _Execution(
+            program=_unescape_trace_string(match.group("path")),
+            argv=tuple(
+                _unescape_trace_string(argument)
+                for argument in _TRACE_STRING_PATTERN.findall(match.group("argv"))
+            ),
+        )
+        for match in _EXECVE_PATTERN.finditer(trace_text)
+    )
+
+
+def _trace_completeness_defects(trace_text: str) -> tuple[str, ...]:
+    """Name strace artefacts that would drop or shorten a record unnoticed.
+
+    An interleaved syscall is split across an ``<unfinished ...>`` and a
+    ``<... resumed>`` line, and an over-long string or argument array is cut
+    with an ellipsis. Either would let a record parse as absent or as different
+    from what really ran, so the tests refuse to draw conclusions from a
+    transcript containing them instead of silently under-reporting.
+    """
+    defects = []
+    if "<unfinished" in trace_text:
+        defects.append("interleaved syscall lines")
+    if "..." in trace_text:
+        defects.append("truncated strings or argument arrays")
+    return tuple(defects)
+
+
+def _probe_strace_support() -> str:
+    """Return an empty string when strace can trace a child here, else why not.
+
+    Presence of the binary is not enough: a hardened ``ptrace_scope``, a
+    missing capability, or a container without ``CAP_SYS_PTRACE`` makes strace
+    start and then report nothing. The probe therefore traces ``/bin/true`` and
+    insists on a parsed record, so an environment where the harness would
+    measure nothing produces a loud skip rather than a green test.
+    """
+    if _STRACE_PATH is None:
+        return "strace is not installed on this host"
+    with tempfile.TemporaryDirectory() as scratch:
+        trace_file = Path(scratch) / "probe.trace"
+        try:
+            probe = subprocess.run(
+                [_STRACE_PATH, "-f", "-e", "trace=execve", "-o", str(trace_file), "/bin/true"],
+                capture_output=True,
+                text=True,
+                timeout=_RUN_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return f"strace could not be started: {error}"
+        if probe.returncode != 0:
+            return f"strace exited {probe.returncode}: {probe.stderr.strip()}"
+        if not _parse_executions(trace_file.read_text(encoding="utf-8")):
+            return "strace recorded no execve; ptrace is restricted in this environment"
+    return ""
+
+
+_STRACE_SKIP_REASON: Final[str] = _probe_strace_support()
+
+
+def _run_traced_entrypoint(script: Path, workspace: Path, console_mode: str | None) -> _TracedRun:
+    """Execute one entrypoint script under ``strace -f -e trace=execve``.
+
+    The sandbox is the PATH harness's sandbox, so both runners observe the same
+    HOME, the same planted codex config, and the same shimmed PATH. ``-f``
+    follows children, which is required because the script forks for
+    ``seed_kimi_region`` and then ``exec``s itself. The transcript goes to a
+    file rather than a pipe for the same reason the registry does: the traced
+    process replaces itself, and buffered pipe output could lose the tail.
+    """
+    assert _STRACE_PATH is not None, _STRACE_SKIP_REASON
+    sandbox = _build_sandbox(workspace)
+    trace_file = workspace / "execve.trace"
+    completed = subprocess.run(
+        [
+            _STRACE_PATH,
+            "-f",
+            "-s",
+            _TRACE_STRING_LIMIT,
+            "-e",
+            "trace=execve",
+            "-o",
+            str(trace_file),
+            _SHELL,
+            str(script),
+        ],
+        env=_sandbox_environment(sandbox, console_mode),
+        capture_output=True,
+        text=True,
+        timeout=_RUN_TIMEOUT_SECONDS,
+        check=False,
+    )
+    trace_text = trace_file.read_text(encoding="utf-8")
+    return _TracedRun(
+        returncode=completed.returncode,
+        executions=_parse_executions(trace_text),
+        trace_text=trace_text,
+        sandbox=sandbox,
+        config_before=sandbox.config_before,
+        config_after=sandbox.user_config.read_bytes(),
+    )
+
+
+def _expected_prologue(sandbox: _Sandbox, script: Path) -> tuple[_Execution, ...]:
+    """List the executions every entrypoint run performs before its branch.
+
+    The first is the harness starting the script under ``/bin/sh``, which is
+    apparatus but is pinned rather than filtered so that a second shell start
+    cannot hide behind it. The second is ``seed_kimi_region`` creating the kimi
+    state directory: that is genuine entrypoint behaviour, so it belongs in the
+    expected list rather than in a filter.
+    """
+    return (
+        _Execution(program=_SHELL, argv=(_SHELL, str(script))),
+        _Execution(
+            program=_resolve_on_path("mkdir", sandbox),
+            argv=("mkdir", "-p", str(sandbox.home / _KIMI_STATE_RELATIVE)),
+        ),
     )
 
 
@@ -210,6 +477,55 @@ def test_idle_mode_never_invokes_python_and_never_rewrites_user_config(tmp_path:
         ),
     )
     assert all(invocation.program not in {"python", "python3"} for invocation in run.invocations)
+
+
+@pytest.mark.skipif(bool(_STRACE_SKIP_REASON), reason=_STRACE_SKIP_REASON or "strace is usable")
+def test_delegate_mode_execve_trace_holds_no_preflight_by_any_path(tmp_path: Path) -> None:
+    """Every program delegate mode starts is accounted for, PATH or not.
+
+    Given: The committed entrypoint, an isolated HOME holding a non-trivial
+        codex user config, and strace following every descendant's execve,
+    When: The script is executed with AGENT_CONSOLE_MODE=delegate,
+    Then: The complete list of started programs is exactly the shell that runs
+        the script, the kimi state mkdir, and the strict-flagged delegate exec,
+        and the user config is byte-identical, so a preflight invoked by
+        absolute path such as `/usr/local/bin/python -c ...`, `/bin/true`, or
+        `/bin/sh -c ...` is recorded as a surplus entry and fails here even
+        though a PATH-shim registry could never see it.
+    """
+    run = _run_traced_entrypoint(_ENTRYPOINT, tmp_path, "delegate")
+    assert _trace_completeness_defects(run.trace_text) == ()
+    assert run.returncode == 0
+    assert run.config_after == run.config_before
+    assert run.executions == (
+        *_expected_prologue(run.sandbox, _ENTRYPOINT),
+        _Execution(
+            program=str(run.sandbox.shim_dir / "python"),
+            argv=("python", "-m", "snapper_delegate.pid1"),
+        ),
+    )
+
+
+@pytest.mark.skipif(bool(_STRACE_SKIP_REASON), reason=_STRACE_SKIP_REASON or "strace is usable")
+def test_idle_mode_execve_trace_holds_no_interpreter_by_any_path(tmp_path: Path) -> None:
+    """Every program idle mode starts is accounted for, PATH or not.
+
+    Given: The committed entrypoint, an isolated HOME holding a non-trivial
+        codex user config, and strace following every descendant's execve,
+    When: The script is executed with AGENT_CONSOLE_MODE unset,
+    Then: The complete list of started programs is exactly the shell that runs
+        the script, the kimi state mkdir, and the parking sleep, and the user
+        config is byte-identical, so the idle branch cannot smuggle an
+        interpreter in under an absolute path either.
+    """
+    run = _run_traced_entrypoint(_ENTRYPOINT, tmp_path, None)
+    assert _trace_completeness_defects(run.trace_text) == ()
+    assert run.returncode == 0
+    assert run.config_after == run.config_before
+    assert run.executions == (
+        *_expected_prologue(run.sandbox, _ENTRYPOINT),
+        _Execution(program=str(run.sandbox.shim_dir / "sleep"), argv=("sleep", "infinity")),
+    )
 
 
 def test_delegate_mode_maps_to_exactly_one_strict_pid1_exec() -> None:

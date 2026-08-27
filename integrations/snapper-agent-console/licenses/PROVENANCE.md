@@ -32,7 +32,7 @@ every digest against the committed file.
 | `libcap-2.75-License` | `libcap` @ tag `libcap-2.75` `/License` — dual `BSD-3-Clause OR GPL-2.0-only` in one upstream file, both texts inside. Double-pinned: bit-identical to `libcap-2.75/License` inside `https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.75.tar.xz`, whose own digest `de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632` matches the pin in `openai/codex` @ `rust-v0.150.0` `/.github/scripts/install-musl-build-tools.sh` (verified: same digest via `https://git.kernel.org/pub/scm/libs/libcap/libcap.git/plain/License?h=libcap-2.75`) | `68467e731f4744bd6e0bb69e8df9c3a994e09cd6b203d0c41327ac6d079c581d` |
 | `zsh-5.9.0.3-test-LICENCE` | `zsh-users/zsh` @ commit `77045ef899e53b9598bebc5a41db93a548a40ca6` `/LICENCE` — the exact source commit the codex zsh asset is built from (see below); bit-identical to the same file at tag `zsh-5.9.0.3-test` (verified: same digest) | `d06fdf3ef9b1ec69d6b9e170b0a9516fbad3523261ff1668bde3bfea6e0ef5f5` |
 | `ratatui-0.30.2-LICENSE` | `ratatui/ratatui` @ `ratatui-v0.30.2` `/LICENSE` (MIT) | `50eb43e8d742c9c61a9391e42b2184fce54dbd1893a1bb1c85b8c9ee217ab1f5` |
-| `kimi-cli-LICENSE` | `MoonshotAI/kimi-cli` @ tag **`0.38`** (peels to commit `83579fd33d4c3bb136be1f0373e574697b91e3d3`) `/LICENSE` (Apache-2.0) — the tag matching the shipped binary's reported version; bit-identical to the same file at commit `c4f2102a51448f5041caa445c8a804d97279debe` (verified: same digest) | `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` |
+| `kimi-cli-LICENSE` | `MoonshotAI/kimi-cli` @ commit `c4f2102a51448f5041caa445c8a804d97279debe` `/LICENSE` (Apache-2.0) — the licence of the **legacy Python `kimi-cli` project**, which is NOT the artifact this image ships; kept as the closest available upstream text, NOT as a grant for the shipped binary (see caveat) | `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` |
 
 ## The zsh helper is a PATCHED codex asset, not a stock zsh build
 
@@ -64,17 +64,32 @@ commit + patch + workflow triple, not from a release tag of stock zsh.
   build of the tree vendored at
   `https://github.com/openai/codex/tree/rust-v0.150.0/codex-rs/vendor/bubblewrap`.
   That pinned tree is the corresponding source.
-- **kimi-cli — a SECOND CORRECTED claim.** Earlier revisions stated that the
-  shipped 0.38.0 binary had "no matching public tag" and that its
-  redistribution grant was therefore unconfirmed. That was WRONG, and it was
-  wrong for a mundane reason worth recording: the tag is named `0.38`, and the
-  probes behind the claim only tried `0.38.0`, `v0.38.0` and
-  `kimi-code-0.38.0`, plus a tag listing that was not paginated to the end.
-  Exhaustive enumeration (146 tags across 5 pages) finds `0.38`, whose
-  `/LICENSE` returns 200 and is bit-identical to the vendored text. The
-  upstream source state IS publicly mapped and the Apache-2.0 grant applies.
-  Lesson for the next absence claim in this file: enumerate exhaustively and
-  exhaust the plausible NAMING FORMS before recording "does not exist" — a
-  probe of three guessed spellings is not a search.
+- **kimi — TWO corrections, and the second reversed the first.** The history is
+  worth keeping in full, because both errors were about the same claim.
+  (a) v10-v12 stated the shipped 0.38.0 binary had "no matching public tag".
+  The probes behind that tried three guessed spellings (`0.38.0`, `v0.38.0`,
+  `kimi-code-0.38.0`) against an unpaginated listing; exhaustive enumeration
+  (146 tags over 5 pages) does find a tag named `0.38`, so the claim as
+  written was false.
+  (b) v13 then mapped that tag to our binary — and THAT was also wrong, for a
+  deeper reason: `MoonshotAI/kimi-cli` @ `0.38` is the **legacy Python**
+  project (`pyproject.toml`: name `kimi-cli`, `requires-python >=3.13`, module
+  `kimi_cli`), whereas this image downloads **Kimi Code CLI** from
+  `code.kimi.ai`, a separate product that upstream documents as a migration
+  away from the Python tool. Matching version numbers do not make them the
+  same artifact.
+  **Measured on the shipped binary** (182 MB ELF at `/usr/local/bin/kimi`):
+  9587 occurrences of `node`, 11 of `NODE_MODULE`, 83 of `v8::`, 248 of
+  `kimi-code`; and **zero** of `Py_Initialize`, `PyInstaller` and `_MEIPASS`.
+  It is a Node.js bundle, not a PyInstaller build of the Python project.
+  **Therefore: no licence has been located for the exact artifact this image
+  ships, and its redistribution grant is UNCONFIRMED.** The vendored text is
+  the legacy project's Apache-2.0 licence, retained as the closest upstream
+  material and explicitly NOT as a grant for the binary. The image stays
+  private regardless (see README "Never publish this image").
+  Lesson, distinct from the one in (a): finding *a* plausible source is not
+  provenance. The question is never "does a matching version exist somewhere"
+  but "is THIS artifact the output of THAT source" — and here the binary
+  itself answered it.
 - **node LICENSE** is copied in the Dockerfile from the `node:26-slim` image
   itself (the artifact carries its own text), not from this directory.
