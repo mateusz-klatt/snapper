@@ -1,0 +1,9 @@
+# Managed Codex policy baked into the image at /etc/codex/requirements.toml.
+# Codex CLI treats this file as an administrator requirement layered above the
+# user's ~/.codex/config.toml: with the root key below, a user config that sets
+# check_for_update_on_startup = true still resolves to an effective false, and
+# `codex doctor` reports the override ("startup update check: false").
+# Verified on the exact pinned codex-cli 0.150.0 inside this image, in both
+# directions (with this file: effective false; without it: effective true).
+# The user config is never read, rewritten, or touched by the entrypoint.
+check_for_update_on_startup = false

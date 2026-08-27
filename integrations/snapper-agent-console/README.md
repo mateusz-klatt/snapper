@@ -27,6 +27,16 @@ agent) at a PTY.
 - `compose.agent-console.yml` — profile-gated service: no ports, non-root,
   isolated home volume, PAT for `snapper-mcp` mounted read-only, worktree
   mounted explicitly.
+- `codex-requirements.toml` — baked to `/etc/codex/requirements.toml`: Codex's
+  managed-policy layer pins `check_for_update_on_startup = false` above any
+  user config (verified with `codex doctor` on the pinned 0.150.0: user
+  `true` still resolves to effective `false`). The entrypoint never reads or
+  rewrites the user's `~/.codex/config.toml`.
+- `licenses/` — vendored license texts for the bundled third-party components,
+  copied to `/usr/local/share/licenses/vendored`; `licenses/PROVENANCE.md`
+  records the pinned source ref and SHA-256 of every text, and
+  `licenses/THIRD-PARTY-INVENTORY.md` maps each binary in the codex package to
+  its component, version (read from the binary), and license text.
 
 ## Attach
 
@@ -67,28 +77,44 @@ compose does not make.
 
 ## Never publish this image
 
-The built image embeds vendor CLI binaries. Codex CLI is Apache-2.0
-(open source; redistribution permitted with notices) and Node.js is MIT, but
-Claude Code, Copilot, Kimi, agy, Cursor and Grok are proprietary and their
-licenses do not grant redistribution:
-the image is local/private-registry only; the recipe (this directory) is what
-may be shared. `snapper-mcp` is MIT and ships with its LICENSE at
-`/usr/local/lib/snapper-mcp/LICENSE`.
+The built image embeds vendor CLI binaries with mixed redistribution terms
+(verified against each vendor's published license, see `cli-manifest.toml`
+and `licenses/PROVENANCE.md`):
+
+- **Redistribution permitted with notices**: Codex CLI (Apache-2.0), Node.js
+  (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`).
+  Kimi's upstream (`MoonshotAI/kimi-cli`) is Apache-2.0, but binary 0.38.0
+  has no matching public tag, so its grant is treated as unconfirmed.
+- **Conditional**: Copilot CLI — the GitHub Copilot CLI License permits
+  unmodified copies only as part of an application or service and prohibits
+  standalone distribution.
+- **No redistribution grant found**: Claude Code, agy (Google), Cursor, and
+  Grok (no published license; xAI terms).
+
+The last group alone forces the conclusion: the image is local/private-registry
+only; the recipe (this directory, including the vendored license texts) is
+what may be shared.
 
 ## Delegate mode
 
-`AGENT_CONSOLE_MODE=delegate` execs `python -m snapper_delegate.pid1` instead
-of the idle PTY holder. That mode additionally needs the blackbox delegate's
-own configuration (`SNAPPER_DELEGATE_*` environment references and its
-`/run/secrets/delegate` files, exactly as the blackbox compose supplies them) —
-without those pid1 has nothing to connect to. Compose passes
-`AGENT_CONSOLE_MODE` through from the host environment, but the delegate
-secrets/network wiring intentionally lives with the blackbox deployment —
-copy it from there into an override file when enabling the mode; until then
-the entrypoint preflights the mode: with no `SNAPPER_DELEGATE_*` env and no
-`/run/secrets/delegate`, it logs CRITICAL and exits non-zero instead of
-idling as a fake-healthy delegate (under `restart: unless-stopped` that shows
-up as a visible restart loop, which is the point).
+`AGENT_CONSOLE_MODE=delegate` execs `python -m snapper_delegate.pid1` with
+`SNAPPER_PID1_STRICT=1` instead of the idle PTY holder. That mode additionally
+needs the blackbox delegate's own configuration (`SNAPPER_DELEGATE_*`
+environment references and its `/run/secrets/delegate` files, exactly as the
+blackbox compose supplies them) — without those pid1 has nothing to connect
+to. Compose passes `AGENT_CONSOLE_MODE` through from the host environment, but
+the delegate secrets/network wiring intentionally lives with the blackbox
+deployment — copy it from there into an override file when enabling the mode.
+
+Fail-closed is enforced by pid1 itself, not by a shell preflight: under
+strict startup the ONE canonical configuration load (the same
+`load_runner_configuration` call that produces the runner's parameters) logs
+CRITICAL and terminates the process with exit code 1 on any error. There is
+no separate validate-then-reload window, so mutating the bind-mounted secrets
+between a preflight and the real load cannot produce a fake-healthy idle
+delegate. Under `restart: unless-stopped` a misconfiguration shows up as a
+visible restart loop, which is the point. The blackbox deployment does not
+set the strict flag and keeps its documented signal-aware idle contract.
 
 ## Shared-home risk (accepted)
 

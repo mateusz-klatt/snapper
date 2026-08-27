@@ -7,6 +7,10 @@ credential file references are present and readable, and only then
 instantiates ``DelegateRunner``.
 Incomplete or malformed configuration stays alive in a signal-aware idle
 state so a profile-enabled canary fails closed without a restart loop.
+Deployments that must never idle as a fake-healthy delegate opt into strict
+startup by setting ``SNAPPER_PID1_STRICT=1``: the one canonical configuration
+load then terminates the process with a non-zero exit code on any error,
+leaving no window between validation and use for a separate preflight to miss.
 """
 
 import asyncio
@@ -72,6 +76,8 @@ _ORIGIN_HOST_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?"
 )
+_STRICT_STARTUP_ENV: Final[str] = "SNAPPER_PID1_STRICT"
+_STRICT_STARTUP_VALUE: Final[str] = "1"
 _CONFIG_ERROR_MESSAGE: Final[str] = "Runner-only delegate configuration is incomplete or invalid"
 _INVALID_ENDPOINT_ORIGIN: Final[str] = "invalid endpoint origin"
 _INVALID_SNAPPER_ORIGIN: Final[str] = "invalid Snapper origin"
@@ -298,15 +304,24 @@ async def _idle_unconfigured() -> None:
 
 
 async def run_pid1(environ: Mapping[str, str] | None = None) -> None:
-    """Run one configured delegate or remain safely idle.
+    """Run one configured delegate, remain safely idle, or exit under strict startup.
 
     Args:
         environ: Optional injected environment mapping for tests.
+
+    Raises:
+        RunnerOnlyConfigurationError: If the configuration is refused while
+            strict startup is requested via ``SNAPPER_PID1_STRICT=1``.
     """
     source = os.environ if environ is None else environ
     try:
         configuration = load_runner_configuration(source)
     except RunnerOnlyConfigurationError:
+        if source.get(_STRICT_STARTUP_ENV) == _STRICT_STARTUP_VALUE:
+            logger.critical(
+                "Runner-only delegate configuration is invalid under strict startup; exiting"
+            )
+            raise
         logger.info("Runner-only delegate is unconfigured and remains idle")
         await _idle_unconfigured()
         return
@@ -326,10 +341,14 @@ def main() -> int:
     """Run the runner-only delegate as the container's PID1.
 
     Returns:
-        Zero after a clean runner or unconfigured-idle shutdown.
+        Zero after a clean runner or unconfigured-idle shutdown, and one when
+        strict startup refuses the canonical configuration load.
     """
     _configure_file_logging(os.environ)
-    asyncio.run(run_pid1())
+    try:
+        asyncio.run(run_pid1())
+    except RunnerOnlyConfigurationError:
+        return 1
     return 0
 
 

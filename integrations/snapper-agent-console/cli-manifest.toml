@@ -28,8 +28,9 @@ artifact = "https://releases.openai.com/codex/releases/0.150.0/codex-package-x86
 sha256 = "2d27b8569ca760eeb2bf21fa12bd31f59ac42b81617b340cf8958e9b38d743d5"
 sha256_kind = "vendor"
 install = "/usr/local/lib/codex (package tree), symlink /usr/local/bin/codex"
-disable_update = "config.toml check_for_update_on_startup=false (seeded by entrypoint)"
-components = "codex + codex-code-mode-host + rg + bwrap + zsh (operator accepted multi-binary)"
+disable_update = "baked /etc/codex/requirements.toml check_for_update_on_startup=false (managed policy; user config never touched)"
+components = "codex + codex-code-mode-host + rg 15.2.0 + bwrap 0.11.2 (vendored codex build) + zsh 5.9.0.3-test (operator accepted multi-binary)"
+license_note = "Apache-2.0; helper licenses vendored in licenses/ with provenance"
 
 [copilot-cli]
 version = "1.0.80"
@@ -39,6 +40,7 @@ sha256_kind = "vendor"
 install = "/usr/local/bin/copilot"
 disable_update = "COPILOT_AUTO_UPDATE=false"
 runtime_note = "Node SEA: first run self-extracts ~218 MB into ~/.cache/copilot/pkg (home volume)"
+license_note = "GitHub Copilot CLI License: unmodified copies may ship as part of an application/service, standalone distribution prohibited"
 
 [kimi-code]
 version = "0.38.0"
@@ -48,6 +50,7 @@ sha256_kind = "vendor"
 install = "/usr/local/bin/kimi"
 disable_update = "none needed (no self-update); KIMI_NO_MODIFY_PATH=1"
 runtime_note = "entrypoint seeds ~/.kimi-code/region=global (code.kimi.com script would write mainland-cn)"
+license_note = "upstream MoonshotAI/kimi-cli is Apache-2.0 (text vendored in licenses/), but binary 0.38.0 has no matching public tag - redistribution grant unconfirmed"
 
 [antigravity-agy]
 version = "1.1.21-6424454201475072"

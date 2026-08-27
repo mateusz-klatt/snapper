@@ -125,39 +125,12 @@ COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
 COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
-RUN mkdir -p /usr/local/share/licenses/codex-cli /usr/local/share/licenses/ripgrep /usr/local/share/licenses/bubblewrap /usr/local/share/licenses/zsh \
-    && curl -fsSL --proto '=https' --tlsv1.2 \
-        "https://raw.githubusercontent.com/openai/codex/rust-v0.150.0/LICENSE" \
-        -o /usr/local/share/licenses/codex-cli/LICENSE \
-    && grep -q "Apache License" /usr/local/share/licenses/codex-cli/LICENSE \
-    && code=$(curl -sSL --proto '=https' --tlsv1.2 -w '%{http_code}' \
-        "https://raw.githubusercontent.com/openai/codex/rust-v0.150.0/NOTICE" \
-        -o /usr/local/share/licenses/codex-cli/NOTICE) \
-    && { [ "$code" = "200" ] \
-        || { [ "$code" = "404" ] && printf 'Upstream tag rust-v0.150.0 publishes no NOTICE file at the repo root (verified HTTP 404 at build time).\n' > /usr/local/share/licenses/codex-cli/NOTICE; }; } \
-    && curl -fsSL --proto '=https' --tlsv1.2 \
-        "https://raw.githubusercontent.com/BurntSushi/ripgrep/14.1.1/LICENSE-MIT" \
-        -o /usr/local/share/licenses/ripgrep/LICENSE-MIT \
-    && curl -fsSL --proto '=https' --tlsv1.2 \
-        "https://raw.githubusercontent.com/containers/bubblewrap/v0.11.0/COPYING" \
-        -o /usr/local/share/licenses/bubblewrap/COPYING \
-    && curl -fsSL --proto '=https' --tlsv1.2 \
-        "https://raw.githubusercontent.com/zsh-users/zsh/zsh-5.9/LICENCE" \
-        -o /usr/local/share/licenses/zsh/LICENCE \
-    && printf '%s\n' \
-        'Third-party inventory for the bundled codex package (pinned rust-v0.150.0):' \
-        '- codex, codex-code-mode-host: Rust binaries aggregating crates (ratatui,' \
-        '  tokio, serde and others) under their respective licenses; the exact' \
-        '  crate set is upstream Cargo.lock at' \
-        '  https://github.com/openai/codex/blob/rust-v0.150.0/codex-rs/Cargo.lock' \
-        '- codex-path/rg: ripgrep (MIT/Unlicense) — LICENSE-MIT in ../ripgrep/' \
-        '- codex-resources/bwrap: bubblewrap (LGPL-2.0-or-later) — COPYING in' \
-        '  ../bubblewrap/; LGPL source: https://github.com/containers/bubblewrap' \
-        '- codex-resources/zsh: zsh (MIT-like) — LICENCE in ../zsh/' \
-        'Helper license texts above are fetched from PINNED upstream tags; the' \
-        'bundled binary versions ship inside the checksummed codex package and' \
-        'may differ in patch level from the tag the text was taken from.' \
-        > /usr/local/share/licenses/codex-cli/THIRD-PARTY-INVENTORY
+# License texts are vendored in the repo (licenses/PROVENANCE.md records the
+# pinned source ref and SHA-256 of every file; versions were read from the
+# bundled binaries, not assumed from tags) so this layer needs no network and
+# can never substitute a synthetic fallback for a fetch failure.
+COPY snapper-agent-console/licenses /usr/local/share/licenses/vendored
+COPY snapper-agent-console/codex-requirements.toml /etc/codex/requirements.toml
 COPY snapper-agent-console/snapper-mcp-wrapper.sh /usr/local/bin/snapper-mcp
 RUN chmod 0755 /usr/local/bin/snapper-mcp
 COPY snapper-agent-console/entrypoint.sh /usr/local/bin/agent-console-entrypoint

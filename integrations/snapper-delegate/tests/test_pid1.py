@@ -389,6 +389,117 @@ async def test_run_pid1_instantiates_existing_runner_directly(
 
 
 @pytest.mark.asyncio
+async def test_run_pid1_strict_startup_raises_on_invalid_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict startup refuses to idle when the canonical load fails.
+
+    Given: The strict-startup flag and an otherwise empty environment,
+    When: The runner-only lifecycle starts,
+    Then: It raises the configuration error without idling or constructing
+        a runner, and records the value-independent critical log line.
+    """
+    idle = AsyncMock()
+    runner_factory = MagicMock()
+    critical = MagicMock()
+    monkeypatch.setattr(pid1, "_idle_unconfigured", idle)
+    monkeypatch.setattr(pid1, "DelegateRunner", runner_factory)
+    monkeypatch.setattr("snapper_delegate.pid1.logger.critical", critical)
+    with pytest.raises(pid1.RunnerOnlyConfigurationError):
+        await pid1.run_pid1({"SNAPPER_PID1_STRICT": "1"})
+    idle.assert_not_awaited()
+    runner_factory.assert_not_called()
+    critical.assert_called_once_with(
+        "Runner-only delegate configuration is invalid under strict startup; exiting"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_pid1_strict_startup_requires_exact_flag_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the exact strict-startup value arms the fail-closed exit.
+
+    Given: A non-canonical strict-flag value and an invalid configuration,
+    When: The runner-only lifecycle starts,
+    Then: It keeps the documented signal-aware idle contract.
+    """
+    idle = AsyncMock()
+    runner_factory = MagicMock()
+    monkeypatch.setattr(pid1, "_idle_unconfigured", idle)
+    monkeypatch.setattr(pid1, "DelegateRunner", runner_factory)
+    await pid1.run_pid1({"SNAPPER_PID1_STRICT": "true"})
+    idle.assert_awaited_once_with()
+    runner_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_pid1_strict_startup_runs_configured_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict startup changes nothing for a valid configuration.
+
+    Given: The strict-startup flag beside a complete ready environment,
+    When: The PID1 starts,
+    Then: The delegate runner is constructed and awaited exactly as without
+        the flag.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_PID1_STRICT"] = "1"
+    fake_runner = MagicMock()
+    fake_runner.start = AsyncMock()
+    runner_factory = MagicMock(return_value=fake_runner)
+    monkeypatch.setattr(pid1, "DelegateRunner", runner_factory)
+    await pid1.run_pid1(environment)
+    runner_factory.assert_called_once()
+    fake_runner.start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_pid1_strict_startup_rejects_token_mutated_before_the_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret zeroed ahead of the one canonical load exits instead of idling.
+
+    Given: A complete strict environment whose delegate token file is emptied
+        after setup, reproducing the mutation that previously slipped between
+        a shell preflight and a second in-process load,
+    When: The strict PID1 lifecycle performs its single canonical load,
+    Then: The configuration error escapes without idling or constructing a
+        runner, so the process terminates non-zero.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_PID1_STRICT"] = "1"
+    Path(environment["SNAPPER_DELEGATE_TOKEN_FILE"]).write_bytes(b"")
+    idle = AsyncMock()
+    runner_factory = MagicMock()
+    monkeypatch.setattr(pid1, "_idle_unconfigured", idle)
+    monkeypatch.setattr(pid1, "DelegateRunner", runner_factory)
+    with pytest.raises(pid1.RunnerOnlyConfigurationError):
+        await pid1.run_pid1(environment)
+    idle.assert_not_awaited()
+    runner_factory.assert_not_called()
+
+
+def test_main_reports_strict_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A strict-startup refusal surfaces as a non-zero process exit code.
+
+    Given: A runner-only lifecycle that raises the configuration error,
+    When: ``main`` is invoked,
+    Then: It returns one so PID1 terminates visibly instead of idling.
+    """
+    run_pid1 = AsyncMock(side_effect=pid1.RunnerOnlyConfigurationError())
+    monkeypatch.setattr(pid1, "run_pid1", run_pid1)
+    monkeypatch.setattr(pid1, "_configure_file_logging", MagicMock())
+    assert pid1.main() == 1
+    run_pid1.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_run_pid1_reads_process_environment_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
