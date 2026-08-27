@@ -483,6 +483,48 @@ async def test_run_pid1_strict_startup_rejects_token_mutated_before_the_load(
     runner_factory.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_run_pid1_calls_the_canonical_loader_exactly_once_when_valid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured lifecycle performs one canonical load, never a preflight pair.
+
+    Given: A complete strict environment and a spy wrapping the real loader,
+    When: The PID1 lifecycle runs to a started runner,
+    Then: The canonical loader was invoked exactly once, so reintroducing a
+        separate validate-then-reload step fails this pin.
+    """
+    environment = _ready_environment(tmp_path, monkeypatch)
+    environment["SNAPPER_PID1_STRICT"] = "1"
+    loader_spy = MagicMock(wraps=pid1.load_runner_configuration)
+    monkeypatch.setattr(pid1, "load_runner_configuration", loader_spy)
+    fake_runner = MagicMock()
+    fake_runner.start = AsyncMock()
+    monkeypatch.setattr(pid1, "DelegateRunner", MagicMock(return_value=fake_runner))
+    await pid1.run_pid1(environment)
+    assert loader_spy.call_count == 1
+    fake_runner.start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_pid1_calls_the_canonical_loader_exactly_once_when_strict_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strict failure path also performs exactly one canonical load.
+
+    Given: The strict flag, an invalid environment, and a loader spy,
+    When: The lifecycle refuses the configuration,
+    Then: The loader ran exactly once before the process-terminating error.
+    """
+    loader_spy = MagicMock(wraps=pid1.load_runner_configuration)
+    monkeypatch.setattr(pid1, "load_runner_configuration", loader_spy)
+    monkeypatch.setattr(pid1, "DelegateRunner", MagicMock())
+    with pytest.raises(pid1.RunnerOnlyConfigurationError):
+        await pid1.run_pid1({"SNAPPER_PID1_STRICT": "1"})
+    assert loader_spy.call_count == 1
+
+
 def test_main_reports_strict_configuration_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

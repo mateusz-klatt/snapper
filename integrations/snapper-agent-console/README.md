@@ -34,9 +34,11 @@ agent) at a PTY.
   rewrites the user's `~/.codex/config.toml`.
 - `licenses/` — vendored license texts for the bundled third-party components,
   copied to `/usr/local/share/licenses/vendored`; `licenses/PROVENANCE.md`
-  records the pinned source ref and SHA-256 of every text, and
-  `licenses/THIRD-PARTY-INVENTORY.md` maps each binary in the codex package to
-  its component, version (read from the binary), and license text.
+  records the pinned source ref and SHA-256 of every text plus the
+  per-component version evidence (binary-reported for rg and zsh,
+  source-inferred for bwrap, lockfile-derived for ratatui), and
+  `licenses/THIRD-PARTY-INVENTORY.md` maps each binary in the codex package
+  to its component, version, and license text.
 
 ## Attach
 
