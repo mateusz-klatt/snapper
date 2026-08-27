@@ -44,9 +44,15 @@ agent) at a PTY.
   copied to `/usr/local/share/licenses/vendored`; `licenses/PROVENANCE.md`
   records the pinned source ref and SHA-256 of every text plus the
   per-component version evidence (binary-reported for rg and zsh,
-  source-inferred for bwrap, lockfile-derived for ratatui), and
+  source-inferred for bwrap, lockfile-derived for ratatui, binary-reported
+  *and* source-pinned for the kimi bundle), and
   `licenses/THIRD-PARTY-INVENTORY.md` maps each binary in the codex package
-  to its component, version, and license text.
+  to its component, version, and license text, and does the same layer by
+  layer for the Kimi Code SEA bundle — including a list of what it does NOT
+  close. `PROVENANCE.md` additionally records, in a table, the exact
+  enumerations behind every claim of absence, because three earlier revisions
+  of the kimi claim were wrong in ways a hand-guessed probe cannot
+  distinguish from a real absence.
 
 ## Attach
 
@@ -93,11 +99,18 @@ and `licenses/PROVENANCE.md`):
 
 - **Redistribution permitted with notices**: Codex CLI (Apache-2.0, and its
   upstream NOTICE travels with it in `licenses/codex-cli-NOTICE`), Node.js
-  (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`).
-  Kimi Code CLI is NOT in this group: no licence has been located for the exact
-  binary this image ships (measured: it is a Node.js bundle, while the
-  similarly-numbered public tag belongs to the separate legacy Python
-  `kimi-cli` project), so its redistribution grant is unconfirmed.
+  (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`),
+  and **Kimi Code CLI** (MIT) — with an explicit reservation, below.
+- **Kimi Code CLI, stated precisely**: its *code* grant is confirmed MIT
+  (`MoonshotAI/kimi-code` @ tag `@moonshot-ai/kimi-code@0.38.0`, text vendored
+  at `licenses/kimi-code-0.38.0-LICENSE`). What is **not** confirmed is full
+  redistribution closure for the *bundle*: the artifact is a single 182 MB
+  Node SEA that embeds a complete Node 24.15.0 runtime, force-bundled JS, a
+  prebuilt native module and a 534-file prebuilt web UI, and it ships with no
+  LICENSE, no NOTICE and no SBOM. Those are two different questions and
+  earlier revisions of this README conflated them. The four texts that are
+  known to be required travel in `licenses/`; the items that cannot be closed
+  from public evidence are itemised in `licenses/THIRD-PARTY-INVENTORY.md`.
 - **Conditional**: Copilot CLI — the GitHub Copilot CLI License permits
   unmodified copies only as part of an application or service and prohibits
   standalone distribution.
@@ -107,6 +120,21 @@ and `licenses/PROVENANCE.md`):
 The last group alone forces the conclusion: the image is local/private-registry
 only; the recipe (this directory, including the vendored license texts) is
 what may be shared.
+
+Two of the seven CLIs are bundles whose one-line license label understates
+what they actually contain, and both are documented layer-by-layer in
+`licenses/THIRD-PARTY-INVENTORY.md` rather than by that label alone.
+
+"Kimi Code CLI is MIT" is the first. The MIT grant covers Moonshot's own code;
+the shipped file additionally carries a verbatim Node **24.15.0** executable
+whose composite license text is measurably *not* inside the binary (hence
+`licenses/node-24.15.0-LICENSE`, double-pinned against the official Node
+tarball), plus `pi-tui` and OpenTUI-derived code whose MIT copyright notices
+are likewise absent from the artifact. Genuinely open: the Rust crate closure
+behind the bundled clipboard module, the erased module identities inside the
+force-bundled JS, and the prebuilt `dist-web` tree, which upstream states is
+synced from a `code-app` repository that is not among the MoonshotAI
+organisation's 43 public repositories.
 
 Note that "Codex CLI is Apache-2.0" understates what its package contains: the
 sandbox helper `bwrap` is three layers — an Apache-2.0 Rust crate whose

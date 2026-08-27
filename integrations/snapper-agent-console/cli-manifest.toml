@@ -50,7 +50,8 @@ sha256_kind = "vendor"
 install = "/usr/local/bin/kimi"
 disable_update = "none needed (no self-update); KIMI_NO_MODIFY_PATH=1"
 runtime_note = "entrypoint seeds ~/.kimi-code/region=global (code.kimi.com script would write mainland-cn)"
-license_note = "redistribution grant UNCONFIRMED: no licence found for this exact artifact. The binary is a Node.js bundle (measured); the similarly-numbered MoonshotAI/kimi-cli tag 0.38 is the separate legacy Python project, not this one"
+components = "Node SEA: a verbatim Node 24.15.0 executable + postject-injected blob carrying the force-bundled JS, the prebuilt clipboard napi module, and the whole 534-file dist-web tree; one file, no LICENSE/NOTICE/SBOM beside it"
+license_note = "SPLIT VERDICT — code grant CONFIRMED MIT, bundle closure UNKNOWN. The source is MoonshotAI/kimi-code @ tag @moonshot-ai/kimi-code@0.38.0 (npm-scoped spelling; peels to commit 0999454b), root MIT, vendored as licenses/kimi-code-0.38.0-LICENSE. What is NOT established is redistribution closure for everything the single-file artifact bundles. Minimum vendor floor, all under licenses/: kimi-code MIT + node-24.15.0 composite LICENSE + pi-tui MIT + opentui MIT. Open UNKNOWNs are itemised in licenses/THIRD-PARTY-INVENTORY.md. The similarly-numbered MoonshotAI/kimi-cli tag 0.38 is the separate legacy Python project and is NOT this artifact"
 
 [antigravity-agy]
 version = "1.1.21-6424454201475072"
