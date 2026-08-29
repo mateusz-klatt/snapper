@@ -1381,8 +1381,8 @@ request and publishes a lightweight `OrderEventData(event="rejected")` on
 `orders.events.{exchange}.{instrument}.rejected` so callers can use an
 explicit cancel + new-order workflow.
 
-The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
-`BalanceService` in sync during normal operation. `VenueEvent` rows are used as
+The trade runtime subscribes to `orders.events.*` to keep `TradeService`
+in sync during normal operation. `VenueEvent` rows are used as
 the durable recovery and reconciliation backbone. At startup the
 executor recovers open orders from those rows and the `executions` log
 (rows exist only for successfully published fills):

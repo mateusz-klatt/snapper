@@ -89,7 +89,7 @@ snapper broker --xsub tcp://127.0.0.1:7500 --xpub tcp://127.0.0.1:7501
 Starts the central trade runtime coordinator.
 
 The process still runs as the `trade-zmq` command, but after the trade
-runtime redesign it also hosts `TradeService`, `BalanceService`, the
+runtime redesign it also hosts `TradeService`, the
 outbox dispatcher, and the reconciliation loops. It writes
 `TradeCommand` rows, consumes `orders.events.*` to keep projections in
 sync, and persists checkpoints for recovery.

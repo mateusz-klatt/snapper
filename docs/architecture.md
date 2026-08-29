@@ -600,7 +600,7 @@ Business logic:
 - **Trade** (`trade/`) — Trade-domain services: `trade_service.py`
   (in-memory command and position read model, fill deduplication,
   funding accrual application, and reconciliation halt feedback),
-  `balance_service.py` (cash/equity/exposure projection), `outbox.py`
+  `outbox.py`
   (outbox-driven publishing with wake-up + polling fallback),
   `reconciler.py` (trade-command lifecycle fold, evidence-scoped
   stale-command scan, and reconciliation failure feedback),
@@ -786,7 +786,6 @@ flowchart TB
     VenueEvent --> Facts["Order + Execution\nfacts in DB"]
     Executor -->|orders.events.*| Runtime
     Runtime --> Trade["TradeService\nshadow read model + checkpoint state"]
-    Trade --> Balance["BalanceService\nprojection"]
 ```
 
 ## Database
@@ -1037,8 +1036,8 @@ Operator notes are in [`docs/operations.md`](operations.md)
 "Recovery-time corrective fills".
 
 The `TraderCoordinator` class acts as the trade runtime coordinator
-and integrates `TradeService` (command lifecycle) and `BalanceService`
-(balance tracking). It spawns the outbox dispatcher (when a
+and integrates `TradeService`, which owns command lifecycle, position
+and cash together as one read model. It spawns the outbox dispatcher (when a
 `SQLAlchemyRepository` is wired) plus per-exchange reconciliation
 loops that drive the trade-command lifecycle fold and feed the
 circuit breaker. Canonical `Order` and `Execution`
