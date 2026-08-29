@@ -50,6 +50,7 @@ data/*.db.bak*
 data/*.log
 data/log/
 data/*-pat.json
+data/secrets/
 data/seed/
 data/archive/
 data/kraken/
