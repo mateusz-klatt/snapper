@@ -325,7 +325,10 @@ venv_decl = declared(r"^RUN\s+python -m venv (\S+)\s*$", "the venv directory")
 copy_decl = declared(r"^COPY\s+src/snapper_delegate\s+(\S+)\s*$", "the delegate package destination")
 path_decl = declared(r"^\s*PYTHONPATH=(\S+)", "PYTHONPATH")
 uid_decl = declared(r"^RUN\s+useradd\s+--uid\s+(\d+)\b", "the delegate uid")
-install_decl = declared(r"^RUN\s+python -m pip install (.*)-r /tmp/requirements.lock\s*$", "the requirements.lock install")
+install_decl = declared(
+    r"^RUN\s+python -m pip install (.*)-r /tmp/requirements.lock\s*$",
+    "the requirements.lock install",
+)
 if any(match is None for match in (runtime_from, venv_decl, copy_decl, path_decl, uid_decl, install_decl)):
     stop_if_failed()
 
@@ -786,13 +789,13 @@ COPY snapper-agent-console/codex-requirements.toml /etc/codex/requirements.toml
 COPY snapper-agent-console/snapper-mcp-wrapper.sh /usr/local/bin/snapper-mcp
 RUN chmod 0755 /usr/local/bin/snapper-mcp
 COPY snapper-agent-console/entrypoint.sh /usr/local/bin/agent-console-entrypoint
-RUN chmod 0755 /usr/local/bin/agent-console-entrypoint \
-    && mkdir -p /home/delegate && chown 888:888 /home/delegate
 # compose.agent-console.yml runs with working_dir /workspace over a bind mount.
 # Creating it here owned by the runtime uid is what lets the smoke below start an
 # interpreter from the production working directory; the bind mount replaces this
 # directory at run time, so nothing about the mounted behaviour changes.
-RUN mkdir -p /workspace && chown 888:888 /workspace
+RUN chmod 0755 /usr/local/bin/agent-console-entrypoint \
+    && mkdir -p /home/delegate && chown 888:888 /home/delegate \
+    && mkdir -p /workspace && chown 888:888 /workspace
 
 ENV HOME=/home/delegate \
     SHELL=/bin/bash \

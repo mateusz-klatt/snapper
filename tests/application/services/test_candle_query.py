@@ -1099,6 +1099,8 @@ class TestDensifyRangeResult:
         stamps = [int(row.open_at.timestamp() * 1000) for row in filled.rows]
         assert stamps == [0, 60_000, 120_000, 180_000]
         assert filled.sample_count == 4
+        assert filled.source == "db"
+        assert filled.is_warm is True
 
     def test_nothing_is_emitted_before_the_first_observed_bar(self) -> None:
         """A named range is not evidence that anything traded inside it.
