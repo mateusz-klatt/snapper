@@ -27,7 +27,9 @@ FROM ${BASE_IMAGE} AS base
 ARG TARGETARCH
 USER root
 RUN [ "${TARGETARCH:-amd64}" = "amd64" ] && [ "$(uname -m)" = "x86_64" ] \
-    || { echo "agent-console: all pinned CLI artifacts are x86_64; refusing TARGETARCH=${TARGETARCH} uname=$(uname -m)" >&2; exit 1; }
+    || { echo "agent-console: all pinned CLI artifacts are x86_64;" \
+              "refusing TARGETARCH=${TARGETARCH} uname=$(uname -m)" >&2; \
+         exit 1; }
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git less procps tini tmux zstd \
@@ -315,7 +317,10 @@ def declared(pattern, what):
     return match
 
 
-runtime_from = declared(r"^FROM\s+python:(\d+)\.(\d+)-slim\s+AS\s+runtime\b", "its runtime base as python:<major>.<minor>-slim")
+runtime_from = declared(
+    r"^FROM\s+python:(\d+)\.(\d+)-slim\s+AS\s+runtime\b",
+    "its runtime base as python:<major>.<minor>-slim",
+)
 venv_decl = declared(r"^RUN\s+python -m venv (\S+)\s*$", "the venv directory")
 copy_decl = declared(r"^COPY\s+src/snapper_delegate\s+(\S+)\s*$", "the delegate package destination")
 path_decl = declared(r"^\s*PYTHONPATH=(\S+)", "PYTHONPATH")
@@ -723,7 +728,11 @@ manifest = [
     "requirements-lock-entries=" + str(len(lock_order)),
     "requirements-lock-applicable-here=" + str(sum(1 for entry in locked.values() if entry["applies"])),
     "python-runtime=" + sys.version.split()[0],
-    "python-declared-base=python:" + str(want_python[0]) + "." + str(want_python[1]) + "-slim (image digest NOT verified)",
+    "python-declared-base=python:"
+    + str(want_python[0])
+    + "."
+    + str(want_python[1])
+    + "-slim (image digest NOT verified)",
     "python-executable=" + sys.executable,
     "venv-prefix=" + sys.prefix,
     "delegate-package-dir=" + str(package_dir),
@@ -737,7 +746,13 @@ manifest.extend(installed[key]["name"] + "==" + installed[key]["version"] for ke
 manifest.extend(["", "[delegate-package-sha256]"])
 manifest.extend(shipped[name] + "  " + name for name in sorted(shipped))
 (OUT / "delegate-lineage.manifest").write_text("\n".join(manifest) + "\n")
-print("agent-console lineage: BASE_IMAGE verified against this checkout (" + str(len(shipped)) + " package files, " + str(len(installed)) + " distributions)")
+print(
+    "agent-console lineage: BASE_IMAGE verified against this checkout ("
+    + str(len(shipped))
+    + " package files, "
+    + str(len(installed))
+    + " distributions)"
+)
 PY
 
 FROM base AS runtime
@@ -925,7 +940,10 @@ for key in ("delegate-package-dir", "delegate-pythonpath", "delegate-uid"):
     if key not in settings:
         fail("the lineage manifest declares no " + key + ", so this step has no expected value to check against")
 if not recorded:
-    fail("the lineage manifest records no [delegate-package-sha256] entries, so there is nothing to compare the shipped package against")
+    fail(
+        "the lineage manifest records no [delegate-package-sha256] entries, so there "
+        "is nothing to compare the shipped package against"
+    )
 stop_if_failed()
 
 package_dir = pathlib.Path(settings["delegate-package-dir"])
@@ -971,7 +989,10 @@ def scan_package(root):
             try:
                 mode = entry.stat(follow_symlinks=False).st_mode
             except OSError as exc:
-                fail("the shipped entry " + relative + " cannot be stat'ed by uid " + str(running_uid) + " (" + repr(exc) + ")")
+                fail(
+                    "the shipped entry " + relative + " cannot be stat'ed by uid "
+                    + str(running_uid) + " (" + repr(exc) + ")"
+                )
                 continue
             if stat.S_ISDIR(mode):
                 pending.append(path)
@@ -1013,9 +1034,15 @@ if not package_dir.is_dir() or package_dir.is_symlink():
 
 shipped = scan_package(package_dir)
 for name in sorted(set(shipped) - set(recorded)):
-    fail("the shipped image carries " + str(package_dir / name) + " (sha256:" + shipped[name] + "), which the lineage stage never saw")
+    fail(
+        "the shipped image carries " + str(package_dir / name)
+        + " (sha256:" + shipped[name] + "), which the lineage stage never saw"
+    )
 for name in sorted(set(recorded) - set(shipped) - unreadable):
-    fail("the shipped image is missing " + str(package_dir / name) + ", which the lineage stage verified (sha256:" + recorded[name] + ")")
+    fail(
+        "the shipped image is missing " + str(package_dir / name)
+        + ", which the lineage stage verified (sha256:" + recorded[name] + ")"
+    )
 for name in sorted(set(shipped) & set(recorded)):
     if shipped[name] != recorded[name]:
         fail(
@@ -1048,7 +1075,10 @@ def probe(cwd, situation):
     try:
         seen = json.loads(done.stdout)
     except ValueError as exc:
-        fail("the import probe from " + str(cwd) + " printed " + repr(done.stdout) + " instead of its JSON result: " + repr(exc))
+        fail(
+            "the import probe from " + str(cwd) + " printed " + repr(done.stdout)
+            + " instead of its JSON result: " + repr(exc)
+        )
         return
     for key, wanted in (("package", package_dir / "__init__.py"), ("entry", package_dir / "pid1.py")):
         if seen.get(key) != str(wanted):
