@@ -202,10 +202,10 @@ def faithful_roundings(units: int) -> tuple[float, ...]:
     """
     nearest = project_units(units)
     nearest_units = exact_units_of(nearest)
-    roundings: tuple[float, ...] = (nearest,)
-    if nearest_units != units:
-        direction = math.inf if units > nearest_units else -math.inf
-        neighbour = math.nextafter(nearest, direction)
-        if not math.isinf(neighbour):
-            roundings += (neighbour,)
-    return roundings
+    if nearest_units == units:
+        return (nearest,)
+    direction = math.inf if units > nearest_units else -math.inf
+    neighbour = math.nextafter(nearest, direction)
+    if math.isinf(neighbour):
+        return (nearest,)
+    return (nearest, neighbour)
