@@ -29,7 +29,6 @@ from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
-from snapper.application.trade.balance_service import BalanceService
 from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
@@ -1780,11 +1779,10 @@ async def test_sync_fill_to_trade_service() -> None:
 
     Given: A live engine and replay projection consuming the same base-fee BUY,
     When: the engine applies it and the coordinator shadows it to TradeService,
-    Then: both positions equal the venue-received quantity and BalanceService is updated.
+    Then: both positions equal the venue-received quantity.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
-    coord.balance_service = BalanceService()
     coord.repository = MagicMock()
     coord._tracker = MagicMock()
     coord._tracker.session_id = "s-test"
@@ -1818,7 +1816,6 @@ async def test_sync_fill_to_trade_service() -> None:
     assert engine.position_qty == pytest.approx(20.0)
     assert engine.portfolio.position_qty("EUR-PLN") == pytest.approx(20.0)
     assert pos.position_qty == pytest.approx(engine.position_qty)
-    assert coord.balance_service.get_cash(engine._shard_key) != 0.0
 
 
 def test_engine_futures_base_fee_keeps_contract_quantity() -> None:
@@ -1872,7 +1869,6 @@ def test_setup_trade_services_without_sqlalchemy_repo_skips_outbox() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
-    coord.balance_service = BalanceService()
     coord.outbox = None
     coord.repository = MagicMock()
     coord.settings = MagicMock()
@@ -1896,7 +1892,6 @@ def test_setup_trade_services_creates_outbox_for_sql_repo() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
-    coord.balance_service = BalanceService()
     coord.outbox = None
     coord.repository = MagicMock(spec=SQLAlchemyRepository)
     coord.settings = MagicMock()
@@ -3749,7 +3744,6 @@ def test_setup_trade_services_wires_dispatch_ttl_and_expiry() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
-    coord.balance_service = BalanceService()
     coord.outbox = None
     coord.repository = MagicMock(spec=SQLAlchemyRepository)
     coord.settings = MagicMock()

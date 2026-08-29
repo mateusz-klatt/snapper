@@ -240,7 +240,6 @@ max-statements = 50
 "src/snapper/application/services/settings.py" = ["PLR0913"]
 "src/snapper/application/services/signals/service.py" = ["PLR0913"]
 "src/snapper/application/system_metrics/snapshotter.py" = ["PLR0913"]
-"src/snapper/application/trade/balance_service.py" = ["PLR0913"]
 "src/snapper/application/trade/outbox.py" = ["PLR0913"]
 "src/snapper/application/trade/trade_service.py" = ["PLR0913"]
 "src/snapper/application/updaters/historical/aggregates.py" = ["PLR0913"]

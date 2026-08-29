@@ -483,14 +483,6 @@
         "PLR0913": 10
       }
     },
-    "src/snapper/application/trade/balance_service.py": {
-      "BalanceService.on_position_changed": {
-        "PLR0913": 6
-      },
-      "BalanceService.restore_from_checkpoint": {
-        "PLR0913": 6
-      }
-    },
     "src/snapper/application/trade/outbox.py": {
       "OutboxDispatcher.__init__": {
         "PLR0913": 8

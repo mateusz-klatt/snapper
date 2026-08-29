@@ -220,7 +220,7 @@ class PlanExecutorService(RegisterableProcess):
         """Create ZMQ publisher for the ``plans.decisions.*`` topic family.
 
         Self-bootstrapped from ``settings.zmq_broker_xsub`` following
-        the ``TraderCoordinator`` / ``BalanceService`` / ``SettingsService``
+        the ``TraderCoordinator`` / ``SettingsService``
         pattern (see ``application/engine/trader.py:2428-2432`` and
         ``application/services/settings.py:232-236``). ``PlanExecutorService``
         does not receive a DI-injected publisher because

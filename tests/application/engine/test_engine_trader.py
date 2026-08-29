@@ -5268,7 +5268,7 @@ class TestRecoveryAccrualReplayError:
 
         Given: get_accruals raises an error during recovery,
         When: _recover_from_checkpoints runs,
-        Then: Recovery continues (balance_service restore still executes).
+        Then: Recovery continues.
         """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()

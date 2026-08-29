@@ -47,7 +47,6 @@ from snapper.application.process_manager.registry import register_process
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
-from snapper.application.trade.balance_service import BalanceService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
@@ -356,7 +355,6 @@ class TraderCoordinator(RegisterableProcess):
         self._gap_detector: GapDetector = GapDetector("trader")
         self._current_topic: str = ""
         self.trade_service: TradeService = TradeService()
-        self.balance_service: BalanceService = BalanceService()
         self.outbox: OutboxDispatcher | None = None
         self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
@@ -671,7 +669,7 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_engine_state(self) -> None:
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.
 
-        Step 0: Read checkpoints, restore TradeService/BalanceService,
+        Step 0: Read checkpoints, restore TradeService,
             replay delta VenueEvents, create engines with restored state;
             correct any fill dropped under the scalar watermark by overlaying
             a chronological venue-event replay (R9).
@@ -743,7 +741,6 @@ class TraderCoordinator(RegisterableProcess):
         result only from the durable database snapshot it reads.
         """
         self.trade_service = TradeService()
-        self.balance_service = BalanceService()
         self._engines_by_pending_coid.clear()
         self._engines_by_scope.clear()
         self._engines_by_scope_legacy.clear()
@@ -1153,7 +1150,6 @@ class TraderCoordinator(RegisterableProcess):
             shard_key=shard_key,
         )
         accruals_certain = await self._checkpoint_accruals_certain(context, accruals_certain)
-        self._restore_balance_service_from_shard(shard_key)
         return await self._complete_checkpoint_recovery(
             context,
             checkpoint,
@@ -2373,7 +2369,6 @@ class TraderCoordinator(RegisterableProcess):
             self.trade_service.apply_venue_event(event)
         last_id = context.events[-1]["id"] if context.events else 0
         self._consumed_venue_event_watermarks[context.shard_key] = last_id
-        self._restore_balance_service_from_shard(context.shard_key)
         self._restore_engine_from_shard(engine, context.shard_key, context.instrument)
         if created:
             engine_key = self._build_engine_key(
@@ -2458,18 +2453,6 @@ class TraderCoordinator(RegisterableProcess):
         except Exception:
             logger.opt(exception=True).warning("ZMQTrader: Accrual replay failed for {}", shard_key)
             return False
-
-    def _restore_balance_service_from_shard(self, shard_key: str) -> None:
-        """Mirror the recovered TradeService shard into BalanceService."""
-        shard = self.trade_service._shards[shard_key]
-        self.balance_service.restore_from_checkpoint(
-            shard_key=shard_key,
-            cash=shard.cash,
-            position_qty=shard.position.position_qty,
-            entry_price=shard.position.entry_price,
-            peak_equity=shard.peak_equity,
-            realized_pnl=shard.position.realized_pnl,
-        )
 
     def _register_recovered_engine(
         self,
@@ -4987,7 +4970,7 @@ class TraderCoordinator(RegisterableProcess):
         """Shadow-write fill to TradeService and persist checkpoint.
 
         Constructs a VenueEventRow-like dict from the ZMQ ExecutionData,
-        applies it to TradeService, updates BalanceService, syncs the
+        applies it to TradeService, syncs the
         position cycle lifecycle to DB, and writes a checkpoint for
         durable recovery. ``old_qty`` is sampled BEFORE
         :meth:`TradeService.apply_venue_event` and ``new_qty`` AFTER so
@@ -5032,14 +5015,6 @@ class TraderCoordinator(RegisterableProcess):
         await self._project_paired_execution_leg_fill(fill, venue_event)
         pos = self.trade_service.get_position(shard_key)
         new_qty = pos.position_qty
-        self.balance_service.on_position_changed(
-            shard_key=shard_key,
-            position_qty=pos.position_qty,
-            entry_price=pos.entry_price,
-            cash=self.trade_service.get_equity(shard_key),
-            peak_equity=self.trade_service.get_peak_equity(shard_key),
-            realized_pnl=pos.realized_pnl,
-        )
         await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
         await self._persist_checkpoint(shard_key, consumed_fill=fill)
 
@@ -6246,7 +6221,7 @@ class TraderCoordinator(RegisterableProcess):
     def _setup_trade_services(self) -> None:
         """Initialize trade domain services + outbox dispatcher.
 
-        TradeService and BalanceService are initialized in __init__.
+        TradeService is initialized in __init__.
         The durable outbox dispatcher always owns the dispatch path
         when a real SQLAlchemyRepository is wired; the engine writes
         TradeCommand rows and notifies the outbox, which in turn
