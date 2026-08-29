@@ -47,7 +47,6 @@ projection.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from typing import Literal
@@ -645,8 +644,12 @@ def densify_range_result(
         return result
     filled = densify_rows(result.rows, gap_fill_minutes)
     trimmed = filled[:limit] if len(filled) > limit else filled
-    densified: CandleQueryResult = replace(result, rows=trimmed, sample_count=len(trimmed))
-    return densified
+    return CandleQueryResult(
+        rows=trimmed,
+        source=result.source,
+        sample_count=len(trimmed),
+        is_warm=result.is_warm,
+    )
 
 
 async def fetch_cache_only(

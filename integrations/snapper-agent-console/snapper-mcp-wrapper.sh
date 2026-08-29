@@ -10,6 +10,7 @@ explicit_config=0
 for arg in "$@"; do
     case "$arg" in
         --config|--config=*) explicit_config=1 ;;
+        *) ;;
     esac
 done
 
