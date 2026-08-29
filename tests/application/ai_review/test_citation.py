@@ -12,6 +12,7 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from typing import Final
 from uuid import uuid7
 
 import pytest
@@ -32,12 +33,17 @@ async def _build_repo(tmp_path: Path) -> SQLAlchemyRepository:
     return repo
 
 
+_INSTRUMENT: Final[str] = "019e1111-1111-7111-8111-111111111111"
+"""The instrument every seeded review names unless a case says otherwise."""
+
+
 async def _seed_review(
     repo: SQLAlchemyRepository,
     *,
     user_public_id: str,
     wallet_public_id: str,
     status: str = "resolved_approved",
+    instrument_public_id: str = _INSTRUMENT,
 ) -> str:
     """Insert a single ``ai_reviews`` row in the requested status; return public_id."""
     review_pid = str(uuid7())
@@ -49,7 +55,7 @@ async def _seed_review(
         "user_public_id": user_public_id,
         "operator_public_id": str(uuid7()),
         "wallet_public_id": wallet_public_id,
-        "instrument_public_id": str(uuid7()),
+        "instrument_public_id": instrument_public_id,
         "strategy_public_id": str(uuid7()),
         "selected_delegate_public_id": str(uuid7()),
         "status": status,
@@ -97,6 +103,7 @@ async def test_happy_path_passes_for_owner_wallet_match_and_resolved_approved(
         ai_review_public_id=review_pid,
         expected_user_public_id=user_pid,
         expected_wallet_public_id=wallet_pid,
+        expected_instrument_public_id=_INSTRUMENT,
     )
 
 
@@ -118,6 +125,7 @@ async def test_unknown_review_id_raises_citation_error(tmp_path: Path) -> None:
             ai_review_public_id="ghost-review-id",
             expected_user_public_id=expected_user_pid,
             expected_wallet_public_id=expected_wallet_pid,
+            expected_instrument_public_id=_INSTRUMENT,
         )
 
 
@@ -142,6 +150,7 @@ async def test_owner_mismatch_raises_citation_error(tmp_path: Path) -> None:
             ai_review_public_id=review_pid,
             expected_user_public_id=attacker_pid,
             expected_wallet_public_id=wallet_pid,
+            expected_instrument_public_id=_INSTRUMENT,
         )
 
 
@@ -169,6 +178,42 @@ async def test_wallet_mismatch_raises_citation_error(tmp_path: Path) -> None:
             ai_review_public_id=review_pid,
             expected_user_public_id=user_pid,
             expected_wallet_public_id=wallet_b,
+            expected_instrument_public_id=_INSTRUMENT,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_instrument_mismatch_raises_citation_error(tmp_path: Path) -> None:
+    """An approval names one instrument and authorizes only that one.
+
+    Given a resolved_approved review for instrument A,
+    When the caller cites it on a submission for instrument B, with the same
+        owner and the same wallet,
+    Then AiReviewCitationError fires with an "instrument mismatch" message.
+
+    Before this, the citation read the owner, the wallet and the status, and
+    never the instrument the review was about — so an approval to trade one
+    market authorized an order in any market the wallet could reach. The row
+    carried ``instrument_public_id`` the whole time.
+    """
+    repo = await _build_repo(tmp_path)
+    user_pid = str(uuid7())
+    wallet_pid = str(uuid7())
+    other_instrument = str(uuid7())
+    review_pid = await _seed_review(
+        repo,
+        user_public_id=user_pid,
+        wallet_public_id=wallet_pid,
+        instrument_public_id=_INSTRUMENT,
+    )
+    with pytest.raises(AiReviewCitationError, match="instrument mismatch"):
+        await validate_ai_review_citation(
+            repo,
+            ai_review_public_id=review_pid,
+            expected_user_public_id=user_pid,
+            expected_wallet_public_id=wallet_pid,
+            expected_instrument_public_id=other_instrument,
         )
 
 
@@ -206,6 +251,7 @@ async def test_non_approved_status_raises_citation_error(
             ai_review_public_id=review_pid,
             expected_user_public_id=user_pid,
             expected_wallet_public_id=wallet_pid,
+            expected_instrument_public_id=_INSTRUMENT,
         )
 
 

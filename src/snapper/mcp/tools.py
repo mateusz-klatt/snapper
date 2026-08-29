@@ -927,6 +927,7 @@ async def _prepare_manual_order(
             ai_review_public_id=order.ai_review_public_id,
             expected_user_public_id=claims.user_public_id or claims.username,
             expected_wallet_public_id=wallet_public_id,
+            expected_instrument_public_id=resolved_instrument_public_id,
         )
     bus_time = dt.datetime.now(dt.UTC)
     shard_key = compute_shard_key(

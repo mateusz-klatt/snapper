@@ -16,7 +16,9 @@ delegates' UIs (info leak + fanout spam). The validator enforces:
 3. ``review.wallet_public_id`` matches the submission's wallet
    (the caller already passed wallet scope check upstream; this
    enforces the cross-link).
-4. ``review.status == "resolved_approved"`` — only AI-approved
+4. ``review.instrument_public_id == submission.instrument`` — an
+   approval names ONE instrument and authorizes only that one.
+5. ``review.status == "resolved_approved"`` — only AI-approved
    reviews may legitimately authorize a manual order. A
    ``pending`` / ``resolved_rejected`` / ``timeout`` / ``superseded``
    row cannot.
@@ -43,8 +45,28 @@ async def validate_ai_review_citation(
     ai_review_public_id: str,
     expected_user_public_id: str,
     expected_wallet_public_id: str,
+    expected_instrument_public_id: str,
 ) -> None:
     """Verify the caller may cite ``ai_review_public_id`` on a manual order.
+
+    An approval names a specific instrument, and until now the citation did not
+    read it: a review approving one instrument authorized an order in ANY
+    instrument, as long as the wallet and the owner matched. The row has
+    carried ``instrument_public_id`` all along.
+
+    What this still does NOT bind, stated so nobody reads a narrower guard as a
+    wider one:
+
+    - **Side and size.** The row does not carry them. They live inside
+      ``signal_envelope``, an opaque ``JsonObject`` with no declared shape that
+      nothing in this package reads. Binding them is a contract change, not a
+      validator change.
+    - **Validity in time.** ``deadline`` is when the DELEGATE must answer, after
+      which a reaper times the review out; it is not an authorization lifetime.
+      Reusing it here would enforce something it does not mean. A citation
+      therefore stays usable for as long as the approved row exists, and
+      ``signal_snapshot_hash`` says of itself that it is
+      "Audit/forensics — NOT used for replay protection".
 
     Args:
         repo: Repository handle used for the row fetch.
@@ -54,11 +76,13 @@ async def validate_ai_review_citation(
             authenticated caller's claims.
         expected_wallet_public_id: ``wallet_public_id`` from the
             manual-order submission.
+        expected_instrument_public_id: Instrument identity the caller
+            already resolved and matched against the submission.
 
     Raises:
-        AiReviewCitationError: When any of the four invariants
-            fails (row missing / owner mismatch / wallet mismatch /
-            non-approved status).
+        AiReviewCitationError: When any of the five invariants fails
+            (row missing / owner mismatch / wallet mismatch /
+            instrument mismatch / non-approved status).
     """
     review = await repo.get_ai_review(ai_review_public_id)
     if review is None:
@@ -73,6 +97,12 @@ async def validate_ai_review_citation(
             f"ai_review_public_id={ai_review_public_id!r} wallet mismatch "
             f"(review.wallet_public_id={review['wallet_public_id']!r} "
             f"vs submission wallet={expected_wallet_public_id!r})"
+        )
+    if review["instrument_public_id"] != expected_instrument_public_id:
+        raise AiReviewCitationError(
+            f"ai_review_public_id={ai_review_public_id!r} instrument mismatch "
+            f"(review.instrument_public_id={review['instrument_public_id']!r} "
+            f"vs submission instrument={expected_instrument_public_id!r})"
         )
     if review["status"] != "resolved_approved":
         raise AiReviewCitationError(
