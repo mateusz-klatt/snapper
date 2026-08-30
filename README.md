@@ -60,7 +60,7 @@ or rotate after first login via
     exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
     YAML-driven pattern matching, front-month rollover, contract ladder API
 - **Trade runtime** — Facts-canonical live and paper trading with canonical
-    Order and Execution facts, rebuildable Position and Balance projections,
+    Order and Execution facts, rebuildable Position and cash projections,
     dispatched via a durable outbox
 - **Strategies** — Framework for creating strategies based on RSI, MACD,
   cointegration, and TA-Lib indicators
@@ -297,7 +297,7 @@ flowchart TB
     subgraph Components["Components"]
         Feed["Feed Publisher"]
         Strategies["ZMQ Strategies"]
-        Runtime["Trade Runtime<br/>Coordinator + Per-Symbol Engines + Trade/Balance Services"]
+        Runtime["Trade Runtime<br/>Coordinator + Per-Symbol Engines + TradeService"]
         Executor["Order Executor<br/>Venue Adapter"]
     end
 

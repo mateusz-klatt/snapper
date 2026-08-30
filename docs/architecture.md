@@ -4,7 +4,7 @@ Snapper is a trading platform built with a layered architecture
 using asynchronous processing and ZeroMQ messaging.
 
 The trading path is facts-canonical: `Order` and `Execution` are the
-canonical business facts, while `Position`, `Balance`, and equity are
+canonical business facts, while `Position`, cash, and equity are
 derived projections that can be rebuilt from facts plus checkpoints.
 
 ## System Layers
@@ -89,7 +89,7 @@ Persistence layer with SQLAlchemy:
     - `Position` — Derived position projection (includes `mode`: `"live"` or `"paper"`)
     - `TradeCommand` — Durable trade intent written by the engine before execution
     - `VenueEvent` — Durable venue observations and acknowledgements persisted by executors
-    - `TradeProjectionCheckpoint` — Materialized position/balance snapshot for fast recovery
+    - `TradeProjectionCheckpoint` — Materialized position/cash snapshot for fast recovery
     - `PairedExecutionGroup`, `PairedExecutionLeg`, `PairedExecutionHalt` —
       durable arming, compensation, and halt state for multi-leg paired execution
     - `Signal` — Signal events
@@ -818,7 +818,7 @@ execution_plan_decision_outbox -- Durable retry state for plans.decisions fanout
 -- Trade runtime (durable command path)
 trade_commands              -- Durable trade intent (engine writes before execution)
 venue_events                -- Durable venue observations and acknowledgements from executors
-trade_projection_checkpoints -- Materialized position/balance snapshots
+trade_projection_checkpoints -- Materialized position/cash snapshots
 paired_execution_groups     -- Multi-leg group FSM for arming and compensation
 paired_execution_legs       -- Per-leg command binding and signed exposure accounting
 paired_execution_halts      -- Durable per-scope halt projection for broken/exposed groups

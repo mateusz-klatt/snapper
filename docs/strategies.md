@@ -3,7 +3,7 @@
 Snapper provides a framework for creating trading strategies based on
 ZeroMQ messaging. Strategies subscribe to market data and publish signals.
 Strategies produce intent only; the trade runtime owns order lifecycle,
-positions, and balance projections.
+positions, and cash projections.
 
 ## Strategy Architecture
 
