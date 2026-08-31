@@ -9572,10 +9572,14 @@ def test_enqueue_finalized_candles_forgets_evicted_write_sequence() -> None:
     first = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
     second = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 1), complete=True)
     pub._enqueue_finalized_candles([("BTC-USD", first)], ExchangeEnum.KRAKEN, "kraken")
-    assert pub._candle_write_sequence_by_row_id[id(first)] == 1
+    first_tracking = pub._candle_write_sequence_by_row_id[id(first)]
+    assert first_tracking.row is first
+    assert first_tracking.sequence == 1
     pub._enqueue_finalized_candles([("ETH-USD", second)], ExchangeEnum.KRAKEN, "kraken")
     assert id(first) not in pub._candle_write_sequence_by_row_id
-    assert pub._candle_write_sequence_by_row_id[id(second)] == 2
+    second_tracking = pub._candle_write_sequence_by_row_id[id(second)]
+    assert second_tracking.row is second
+    assert second_tracking.sequence == 2
 
 
 def test_evicted_correction_write_cleans_all_dependent_repairs() -> None:
@@ -9833,12 +9837,47 @@ def test_mark_candle_writes_committed_acks_exact_rows_and_wakes_event() -> None:
     assert not pub._candle_repair_event.is_set()
     pub._mark_candle_writes_committed([first, untracked])
     assert pub._committed_candle_write_sequences == set()
-    assert pub._candle_write_sequence_by_row_id == {id(second): 2}
+    assert set(pub._candle_write_sequence_by_row_id) == {id(second)}
+    second_tracking = pub._candle_write_sequence_by_row_id[id(second)]
+    assert second_tracking.row is second
+    assert second_tracking.sequence == 2
     assert pub._candle_repair_event.is_set()
     late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
     pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(write_sequence=2)
     pub._mark_candle_writes_committed([second])
     assert pub._committed_candle_write_sequences == {2}
+
+
+def test_candle_write_sequence_rejects_reused_identity_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign row at a reused address cannot consume the tracked sequence.
+
+    Given: one pinned candle row and a deterministic simulation of its address
+        being reused for a different row,
+    When: the foreign row tries to remove sequence tracking,
+    Then: identity comparison refuses it and leaves the original tracking intact.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    tracked = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    foreign = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    tracked_id = id(tracked)
+    assert foreign == tracked
+    assert foreign is not tracked
+    assert pub._assign_candle_write_sequence(tracked) == 1
+
+    def _reused_id(_row: CandleUpsertRow) -> int:
+        """Return the tracked row's identity key for every row."""
+        return tracked_id
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.id", _reused_id, raising=False)
+
+    assert pub._pop_candle_write_sequence(foreign) is None
+    tracking = pub._candle_write_sequence_by_row_id[tracked_id]
+    assert tracking.row is tracked
+    assert tracking.sequence == 1
+    assert pub._pop_candle_write_sequence(tracked) == 1
+    assert pub._candle_write_sequence_by_row_id == {}
 
 
 @pytest.mark.asyncio
@@ -10494,7 +10533,9 @@ async def test_disconnect_for_correction_write_keeps_gate_for_retry() -> None:
     )
     with pytest.raises(_WriterSessionLostError):
         await pub._flush_single_candle_row(row)
-    assert pub._candle_write_sequence_by_row_id[id(row)] == sequence
+    tracking = pub._candle_write_sequence_by_row_id[id(row)]
+    assert tracking.row is row
+    assert tracking.sequence == sequence
     assert pub._pending_late_candle_drops[late_key].write_sequence == sequence
     assert all(
         pub._pending_candle_repairs[repair_key].required_sequence == sequence

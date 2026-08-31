@@ -516,6 +516,14 @@ class _EnqueuedCandleWrite:
     sequence: int
 
 
+@dataclass(frozen=True)
+class _TrackedCandleWrite:
+    """Pinned candle row paired with its publisher-assigned write sequence."""
+
+    row: CandleUpsertRow
+    sequence: int
+
+
 type TickPayloadValue = float | bool | None
 """Union of every value type in the tick payload deduplication tuple."""
 
@@ -799,7 +807,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._repair_drop_key_by_repair_key: dict[_CandleRepairKey, _LateCandleDropKey] = {}
         self._candle_repair_event: asyncio.Event = asyncio.Event()
         self._next_candle_write_sequence: int = 0
-        self._candle_write_sequence_by_row_id: dict[int, int] = {}
+        self._candle_write_sequence_by_row_id: dict[int, _TrackedCandleWrite] = {}
         self._committed_candle_write_sequences: set[int] = set()
         self._candle_shutdown_repair_drain_active: bool = False
         self._native_finalizer: NativeCandleFinalizer | None = None
@@ -2845,7 +2853,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         self._next_candle_write_sequence += 1
         sequence = self._next_candle_write_sequence
-        self._candle_write_sequence_by_row_id[id(row)] = sequence
+        self._candle_write_sequence_by_row_id[id(row)] = _TrackedCandleWrite(row, sequence)
         return sequence
 
     def _forget_candle_write_sequence(self, row: CandleUpsertRow) -> int | None:
@@ -2871,7 +2879,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             The forgotten sequence if the row was tracked.
         """
-        return self._candle_write_sequence_by_row_id.pop(id(row), None)
+        row_id = id(row)
+        tracked = self._candle_write_sequence_by_row_id.get(row_id)
+        if tracked is None or tracked.row is not row:
+            return None
+        del self._candle_write_sequence_by_row_id[row_id]
+        return tracked.sequence
 
     def _mark_candle_writes_committed(self, rows: list[CandleUpsertRow]) -> None:
         """Mark queued candle rows as durably committed by exact sequence.
