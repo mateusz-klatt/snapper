@@ -1127,11 +1127,13 @@ class TestCreateOrderAiReviewCitation:
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         _arm_execution_venue(repo)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         repo.get_ai_review = AsyncMock(
             return_value={
                 "public_id": "review-ok-1",
                 "user_public_id": "test_user",
                 "wallet_public_id": "wallet-1",
+                "instrument_public_id": "inst-1",
                 "status": "resolved_approved",
             }
         )
@@ -1185,6 +1187,102 @@ class TestCreateOrderAiReviewCitation:
         assert response.status_code == 403
         assert "not found" in response.json()["detail"]
         repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_citation_for_a_different_instrument_returns_403(self) -> None:
+        """An approval names one instrument and authorizes only that one.
+
+        Given: an approved review owned by the caller, on the caller's wallet,
+            but issued for a DIFFERENT instrument than the route resolved,
+        When: the client POSTs the order,
+        Then: response is HTTP 403 naming the instrument mismatch and no
+            trade-command insert fires.
+
+        The REST create-order route is the main manual-order path, and it was
+        the one call site the instrument binding did not reach: the validator
+        gained the argument and only the MCP tool was updated. Until this test,
+        a review approving one instrument authorized an order in any other
+        through ``POST /api/orders``, which is the exact hole the binding
+        exists to close.
+
+        The instrument compared is the one the ROUTE resolved from
+        ``(native_symbol, exchange)``, never ``body.instrument_public_id`` —
+        binding an approval to a value the same caller supplies would bind
+        nothing.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": "review-other-instrument",
+                "user_public_id": "test_user",
+                "wallet_public_id": "wallet-1",
+                "instrument_public_id": "inst-SOMETHING-ELSE",
+                "status": "resolved_approved",
+            }
+        )
+        body = _create_order_body()
+        body["payload"]["ai_review_public_id"] = "review-other-instrument"
+        client = _create_client(repo)
+
+        response = client.post("/api/orders", json=body)
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert "instrument mismatch" in detail
+        assert "inst-SOMETHING-ELSE" in detail
+        assert "inst-1" in detail
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_a_forged_instrument_in_the_body_cannot_satisfy_the_citation(self) -> None:
+        """The binding must read the route's instrument, not the caller's.
+
+        Given: an approved review issued for one instrument, and a body whose
+            ``instrument_public_id`` is forged to match that review while the
+            symbol resolves server-side to a DIFFERENT instrument,
+        When: the client POSTs the order,
+        Then: response is HTTP 403 naming the instrument mismatch.
+
+        This is the assertion that makes the binding worth anything. Comparing
+        the review against ``body.instrument_public_id`` would compare a
+        caller-supplied value with a caller-chosen citation — the attacker
+        controls both sides, so the check would pass for any pairing they like.
+        The route already canonicalises the instrument from
+        ``(native_symbol, exchange)``; the citation must be held to that.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-RESOLVED")
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": "review-forged",
+                "user_public_id": "test_user",
+                "wallet_public_id": "wallet-1",
+                "instrument_public_id": "inst-FORGED",
+                "status": "resolved_approved",
+            }
+        )
+        body = _create_order_body()
+        body["payload"]["ai_review_public_id"] = "review-forged"
+        body["payload"]["instrument_public_id"] = "inst-FORGED"
+        client = _create_client(repo)
+
+        response = client.post("/api/orders", json=body)
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert "instrument mismatch" in detail
+        assert "inst-RESOLVED" in detail
         repo.insert_trade_command.assert_not_called()
         client.close()
 

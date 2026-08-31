@@ -338,16 +338,21 @@ async def test_create_order_with_ai_review_citation_uses_resolved_wallet() -> No
     Given: an omitted-wallet order with one live wallet and a valid citation,
     When: the create-order handler validates the citation,
     Then: the review lookup is checked against the resolved wallet ID.
+
+    The row also carries the instrument the route resolves, because the
+    citation now binds the instrument as well as the owner and the wallet.
     """
     repo = _make_repo(plan_wallet_public_id="wallet-live")
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-live")]
     )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
     repo.get_ai_review = AsyncMock(
         return_value={
             "public_id": "review-1",
             "user_public_id": "user-1",
             "wallet_public_id": "wallet-live",
+            "instrument_public_id": "inst-1",
             "status": "resolved_approved",
         }
     )

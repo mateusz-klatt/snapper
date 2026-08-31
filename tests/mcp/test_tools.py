@@ -2013,6 +2013,7 @@ class TestSubmitManualOrderTool:
                 "public_id": review_pid,
                 "user_public_id": "user-1",
                 "wallet_public_id": "wallet-1",
+                "instrument_public_id": "inst-1",
                 "status": "resolved_approved",
             }
         )

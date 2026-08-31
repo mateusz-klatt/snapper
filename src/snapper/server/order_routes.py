@@ -137,6 +137,7 @@ async def _validate_create_order_ai_review_citation(
     principal: AuthPrincipal,
     body: CreateOrderBody,
     wallet_public_id: str,
+    resolved_instrument_public_id: str,
 ) -> None:
     """Gate ``ai_review_public_id`` citations.
 
@@ -146,6 +147,19 @@ async def _validate_create_order_ai_review_citation(
     becomes HTTP 403 so the caller cannot use a forged citation to
     trigger ``bus.caps_violation_after_ai_approve`` fanout to other
     delegates' UIs.
+
+    The instrument passed is the one the ROUTE resolved from
+    ``(native_symbol, exchange)``, never ``body.instrument_public_id``. A
+    caller-supplied identity is an assertion, and binding an approval to an
+    assertion the same caller controls would bind nothing at all.
+
+    Args:
+        repo: Repository handle used for the row fetch.
+        principal: Authenticated caller, for the owner check.
+        body: The manual-order submission carrying the citation.
+        wallet_public_id: Wallet the route resolved for this submission.
+        resolved_instrument_public_id: Instrument the route resolved
+            server-side for this submission.
     """
     if body.ai_review_public_id is None:
         return
@@ -155,6 +169,7 @@ async def _validate_create_order_ai_review_citation(
             ai_review_public_id=body.ai_review_public_id,
             expected_user_public_id=principal.user_public_id or principal.username,
             expected_wallet_public_id=wallet_public_id,
+            expected_instrument_public_id=resolved_instrument_public_id,
         )
     except AiReviewCitationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -603,6 +618,7 @@ async def create_order(
         principal=principal,
         body=body,
         wallet_public_id=wallet_public_id,
+        resolved_instrument_public_id=resolved_instrument_public_id,
     )
 
     shard_key = compute_shard_key(
