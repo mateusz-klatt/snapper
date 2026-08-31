@@ -240,6 +240,23 @@ class TestZmqBrokerBindEndpoints:
         assert loader.zmq_broker_bind_xpub == "tcp://0.0.0.0:7501"
 
 
+class TestPairedExecutionTimeouts:
+    """Paired-execution timeout env validation."""
+
+    @pytest.mark.parametrize(
+        "env_name",
+        ["PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S", "PAIRED_EXECUTION_FILL_TIMEOUT_S"],
+    )
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_non_finite_env_value_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, env_name: str, value: str
+    ) -> None:
+        """Non-finite paired-execution timeout strings fail bootstrap validation."""
+        monkeypatch.setenv(env_name, value)
+        with pytest.raises(ValidationError, match="finite"):
+            BootstrapSettingsLoader()
+
+
 class TestTradeCommandDispatchTtl:
     """``TRADE_COMMAND_DISPATCH_TTL_S`` env round-trip."""
 
@@ -254,3 +271,21 @@ class TestTradeCommandDispatchTtl:
         monkeypatch.setenv("TRADE_COMMAND_DISPATCH_TTL_S", "12.5")
         loader = BootstrapSettingsLoader()
         assert loader.trade_command_dispatch_ttl_s == pytest.approx(12.5)
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_non_finite_env_value_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Non-finite TTL strings fail bootstrap validation."""
+        monkeypatch.setenv("TRADE_COMMAND_DISPATCH_TTL_S", value)
+        with pytest.raises(ValidationError, match="finite"):
+            BootstrapSettingsLoader()
+
+    @pytest.mark.parametrize("value", ["0", "-12.5"])
+    def test_non_positive_env_value_remains_allowed(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Zero and negative finite values retain the documented disable policy."""
+        monkeypatch.setenv("TRADE_COMMAND_DISPATCH_TTL_S", value)
+        loader = BootstrapSettingsLoader()
+        assert loader.trade_command_dispatch_ttl_s == pytest.approx(float(value))

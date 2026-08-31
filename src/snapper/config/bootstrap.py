@@ -248,12 +248,20 @@ class BootstrapSettingsLoader(BaseSettings):
         default=False, alias="PAIRED_EXECUTION_GUARD_ENABLED"
     )
     paired_execution_assembly_timeout_s: float = Field(
-        default=5.0, alias="PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S"
+        default=5.0,
+        allow_inf_nan=False,
+        alias="PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S",
     )
     paired_execution_fill_timeout_s: float = Field(
-        default=30.0, alias="PAIRED_EXECUTION_FILL_TIMEOUT_S"
+        default=30.0,
+        allow_inf_nan=False,
+        alias="PAIRED_EXECUTION_FILL_TIMEOUT_S",
     )
-    trade_command_dispatch_ttl_s: float = Field(default=30.0, alias="TRADE_COMMAND_DISPATCH_TTL_S")
+    trade_command_dispatch_ttl_s: float = Field(
+        default=30.0,
+        allow_inf_nan=False,
+        alias="TRADE_COMMAND_DISPATCH_TTL_S",
+    )
     """Max age of a trade command before dispatch refuses it.
 
     Gates BOTH the outbox fetch (stale CREATED submits expire to the
