@@ -40,9 +40,36 @@ _COMMAND_LOGFILES: dict[str, str] = {
 }
 
 
+_MACHINE_STDOUT_COMMANDS: dict[tuple[str, ...], str | None] = {
+    ("audit-candles",): "--json",
+    ("mcp-oauth", "provision-client"): None,
+}
+"""Invocations whose stdout is one machine-readable document, not a console.
+
+Keyed by the leading argv words that identify the command; the value is a flag
+that must also be present, or ``None`` when the command always writes a
+document. ``mcp-oauth provision-client`` prints a client secret that is shown
+once and never recoverable, so a log line landing on stdout ahead of it does not
+merely look untidy — it makes the output unparseable and the secret lost."""
+
+
 def _machine_stdout_requested(argv: list[str]) -> bool:
-    """Return whether this invocation reserves stdout for one data document."""
-    return len(argv) > 1 and argv[1] == "audit-candles" and "--json" in argv[2:]
+    """Return whether this invocation reserves stdout for one data document.
+
+    Args:
+        argv: Full process argv, including the program name at index 0.
+
+    Returns:
+        Whether console logging must be diverted to stderr.
+    """
+    words = tuple(argv[1:])
+    for command, required_flag in _MACHINE_STDOUT_COMMANDS.items():
+        if words[: len(command)] != command:
+            continue
+        if required_flag is None:
+            return True
+        return required_flag in words[len(command) :]
+    return False
 
 
 def _resolve_logfile(argv: list[str]) -> str:

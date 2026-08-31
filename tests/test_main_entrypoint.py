@@ -35,6 +35,19 @@ def _clear_logfile_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(LOGFILE_ENV_VAR, raising=False)
 
 
+async def _create_schema(database_url: str) -> None:
+    """Create an empty schema for a subprocess that only needs tables.
+
+    Args:
+        database_url: SQLAlchemy URL for the throwaway SQLite file.
+    """
+    repository = SQLAlchemyRepository(database_url)
+    try:
+        await repository.create_all()
+    finally:
+        await repository.engine.dispose()
+
+
 async def _seed_active_aapl(database_url: str, active_at: datetime) -> None:
     """Create one active Polygon target without candles for a subprocess audit."""
     repository = SQLAlchemyRepository(database_url)
@@ -112,18 +125,35 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
         (["snapper", "audit-candles", "--json"], True),
         (["snapper", "audit-candles"], False),
         (["snapper", "server", "--json"], False),
+        (["snapper", "mcp-oauth", "provision-client", "--name", "x"], True),
+        (["snapper", "mcp-oauth", "list-clients"], False),
+        (["snapper", "mcp-oauth"], False),
+        (["snapper"], False),
+        (["snapper", "server", "--label", "mcp-oauth", "provision-client"], False),
+        (["snapper", "provision-client", "mcp-oauth"], False),
     ],
 )
-def test_main_reserves_machine_stdout_only_for_json_candle_audits(
+def test_main_reserves_machine_stdout_only_for_machine_commands(
     monkeypatch: pytest.MonkeyPatch,
     argv: list[str],
     expected: bool,
 ) -> None:
-    """Only the machine candle report routes console logs to stderr.
+    """Only a command that emits one document routes console logs to stderr.
 
-    Given: A JSON candle invocation or a nearby human/non-candle invocation.
+    Given: A machine invocation or a nearby human invocation that merely
+        shares its leading word.
     When: The package entry point configures logging.
     Then: The stderr-console flag matches the exact machine-output contract.
+
+    The sibling cases carry the weight. Matching on ``mcp-oauth`` alone would
+    silence the console for ``list-clients`` too, which is a human command whose
+    logs an operator is meant to see; matching on the bare group word, or on the
+    program name with no subcommand at all, must not reserve stdout either. The
+    contract is the exact argv prefix, not a family — and not a bag of words
+    either. The last two cases put the command's own words somewhere other than
+    the front, and in the wrong order, because a membership test would accept
+    both and silence the console for an operator command that merely mentions
+    the name of a machine one.
     """
     captured: dict[str, object] = {}
 
@@ -579,6 +609,72 @@ class TestMain:
             assert (
                 "Usage:" in output or "snapper" in output.lower()
             ), f"Unexpected output: {output!r}"
+
+
+def test_oauth_provisioning_subprocess_reserves_stdout_for_one_document(tmp_path: Path) -> None:
+    """The credential is shown once, so nothing may share its stdout.
+
+    Given: a SQLite-backed database and the real package entry point.
+    When: ``python -m snapper mcp-oauth provision-client`` succeeds.
+    Then: stdout is exactly one parseable JSON document carrying the secret
+        once, and every log line went to stderr instead.
+
+    This runs the REAL entry point in a subprocess on purpose. The CLI-level
+    test invokes the typer app directly and therefore never executes
+    ``snapper.__main__.main``, where the console logger is attached and
+    ``log_kraken_sdk_patches_status()`` emits INFO lines before the command
+    runs. Only a subprocess can observe whether those lines land on stdout —
+    and if they do, the document is unparseable and the client secret, which
+    cannot be recovered, is lost with it.
+    """
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'oauth.db').as_posix()}"
+    asyncio.run(_create_schema(database_url))
+    env = os.environ.copy()
+    env["DB_URL"] = database_url
+    env["SNAPPER_ENV"] = "test"
+    env[LOGFILE_ENV_VAR] = str(tmp_path / "oauth.log")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(
+            None,
+            [
+                str(Path(__file__).resolve().parents[1] / "src"),
+                env.get("PYTHONPATH", ""),
+            ],
+        )
+    )
+    run_cwd = tmp_path / "oauth-runroot"
+    run_cwd.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "snapper",
+            "mcp-oauth",
+            "provision-client",
+            "--name",
+            "Entry Point Probe",
+            "--redirect-uri",
+            "https://example.invalid/callback",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=run_cwd,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("\n") == 1
+    document = json.loads(result.stdout)
+    assert document["client_name"] == "Entry Point Probe"
+    secret = document["client_secret"]
+    assert secret
+    assert result.stdout.count(secret) == 1
+    assert secret not in result.stderr
+    assert "Save this credential now" in result.stderr
 
 
 def test_json_candle_audit_subprocess_reserves_stdout_for_one_document(tmp_path: Path) -> None:
