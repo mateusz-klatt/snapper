@@ -38,7 +38,7 @@ fastapi = "^0.141.1"
 uvicorn = {extras = ["standard"], version = "^0.53.0"}
 pyzmq = "^27.2.0"
 pyjwt = "^2.14.0"
-TA-Lib = "^0.7.1"
+TA-Lib = "^0.8.0"
 ccxt = "^4.5.78"
 python-kraken-sdk = "^3.5.0"
 massive = "^2.8.0"
