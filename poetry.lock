@@ -5481,14 +5481,14 @@ cli = ["click (>=5.0)"]
 
 [[package]]
 name = "python-kraken-sdk"
-version = "3.3.0"
+version = "3.5.0"
 description = "Command-line tool and collection of REST and websocket clients to interact with the Kraken Crypto Asset Exchange."
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "python_kraken_sdk-3.3.0-py3-none-any.whl", hash = "sha256:53a6ae7d02108502c22329b77b81735cee12bfbe31dcf2dd3ca33b342bf99693"},
-    {file = "python_kraken_sdk-3.3.0.tar.gz", hash = "sha256:b2b4982684bc2c47b48a780fb2f99086f7401f4e23c21ff60ba4367e2dcb55db"},
+    {file = "python_kraken_sdk-3.5.0-py3-none-any.whl", hash = "sha256:bf7eb9bb9b4048492770dc057b05eacad7dfe253abd15a1974c1876b97dbe460"},
+    {file = "python_kraken_sdk-3.5.0.tar.gz", hash = "sha256:8037bf89bbe9e628dc7c15638b57b4ca5de96da222c831989cfadf496ac858dd"},
 ]
 
 [package.dependencies]
@@ -5498,6 +5498,9 @@ cloup = "*"
 orjson = "*"
 requests = "*"
 websockets = ">=14.1"
+
+[package.extras]
+mcp = ["mcp (>=2.2.0)"]
 
 [[package]]
 name = "python-multipart"
@@ -7920,4 +7923,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "820f491a1d7a7a06a5b7c6389b37df84a5498a16d11f5dbd27cfbd0d0414ca3b"
+content-hash = "b82f79838a1610feca94efb67655393011c34887478a97cbc448fac0ce1768d1"
