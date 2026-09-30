@@ -417,31 +417,39 @@ class TestResolveWalletPublicIdByShort:
     async def test_resolves_canonical_short(self, repo: SQLAlchemyRepository) -> None:
         """Canonical last-12 wallet-short resolves through active credentials.
 
-        Given: A wallet with an active credential at the query time,
+        Given: A wallet with active credentials on two exchanges at the query time,
         When: The canonical wallet-short is resolved,
-        Then: The wallet public ID is returned.
+        Then: The resolver receives one wallet identity and returns its public ID.
         """
         wallet_id = "018f0000-0000-7000-8000-abcdefabcdef"
         base_ts = datetime.now(UTC) - timedelta(minutes=1)
         await _seed_wallet(repo, wallet_id)
-        await repo.create_wallet_credential(
-            wallet_public_id=wallet_id,
-            exchange="kraken",
-            credential_type="api_key_secret",
-            encrypted_payload="gAAAAABcanonical",
-            label=None,
-            session_id="test-session",
-            sequence_id=10,
-            timestamp=base_ts,
-            reconciliation_method="unclassified",
-        )
+        for sequence_id, exchange in enumerate(("kraken", "walutomat"), start=10):
+            await repo.create_wallet_credential(
+                wallet_public_id=wallet_id,
+                exchange=exchange,
+                credential_type="api_key_secret",
+                encrypted_payload="gAAAAABcanonical",
+                label=None,
+                session_id="test-session",
+                sequence_id=sequence_id,
+                timestamp=base_ts,
+                reconciliation_method="unclassified",
+            )
 
-        result = await repo.resolve_wallet_public_id_by_short(
-            compute_wallet_short(wallet_id),
-            datetime.now(UTC),
-        )
+        wallet_short = compute_wallet_short(wallet_id)
+        with patch.object(
+            SQLAlchemyRepository,
+            "_wallet_public_id_from_short",
+            wraps=SQLAlchemyRepository._wallet_public_id_from_short,
+        ) as resolver:
+            result = await repo.resolve_wallet_public_id_by_short(
+                wallet_short,
+                datetime.now(UTC),
+            )
 
         assert result == wallet_id
+        resolver.assert_called_once_with(wallet_short, [wallet_id])
 
     @pytest.mark.asyncio
     async def test_resolves_legacy_short(self, repo: SQLAlchemyRepository) -> None:

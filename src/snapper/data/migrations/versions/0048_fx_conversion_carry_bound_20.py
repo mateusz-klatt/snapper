@@ -73,7 +73,7 @@ def downgrade() -> None:
             bound, because tightening the CHECK under it would orphan evidence
             a P&L replay still depends on.
     """
-    wider = (
+    wider: int = (
         op.get_bind()
         .execute(
             sa.text(

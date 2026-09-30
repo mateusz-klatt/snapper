@@ -698,7 +698,7 @@ def _demo_exchange_order_id(order_public_id: str) -> str:
 
 def _lookup_order_native_symbol(conn: Connection, order_public_id: str) -> str:
     """Resolve the active native symbol owned by one freshly seeded order."""
-    native_symbol = conn.execute(
+    native_symbol: str = conn.execute(
         text(
             "SELECT s.native_symbol FROM orders o "
             "JOIN instruments i ON i.public_id = o.instrument_public_id "

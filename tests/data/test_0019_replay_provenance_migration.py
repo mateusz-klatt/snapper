@@ -88,7 +88,7 @@ def _origin_of(engine: sa.Engine, public_id: str) -> str:
         The origin column value.
     """
     with engine.begin() as conn:
-        value = conn.execute(
+        value: str = conn.execute(
             sa.text("SELECT origin FROM trade_commands WHERE public_id = :pid"),
             {"pid": public_id},
         ).scalar_one()

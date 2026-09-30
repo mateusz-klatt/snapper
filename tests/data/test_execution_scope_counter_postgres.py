@@ -40,6 +40,7 @@ import asyncio
 import os
 import threading
 from collections.abc import AsyncIterator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -199,7 +200,7 @@ async def _wait_until_fence_blocked(repository: SQLAlchemyRepository) -> None:
     deadline = asyncio.get_running_loop().time() + _RACE_TIMEOUT_SECONDS
     while asyncio.get_running_loop().time() < deadline:
         async with repository.session() as s:
-            waiting = (
+            waiting: int = (
                 await s.execute(
                     text("SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event = 'advisory'")
                 )
@@ -577,12 +578,12 @@ async def test_insert_transaction_isolation_is_explicitly_read_committed(
     """
     repo = inherited_repeatable_read_repository
     async with repo.session() as s:
-        inherited = (await s.execute(text("SHOW transaction_isolation"))).scalar_one()
+        inherited: str = (await s.execute(text("SHOW transaction_isolation"))).scalar_one()
         await s.rollback()
     assert inherited == "repeatable read"
     async with repo.session() as s:
         await repo._begin_execution_insert_transaction(s)
-        forced = (await s.execute(text("SHOW transaction_isolation"))).scalar_one()
+        forced: str = (await s.execute(text("SHOW transaction_isolation"))).scalar_one()
         await s.rollback()
     assert forced == "read committed"
 
@@ -847,16 +848,16 @@ async def test_migration_fence_refuses_a_crossed_wallet_writer_on_live_postgresq
     verify_engine = create_async_engine(rendered)
     try:
         async with verify_engine.connect() as connection:
-            version = (
+            version: str = (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar_one()
-            crossed_rows = (
+            crossed_rows: int = (
                 await connection.execute(
                     text("SELECT COUNT(*) FROM executions WHERE wallet_public_id = :wallet"),
                     {"wallet": wallet_b},
                 )
             ).scalar_one()
-            wallet_a_counters = (
+            wallet_a_counters: Sequence[int] = (
                 (
                     await connection.execute(
                         text(
@@ -939,7 +940,7 @@ async def test_migration_named_validator_catches_crossed_writer_under_hostile_is
     control_engine = create_async_engine(rendered)
     try:
         async with control_engine.connect() as connection:
-            default_isolation = (
+            default_isolation: str = (
                 await connection.execute(text("SHOW default_transaction_isolation"))
             ).scalar_one()
     finally:
@@ -1059,10 +1060,10 @@ async def test_migration_named_validator_catches_crossed_writer_under_hostile_is
     verify_engine = create_async_engine(rendered)
     try:
         async with verify_engine.connect() as connection:
-            version = (
+            version: str = (
                 await connection.execute(text("SELECT version_num FROM alembic_version"))
             ).scalar_one()
-            scope_columns = (
+            scope_columns: int = (
                 await connection.execute(
                     text(
                         "SELECT COUNT(*) FROM information_schema.columns WHERE "
@@ -1070,7 +1071,7 @@ async def test_migration_named_validator_catches_crossed_writer_under_hostile_is
                     )
                 )
             ).scalar_one()
-            crossed_rows = (
+            crossed_rows: int = (
                 await connection.execute(
                     text("SELECT COUNT(*) FROM executions WHERE wallet_public_id = :wallet"),
                     {"wallet": wallet_b},

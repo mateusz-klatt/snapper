@@ -943,6 +943,34 @@ async def test_seed_normalizes_local_connection_refusal(
 
 
 @pytest.mark.asyncio
+async def test_seed_disposal_failure_does_not_report_transaction_rollback(
+    oss_seeded_db_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep post-commit disposal failures distinct from insertion failures.
+
+    Given: Fixture rows commit but disposing their engine raises,
+    When: The seed operation exits its resource boundary,
+    Then: The original cleanup error propagates and anchor creation never starts.
+    """
+    original_dispose = AsyncEngine.dispose
+    seed_anchors = AsyncMock()
+
+    async def fail_dispose(engine: AsyncEngine, close: bool = True) -> None:
+        await original_dispose(engine, close=close)
+        raise SQLAlchemyError("forced engine disposal failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncEngine, "dispose", fail_dispose)
+        patch.setattr(pnl_uat_fixture, "_seed_activation_anchors", seed_anchors)
+        with pytest.raises(SQLAlchemyError, match="forced engine disposal failure"):
+            await pnl_uat_fixture._seed_fixture_database_unchecked(oss_seeded_db_url, _ANCHOR)
+
+    seed_anchors.assert_not_awaited()
+    assert await _instrument_count(oss_seeded_db_url) > 0
+
+
+@pytest.mark.asyncio
 async def test_seed_rejects_a_database_behind_schema_head(
     oss_seeded_db_url: URL,
 ) -> None:

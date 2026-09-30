@@ -181,7 +181,7 @@ class TestSchemaHygiene0010Upgrade:
     def test_known_to_default_dropped(self, migrated_db: tuple[sa.Engine, Config]) -> None:
         """continuous_contract_configs.known_to no longer carries a server default."""
         engine, _ = migrated_db
-        ddl = (
+        ddl: str = (
             engine.connect()
             .execute(
                 sa.text(
@@ -291,13 +291,13 @@ class TestSchemaHygiene0010Downgrade:
         engine, cfg = migrated_db
         command.downgrade(cfg, "0009")
         assert "ix_executions_wallet_ts" not in _names(engine, "index", "ix_executions_%")
-        orders_ddl = (
+        orders_ddl: str = (
             engine.connect()
             .execute(sa.text("SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'"))
             .scalar_one()
         )
         assert "ck_orders_status" not in orders_ddl
-        ccc_ddl = (
+        ccc_ddl: str = (
             engine.connect()
             .execute(
                 sa.text(

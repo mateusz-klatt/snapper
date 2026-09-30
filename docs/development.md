@@ -32,6 +32,11 @@ make pre-refresh
 make update
 ```
 
+`make refresh` upgrades Python, frontend, and MCP dependencies, GitHub Actions,
+and pre-commit hooks. The Python refresh also reinstalls the current project
+so its installed dependency metadata matches the updated manifest and lock file.
+`make update` additionally refreshes Docker build-tool pins.
+
 ## Isolated Worktrees for Parallel Sessions
 
 When more than one agent or developer session works on the repository at
@@ -492,10 +497,11 @@ inside the Makefile. This keeps `make test`, `make cov`, and
 `make check-all` from mutating the database used by a running local
 server, even when `.env` points at `./data/snapper.db` or PostgreSQL.
 
-The fixture is built automatically on the first test run and reused
-afterwards. `make migrate-dev-sqlite` builds it explicitly (Alembic
-migrations via `snapper db-init`, then `snapper db-seed --profile dev`);
-delete `./data/dev.db` first to rebuild it from scratch.
+The fixture is rebuilt automatically before every SQLite test or coverage
+invocation. `make migrate-dev-sqlite` rebuilds it explicitly using the same
+locked, staged migration and dev-seed process. The builder validates the
+new database before atomically replacing `./data/dev.db`; no manual
+deletion is needed.
 
 The fixture URL is the `TEST_DB_URL` Make variable (default
 `sqlite+aiosqlite:///./data/dev.db`). Override it to run the suite

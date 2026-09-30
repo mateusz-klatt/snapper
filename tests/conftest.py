@@ -63,6 +63,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
+from sqlalchemy.engine import make_url
 
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.application.services.settings import SettingsService
@@ -445,12 +447,16 @@ def mock_settings_for_tests(
     ws_token_service.set_settings_service(mock_settings_service)
 
 
-def _extract_sqlite_path(db_url: str) -> Path | None:
-    """Return the file path from a SQLite URL, or None for other engines."""
-    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
-        if db_url.startswith(prefix):
-            return Path(db_url[len(prefix) :]).resolve()
-    return None
+def _extract_sqlite_path(db_url: str | URL) -> Path | None:
+    """Return the decoded ordinary SQLite path, excluding memory and URI URLs."""
+    url = make_url(db_url)
+    if (
+        url.get_backend_name() != "sqlite"
+        or url.database in (None, "", ":memory:")
+        or "uri" in url.query
+    ):
+        return None
+    return Path(url.database).resolve()
 
 
 def _sqlite_contract_rows(
@@ -721,7 +727,7 @@ def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     engine = create_engine(f"sqlite:///{template_path}")
     Base.metadata.create_all(engine)
     with engine.connect() as connection:
-        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
+        journal_mode: str = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     engine.dispose()
     if journal_mode != "wal":
         raise RuntimeError(f"SQLite test template did not enter WAL mode: {journal_mode}")
@@ -729,39 +735,32 @@ def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return template_path
 
 
-def _try_copy_template(db_url: str) -> bool:
+def _try_copy_template(db_url: str | URL) -> bool:
     """Copy template DB file if URL is file-based SQLite and template exists.
 
     Returns True if copy succeeded, False if fallback to real create_all needed.
-    In-memory SQLite (`:memory:`) always falls back.
+    In-memory SQLite and SQLite URI URLs always fall back to schema creation.
     """
     if _db_template_state["path"] is None or not _db_template_state["path"].exists():
         return False
-    if ":memory:" in db_url:
-        return False
-    for prefix in ("sqlite:///", "sqlite+aiosqlite:///"):
-        if db_url.startswith(prefix):
-            raw_path = db_url[len(prefix) :]
-            if not raw_path or raw_path == ":memory:":
-                return False
-            target = Path(raw_path)
-            if not target.exists():
-                shutil.copy2(_db_template_state["path"], target)
-                return True
+    target = _extract_sqlite_path(db_url)
+    if target is not None and not target.exists():
+        shutil.copy2(_db_template_state["path"], target)
+        return True
     return False
 
 
-async def _patched_create_all_async(self: Any) -> None:
+async def _patched_create_all_async(self: SQLAlchemyRepository) -> None:
     """Async create_all that copies template DB instead of full schema creation."""
-    if _try_copy_template(str(self.engine.url)):
+    if _try_copy_template(self.engine.url):
         return
     async with self.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-def _patched_create_all_sync(self: Any) -> None:
+def _patched_create_all_sync(self: DatabaseRepository) -> None:
     """Sync create_all that copies template DB instead of full schema creation."""
-    if _try_copy_template(str(self.engine.url)):
+    if _try_copy_template(self.engine.url):
         return
     Base.metadata.create_all(self.engine)
 

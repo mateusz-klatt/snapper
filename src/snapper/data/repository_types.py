@@ -407,8 +407,8 @@ class SignalRow(TypedDict):
     side: str
     strength: float
     reason: str
-    strategy_name: str
-    price: float
+    strategy_name: str | None
+    price: float | None
     fired_at: datetime
     wallet_public_id: str | None
     operator_public_id: str | None

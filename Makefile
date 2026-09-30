@@ -256,6 +256,7 @@ py-refresh:
 	$(VENV_PY) scripts/refresh_python_deps.py
 	$(info Refreshing Python lock file within the current constraints...)
 	$(PYRUN) poetry update
+	$(PYRUN) poetry install --with dev --with cloud
 	$(info Python dependencies refreshed!)
 
 mcp-refresh:

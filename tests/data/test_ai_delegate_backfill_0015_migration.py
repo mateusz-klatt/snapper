@@ -173,7 +173,7 @@ def test_backfill_leaves_existing_rows_and_humans_untouched(
             ),
             {"user": _USER_SEEDED},
         ).fetchall()
-        human = connection.execute(
+        human: int = connection.execute(
             sa.text("SELECT COUNT(*) FROM ai_delegates WHERE user_public_id = :user"),
             {"user": _USER_HUMAN},
         ).scalar_one()

@@ -1370,7 +1370,7 @@ def run_seed(profile: str) -> tuple[int, int]:
     engine = create_engine(db_url, poolclass=NullPool)
     tracker = SequenceTracker()
     with engine.connect() as conn:
-        existing_bootstrap_rows = {
+        existing_bootstrap_rows: dict[str, int] = {
             "users": conn.execute(text("SELECT COUNT(*) FROM users")).scalar_one(),
             "operators": conn.execute(text("SELECT COUNT(*) FROM operators")).scalar_one(),
             "wallets": conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar_one(),

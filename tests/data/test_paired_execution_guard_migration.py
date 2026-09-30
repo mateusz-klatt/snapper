@@ -151,7 +151,7 @@ class TestPairedExecutionGuardMigration:
             )
         _insert_leg(engine, public_id="leg-2", group_public_id="grp-1", leg_index=0)
         with engine.begin() as conn:
-            active = conn.execute(
+            active: int = conn.execute(
                 sa.text(
                     "SELECT COUNT(*) FROM paired_execution_legs "
                     "WHERE group_public_id = 'grp-1' AND leg_index = 0 "

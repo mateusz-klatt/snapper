@@ -117,7 +117,7 @@ class TestInstrumentFeedHealthMigration:
         _insert_row(engine, coordinator="coord-0")
         _insert_row(engine, coordinator="coord-1")
         with engine.begin() as conn:
-            count = conn.execute(
+            count: int = conn.execute(
                 sa.text("SELECT COUNT(*) FROM instrument_feed_health")
             ).scalar_one()
         assert count == 2

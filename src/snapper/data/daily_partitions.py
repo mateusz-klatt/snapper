@@ -26,6 +26,7 @@ from typing import cast
 from sqlalchemy import bindparam
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
+from sqlalchemy.engine import ScalarResult
 from sqlalchemy.exc import DBAPIError
 
 MarketDataTable = Literal["ticks", "candles", "trades"]
@@ -1015,13 +1016,11 @@ def _verify_adoption_names_available(
           AND relation.relname IN :names
         ORDER BY relation.relname
         """).bindparams(bindparam("names", expanding=True))
-    collisions = tuple(
-        cast(str, name)
-        for name in connection.execute(
-            statement,
-            {"names": tuple(sorted(names))},
-        ).scalars()
-    )
+    collision_names: ScalarResult[str] = connection.execute(
+        statement,
+        {"names": tuple(sorted(names))},
+    ).scalars()
+    collisions = tuple(collision_names)
     if collisions:
         raise DailyPartitionError(
             f"refused: target partition relation names already exist: {collisions!r}"

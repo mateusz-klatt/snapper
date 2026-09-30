@@ -38,6 +38,7 @@ from alembic.config import Config
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import RowMapping
+from sqlalchemy.engine import ScalarResult
 
 from snapper.data.daily_partitions import DailyPartitionError
 from snapper.data.daily_partitions import adopt
@@ -640,7 +641,7 @@ def alembic_revision(connection: Connection) -> str:
     Returns:
         Current single Alembic revision.
     """
-    value = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+    value: str = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
     return _required_text(value)
 
 
@@ -1005,7 +1006,7 @@ def _root_kinds(connection: Connection) -> tuple[tuple[str, str, bool], ...]:
 
 def _legacy_relations(connection: Connection) -> tuple[str, ...]:
     """Read any market legacy relation names after a refused migration."""
-    values = connection.exec_driver_sql("""
+    values: ScalarResult[str] = connection.exec_driver_sql("""
         SELECT relname
         FROM pg_class
         JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
@@ -1086,7 +1087,7 @@ def _not_null_constraint_name(
     Returns:
         Exact catalog constraint name.
     """
-    value = connection.execute(
+    value: str = connection.execute(
         sa.text("""
             SELECT constraint_row.conname
             FROM pg_constraint AS constraint_row
@@ -1118,7 +1119,7 @@ def _sequence_cache(connection: Connection, sequence: str) -> int:
     Raises:
         TypeError: If the driver returns a noninteger catalog value.
     """
-    value = connection.execute(
+    value: int = connection.execute(
         sa.text("""
             SELECT sequence_parameters.seqcache
             FROM pg_sequence AS sequence_parameters
@@ -1385,7 +1386,7 @@ def _prove_unexpected_partitioned_child_refusal(
 
 def _index_reloptions(connection: Connection, index: str) -> str:
     """Return stable comma-delimited storage options for one public index."""
-    value = connection.execute(
+    value: str = connection.execute(
         sa.text("""
             SELECT COALESCE(array_to_string(relation.reloptions, ','), '')
             FROM pg_class AS relation
@@ -1454,7 +1455,7 @@ def _prove_malformed_partitioned_refusal(
     )
     with engine.connect() as connection:
         revision = alembic_revision(connection)
-        observed = connection.exec_driver_sql(
+        observed: str = connection.exec_driver_sql(
             "SELECT relname FROM pg_class WHERE oid = "
             "'public.trades_p_ix_ts_malformed'::regclass"
         ).scalar_one()

@@ -111,7 +111,6 @@ from sqlalchemy import case
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import delete
 from sqlalchemy import desc
-from sqlalchemy import distinct
 from sqlalchemy import event
 from sqlalchemy import exists
 from sqlalchemy import func
@@ -1883,15 +1882,65 @@ class _PnlOrderMinimumWindow:
     as_of: datetime
 
 
+type _PnlOrderMinimumSpecRecord = Row[
+    str,
+    str,
+    str | None,
+    str,
+    str,
+    str,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    str,
+    str | None,
+    str | None,
+    datetime | None,
+    float | None,
+    bool,
+    bool,
+    datetime,
+    datetime,
+]
+type _PnlOrderMinimumIdentityRecord = Row[
+    str,
+    str,
+    str | None,
+    str,
+    str,
+    str,
+    str,
+    bool,
+    datetime,
+    datetime,
+    datetime,
+    datetime,
+    int,
+]
+type _PnlOrderMinimumCapabilityRecord = Row[str, str, bool, datetime, datetime]
+type _PnlOrderMinimumInstrumentRecord = Row[str, str, str, datetime, datetime, int]
+type _PnlOrderMinimumOrphanSpecRecord = Row[str, str, datetime, datetime]
+type _InstrumentSymbolRefRecord = Row[
+    str, str, str, str, str, str | None, datetime, datetime, datetime, datetime
+]
+type _PnlFxRateRecord = Row[
+    str, str | None, str, datetime, float, str, str, int, str, str, int, datetime, datetime
+]
+type _PnlCryptoUsdPlaneRecord = Row[
+    str, str | None, str, str, str, int, str, datetime, float, datetime
+]
+
+
 @dataclass(frozen=True, slots=True)
 class _PnlOrderMinimumEvidence:
     """Raw SQL planes needed to prove a complete venue sibling set."""
 
-    spec_records: list[Row[Any]]
-    identity_records: list[Row[Any]]
-    capability_records: list[Row[Any]]
-    instrument_records: list[Row[Any]]
-    orphan_spec_records: list[Row[Any]]
+    spec_records: list[_PnlOrderMinimumSpecRecord]
+    identity_records: list[_PnlOrderMinimumIdentityRecord]
+    capability_records: list[_PnlOrderMinimumCapabilityRecord]
+    instrument_records: list[_PnlOrderMinimumInstrumentRecord]
+    orphan_spec_records: list[_PnlOrderMinimumOrphanSpecRecord]
 
 
 type _PnlOrderMinimumCapabilities = dict[
@@ -1920,60 +1969,63 @@ async def _pnl_order_minimum_records(
         minimum_unstable,
     ) = _pnl_spot_order_minimum_proof_filters(window.as_of)
     spec_records = list(
-        (
-            await session.execute(
-                select(
-                    Instrument.exchange,
-                    Symbol.base,
-                    Symbol.quote,
-                    Symbol.asset_type,
-                    Instrument.public_id,
-                    Symbol.public_id,
-                    Symbol.native_symbol,
-                    InstrumentSpec.instrument_kind,
-                    InstrumentSpec.quantity_unit,
-                    InstrumentSpec.status,
-                    InstrumentSpec.public_id,
-                    InstrumentSpec.spec_source,
-                    InstrumentSpec.spec_version,
-                    InstrumentSpec.spec_observed_at,
-                    InstrumentSpec.min_order_size,
-                    identity_conflicted,
-                    minimum_unstable,
-                    InstrumentSpec.timestamp,
-                    InstrumentSpec.known_to,
+        cast(
+            Sequence[_PnlOrderMinimumSpecRecord],
+            (
+                await session.execute(
+                    select(
+                        Instrument.exchange,
+                        Symbol.base,
+                        Symbol.quote,
+                        Symbol.asset_type,
+                        Instrument.public_id,
+                        Symbol.public_id,
+                        Symbol.native_symbol,
+                        InstrumentSpec.instrument_kind,
+                        InstrumentSpec.quantity_unit,
+                        InstrumentSpec.status,
+                        InstrumentSpec.public_id,
+                        InstrumentSpec.spec_source,
+                        InstrumentSpec.spec_version,
+                        InstrumentSpec.spec_observed_at,
+                        InstrumentSpec.min_order_size,
+                        identity_conflicted,
+                        minimum_unstable,
+                        InstrumentSpec.timestamp,
+                        InstrumentSpec.known_to,
+                    )
+                    .select_from(InstrumentSpec)
+                    .join(
+                        Instrument,
+                        and_(
+                            InstrumentSpec.instrument_public_id == Instrument.public_id,
+                            Instrument.timestamp <= InstrumentSpec.timestamp,
+                            Instrument.known_to > InstrumentSpec.timestamp,
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            Symbol.timestamp <= InstrumentSpec.timestamp,
+                            Symbol.known_to > InstrumentSpec.timestamp,
+                        ),
+                    )
+                    .where(
+                        Instrument.exchange.in_(window.exchanges),
+                        InstrumentSpec.timestamp <= window.as_of,
+                        InstrumentSpec.timestamp < window.end,
+                        InstrumentSpec.known_to > window.start,
+                        or_(
+                            Symbol.base.in_(window.currencies),
+                            Symbol.quote.in_(window.currencies),
+                        ),
+                        symbol_known,
+                        real_venue,
+                    )
                 )
-                .select_from(InstrumentSpec)
-                .join(
-                    Instrument,
-                    and_(
-                        InstrumentSpec.instrument_public_id == Instrument.public_id,
-                        Instrument.timestamp <= InstrumentSpec.timestamp,
-                        Instrument.known_to > InstrumentSpec.timestamp,
-                    ),
-                )
-                .join(
-                    Symbol,
-                    and_(
-                        Instrument.symbol_public_id == Symbol.public_id,
-                        Symbol.timestamp <= InstrumentSpec.timestamp,
-                        Symbol.known_to > InstrumentSpec.timestamp,
-                    ),
-                )
-                .where(
-                    Instrument.exchange.in_(window.exchanges),
-                    InstrumentSpec.timestamp <= window.as_of,
-                    InstrumentSpec.timestamp < window.end,
-                    InstrumentSpec.known_to > window.start,
-                    or_(
-                        Symbol.base.in_(window.currencies),
-                        Symbol.quote.in_(window.currencies),
-                    ),
-                    symbol_known,
-                    real_venue,
-                )
-            )
-        ).all()
+            ).all(),
+        )
     )
     instrument_records = list(
         (
@@ -2003,48 +2055,51 @@ async def _pnl_order_minimum_records(
         ).all()
     )
     instrument_ids = [record[5] for record in instrument_records]
-    identity_records: list[Row[Any]] = []
+    identity_records: list[_PnlOrderMinimumIdentityRecord] = []
     if instrument_ids:
         identity_records = list(
-            (
-                await session.execute(
-                    select(
-                        Instrument.exchange,
-                        Symbol.base,
-                        Symbol.quote,
-                        Symbol.asset_type,
-                        Instrument.public_id,
-                        Symbol.public_id,
-                        Symbol.native_symbol,
-                        identity_conflicted,
-                        Instrument.timestamp,
-                        Instrument.known_to,
-                        Symbol.timestamp,
-                        Symbol.known_to,
-                        Instrument.id,
+            cast(
+                Sequence[_PnlOrderMinimumIdentityRecord],
+                (
+                    await session.execute(
+                        select(
+                            Instrument.exchange,
+                            Symbol.base,
+                            Symbol.quote,
+                            Symbol.asset_type,
+                            Instrument.public_id,
+                            Symbol.public_id,
+                            Symbol.native_symbol,
+                            identity_conflicted,
+                            Instrument.timestamp,
+                            Instrument.known_to,
+                            Symbol.timestamp,
+                            Symbol.known_to,
+                            Instrument.id,
+                        )
+                        .select_from(Instrument)
+                        .join(
+                            Symbol,
+                            and_(
+                                Instrument.symbol_public_id == Symbol.public_id,
+                                Symbol.timestamp < Instrument.known_to,
+                                Instrument.timestamp < Symbol.known_to,
+                            ),
+                        )
+                        .where(
+                            Instrument.id.in_(instrument_ids),
+                            Instrument.exchange.in_(window.exchanges),
+                            Instrument.timestamp <= window.as_of,
+                            Instrument.timestamp < window.end,
+                            Instrument.known_to > window.start,
+                            Symbol.timestamp < window.end,
+                            Symbol.known_to > window.start,
+                            symbol_known,
+                            real_venue,
+                        )
                     )
-                    .select_from(Instrument)
-                    .join(
-                        Symbol,
-                        and_(
-                            Instrument.symbol_public_id == Symbol.public_id,
-                            Symbol.timestamp < Instrument.known_to,
-                            Instrument.timestamp < Symbol.known_to,
-                        ),
-                    )
-                    .where(
-                        Instrument.id.in_(instrument_ids),
-                        Instrument.exchange.in_(window.exchanges),
-                        Instrument.timestamp <= window.as_of,
-                        Instrument.timestamp < window.end,
-                        Instrument.known_to > window.start,
-                        Symbol.timestamp < window.end,
-                        Symbol.known_to > window.start,
-                        symbol_known,
-                        real_venue,
-                    )
-                )
-            ).all()
+                ).all(),
+            )
         )
     symbol_public_ids = list(
         dict.fromkeys(
@@ -2054,7 +2109,7 @@ async def _pnl_order_minimum_records(
             ]
         )
     )
-    capability_records: list[Row[Any]] = []
+    capability_records: list[_PnlOrderMinimumCapabilityRecord] = []
     if symbol_public_ids:
         capability_records = list(
             (
@@ -2123,7 +2178,7 @@ async def _pnl_order_minimum_records(
 
 
 def _pnl_order_minimum_capability_index(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumCapabilityRecord],
     window: _PnlOrderMinimumWindow,
 ) -> _PnlOrderMinimumCapabilities:
     """Index clipped capability intervals by logical symbol and venue."""
@@ -2140,7 +2195,7 @@ def _pnl_order_minimum_capability_index(
 
 
 def _pnl_order_minimum_spec_rows(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumSpecRecord],
     window: _PnlOrderMinimumWindow,
     capabilities: _PnlOrderMinimumCapabilities,
 ) -> list[PnlVenueOrderMinimumVersionRow]:
@@ -2226,7 +2281,7 @@ def _pnl_order_minimum_occupied(
 
 
 def _pnl_order_minimum_current_symbol_intervals(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumIdentityRecord],
     window: _PnlOrderMinimumWindow,
 ) -> _PnlOrderMinimumIdentityIntervals:
     """Index every interval in which an instrument has a current Symbol fact."""
@@ -2245,7 +2300,7 @@ def _pnl_order_minimum_current_symbol_intervals(
 
 
 def _pnl_order_minimum_identity_rows(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumIdentityRecord],
     window: _PnlOrderMinimumWindow,
     capabilities: _PnlOrderMinimumCapabilities,
     occupied: _PnlOrderMinimumOccupied,
@@ -2330,7 +2385,7 @@ def _pnl_order_minimum_identity_rows(
 
 
 def _pnl_order_minimum_missing_symbol_rows(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumInstrumentRecord],
     window: _PnlOrderMinimumWindow,
     current_symbol_intervals: _PnlOrderMinimumIdentityIntervals,
 ) -> list[PnlVenueOrderMinimumVersionRow]:
@@ -2387,7 +2442,7 @@ def _pnl_order_minimum_missing_symbol_rows(
 
 
 def _pnl_order_minimum_orphan_spec_rows(
-    records: Sequence[Row[Any]],
+    records: Sequence[_PnlOrderMinimumOrphanSpecRecord],
     window: _PnlOrderMinimumWindow,
 ) -> list[PnlVenueOrderMinimumVersionRow]:
     """Project venue-wide conflict markers for specs without one author identity."""
@@ -2425,12 +2480,32 @@ def _pnl_order_minimum_orphan_spec_rows(
     return rows
 
 
-def _candle_row_from_result(r: Row[Any]) -> CandleRow:
+class _CandleResult(Protocol):
+    """Named candle columns shared by plain and audit-marker SQL projections."""
+
+    open_at: datetime
+    timeframe: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    vwap: float | None
+    trades: int | None
+    source: str
+    complete: bool
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+def _candle_row_from_result(r: _CandleResult) -> CandleRow:
     """Project one candles SELECT result row to a :class:`CandleRow`.
 
     The caller's SELECT MUST project at least the fifteen named columns below.
-    Additional boundary-marker columns are ignored. ``Row[Any]`` sits in the permitted
-    SQLAlchemy-expression-internals boundary for ``Any``.
+    Additional boundary-marker columns are ignored. Named-column structural
+    typing preserves the projection contract for either SQL row shape.
 
     Deliberately NOT wired into :meth:`SQLAlchemyRepository.get_candles`,
     whose identical inline projection is left untouched: that method
@@ -12542,7 +12617,8 @@ class SQLAlchemyRepository(Repository):
         """Return distinct exchange names from active symbol aliases."""
         async with self.session() as s:
             result = await s.execute(
-                select(distinct(SymbolAlias.exchange))
+                select(SymbolAlias.exchange)
+                .distinct()
                 .where(*where_active(SymbolAlias, as_of))
                 .order_by(SymbolAlias.exchange)
             )
@@ -12552,7 +12628,8 @@ class SQLAlchemyRepository(Repository):
         """Return distinct native symbols available on a given exchange."""
         async with self.session() as s:
             result = await s.execute(
-                select(distinct(Symbol.native_symbol))
+                select(Symbol.native_symbol)
+                .distinct()
                 .select_from(SymbolAlias)
                 .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
                 .where(
@@ -15480,7 +15557,7 @@ class SQLAlchemyRepository(Repository):
         }
 
     @staticmethod
-    def _witnessed_order_public_ids() -> Select[tuple[str]]:
+    def _witnessed_order_public_ids() -> Select[str]:
         """Select every order a durable ``fill_observed`` row witnesses.
 
         Reproduces the guarded writer's binding exactly: an order counts as
@@ -19634,7 +19711,7 @@ class SQLAlchemyRepository(Repository):
                     instrument_to,
                     symbol_from,
                     symbol_to,
-                ) in result.all()
+                ) in cast(Sequence[_InstrumentSymbolRefRecord], result.all())
             ]
             refs.sort(
                 key=lambda row: (
@@ -19801,7 +19878,7 @@ class SQLAlchemyRepository(Repository):
                 .distinct()
                 .order_by(Symbol.base.asc(), Symbol.quote.asc(), Instrument.exchange.asc())
             )
-            return [(base, quote, exchange) for base, quote, exchange in result.all()]
+            return [(base, cast(str, quote), exchange) for base, quote, exchange in result.all()]
 
     async def get_pnl_fx_rate_candles_at(
         self,
@@ -19931,7 +20008,7 @@ class SQLAlchemyRepository(Repository):
             rows: list[PnlFxRateRow] = [
                 {
                     "base": base,
-                    "quote": quote,
+                    "quote": cast(str, quote),
                     "exchange": exchange,
                     "open_at": open_at,
                     "close": close,
@@ -19958,7 +20035,7 @@ class SQLAlchemyRepository(Repository):
                     candle_sequence_id,
                     candle_timestamp,
                     candle_known_to,
-                ) in result.all()
+                ) in cast(Sequence[_PnlFxRateRecord], result.all())
             ]
             return rows
 
@@ -20047,7 +20124,7 @@ class SQLAlchemyRepository(Repository):
             rows: list[PnlCryptoUsdPlaneRow] = [
                 {
                     "base": base,
-                    "quote": quote,
+                    "quote": cast(str, quote),
                     "exchange": exchange,
                     "native_symbol": native_symbol,
                     "instrument_public_id": instrument_public_id,
@@ -20068,7 +20145,7 @@ class SQLAlchemyRepository(Repository):
                     open_at,
                     close,
                     candle_timestamp,
-                ) in result.all()
+                ) in cast(Sequence[_PnlCryptoUsdPlaneRecord], result.all())
             ]
             rows.sort(
                 key=lambda row: (
@@ -20813,7 +20890,7 @@ class SQLAlchemyRepository(Repository):
                     )
                     .order_by(Symbol.native_symbol, Instrument.public_id)
                 )
-                symbol_rows = list(symbol_result.tuples().all())
+                symbol_rows = list(symbol_result.all())
             mappings, mapping_error = self._futures_symbol_mappings(
                 symbol_rows,
                 position_projection.instrument_public_ids_by_symbol,
@@ -21496,7 +21573,7 @@ class SQLAlchemyRepository(Repository):
             row = result.first()
             if row is None:
                 return None
-            return cast(str | None, row[0])
+            return row[0]
 
     async def get_plan_public_ids_for_client_order_ids(
         self,
@@ -21568,7 +21645,7 @@ class SQLAlchemyRepository(Repository):
             row = result.first()
             if row is None:
                 return None
-            return cast(str | None, row[0])
+            return row[0]
 
     async def has_pending_cancel_command(
         self,
@@ -23370,7 +23447,7 @@ class SQLAlchemyRepository(Repository):
         row = result.first()
         if row is None:
             return 0.0
-        return float(row[0])
+        return float(cast(float, row[0]))
 
     async def project_paired_execution_leg_terminal(
         self,
@@ -28061,7 +28138,7 @@ class SQLAlchemyRepository(Repository):
                 _PortfolioReconciliationIdentity,
                 _PortfolioReconciliationActiveRowIds,
             ] = {}
-            for result_row in result.tuples().all():
+            for result_row in result.all():
                 identity, context, row_ids = self._portfolio_reconciliation_read_context_from_row(
                     result_row
                 )
@@ -30658,17 +30735,13 @@ class SQLAlchemyRepository(Repository):
             for offset in range(0, len(cycle_public_ids), _POSITION_CYCLE_LOOKUP_CHUNK_SIZE):
                 chunk = cycle_public_ids[offset : offset + _POSITION_CYCLE_LOOKUP_CHUNK_SIZE]
                 rows = (
-                    (
-                        await s.execute(
-                            select(PositionCycle.public_id, PositionCycle.status).where(
-                                PositionCycle.public_id.in_(chunk),
-                                *where_active(PositionCycle, as_of),
-                            )
+                    await s.execute(
+                        select(PositionCycle.public_id, PositionCycle.status).where(
+                            PositionCycle.public_id.in_(chunk),
+                            *where_active(PositionCycle, as_of),
                         )
                     )
-                    .tuples()
-                    .all()
-                )
+                ).all()
                 result.update(rows)
         return result
 
@@ -30985,7 +31058,7 @@ class SQLAlchemyRepository(Repository):
                     i_kt,
                 )
             )
-            return dict(result.tuples().all())
+            return dict(result.all())
 
     async def get_symbol_for_instrument(
         self,
@@ -32008,7 +32081,8 @@ class SQLAlchemyRepository(Repository):
         """
         async with self.session() as s:
             result = await s.execute(
-                select(distinct(WalletCredential.wallet_public_id))
+                select(WalletCredential.wallet_public_id)
+                .distinct()
                 .where(*where_active(WalletCredential, as_of))
                 .order_by(WalletCredential.wallet_public_id)
             )
@@ -32572,7 +32646,7 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _active_device_alert_pref_query(
         row: DeviceAlertPrefUpsertRow,
-    ) -> Select[tuple[DeviceAlertPref]]:
+    ) -> Select[DeviceAlertPref]:
         """Build the active-row lookup for a device alert preference scope."""
         operator_public_id = row.get("operator_public_id")
         wallet_public_id = row.get("wallet_public_id")
@@ -32786,7 +32860,7 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _active_user_alert_default_query(
         row: UserAlertDefaultUpsertRow,
-    ) -> Select[tuple[UserAlertDefault]]:
+    ) -> Select[UserAlertDefault]:
         """Build the active-row lookup for a user alert default."""
         return select(UserAlertDefault).where(
             UserAlertDefault.user_public_id == row["user_public_id"],
@@ -33123,7 +33197,7 @@ class SQLAlchemyRepository(Repository):
                     User.known_to == KNOWN_TO_MAX,
                 )
             )
-            result.update(dict(rows.tuples().all()))
+            result.update(dict(rows.all()))
         return result
 
     async def list_users_with_permission(self, permission: str) -> list[str]:
@@ -36356,7 +36430,7 @@ class DatabaseRepository:
                 )
                 .order_by(Candle.open_at)
             ).all()
-        return [tuple(r) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in rows]
 
     def get_event_rows_for_archive(
         self,

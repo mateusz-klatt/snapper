@@ -1108,18 +1108,18 @@ class TestImmutableLedgerExclusion:
                 ),
                 {"pid": sealed_execution_pid},
             ).one()
-            anchor_wallet = conn.execute(
+            anchor_wallet: str = conn.execute(
                 text(
                     "SELECT wallet_public_id FROM portfolio_spot_reconciliation_anchors "
                     "WHERE public_id = :pid"
                 ),
                 {"pid": anchor_pid},
             ).scalar_one()
-            event_wallet = conn.execute(
+            event_wallet: str = conn.execute(
                 text("SELECT wallet_public_id FROM venue_events WHERE public_id = :pid"),
                 {"pid": sealed_event_pid},
             ).scalar_one()
-            root_wallet = conn.execute(text("SELECT public_id FROM wallets")).scalar_one()
+            root_wallet: str = conn.execute(text("SELECT public_id FROM wallets")).scalar_one()
             seeded_scope = conn.execute(
                 text(
                     "SELECT wallet_public_id, scope_sequence FROM executions "
@@ -1191,8 +1191,8 @@ class TestImmutableLedgerExclusion:
         assert seed_demo.main() == 0
 
         with engine.connect() as conn:
-            root = conn.execute(text("SELECT public_id FROM wallets")).scalar_one()
-            reference = conn.execute(
+            root: str = conn.execute(text("SELECT public_id FROM wallets")).scalar_one()
+            reference: str = conn.execute(
                 text("SELECT wallet_public_id FROM _preexisting_wallet_scoped")
             ).scalar_one()
             demo_orders = conn.execute(
@@ -1265,7 +1265,7 @@ class TestMain:
                 == 2
             )
             assert conn.execute(text("SELECT COUNT(*) FROM wallet_user_read_grants")).scalar() == 0
-            password_hash = conn.execute(
+            password_hash: str = conn.execute(
                 text("SELECT password_hash FROM users WHERE username = 'ai_demo'")
             ).scalar_one()
             assert bcrypt.checkpw(demo_password.encode(), password_hash.encode())
@@ -1484,21 +1484,21 @@ class TestMain:
         assert seed_demo.main() == 0
 
         with engine.connect() as conn:
-            membership_count = conn.execute(
+            membership_count: int = conn.execute(
                 text(
                     "SELECT COUNT(*) FROM user_operator_memberships "
                     "WHERE user_public_id = :viewer AND operator_public_id = :operator"
                 ),
                 {"viewer": users["viewer"], "operator": operator},
             ).scalar_one()
-            scope_count = conn.execute(
+            scope_count: int = conn.execute(
                 text(
                     "SELECT COUNT(*) FROM wallet_operator_scope_grants "
                     "WHERE wallet_public_id = :wallet AND operator_public_id = :operator"
                 ),
                 {"wallet": wallet, "operator": operator},
             ).scalar_one()
-            personal_count = conn.execute(
+            personal_count: int = conn.execute(
                 text("SELECT COUNT(*) FROM wallet_user_read_grants WHERE user_public_id = :viewer"),
                 {"viewer": users["viewer"]},
             ).scalar_one()
@@ -1694,7 +1694,7 @@ class TestMain:
                 .mappings()
                 .all()
             )
-            venue_event_count = conn.execute(
+            venue_event_count: int = conn.execute(
                 text("SELECT COUNT(*) FROM venue_events WHERE session_id = :session_id"),
                 {"session_id": seed_demo._DEMO_SESSION_ID},
             ).scalar_one()
@@ -2049,7 +2049,7 @@ class TestMain:
         assert seed_demo.main() == 0
 
         with engine.connect() as conn:
-            order_public_id = conn.execute(
+            order_public_id: str = conn.execute(
                 text(
                     "SELECT public_id FROM orders WHERE session_id = :sid "
                     "AND status = 'filled' ORDER BY id ASC LIMIT 1"
@@ -2188,7 +2188,7 @@ class TestMain:
 
         with engine.connect() as conn:
             state = seed_demo._read_demo_pnl_seed_state(conn)
-            distinct_exec_ids = conn.execute(
+            distinct_exec_ids: int = conn.execute(
                 text(
                     "SELECT COUNT(DISTINCT exec_id) FROM executions WHERE session_id = :session_id"
                 ),

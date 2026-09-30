@@ -3327,6 +3327,33 @@ async def _seed_full_repo(tmp_path: Path) -> tuple[SQLAlchemyRepository, str, st
     return r, sym.public_id, inst_pid
 
 
+async def _seed_duplicate_exchange_alias(
+    r: SQLAlchemyRepository,
+    symbol_public_id: str,
+) -> None:
+    """Add a REST alias duplicating the active exchange and symbol projections.
+
+    Args:
+        r: Repository already seeded with the symbol's WebSocket alias.
+        symbol_public_id: Logical symbol identity shared by both aliases.
+    """
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    async with r.session() as s:
+        s.add(
+            SymbolAlias(
+                symbol_public_id=symbol_public_id,
+                exchange="kraken",
+                exchange_symbol="XXBTZUSD",
+                channel="rest",
+                created_at=now,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=4,
+            )
+        )
+        await s.commit()
+
+
 async def _collect_exchange_trades(
     r: SQLAlchemyRepository,
     exchange: str,
@@ -3352,11 +3379,12 @@ async def _collect_exchange_trades(
 async def test_get_exchanges_returns_active(tmp_path: Path) -> None:
     """Verify get_exchanges returns distinct active exchange names.
 
-    Given: Repository with active symbol alias,
+    Given: Repository with active WebSocket and REST aliases on one exchange,
     When: get_exchanges is called,
-    Then: Returns list containing the exchange name.
+    Then: Returns the exchange name once.
     """
-    r, _, _ = await _seed_full_repo(tmp_path)
+    r, symbol_public_id, _ = await _seed_full_repo(tmp_path)
+    await _seed_duplicate_exchange_alias(r, symbol_public_id)
     result = await r.get_exchanges(as_of=datetime.now(UTC))
     assert result == ["kraken"]
 
@@ -3365,11 +3393,12 @@ async def test_get_exchanges_returns_active(tmp_path: Path) -> None:
 async def test_get_exchange_instruments_returns_symbols(tmp_path: Path) -> None:
     """Verify get_exchange_instruments returns native symbols for exchange.
 
-    Given: Repository with symbol alias for kraken,
+    Given: Repository with WebSocket and REST aliases for one Kraken symbol,
     When: get_exchange_instruments is called for kraken,
-    Then: Returns list containing 'BTC-USD'.
+    Then: Returns 'BTC-USD' once.
     """
-    r, _, _ = await _seed_full_repo(tmp_path)
+    r, symbol_public_id, _ = await _seed_full_repo(tmp_path)
+    await _seed_duplicate_exchange_alias(r, symbol_public_id)
     result = await r.get_exchange_instruments("kraken", as_of=datetime.now(UTC))
     assert result == ["BTC-USD"]
 

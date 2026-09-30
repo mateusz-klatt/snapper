@@ -129,7 +129,7 @@ def downgrade() -> None:
             that a P&L replay still depends on.
     """
     bind = op.get_bind()
-    carried = bind.execute(
+    carried: int = bind.execute(
         sa.text("SELECT count(*) FROM fx_conversion_proofs WHERE carried_minutes > 0")
     ).scalar_one()
     if carried:

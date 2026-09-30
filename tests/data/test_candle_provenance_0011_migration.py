@@ -152,7 +152,7 @@ def test_0011_source_check_accepts_vocabulary(
         engine, open_at="2026-06-16 00:01:00.000000", source="synthesized", public_id="cd-s"
     )
     with engine.begin() as conn:
-        count = conn.execute(sa.text("SELECT COUNT(*) FROM candles")).scalar_one()
+        count: int = conn.execute(sa.text("SELECT COUNT(*) FROM candles")).scalar_one()
     assert count == 2
 
 

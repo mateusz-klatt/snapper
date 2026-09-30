@@ -23,12 +23,14 @@ import json
 import os
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Final
+from typing import cast
 from uuid import UUID
 from uuid import uuid5
 
@@ -43,10 +45,10 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.engine import URL
+from sqlalchemy.engine import Row
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -685,7 +687,7 @@ async def _require_pristine_namespace(session: AsyncSession) -> None:
             )
         )
     ).scalar_one()
-    temporal_collisions = (
+    temporal_collisions: int = (
         await session.execute(
             select(
                 select(func.count())
@@ -741,23 +743,26 @@ async def _require_pristine_namespace(session: AsyncSession) -> None:
 
 async def _require_canonical_symbol_seed_baseline(session: AsyncSession) -> None:
     """Require the exact migration-seeded symbol, alias, and capability graph."""
-    symbol_rows = (
-        await session.execute(
-            select(
-                Symbol.id,
-                Symbol.public_id,
-                Symbol.native_symbol,
-                Symbol.base,
-                Symbol.quote,
-                Symbol.asset_type,
-                Symbol.created_at,
-                Symbol.session_id,
-                Symbol.sequence_id,
-                Symbol.timestamp,
-                Symbol.known_to,
-            ).order_by(Symbol.id)
-        )
-    ).all()
+    symbol_rows = cast(
+        Sequence[Row[int, str, str, str, str | None, str, datetime, str, int, datetime, datetime]],
+        (
+            await session.execute(
+                select(
+                    Symbol.id,
+                    Symbol.public_id,
+                    Symbol.native_symbol,
+                    Symbol.base,
+                    Symbol.quote,
+                    Symbol.asset_type,
+                    Symbol.created_at,
+                    Symbol.session_id,
+                    Symbol.sequence_id,
+                    Symbol.timestamp,
+                    Symbol.known_to,
+                ).order_by(Symbol.id)
+            )
+        ).all(),
+    )
     symbols = {
         (native_symbol, base, quote, asset_type)
         for (
@@ -1807,9 +1812,13 @@ async def _seed_fixture_database_unchecked(
         PnlUatFixtureError: If any precondition or insert fails.
     """
     manifest = build_manifest(anchor)
-    engine: AsyncEngine | None = None
     try:
         engine = create_async_engine(db_url, poolclass=NullPool)
+    except (OSError, SQLAlchemyError, ValueError) as exc:
+        raise PnlUatFixtureError(
+            "fixture database operation failed; no transaction committed"
+        ) from exc
+    try:
         async with (
             AsyncSession(engine, expire_on_commit=False) as session,
             session.begin(),
@@ -1826,8 +1835,7 @@ async def _seed_fixture_database_unchecked(
             "fixture database operation failed; no transaction committed"
         ) from exc
     finally:
-        if engine is not None:
-            await engine.dispose()
+        await engine.dispose()
     await _seed_activation_anchors(db_url, manifest)
     return manifest
 

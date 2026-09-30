@@ -372,7 +372,7 @@ async def _find_m1_sqlite(
         )
         rows = (await session.execute(statement)).all()
         for row in rows:
-            instrument_public_id = cast(str, row[0])
+            instrument_public_id = row[0]
             trade_id = cast(str, row[1])
             findings[(instrument_public_id, trade_id)] = TradeIntegrityFinding(
                 monitor="m1",

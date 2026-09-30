@@ -153,7 +153,7 @@ class MarketSnapshotUpdaterService(ABC):
             .order_by(Symbol.id, Instrument.id)
         )
         with self.repository.session_factory() as session:
-            rows = session.execute(query).tuples().all()
+            rows = session.execute(query).all()
         result: dict[str, str] = dict(rows)
         for ns in symbols:
             if ns not in result:

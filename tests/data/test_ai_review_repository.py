@@ -82,7 +82,7 @@ async def _seed_user_operator_wallet_instrument(
             )
         )
         await s.flush()
-        symbol = (await s.execute(__import__("sqlalchemy").select(Symbol))).scalar_one()
+        symbol: Symbol = (await s.execute(__import__("sqlalchemy").select(Symbol))).scalar_one()
         s.add(
             Instrument(
                 symbol_public_id=symbol.public_id,
@@ -107,7 +107,9 @@ async def _seed_user_operator_wallet_instrument(
             )
         )
         await s.flush()
-        instrument = (await s.execute(__import__("sqlalchemy").select(Instrument))).scalar_one()
+        instrument: Instrument = (
+            await s.execute(__import__("sqlalchemy").select(Instrument))
+        ).scalar_one()
         s.add(
             InstrumentUnderlyingMapping(
                 instrument_public_id=instrument.public_id,
@@ -1471,7 +1473,7 @@ async def _fetch_delegate_counter(
 ) -> tuple[int, datetime | None]:
     """Return ``(active_reviews_count, ai_reviews.counter_decremented_at)`` for the test row."""
     async with repo.session() as s:
-        delegate = (
+        delegate: int = (
             await s.execute(
                 __import__("sqlalchemy")
                 .select(AiDelegate.active_reviews_count)

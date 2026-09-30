@@ -123,7 +123,7 @@ class TestInstrumentSourceExchangeMigration:
         engine, _ = migrated_db
         _insert_instrument(engine, public_id="inst-p", exchange="paper", source_exchange="kraken")
         with engine.begin() as conn:
-            value = conn.execute(
+            value: str = conn.execute(
                 sa.text("SELECT source_exchange FROM instruments WHERE public_id = 'inst-p'")
             ).scalar_one()
         assert value == "kraken"

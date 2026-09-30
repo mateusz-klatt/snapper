@@ -121,7 +121,7 @@ def downgrade() -> None:
             narrowed, because dropping it from the uniqueness key would let
             duplicates accumulate unnoticed under the older predicate.
     """
-    carried = (
+    carried: int = (
         op.get_bind()
         .execute(
             sa.text(

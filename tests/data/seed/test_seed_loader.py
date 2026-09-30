@@ -1517,11 +1517,11 @@ class TestRunSeed:
                     " ORDER BY users.username"
                 )
             ).all()
-            read_grant_count = conn.execute(
+            read_grant_count: int = conn.execute(
                 text("SELECT COUNT(*) FROM wallet_user_read_grants")
             ).scalar_one()
             active_sentinel = "9999-12-31 23:59:59.000000"
-            sentinel_counts = {
+            sentinel_counts: dict[str, tuple[int, int]] = {
                 table: (
                     conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one(),
                     conn.execute(
@@ -1668,7 +1668,7 @@ class TestRunSeed:
         assert settings_count >= 1
         engine = create_engine(db_url, poolclass=NullPool)
         with engine.connect() as conn:
-            actual_counts = {
+            actual_counts: dict[str, int] = {
                 "users": conn.execute(text("SELECT COUNT(*) FROM users")).scalar_one(),
                 "operators": conn.execute(text("SELECT COUNT(*) FROM operators")).scalar_one(),
                 "wallets": conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar_one(),

@@ -29,12 +29,12 @@ def _rename_temporary_sequence(table: str) -> None:
     temporary = f"_alembic_tmp_{table}_id_seq"
     canonical = f"{table}_id_seq"
     bind = op.get_bind()
-    present = bind.execute(
+    present: bool = bind.execute(
         sa.text("SELECT to_regclass(:name) IS NOT NULL"), {"name": temporary}
     ).scalar_one()
     if not present:
         return
-    taken = bind.execute(
+    taken: bool = bind.execute(
         sa.text("SELECT to_regclass(:name) IS NOT NULL"), {"name": canonical}
     ).scalar_one()
     if taken:

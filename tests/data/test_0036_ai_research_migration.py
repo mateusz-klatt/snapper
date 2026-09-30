@@ -125,7 +125,7 @@ def test_0036_upgrade_round_trips_three_tables_and_required_clocks(tmp_path: Pat
 
     view_id = _insert_view(engine)
     with engine.connect() as connection:
-        submitted_at = connection.execute(
+        submitted_at: str | None = connection.execute(
             sa.text("SELECT submitted_at FROM market_views WHERE public_id = :public_id"),
             {"public_id": view_id},
         ).scalar_one()
