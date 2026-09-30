@@ -414,15 +414,35 @@ Backend `user.default_language` validation accepts the union of the
 iOS and frontend catalog code forms: 45 iOS cases plus 45 frontend
 cases, with five naming divergences (`pt-BR`/`pt`, `nb`/`no`,
 `zh-Hans`/`zh`, `sr-Latn`/`sr`, `my`/`my-MM`) for 50 accepted codes.
+Backend lookup resolves those five frontend aliases to the corresponding
+iOS catalog; explicit Chinese scripts remain distinct. Initial client selection
+uses the preferred language and script, with a valid saved selection taking
+precedence. Display locale never determines an instrument's quote currency.
 
 ### Backend alert catalog
 
 `scripts/gen_backend_i18n_catalog.py` reads the iOS xcstrings file and
 writes committed backend JSON catalogs to
 `src/snapper/i18n/catalogs/<lang>.json`. The backend catalog is limited
-to alert title/body templates: 12 keys across 45 languages, one JSON
-file per language. It is generated with `make gen-backend-i18n-catalog`
+to alert title/body templates and application-owned argument labels across
+45 languages, one JSON file per language. It is generated with `make gen-backend-i18n-catalog`
 and checked by `scripts/check_type_drift.py`.
+
+Known side, health-status and fallback-reason values are localized at render
+time; persisted arguments remain stable so iOS can re-render after a language
+change. Instrument, venue and instance identifiers and arbitrary external
+diagnostics retain their original text. APNs receives server-rendered strings.
+
+New fill alerts use `alerts.body.order_fill_full_quoted` with the existing five
+arguments. The price argument preserves execution precision and appends the
+quote currency from a matching historical instrument reference. Known
+currency-leg revisions are treated as ambiguous. If identity or unambiguous
+quote metadata is missing, it contains only the price rather than an assumed dollar amount.
+Older iOS clients fall back to the server-rendered body for this unknown key.
+Historical rows retain their recorded price precision; it cannot be recovered
+from localization arguments. New unresolved-order alerts similarly use
+`alerts.body.order_unknown_unresolved` so older clients retain the server's
+explicit instruction not to assume the position is closed.
 
 ### Market catalog
 
@@ -462,7 +482,7 @@ Historically the iOS alerts catalog was the source of truth and
 frontend caught up via `scripts/port_ios_alert_catalog.py`. That
 direction is preserved for back-compatibility; new namespaces should
 flow frontend → iOS via the market-catalog pattern above. The alert
-port currently processes 32 `alerts.*` keys across 45 locales, writes
+port processes all `alerts.*` keys across 45 locales, writes
 one `frontend/src/locales/<lang>/alerts.json` file per locale, and
 updates `common.nav.alerts` from the `alerts.navTitle` xcstrings key.
 The five divergent locale directory names are remapped between iOS and

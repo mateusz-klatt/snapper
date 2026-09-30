@@ -33,6 +33,38 @@ _CATALOG_DIR: Final[Path] = Path(__file__).resolve().parent / "catalogs"
 
 _EN: Final[str] = "en"
 
+_CATALOG_ALIASES: Final[dict[str, str]] = {
+    "pt": "pt-BR",
+    "no": "nb",
+    "sr": "sr-Latn",
+    "zh": "zh-Hans",
+    "my-MM": "my",
+}
+
+_SIDE_KEYS: Final[dict[str, str]] = {
+    "buy": "alerts.argument.side.buy",
+    "sell": "alerts.argument.side.sell",
+}
+_REASON_KEYS: Final[dict[str, str]] = {
+    "unknown reason": "alerts.argument.reason.unknown",
+    "ambiguous venue response": "alerts.argument.reason.ambiguous",
+}
+_ARGUMENT_KEYS: Final[dict[str, dict[int, dict[str, str]]]] = {
+    "alerts.body.order_fill_full": {0: _SIDE_KEYS},
+    "alerts.body.order_fill_full_quoted": {0: _SIDE_KEYS},
+    "alerts.body.order_rejected": {0: _SIDE_KEYS, 3: _REASON_KEYS},
+    "alerts.body.margin_warning": {0: _SIDE_KEYS, 3: _REASON_KEYS},
+    "alerts.body.order_unknown": {0: _SIDE_KEYS, 3: _REASON_KEYS},
+    "alerts.body.order_unknown_unresolved": {0: _SIDE_KEYS, 3: _REASON_KEYS},
+    "alerts.body.critical_system_error": {
+        2: {
+            "healthy": "alerts.argument.status.healthy",
+            "warning": "alerts.argument.status.warning",
+            "error": "alerts.argument.status.error",
+        }
+    },
+}
+
 
 def load_catalogs_from(catalog_dir: Path) -> dict[str, dict[str, str]]:
     """Read every ``<lang>.json`` file under ``catalog_dir``.
@@ -100,11 +132,12 @@ def localized(key: str, language: str) -> str:
 
     Returns:
         The template string for that language. Falls back to the EN
-        template if ``language`` has no catalog (e.g. a frontend-only
-        code like ``"pt"`` against the iOS catalog set). Falls back to
+        template if ``language`` has no catalog or known client alias.
+        Client aliases preserve the variant selected by each registry.
+        Falls back to
         ``key`` itself if the key isn't in the EN catalog either.
     """
-    catalog = _CATALOGS.get(language)
+    catalog = _CATALOGS.get(_CATALOG_ALIASES.get(language, language))
     if catalog is not None:
         value = catalog.get(key)
         if value is not None:
@@ -130,7 +163,31 @@ def render(key: str, language: str, *args: object) -> str:
     template = localized(key, language)
     if template == key:
         return key
-    return render_template(template, args)
+    return render_template(template, _localized_arguments(key, language, args))
+
+
+def _localized_arguments(key: str, language: str, args: tuple[object, ...]) -> list[object]:
+    """Translate known application values without changing persisted arguments.
+
+    Args:
+        key: Alert template defining the semantic argument positions.
+        language: Recipient's catalog language or client alias.
+        args: Original positional values, including external diagnostics.
+
+    Returns:
+        A new argument list with recognized side, status and fallback-reason
+        values localized. Unknown values and identifiers remain verbatim.
+    """
+    translated = list(args)
+    for index, token_keys in _ARGUMENT_KEYS.get(key, {}).items():
+        if index >= len(args):
+            continue
+        argument_key = token_keys.get(str(args[index]).casefold())
+        if argument_key is not None:
+            value = localized(argument_key, language)
+            if value != argument_key:
+                translated[index] = value
+    return translated
 
 
 def resolve_alert_strings(

@@ -427,6 +427,35 @@ class TestBuildApnsPayload:
         assert alert["title"] == "Order filled"
         assert alert["body"] == "BUY 100 BTCUSD @ $50000.00 filled on Kraken"
 
+    @pytest.mark.parametrize("language", [None, "en", "pl", "pt", "no", "sr", "zh", "my-MM"])
+    def test_quoted_fill_push_is_safe_without_client_catalog(self, language: str | None) -> None:
+        """Given a quote-aware fill, APNs carries resolved text and no client loc-key.
+
+        A recipient with an older application receives the correct explicit
+        currency and precision without consulting its bundled dollar template.
+        """
+        row = self._row(
+            title="Order filled",
+            body="BUY 1 ETH/BTC @ 0.00234 BTC filled on venue",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full_quoted",
+                "body_loc_args": ["BUY", "1", "ETH/BTC", "0.00234 BTC", "venue"],
+            },
+        )
+        payload = _build_apns_payload(row, user_language=language)
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        body = alert["body"]
+        assert isinstance(body, str)
+        assert "0.00234 BTC" in body
+        assert "$" not in body
+        assert "loc-key" not in alert
+        assert "body_loc_key" not in payload
+        assert "body_loc_args" not in payload
+
     def test_user_language_pl_resolves_polish_title_body(self) -> None:
         """PL user with loc_key set gets Polish APNs payload.
 

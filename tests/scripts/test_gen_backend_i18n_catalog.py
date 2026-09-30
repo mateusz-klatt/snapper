@@ -43,17 +43,22 @@ class TestIterCatalogKeys:
 
         Given: An xcstrings doc with mixed namespaces.
         When: ``iter_catalog_keys`` is called.
-        Then: Only ``alerts.title.*`` and ``alerts.body.*`` keys come back.
+        Then: Alert title, body and argument keys come back.
         """
         xcs = _make_xcstrings(
             {
                 "alerts.title.x": {"en": "X"},
                 "alerts.body.y": {"en": "Y"},
+                "alerts.argument.side.buy": {"en": "BUY"},
                 "auth.login.subtitle": {"en": "ignored"},
                 "settings.section.account": {"en": "ignored"},
             }
         )
-        assert list(iter_catalog_keys(xcs)) == ["alerts.body.y", "alerts.title.x"]
+        assert list(iter_catalog_keys(xcs)) == [
+            "alerts.argument.side.buy",
+            "alerts.body.y",
+            "alerts.title.x",
+        ]
 
     def test_raises_when_strings_is_not_a_dict(self) -> None:
         """Defensive: malformed xcstrings file is rejected.

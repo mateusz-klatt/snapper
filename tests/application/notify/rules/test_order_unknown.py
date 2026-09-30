@@ -66,11 +66,11 @@ class TestOrderUnknownRule:
         assert len(rows) == 1
         assert rows[0]["is_safety_critical"] is True
         assert rows[0]["priority"] == "high"
-        assert "do not assume flat" in rows[0]["body"]
+        assert "do not assume the position is closed" in rows[0]["body"]
         payload = rows[0]["payload"]
         assert payload is not None
         assert payload["title_loc_key"] == "alerts.title.order_unknown"
-        assert payload["body_loc_key"] == "alerts.body.order_unknown"
+        assert payload["body_loc_key"] == "alerts.body.order_unknown_unresolved"
         assert payload["body_loc_args"] == [
             "BUY",
             "0.2",

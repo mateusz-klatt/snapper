@@ -3,7 +3,7 @@
 Reads ``ios/Snapper/Resources/Localization/Localizable.xcstrings`` and
 writes one JSON file per language to
 ``src/snapper/i18n/catalogs/<lang>.json`` covering the ``alerts.*``
-title/body namespace (12 keys × 45 languages = 540 entries).
+title/body templates and application-owned argument labels.
 
 Rationale: the backend Docker image does NOT include ``ios/``, so the
 catalog cannot be read at runtime. This generator runs at build time
@@ -31,15 +31,19 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 XCSTRINGS_PATH: Final[Path] = REPO_ROOT / "ios/Snapper/Resources/Localization/Localizable.xcstrings"
 CATALOG_DIR: Final[Path] = REPO_ROOT / "src/snapper/i18n/catalogs"
 
-CATALOG_NAMESPACES: Final[tuple[str, ...]] = ("alerts.title.", "alerts.body.")
+CATALOG_NAMESPACES: Final[tuple[str, ...]] = (
+    "alerts.title.",
+    "alerts.body.",
+    "alerts.argument.",
+)
 
 
 def iter_catalog_keys(xcstrings: dict[str, object]) -> Iterable[str]:
-    """Yield xcstrings keys filtered to ``alerts.{title,body}.*``.
+    """Yield alert templates and application-owned argument labels.
 
-    The backend i18n surface is limited to alert title/body templates for
-    push notifications and REST history. Other namespaces (auth, settings,
-    common) stay client-only.
+    The backend i18n surface includes alert title/body templates and their
+    argument labels for push notifications and REST history. Other namespaces
+    (auth, settings, common) stay client-only.
 
     Args:
         xcstrings: Parsed xcstrings document (``{"sourceLanguage": ...,

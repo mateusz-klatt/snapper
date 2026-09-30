@@ -1,6 +1,7 @@
 """``order_fill_full`` rule — fires when an execution completes in full."""
 
 from datetime import datetime
+from decimal import Decimal
 
 from loguru import logger
 
@@ -10,9 +11,60 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import FillStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
+from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+
+
+def _execution_quote(data: ExecutionData, refs: list[InstrumentSymbolRefRow]) -> str | None:
+    """Require an unambiguous historical currency pair covering the execution.
+
+    Args:
+        data: Execution identifying the venue, symbol and event time.
+        refs: Instrument reference history known when the alert is evaluated.
+
+    Returns:
+        The verified quote unit, or ``None`` when history has currency-leg
+        revisions or no reference covers this execution. Knowledge-time
+        revisions cannot prove whether a currency change was a correction.
+    """
+    pairs = {(ref["base_currency"], ref["quote_currency"]) for ref in refs}
+    if len(pairs) != 1:
+        return None
+    for ref in refs:
+        if (
+            ref["native_symbol"] == data.instrument
+            and ref["instrument_exchange"] == data.exchange
+            and ref["valid_from"] <= data.executed_at < ref["valid_to"]
+        ):
+            return ref["quote_currency"]
+    return None
+
+
+async def _quoted_price(data: ExecutionData, repo: Repository, now: datetime) -> str:
+    """Preserve execution precision and append only an authoritative quote unit.
+
+    Args:
+        data: Execution carrying the venue's native symbol and price.
+        repo: Repository used to resolve the instrument's quote metadata.
+        now: Knowledge horizon for checking all known currency-leg revisions.
+
+    Returns:
+        The unrounded decimal price with its known quote currency, or the
+        plain price when the instrument or quote metadata is unavailable.
+    """
+    price = format(Decimal(str(data.price)), "f")
+    if data.executed_at.utcoffset() is None:
+        return price
+    instrument_id = await repo.get_instrument_public_id_by_symbol(
+        data.instrument, data.exchange, data.executed_at
+    )
+    if instrument_id is None:
+        return price
+    refs = await repo.get_instrument_symbol_refs([instrument_id], now)
+    quote = _execution_quote(data, refs)
+    return f"{price} {quote}" if quote else price
 
 
 class OrderFillFullRule(AlertRule):
@@ -44,7 +96,7 @@ class OrderFillFullRule(AlertRule):
         Args:
             topic: ZMQ topic string the event arrived on.
             payload: Raw JSON payload bytes.
-            repo: Repository handle for dedup-window lookups.
+            repo: Repository handle for deduplication and instrument quote metadata.
             now: Entry-boundary timestamp threaded from the sidecar.
 
         Returns:
@@ -85,10 +137,10 @@ class OrderFillFullRule(AlertRule):
             data.side.upper(),
             str(abs(data.size)),
             data.instrument,
-            f"{data.price:.2f}",
+            await _quoted_price(data, repo, now),
             data.exchange,
         ]
-        body = f"{body_args[0]} {body_args[1]} {body_args[2]} @ ${body_args[3]} filled on {body_args[4]}"
+        body = f"{body_args[0]} {body_args[1]} {body_args[2]} @ {body_args[3]} filled on {body_args[4]}"
         row = AlertEventInsertRow(
             user_public_id=user_public_id,
             operator_public_id=data.operator_public_id,
@@ -104,7 +156,7 @@ class OrderFillFullRule(AlertRule):
                 "exchange_order_id": data.exchange_order_id,
                 "body_suppressed": False,
                 "title_loc_key": "alerts.title.order_fill_full",
-                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full_quoted",
                 "body_loc_args": body_args,
             },
             dedup_key=dedup_key,

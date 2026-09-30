@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from snapper.i18n import catalog
 from snapper.i18n.catalog import load_catalogs_from
 from snapper.i18n.catalog import localized
 from snapper.i18n.catalog import render
@@ -50,12 +51,169 @@ def test_pl_lookup_returns_polish_template() -> None:
 def test_unknown_language_falls_back_to_en() -> None:
     """Unknown language code falls back to EN.
 
-    Given: the user's ``default_language`` is a frontend-only code
-        (e.g. ``"pt"`` against the iOS catalog where it's ``"pt-BR"``).
-    When: ``localized`` is called for ``"pt"`` (no catalog file).
+    Given: the user's language is not a supported catalog or client alias.
+    When: ``localized`` is called for an unknown language.
     Then: the EN template is returned so the user sees content.
     """
-    assert localized("alerts.title.order_fill_full", "pt") == "Order filled"
+    assert localized("alerts.title.order_fill_full", "unknown") == "Order filled"
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [("pt", "pt-BR"), ("no", "nb"), ("sr", "sr-Latn"), ("zh", "zh-Hans"), ("my-MM", "my")],
+)
+def test_client_language_aliases_use_their_existing_catalog(alias: str, canonical: str) -> None:
+    """Client aliases resolve to the corresponding translated catalog.
+
+    Given: Either client's identifier for the same supported language.
+    When: Alert title and body templates are looked up through the alias.
+    Then: Both match the canonical translation rather than English fallback.
+    """
+    for key in ("alerts.title.order_rejected", "alerts.body.order_unknown"):
+        assert localized(key, alias) == localized(key, canonical)
+        assert localized(key, alias) != localized(key, "en")
+
+
+def test_explicit_chinese_scripts_are_not_collapsed() -> None:
+    """Explicit Chinese scripts retain their own catalogs.
+
+    Given: Traditional and simplified Chinese catalog identifiers.
+    When: The same alert title is looked up for both scripts.
+    Then: Each returns its own distinct translated value.
+    """
+    key = "alerts.title.order_rejected"
+    assert localized(key, "zh-Hant") != localized(key, "zh-Hans")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "alerts.body.order_rejected",
+        "alerts.body.margin_warning",
+        "alerts.body.order_unknown",
+        "alerts.body.order_unknown_unresolved",
+    ],
+)
+def test_known_order_arguments_are_localized_without_mutation(key: str) -> None:
+    """Rendering localizes owned tokens without mutating stored arguments.
+
+    Given: Raw side and fallback-reason values plus a token-shaped instrument ID.
+    When: The alert is rendered in Polish.
+    Then: Owned tokens are translated, while identifiers and input values remain
+        unchanged for later re-rendering in another language.
+    """
+    args = ["SELL", "0.25", "BUY", "unknown reason"]
+    rendered = render(key, "pl", *args)
+    assert localized("alerts.argument.side.sell", "pl") in rendered
+    assert localized("alerts.argument.reason.unknown", "pl") in rendered
+    assert "0.25 BUY" in rendered
+    assert "unknown reason" not in rendered
+    assert args == ["SELL", "0.25", "BUY", "unknown reason"]
+
+
+@pytest.mark.parametrize("status", ["healthy", "WARNING", "error"])
+def test_health_status_arguments_are_localized(status: str) -> None:
+    """Health status localization preserves component and instance identifiers.
+
+    Given: A known status and identifiers resembling semantic tokens.
+    When: The health alert is rendered in Polish.
+    Then: Only the status argument is translated.
+    """
+    result = render("alerts.body.critical_system_error", "pl", "warning", "BUY", status, 3)
+    assert "warning/BUY" in result
+    assert localized(f"alerts.argument.status.{status.lower()}", "pl") in result
+
+
+def test_external_diagnostics_and_unknown_side_are_preserved() -> None:
+    """External diagnostics and unknown directions remain verbatim.
+
+    Given: An unknown side token and an external diagnostic containing a known phrase.
+    When: The rejection alert is rendered in Polish.
+    Then: Both original values remain intact for diagnosis.
+    """
+    result = render("alerts.body.order_rejected", "pl", "CUSTOM", "1", "X", "E42 unknown reason")
+    assert "CUSTOM 1 X" in result
+    assert "E42 unknown reason" in result
+
+
+def test_missing_argument_catalog_entry_preserves_raw_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing semantic labels preserve readable raw arguments.
+
+    Given: A catalog containing an alert template but no argument translations.
+    When: The alert is rendered with known semantic tokens.
+    Then: Its original argument values appear instead of untranslated catalog keys.
+    """
+    monkeypatch.setattr(catalog, "_CATALOGS", {"en": {"alerts.body.order_rejected": "%@ %@ %@ %@"}})
+    assert render("alerts.body.order_rejected", "en", "BUY", "1", "X", "unknown reason") == (
+        "BUY 1 X unknown reason"
+    )
+
+
+@pytest.mark.parametrize("args", [[], ["BUY"], ["BUY", "1", "X"]])
+def test_incomplete_semantic_arguments_preserve_the_stored_safety_message(
+    args: list[str],
+) -> None:
+    """Incomplete arguments retain the complete stored alert instead of crashing.
+
+    Given: An unresolved-order payload missing the side or fallback-reason slot.
+    When: The alert resolver attempts to localize the malformed payload.
+    Then: Both stored fields survive, including the warning against assuming closure.
+    """
+    fallback_body = "Venue verification pending, do not assume the position is closed"
+    assert resolve_alert_strings(
+        payload={
+            "title_loc_key": "alerts.title.order_unknown",
+            "body_loc_key": "alerts.body.order_unknown_unresolved",
+            "body_loc_args": [*args],
+        },
+        fallback_title="Order state unknown",
+        fallback_body=fallback_body,
+        user_language="pl",
+    ) == ("Order state unknown", fallback_body)
+
+
+@pytest.mark.parametrize(
+    "key", ["alerts.body.order_unknown", "alerts.body.order_unknown_unresolved"]
+)
+def test_unknown_order_catalog_preserves_explicit_safety_instruction(key: str) -> None:
+    """Both unknown-order templates retain the explicit safety instruction.
+
+    Given: An unresolved order and an explicit English language preference.
+    When: The legacy or new body key is resolved.
+    Then: The pending verification and warning against assuming closure remain.
+    """
+    _, body = resolve_alert_strings(
+        payload={
+            "title_loc_key": "alerts.title.order_unknown",
+            "body_loc_key": key,
+            "body_loc_args": ["BUY", "1", "X", "ambiguous venue response"],
+        },
+        fallback_title="Order state unknown",
+        fallback_body="Fallback must not hide a broken template",
+        user_language="en",
+    )
+    assert "do not assume the position is closed" in body
+    assert "venue verification pending" in body
+    assert "Ambiguous exchange response" in body
+
+
+@pytest.mark.parametrize(
+    "key", ["alerts.body.order_fill_full", "alerts.body.order_fill_full_quoted"]
+)
+def test_fill_templates_never_invent_a_dollar_currency(key: str) -> None:
+    """Fill templates preserve the provided currency without assuming dollars.
+
+    Given: A BTC-quoted price supplied to a legacy or new fill template.
+    When: Each supported language renders the alert.
+    Then: Its price and BTC unit remain intact without a dollar prefix or USD label.
+    """
+    for language in supported_catalog_languages():
+        result = render(key, language, "BUY", "1", "ETH/BTC", "0.00234 BTC", "venue")
+        assert "0.00234 BTC" in result
+        assert "$" not in result
+        assert "USD" not in result
 
 
 def test_unknown_key_falls_back_to_key_itself() -> None:
@@ -86,7 +244,7 @@ def test_render_substitutes_placeholders_for_polish_template() -> None:
         "50000.00",
         "Kraken",
     )
-    assert "BUY" in rendered
+    assert localized("alerts.argument.side.buy", "pl") in rendered
     assert "Kraken" in rendered
     assert "%@" not in rendered
 
@@ -119,7 +277,7 @@ def test_render_works_for_critical_system_error_with_int_arg() -> None:
         "WARNING",
         5,
     )
-    assert rendered == "kraken/spot reported WARNING for 5 consecutive heartbeats"
+    assert rendered == "kraken/spot reported Warning for 5 consecutive heartbeats"
 
 
 def test_load_catalogs_raises_when_directory_missing(tmp_path: Path) -> None:

@@ -95,7 +95,7 @@ class OrderUnknownRule(AlertRule):
         ]
         body = (
             f"{body_args[0]} {body_args[1]} {body_args[2]} state UNKNOWN: {body_args[3]}"
-            f" — venue verification pending, do not assume flat"
+            f" — venue verification pending, do not assume the position is closed"
         )
         rows: list[AlertEventInsertRow] = []
         for recipient in recipients:
@@ -124,7 +124,7 @@ class OrderUnknownRule(AlertRule):
                         "error": data.error,
                         "body_suppressed": False,
                         "title_loc_key": "alerts.title.order_unknown",
-                        "body_loc_key": "alerts.body.order_unknown",
+                        "body_loc_key": "alerts.body.order_unknown_unresolved",
                         "body_loc_args": body_args,
                     },
                     dedup_key=dedup_key,
