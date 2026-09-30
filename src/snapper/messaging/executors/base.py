@@ -4845,9 +4845,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             TimeoutError: When the cycle exceeded the bound; callers log
                 and retry on their own schedule.
         """
-        async with asyncio.timeout(_RECON_CYCLE_TIMEOUT_S):
-            async with self._recon_lock:
-                await self._reconcile_with_exchange_unlocked()
+        async with asyncio.timeout(_RECON_CYCLE_TIMEOUT_S), self._recon_lock:
+            await self._reconcile_with_exchange_unlocked()
 
     async def _post_reconnect_reconcile(self) -> None:
         """Best-effort recon pass before re-entering a respawned stream.

@@ -1335,13 +1335,17 @@ def generate_zod_api(project_root: Path) -> None:
     for name in sorted_names:
         schema = schemas[name]
         raw_definition = generate_zod_schema_definition(name, schema, schemas, exported=False)
-        lines.append(raw_definition)
-        lines.append("")
-        lines.append(
-            f"export const {name}Schema = _{name}RawSchema as unknown as "
-            f"z.ZodType<Components['schemas']['{name}']>"
+        lines.extend(
+            [
+                raw_definition,
+                "",
+                (
+                    f"export const {name}Schema = _{name}RawSchema as unknown as "
+                    f"z.ZodType<Components['schemas']['{name}']>"
+                ),
+                "",
+            ]
         )
-        lines.append("")
     lines.append("// Type exports")
     for name in sorted_names:
         lines.append(f"export type {name} = Components['schemas']['{name}']")
