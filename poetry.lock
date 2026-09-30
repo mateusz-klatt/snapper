@@ -777,14 +777,13 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.84"
+version = "4.5.84+snapper.1"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.84-py3-none-any.whl", hash = "sha256:b920f7d92c0fb62873a900c96ee2cfb76ec6ffeaa7343bf5be0cc01b9b2e9617"},
-    {file = "ccxt-4.5.84.tar.gz", hash = "sha256:5bd072664785b20cd9bef4b57d6aa27b9ae504954043264ea03f96c366c607ad"},
+    {file = "ccxt-4.5.84+snapper.1-py3-none-any.whl", hash = "sha256:5f867a8ca8f679b44fcf93d3024806505cf1a76b3f4ad1c3a07029f7629860a3"},
 ]
 
 [package.dependencies]
@@ -805,7 +804,7 @@ propcache = "0.5.2"
 pycparser = "3.0"
 requests = ">=2.32,<3"
 typing_extensions = "4.16.0"
-urllib3 = "2.7.0"
+urllib3 = "2.8.0"
 uvloop = {version = "0.22.1", markers = "platform_system != \"Windows\" and implementation_name == \"cpython\""}
 winloop = {version = "0.6.3", markers = "platform_system == \"Windows\" and implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"AMD64 ARM64\""}
 yarl = ">=1.20,<2"
@@ -815,6 +814,10 @@ zlib-ng = "1.0.0"
 dev = ["aiodns (==4.0.4)", "aiohttp (>=3.14.3,<3.15)", "aiohttp-fast-zlib (==0.3.0)", "certifi (==2026.6.17)", "coincurve (==21.0.0) ; implementation_name == \"cpython\" and python_version < \"3.14\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 ARM64 i686\"", "cryptography (>=50,<51)", "mypy (==1.6.1)", "orjson (==3.11.9) ; implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x\"", "requests (>=2.32,<3)", "ruff (==0.0.292)", "tox (==4.56.1)", "typing_extensions (==4.16.0)", "uvloop (==0.22.1) ; platform_system != \"Windows\" and implementation_name == \"cpython\"", "winloop (==0.6.3) ; platform_system == \"Windows\" and implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"AMD64 ARM64\"", "yarl (>=1.20,<2)", "zlib-ng (==1.0.0)"]
 qa = ["ruff (==0.0.292)", "tox (==4.56.1)"]
 type = ["mypy (==1.6.1)"]
+
+[package.source]
+type = "file"
+url = "vendor/ccxt/ccxt-4.5.84+snapper.1-py3-none-any.whl"
 
 [[package]]
 name = "certifi"
@@ -7048,14 +7051,14 @@ files = [
 
 [[package]]
 name = "urllib3"
-version = "2.7.0"
+version = "2.8.0"
 description = "HTTP library with thread-safe connection pooling, file post, and more."
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
 files = [
-    {file = "urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"},
-    {file = "urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c"},
+    {file = "urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3"},
+    {file = "urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63"},
 ]
 
 [package.extras]
@@ -7934,4 +7937,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "8d2e824c2cf507c048680e3731d24e3a11b02237c3a42cf2847abdb3847fb517"
+content-hash = "001b8883a3b072bf54bf30e88f307727be1e4c764a553c4867c542e30ba00e33"

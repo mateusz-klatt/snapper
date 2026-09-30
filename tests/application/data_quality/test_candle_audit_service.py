@@ -473,8 +473,10 @@ async def test_unknown_symbol_is_distinct_from_an_active_empty_window() -> None:
     """
     repository = AsyncMock(spec=Repository)
     repository.get_candle_window_for_active_symbol.return_value = None
+    audit_repository = cast(Repository, repository)
+    request = _request()
     with pytest.raises(CandleAuditTargetError, match="not active"):
-        await audit_candle_window(cast(Repository, repository), _request())
+        await audit_candle_window(audit_repository, request)
     repository.get_candle_window_for_active_symbol.assert_awaited_once()
 
 
@@ -490,8 +492,10 @@ async def test_oversized_repository_response_is_never_reported_clean() -> None:
     repository.get_candle_window_for_active_symbol.return_value = [_candle(_START)] * (
         MAX_CANDLE_AUDIT_SLOTS + 1
     )
+    audit_repository = cast(Repository, repository)
+    request = _request()
     with pytest.raises(CandleAuditRequestError, match="truncated or oversized"):
-        await audit_candle_window(cast(Repository, repository), _request())
+        await audit_candle_window(audit_repository, request)
 
 
 @pytest.mark.asyncio
@@ -567,11 +571,9 @@ async def test_sqlite_service_resolves_the_native_symbol_and_exact_range(tmp_pat
         assert [item.type for item in empty_report.anomalies] == [CandleAnomalyType.EMPTY_WINDOW]
         assert len(statements) == 1
         assert "LEFT OUTER JOIN" in statements[0]
+        missing_request = replace(_request(), symbol="MISSING")
         with pytest.raises(CandleAuditTargetError, match="not active"):
-            await audit_candle_window(
-                repository,
-                replace(_request(), symbol="MISSING"),
-            )
+            await audit_candle_window(repository, missing_request)
         rows = [
             {
                 "instrument_public_id": instrument_public_id,
@@ -646,18 +648,17 @@ async def test_repository_refuses_overlapping_historical_target_identities(tmp_p
                 )
             )
             await session.commit()
+        query = CandleWindowQuery(
+            native_symbol="AAPL",
+            timeframe="1m",
+            window_start=_START,
+            window_end=_END,
+            exchange="polygon",
+            as_of=_AS_OF,
+            limit=4,
+        )
         with pytest.raises(RuntimeError, match="temporally ambiguous"):
-            await repository.get_candle_window_for_active_symbol(
-                CandleWindowQuery(
-                    native_symbol="AAPL",
-                    timeframe="1m",
-                    window_start=_START,
-                    window_end=_END,
-                    exchange="polygon",
-                    as_of=_AS_OF,
-                    limit=4,
-                )
-            )
+            await repository.get_candle_window_for_active_symbol(query)
     finally:
         await repository.engine.dispose()
 
@@ -823,9 +824,8 @@ async def test_repository_window_filters_temporal_and_coordinate_distractors(
             _START + timedelta(minutes=3),
         ]
         for invalid_limit in (0, -1):
+            invalid_query = replace(query, limit=invalid_limit)
             with pytest.raises(ValueError, match="limit must be positive"):
-                await repository.get_candle_window_for_active_symbol(
-                    replace(query, limit=invalid_limit)
-                )
+                await repository.get_candle_window_for_active_symbol(invalid_query)
     finally:
         await repository.engine.dispose()

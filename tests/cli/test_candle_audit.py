@@ -349,6 +349,7 @@ def test_repository_lifecycle_is_disposed_after_failure(
     )
     dispose = AsyncMock()
     monkeypatch.setattr(candle_audit_cli, "dispose_repositories", dispose)
+    audit = candle_audit_cli._run_audit(_request())
     with pytest.raises(RuntimeError, match="read failed"):
-        asyncio.run(candle_audit_cli._run_audit(_request()))
+        asyncio.run(audit)
     dispose.assert_awaited_once_with()

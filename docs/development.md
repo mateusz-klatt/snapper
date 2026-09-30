@@ -37,6 +37,11 @@ and pre-commit hooks. The Python refresh also reinstalls the current project
 so its installed dependency metadata matches the updated manifest and lock file.
 `make update` additionally refreshes Docker build-tool pins.
 
+CCXT currently uses a [reproducible dependency metadata patch](../vendor/ccxt/README.md)
+so its exact urllib3 requirement includes the current security fixes. Keep the
+vendored wheel in source checkouts and Docker build contexts; the linked note
+documents verification, rebuilding, distribution limits, and retirement of the patch.
+
 ## Isolated Worktrees for Parallel Sessions
 
 When more than one agent or developer session works on the repository at

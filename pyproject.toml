@@ -39,7 +39,7 @@ uvicorn = {extras = ["standard"], version = "^0.54.0"}
 pyzmq = "^27.2.0"
 pyjwt = "^2.15.1"
 TA-Lib = "^0.8.1"
-ccxt = "^4.5.84"
+ccxt = {path = "vendor/ccxt/ccxt-4.5.84+snapper.1-py3-none-any.whl"}
 python-kraken-sdk = "^3.5.1"
 massive = "^2.8.0"
 bcrypt = "^5.0.0"

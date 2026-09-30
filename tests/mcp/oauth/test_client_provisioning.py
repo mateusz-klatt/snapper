@@ -195,9 +195,10 @@ async def test_unrelated_integrity_failure_is_not_mislabeled_as_duplicate() -> N
     When: A validated client reaches the store.
     Then: The original database exception propagates without a misleading collision label.
     """
+    store = _IntegrityFailureStore()
     with pytest.raises(IntegrityError, match="unrelated check failed"):
         await provision_oauth_client(
-            _IntegrityFailureStore(),
+            store,
             client_name="Private ChatGPT",
             redirect_uris=[_REDIRECT_URI],
         )
