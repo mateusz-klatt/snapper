@@ -26,9 +26,12 @@ the repository root. The script rejects any input with a different SHA-256.
 curl --fail --location \
   'https://files.pythonhosted.org/packages/c9/a2/1f6fd14591a951e608fe7afc8d77de6ef35434c2e430b4fff105ffb216b0/ccxt-4.5.84-py3-none-any.whl' \
   --output /tmp/ccxt-4.5.84-py3-none-any.whl
-python3 scripts/repack_ccxt_wheel.py /tmp/ccxt-4.5.84-py3-none-any.whl
+python3 scripts/repack_ccxt_wheel.py < /tmp/ccxt-4.5.84-py3-none-any.whl
 ```
 
+The script reads archive bytes from standard input and writes only to the fixed
+`vendor/ccxt` directory in its source checkout. It accepts no input or output path
+arguments and verifies the upstream digest before creating or replacing output.
 The generated wheel uses fixed ordering, timestamps, permissions and compression
 settings. Its complete file list and hashes are recorded in its `RECORD`.
 

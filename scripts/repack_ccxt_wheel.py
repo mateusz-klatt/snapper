@@ -1,9 +1,11 @@
 """Repackage verified CCXT 4.5.84 metadata with its urllib3 security update.
 
-Download the exact upstream wheel from ``UPSTREAM_URL`` separately. This command
-checks its fixed SHA-256 before preserving every package and license byte,
-changing the distribution version and urllib3 requirement, and rebuilding RECORD.
+Download the exact upstream wheel from ``UPSTREAM_URL`` separately and supply its
+bytes on standard input. This command checks its fixed SHA-256 before preserving
+every package and license byte, changing the distribution version and urllib3
+requirement, and rebuilding RECORD.
 Archive ordering, timestamps, permissions and compression settings are fixed.
+The completed wheel is written only to this checkout's ``vendor/ccxt`` directory.
 """
 
 import argparse
@@ -11,6 +13,7 @@ import base64
 import csv
 import hashlib
 import io
+import sys
 import zipfile
 from pathlib import Path
 from typing import Final
@@ -24,6 +27,7 @@ UPSTREAM_SHA256: Final = "b920f7d92c0fb62873a900c96ee2cfb76ec6ffeaa7343bf5be0cc0
 SOURCE_DIST_INFO: Final = "ccxt-4.5.84.dist-info/"
 TARGET_DIST_INFO: Final = "ccxt-4.5.84+snapper.1.dist-info/"
 WHEEL_NAME: Final = "ccxt-4.5.84+snapper.1-py3-none-any.whl"
+OUTPUT_DIRECTORY: Final = Path(__file__).resolve().parents[1] / "vendor" / "ccxt"
 
 
 def _patch_metadata(metadata: bytes) -> bytes:
@@ -57,20 +61,18 @@ def _replace_record(files: dict[str, bytes]) -> None:
     files[record_path] = stream.getvalue().encode("utf-8")
 
 
-def repack_wheel(source: Path, output_directory: Path) -> Path:
-    """Verify the upstream archive and write a wheel containing unchanged code.
+def repack_wheel(content: bytes) -> bytes:
+    """Verify the upstream archive and produce a wheel containing unchanged code.
 
     Args:
-        source: Locally downloaded upstream wheel with the pinned digest.
-        output_directory: Destination directory for the reproducible wheel.
+        content: Downloaded upstream wheel bytes with the pinned digest.
 
     Returns:
-        Path to the generated wheel.
+        Reproducible wheel bytes ready to write to the fixed vendor destination.
 
     Raises:
         ValueError: If the upstream archive or metadata differs from the pin.
     """
-    content = source.read_bytes()
     if hashlib.sha256(content).hexdigest() != UPSTREAM_SHA256:
         raise ValueError("Upstream wheel SHA-256 mismatch")
     with zipfile.ZipFile(io.BytesIO(content)) as wheel:
@@ -81,19 +83,18 @@ def repack_wheel(source: Path, output_directory: Path) -> Path:
     metadata_path = TARGET_DIST_INFO + "METADATA"
     files[metadata_path] = _patch_metadata(files[metadata_path])
     _replace_record(files)
-    output_directory.mkdir(parents=True, exist_ok=True)
-    destination = output_directory / WHEEL_NAME
-    with zipfile.ZipFile(destination, "w") as wheel:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as wheel:
         for name, data in sorted(files.items()):
             entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             entry.create_system = 3
             entry.external_attr = 0o100644 << 16
             wheel.writestr(entry, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-    return destination
+    return output.getvalue()
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Rebuild the wheel from a separate, verified upstream download.
+    """Rebuild a wheel from standard input into the fixed repository destination.
 
     Args:
         argv: Command arguments, or None to read them from the process arguments.
@@ -102,11 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         Zero after writing the wheel and printing its SHA-256 digest and path.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="Downloaded upstream CCXT 4.5.84 wheel")
-    parser.add_argument("--output-dir", type=Path, default=Path("vendor/ccxt"))
-    args = parser.parse_args(argv)
-    output = repack_wheel(args.source, args.output_dir)
-    print(f"{hashlib.sha256(output.read_bytes()).hexdigest()}  {output}")
+    parser.parse_args(argv)
+    content = repack_wheel(sys.stdin.buffer.read())
+    OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    output = OUTPUT_DIRECTORY / WHEEL_NAME
+    output.write_bytes(content)
+    print(f"{hashlib.sha256(content).hexdigest()}  {output}")
     return 0
 
 
