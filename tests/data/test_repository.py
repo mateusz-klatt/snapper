@@ -10899,8 +10899,9 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        with pytest.raises(RuntimeError, match="database not ready") as raised:
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01, interval_s=0), 1.0)
+        async with asyncio.timeout(1.0):
+            with pytest.raises(RuntimeError, match="database not ready") as raised:
+                await repository.wait_until_ready(timeout_s=0.01, interval_s=0)
         assert cleaned.is_set()
         assert session.execute_calls == 1
         assert raised.value.__cause__ is failure
@@ -10921,8 +10922,9 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        with pytest.raises(DBAPIError) as raised:
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        async with asyncio.timeout(1.0):
+            with pytest.raises(DBAPIError) as raised:
+                await repository.wait_until_ready(timeout_s=0.01)
         assert cleaned.is_set()
         assert session.execute_calls == 1
         assert raised.value is failure
@@ -10947,11 +10949,12 @@ class TestRepositoryWaitUntilReady:
                 raise failure
 
         repository = _make_repo(factory)
-        with (
-            patch.object(session, "execute", execute),
-            pytest.raises(RuntimeError, match="database not ready") as raised,
-        ):
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        async with asyncio.timeout(1.0):
+            with (
+                patch.object(session, "execute", execute),
+                pytest.raises(RuntimeError, match="database not ready") as raised,
+            ):
+                await repository.wait_until_ready(timeout_s=0.01)
         assert cleaned.is_set()
         assert raised.value.__cause__ is failure
 
@@ -10980,11 +10983,12 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        with (
-            patch.object(session, "execute", execute),
-            pytest.raises(RuntimeError, match="database not ready") as raised,
-        ):
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.02), 1.0)
+        async with asyncio.timeout(1.0):
+            with (
+                patch.object(session, "execute", execute),
+                pytest.raises(RuntimeError, match="database not ready") as raised,
+            ):
+                await repository.wait_until_ready(timeout_s=0.02)
         assert entered.is_set()
         assert cleaned.is_set()
         assert isinstance(raised.value.__cause__, TimeoutError)
@@ -10995,10 +10999,9 @@ class TestRepositoryWaitUntilReady:
         failure = ConnectionRefusedError("offline")
         session = _ReadinessProbeSession([failure])
         repository = _make_repo(lambda: _readiness_factory(session))
-        with pytest.raises(RuntimeError, match="database not ready") as raised:
-            await asyncio.wait_for(
-                repository.wait_until_ready(timeout_s=0.02, interval_s=10.0), 1.0
-            )
+        async with asyncio.timeout(1.0):
+            with pytest.raises(RuntimeError, match="database not ready") as raised:
+                await repository.wait_until_ready(timeout_s=0.02, interval_s=10.0)
         assert session.execute_calls == 1
         assert raised.value.__cause__ is failure
 
@@ -11013,11 +11016,12 @@ class TestRepositoryWaitUntilReady:
             completed.set()
 
         repository = _make_repo(lambda: _readiness_factory(session))
-        with (
-            patch.object(session, "execute", execute),
-            pytest.raises(RuntimeError, match="database not ready"),
-        ):
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.02), 1.0)
+        async with asyncio.timeout(1.0):
+            with (
+                patch.object(session, "execute", execute),
+                pytest.raises(RuntimeError, match="database not ready"),
+            ):
+                await repository.wait_until_ready(timeout_s=0.02)
         assert not completed.is_set()
 
     @pytest.mark.asyncio
@@ -11050,11 +11054,12 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        with (
-            patch.object(session, "execute", execute),
-            pytest.raises(RuntimeError, match="database not ready") as raised,
-        ):
-            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        async with asyncio.timeout(1.0):
+            with (
+                patch.object(session, "execute", execute),
+                pytest.raises(RuntimeError, match="database not ready") as raised,
+            ):
+                await repository.wait_until_ready(timeout_s=0.01)
         assert cancelled.is_set()
         assert cleaned.is_set()
         assert isinstance(raised.value.__cause__, TimeoutError)

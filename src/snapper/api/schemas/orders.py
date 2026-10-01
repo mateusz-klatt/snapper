@@ -2,12 +2,13 @@
 
 from typing import Literal
 
-from pydantic import Field
 from pydantic import field_validator
 
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
+from snapper.core.order_numbers import OrderLeverage
+from snapper.core.order_numbers import PositiveOrderNumber
 from snapper.messaging.schemas.data import ExecutionPlanData
 
 
@@ -21,12 +22,12 @@ class CreateOrderBody(StrictBody):
         mode: Execution mode (live or paper).
         side: Order side (buy or sell).
         order_type: Order type (market, limit, stop, stop_limit).
-        quantity: Order quantity (must be positive).
-        price: Limit price (required for limit and stop_limit).
-        stop_price: Stop trigger price (required for stop and stop_limit).
+        quantity: Order quantity (must be positive and finite).
+        price: Positive finite limit price (required for limit and stop_limit).
+        stop_price: Positive finite stop trigger price (required for stop and stop_limit).
         time_in_force: Time-in-force policy (default GTC).
         post_only: Post-only flag for maker orders.
-        leverage: Optional leverage multiplier.
+        leverage: Optional strict positive int32 leverage multiplier.
         reduce_only: Reduce-only flag for closing positions.
         wallet_public_id: Optional target wallet UUID. When omitted,
             the create-order path resolves the caller's single
@@ -48,12 +49,12 @@ class CreateOrderBody(StrictBody):
     mode: Literal["live", "paper"] = "live"
     side: Literal["buy", "sell"]
     order_type: Literal["market", "limit", "stop", "stop_limit"]
-    quantity: float = Field(gt=0)
-    price: float | None = None
-    stop_price: float | None = None
+    quantity: PositiveOrderNumber
+    price: PositiveOrderNumber | None = None
+    stop_price: PositiveOrderNumber | None = None
     time_in_force: str = "GTC"
     post_only: bool = False
-    leverage: int | None = None
+    leverage: OrderLeverage | None = None
     reduce_only: bool = False
     wallet_public_id: str | None = None
     operator_public_id: str | None = None

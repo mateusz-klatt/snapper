@@ -85,6 +85,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
+from snapper.core.order_numbers import OrderLeverage
+from snapper.core.order_numbers import PositiveOrderNumber
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.core.types import ExecutionModeEnum
@@ -892,6 +894,8 @@ async def _prepare_manual_order(
         {
             "order_type": order.order_type,
             "side": order.side,
+            "quantity": order.quantity,
+            "leverage": order.leverage,
             "price": order.price,
             "stop_price": order.stop_price,
         }
@@ -2231,14 +2235,14 @@ def register_mcp_tools(
         instrument_public_id: str,
         side: str,
         order_type: str,
-        quantity: float,
+        quantity: PositiveOrderNumber,
         idempotency_key: str,
         wallet_public_id: str | None = None,
-        price: float | None = None,
-        stop_price: float | None = None,
+        price: PositiveOrderNumber | None = None,
+        stop_price: PositiveOrderNumber | None = None,
         operator_public_id: str | None = None,
         ai_review_public_id: str | None = None,
-        leverage: int | None = None,
+        leverage: OrderLeverage | None = None,
         post_only: bool = False,
         reduce_only: bool = False,
     ) -> object:
@@ -2256,16 +2260,16 @@ def register_mcp_tools(
             side: ``buy`` or ``sell``.
             order_type: One of ``market``, ``limit``, ``stop``
                 ``stop_limit``.
-            quantity: Order size in base asset units.
+            quantity: Positive finite order size in base asset units.
             idempotency_key: Client-supplied uniqueness key; required
                 because MCP clients are the most
                 likely source of accidental retries.
             wallet_public_id: Optional UUID7 of the wallet the order
                 attaches to. When omitted, the caller must have
                 exactly one accessible live wallet.
-            price: Limit price. Required for ``limit`` and
+            price: Positive finite limit price. Required for ``limit`` and
                 ``stop_limit`` order types.
-            stop_price: Trigger price. Required for ``stop`` and
+            stop_price: Positive finite trigger price. Required for ``stop`` and
                 ``stop_limit`` order types; persisted on the command
                 row so the executor submits the trigger to the venue.
             operator_public_id: Optional operator scope. Omit to
@@ -2278,7 +2282,7 @@ def register_mcp_tools(
                 ``bus.caps_violation_after_ai_approve`` publish so
                 :class:`AiReviewService` can re-fanout the rejection
                 to the delegate's UI.
-            leverage: Optional margin multiplier persisted on the
+            leverage: Optional strict positive int32 margin multiplier persisted on the
                 command row and forwarded to the venue by the Kraken
                 spot adapter. Omit for unleveraged orders. NOT
                 validated against the instrument's

@@ -560,6 +560,8 @@ async def create_order(
             {
                 "order_type": body.order_type,
                 "side": body.side,
+                "quantity": body.quantity,
+                "leverage": body.leverage,
                 "price": body.price,
                 "stop_price": body.stop_price,
             }

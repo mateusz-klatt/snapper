@@ -1073,12 +1073,12 @@ X-CSRF-Token: <csrf_token>
 | `mode` | string | no | `live` (default) or `paper` |
 | `side` | string | yes | `buy` or `sell` |
 | `order_type` | string | yes | `market`, `limit`, `stop`, `stop_limit` |
-| `quantity` | float | yes | Order size (must be > 0) |
-| `price` | float | cond | Required for `limit` and `stop_limit` |
-| `stop_price` | float | cond | Required for `stop` and `stop_limit` |
+| `quantity` | float | yes | Finite order size greater than zero |
+| `price` | float | cond | Finite value greater than zero when supplied; required for `limit` and `stop_limit` |
+| `stop_price` | float | cond | Finite value greater than zero when supplied; required for `stop` and `stop_limit` |
 | `time_in_force` | string | no | Time-in-force policy (`GTC` default) |
 | `post_only` | boolean | no | Maker-only order flag (`false` default) |
-| `leverage` | int | no | Optional leverage multiplier |
+| `leverage` | int | no | Optional integer multiplier from 1 through 2147483647; omitted or `null` means no leverage override |
 | `reduce_only` | boolean | no | Reduce-only flag for closing exposure (`false` default) |
 | `wallet_public_id` | string | no | Target wallet UUID; when omitted, the server resolves the caller's single accessible wallet for the requested mode |
 | `operator_public_id` | string | no | Operator identity |
@@ -1088,6 +1088,19 @@ X-CSRF-Token: <csrf_token>
 **Response (200):** `ExecutionPlanResponse` envelope with plan details.
 
 **Errors:** 403 (disabled/forbidden), 409 (idempotency conflict), 422 (validation).
+
+Numeric strings and booleans are rejected. Quantity and supplied prices must be
+finite and positive; leverage must be an integer, so values such as `2.5` and
+`2.0` are rejected for that field. The leverage range reflects its storage type,
+not a guarantee that a venue or instrument supports the requested multiplier.
+Optional prices may be omitted or `null` when the order type does not require
+them; market orders must omit `price` or set it to `null`.
+
+These numeric checks also apply to the MCP `submit_manual_order` tool and run
+before order-related database lookups or writes. Authentication and authorization
+retain their normal checks. REST validation failures return JSON with structured
+error locations and messages; rejected input values and raw request bodies are
+omitted from that error detail.
 
 ### POST /api/orders/{plan_public_id}/cancel
 

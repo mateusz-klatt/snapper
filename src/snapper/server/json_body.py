@@ -34,6 +34,7 @@ Usage::
 
 from collections.abc import Callable
 from collections.abc import Coroutine
+from math import isfinite
 from typing import Any
 
 from fastapi import FastAPI
@@ -42,7 +43,54 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from pydantic import ValidationError
 
+from snapper.core.json_types import JsonPrimitive
+
 _SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {}
+
+
+def _validation_text(value: str) -> str:
+    """Replace lone surrogates so validation metadata can be encoded as UTF-8."""
+    return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _validation_primitive(value: JsonPrimitive) -> JsonPrimitive:
+    """Normalize only primitive validation metadata, without arbitrary reprs."""
+    if isinstance(value, str):
+        return _validation_text(value)
+    if isinstance(value, float) and not isfinite(value):
+        return str(value)
+    return value
+
+
+def _request_validation_error(exc: ValidationError) -> RequestValidationError:
+    """Keep structured diagnostics while excluding raw bodies and rejected inputs.
+
+    Context contains primitive constraint metadata plus optional exception objects.
+    Discard those objects instead of serializing their potentially sensitive reprs.
+    Nonfinite constraints become text; valid response fields are never processed here.
+    """
+    errors: list[dict[str, object]] = []
+    for error in exc.errors(include_input=False, include_url=False):
+        public_error: dict[str, object] = {
+            "type": _validation_text(error["type"]),
+            "loc": (
+                "body",
+                *(
+                    _validation_text(part) if isinstance(part, str) else part
+                    for part in error["loc"]
+                ),
+            ),
+            "msg": _validation_text(error["msg"]),
+        }
+        context = {
+            _validation_text(key): _validation_primitive(value)
+            for key, value in error.get("ctx", {}).items()
+            if key != "error" and isinstance(value, (str, int, float, bool, type(None)))
+        }
+        if context:
+            public_error["ctx"] = context
+        errors.append(public_error)
+    return RequestValidationError(errors)
 
 
 def optional_json_body[ModelT: BaseModel](
@@ -75,8 +123,7 @@ def optional_json_body[ModelT: BaseModel](
         try:
             return model.model_validate_json(raw)
         except ValidationError as exc:
-            errors = [{**err, "loc": ("body", *err["loc"])} for err in exc.errors()]
-            raise RequestValidationError(errors, body=raw.decode("utf-8")) from exc
+            raise _request_validation_error(exc) from exc
 
     return dependency
 
@@ -107,8 +154,7 @@ def json_body[ModelT: BaseModel](model: type[ModelT]) -> Callable[..., Coroutine
         try:
             return model.model_validate_json(raw)
         except ValidationError as exc:
-            errors = [{**err, "loc": ("body", *err["loc"])} for err in exc.errors()]
-            raise RequestValidationError(errors, body=raw.decode("utf-8")) from exc
+            raise _request_validation_error(exc) from exc
 
     return dependency
 

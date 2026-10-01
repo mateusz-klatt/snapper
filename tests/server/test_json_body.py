@@ -6,15 +6,21 @@ from typing import Any
 
 import pytest
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import ValidationError
+from pydantic import field_validator
+from pydantic_core import PydanticCustomError
 
 from snapper.server.json_body import _SCHEMA_REGISTRY
 from snapper.server.json_body import _lift_defs
 from snapper.server.json_body import _strip_defaults
+from snapper.server.json_body import _validation_text
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
 from snapper.server.json_body import optional_json_body
@@ -298,3 +304,240 @@ class TestPatchOpenapi:
         spec = app.openapi()
         schema = spec["components"]["schemas"]["SharedName"]
         assert "native_field" in schema["properties"]
+
+
+class _FiniteBody(BaseModel):
+    """Exercise Pydantic numeric errors through actual HTTP serialization."""
+
+    model_config = ConfigDict(extra="forbid")
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+
+
+def _validation_client(model: type[BaseModel], optional: bool) -> TestClient:
+    """Build a real HTTP endpoint using either JSON dependency."""
+    app = FastAPI()
+    dependency = optional_json_body(model) if optional else json_body(model)
+
+    @app.post("/", dependencies=[Depends(dependency)])
+    async def submit() -> dict[str, bool]:
+        """Confirm valid requests reach the handler."""
+        return {"ok": True}
+
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_nonfinite_input_returns_structured_422(optional: bool, value: str) -> None:
+    """Rejected nonfinite numbers never reach JSONResponse as raw error input.
+
+    Given: A nonfinite quantity in a JSON body,
+    When: Either JSON dependency rejects the request,
+    Then: The response is a structured 422 without raw error input.
+    """
+    with _validation_client(_FiniteBody, optional) as client:
+        response = client.post("/", content='{"quantity": ' + value + "}")
+    assert response.status_code == 422
+    assert response.json()["detail"] == [
+        {
+            "type": "finite_number",
+            "loc": ["body", "quantity"],
+            "msg": "Input should be a finite number",
+        }
+    ]
+
+
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("raw", [b'{"quantity": "\xff"}', b'{"quantity": "\\ud800"}'])
+def test_invalid_encoding_returns_structured_422(optional: bool, raw: bytes) -> None:
+    """Invalid UTF-8 and lone surrogate escapes refuse without decoding failures.
+
+    Given: Invalid UTF-8 or a lone surrogate escape in a request,
+    When: Either JSON dependency parses the body,
+    Then: A JSON-invalid 422 response is returned without a decoding failure.
+    """
+    with _validation_client(_FiniteBody, optional) as client:
+        response = client.post("/", content=raw)
+    assert response.status_code == 422
+    error = response.json()["detail"][0]
+    assert error["type"] == "json_invalid"
+    assert error["loc"] == ["body"]
+    assert "input" not in error
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_custom_error_does_not_reflect_sensitive_input(optional: bool) -> None:
+    """Custom messages survive without raw input or exception objects in context.
+
+    Given: Sensitive input rejected by a custom validator,
+    When: The validation error becomes an HTTP response,
+    Then: Its descriptive message survives without the input or exception object.
+    """
+
+    class SecretBody(BaseModel):
+        credential: str
+
+        @field_validator("credential")
+        @classmethod
+        def reject(cls, value: str) -> str:
+            """Reject sensitive input with a descriptive, server-controlled message."""
+            raise ValueError("Credential format is invalid")
+
+    with _validation_client(SecretBody, optional) as client:
+        response = client.post("/", json={"credential": "private-credential"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == [
+        {
+            "type": "value_error",
+            "loc": ["body", "credential"],
+            "msg": "Value error, Credential format is invalid",
+        }
+    ]
+    assert "private-credential" not in response.text
+    assert len(response.content) < 300
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_constraint_context_retains_finite_limits(optional: bool) -> None:
+    """Useful ordinary error messages and finite constraint context survive.
+
+    Given: A zero quantity violating a finite positive bound,
+    When: The request fails validation,
+    Then: The response preserves the message and numeric constraint.
+    """
+    with _validation_client(_FiniteBody, optional) as client:
+        response = client.post("/", json={"quantity": 0})
+    assert response.json()["detail"] == [
+        {
+            "type": "greater_than",
+            "loc": ["body", "quantity"],
+            "msg": "Input should be greater than 0",
+            "ctx": {"gt": 0.0},
+        }
+    ]
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_nonfinite_constraint_context_serializes(optional: bool) -> None:
+    """Nonfinite constraint metadata is rendered as text without changing the error.
+
+    Given: A model with an infinite lower bound,
+    When: A finite quantity fails validation,
+    Then: The 422 context represents infinity as JSON-safe text.
+    """
+
+    class InfiniteConstraint(BaseModel):
+        quantity: float = Field(gt=float("inf"))
+
+    with _validation_client(InfiniteConstraint, optional) as client:
+        response = client.post("/", json={"quantity": 1})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["ctx"] == {"gt": "inf"}
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_validation_metadata_preserves_json_primitives(optional: bool) -> None:
+    """Constraint primitives survive while object reprs are excluded from responses.
+
+    Given: A custom error containing primitives and sensitive object metadata,
+    When: The validation error becomes an HTTP response,
+    Then: Primitives survive while exception and object metadata are omitted.
+    """
+
+    class UnsafeMetadata:
+        """Represent metadata that must never be reflected into the response."""
+
+        def __repr__(self) -> str:
+            """Return deliberately large sensitive metadata."""
+            return "private-credential" * 10000
+
+    class MetadataBody(BaseModel):
+        quantity: float
+
+        @field_validator("quantity")
+        @classmethod
+        def reject(cls, value: float) -> float:
+            """Provide a realistic custom error with mixed metadata types."""
+            raise PydanticCustomError(
+                "quantity_constraint",
+                "Quantity violates the constraint",
+                {
+                    "unit": "units",
+                    "enabled": True,
+                    "optional": None,
+                    "minimum": 1,
+                    "maximum": 2.5,
+                    "nan": float("nan"),
+                    "negative_infinity": float("-inf"),
+                    "unsafe": UnsafeMetadata(),
+                    "error": "private-credential",
+                },
+            )
+
+    with _validation_client(MetadataBody, optional) as client:
+        response = client.post("/", json={"quantity": 1})
+    assert response.status_code == 422
+    assert response.json()["detail"] == [
+        {
+            "type": "quantity_constraint",
+            "loc": ["body", "quantity"],
+            "msg": "Quantity violates the constraint",
+            "ctx": {
+                "unit": "units",
+                "enabled": True,
+                "optional": None,
+                "minimum": 1,
+                "maximum": 2.5,
+                "nan": "nan",
+                "negative_infinity": "-inf",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("optional", [False, True])
+async def test_rejected_body_is_not_attached(optional: bool) -> None:
+    """The exception retains no decoded raw body or rejected input field.
+
+    Given: A raw request containing an invalid sensitive value,
+    When: Either JSON dependency raises a validation error,
+    Then: The exception retains neither the body nor rejected input metadata.
+    """
+    dependency = optional_json_body(_FiniteBody) if optional else json_body(_FiniteBody)
+    request = _StubRequest(b'{"quantity": "private-credential"}')
+    with pytest.raises(RequestValidationError) as caught:
+        await dependency(request)
+    assert caught.value.body is None
+    assert "private-credential" not in str(caught.value)
+    assert "input" not in caught.value.errors()[0]
+    assert "url" not in caught.value.errors()[0]
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_nested_error_location_preserves_array_index(optional: bool) -> None:
+    """Nested field names and numeric array indices retain their exact meaning.
+
+    Given: An invalid quantity nested inside an order list,
+    When: The request fails validation,
+    Then: The error location preserves every field name and array index.
+    """
+
+    class NestedBody(BaseModel):
+        orders: list[_FiniteBody]
+
+    with _validation_client(NestedBody, optional) as client:
+        response = client.post("/", json={"orders": [{"quantity": 0}]})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "orders", 0, "quantity"]
+
+
+@pytest.mark.parametrize("value, expected", [("żółw 🐢", "żółw 🐢"), ("bad\ud800", "bad?")])
+def test_validation_text_is_utf8_safe(value: str, expected: str) -> None:
+    """Text metadata preserves Unicode characters and replaces lone surrogates.
+
+    Given: Valid Unicode text or a lone surrogate in metadata,
+    When: The validation text normalizer processes it,
+    Then: Valid characters survive and lone surrogates become safe replacements.
+    """
+    assert _validation_text(value) == expected

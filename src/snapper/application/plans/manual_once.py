@@ -11,6 +11,7 @@ from datetime import datetime
 
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.core.json_types import JsonObject
+from snapper.core.order_numbers import validate_manual_order_numbers
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import TickData
@@ -92,12 +93,16 @@ class ManualOnceEvaluator(PlanEvaluator):
         """Validate manual order parameters.
 
         Args:
-            params: Must contain order_type and side. Optional: price,
+            params: Must contain order_type and side. Quantity is validated when
+                supplied; stored plans keep it in the plan row. Optional: price,
                 stop_price, time_in_force, post_only, leverage, reduce_only.
 
         Raises:
-            ValueError: If required params missing or order_type invalid.
+            ValueError: If required params are missing, order_type is invalid,
+                amounts are not positive and finite, or leverage is not a
+                strict positive int32.
         """
+        validate_manual_order_numbers(params)
         missing = _REQUIRED_PARAMS - set(params.keys())
         if missing:
             raise ValueError(f"Missing required params: {', '.join(sorted(missing))}")
