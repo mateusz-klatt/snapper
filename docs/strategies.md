@@ -167,7 +167,7 @@ class RSIReversion(BaseStrategy):
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
-| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass permits unscoped configuration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
+| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass permits unscoped configuration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The trade coordinator drops signals with missing or blank wallet strings before engine/group persistence. Strategies using `create_ai_review_and_await()` also require a non-empty wallet at the caps guard — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
 
 ### Scoped-strategy reference identities

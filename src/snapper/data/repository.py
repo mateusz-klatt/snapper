@@ -1461,6 +1461,13 @@ _PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _require_command_wallet(row: TradeCommandInsertRow) -> None:
+    """Require an explicit nonblank wallet without changing its supplied spelling."""
+    wallet_public_id = row.get("wallet_public_id")
+    if not isinstance(wallet_public_id, str) or not wallet_public_id.strip():
+        raise ValueError("trade command requires a nonblank wallet_public_id")
+
+
 def _canonicalize_reconciliation_wallet_public_id(wallet_public_id: str) -> str:
     """Render one portfolio or credential wallet UUID in canonical form."""
     try:
@@ -6487,6 +6494,7 @@ class Repository(ABC):
         Raises:
             ShardOwnershipError: If ``ownership`` is not None and
                 ``row["shard_key"]`` is not owned by it.
+            ValueError: If the wallet is absent, not a string, or blank.
         """
         ...
 
@@ -21094,11 +21102,9 @@ class SQLAlchemyRepository(Repository):
     ) -> tuple[int, str]:
         """Insert a new trade command row and return (id, public_id).
 
-        ``wallet_public_id`` is NOT NULL at the schema
-        level. Callers that have not yet migrated to providing an
-        explicit wallet default to the empty-string legacy sentinel
-        (the same default that :class:`ExchangeExecutorService` uses
-        for single-wallet template instantiations).
+        ``wallet_public_id`` must be an explicit nonblank string.
+        Missing or invalid wallet values are refused before opening a session;
+        accepted values retain their supplied spelling.
         When ``ownership``
         is non-None, the row's ``shard_key`` MUST be owned by it or
         class:`ShardOwnershipError` is raised before the DB write.
@@ -21109,9 +21115,9 @@ class SQLAlchemyRepository(Repository):
                 instance_id=ownership.instance_id,
                 instance_count=ownership.instance_count,
             )
+        _require_command_wallet(row)
         async with self.session() as s:
-            row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
-            cmd = TradeCommand(**row_with_defaults)
+            cmd = TradeCommand(**row)
             s.add(cmd)
             await s.commit()
             await s.refresh(cmd)
@@ -21136,14 +21142,18 @@ class SQLAlchemyRepository(Repository):
         idempotent dedup hinges on a concrete key, and a null key would make the
         ``IntegrityError`` re-check match any active null-key command and swallow
         an unrelated constraint failure.
+
+        After the idempotency guard, an absent, non-string or blank wallet is
+        refused before opening a session. Nonblank spelling is preserved.
         """
         idempotency_key = row.get("idempotency_key")
         if not idempotency_key:
             raise ValueError(
                 "insert_paired_compensation_command requires a non-empty idempotency_key"
             )
+        _require_command_wallet(row)
         async with self.session() as s:
-            cmd = TradeCommand(**{"wallet_public_id": "", **row})
+            cmd = TradeCommand(**row)
             s.add(cmd)
             try:
                 await s.commit()
@@ -21191,12 +21201,16 @@ class SQLAlchemyRepository(Repository):
         duplicate) and returns ``None``, else RE-RAISES. ``command_row`` MUST carry
         an ``idempotency_key``. Returns the flatten command ``public_id`` iff this
         call claimed-and-inserted, else ``None``.
+
+        After the idempotency guard, an absent, non-string or blank wallet is
+        refused before opening a session or claiming the leg.
         """
         idempotency_key = command_row.get("idempotency_key")
         if not idempotency_key:
             raise ValueError(
                 "claim_leg_and_insert_flatten_command requires a non-empty idempotency_key"
             )
+        _require_command_wallet(command_row)
         async with self.session() as s:
             leg = (
                 (
@@ -21233,7 +21247,7 @@ class SQLAlchemyRepository(Repository):
                     compensation_seq=new_compensation_seq,
                 )
             )
-            cmd = TradeCommand(**{"wallet_public_id": "", **command_row})
+            cmd = TradeCommand(**command_row)
             s.add(cmd)
             try:
                 await s.commit()

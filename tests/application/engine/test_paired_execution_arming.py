@@ -355,8 +355,12 @@ async def test_on_signal_grouped_ensures_group_and_registers_leg(
         its command, with the two-leg group staying assembling (not armed).
     """
     _coord._current_topic = "signals.kraken.BTC-USD.live"
-    await _coord._on_signal(_standalone_signal())
-    engine = _coord.engines["BTC-USD@kraken-live"]
+    await _coord._on_signal(
+        _standalone_signal().model_copy(
+            update={"wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"}
+        )
+    )
+    engine = _coord.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"]
 
     async def _stub_execute(*_args: Any, **_kwargs: Any) -> str:
         engine.pending_client_order_id = "oid-btc"
@@ -364,7 +368,11 @@ async def test_on_signal_grouped_ensures_group_and_registers_leg(
 
     engine.execute_desired_units = AsyncMock(side_effect=_stub_execute)
     _coord._current_topic = "signals.kraken.BTC-USD.live"
-    await _coord._on_signal(_grouped_signal(instrument="BTC-USD", index=0))
+    await _coord._on_signal(
+        _grouped_signal(instrument="BTC-USD", index=0).model_copy(
+            update={"wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"}
+        )
+    )
 
     _outbox_mock(_coord).notify.assert_not_called()
     legs = await _sql_repo(_coord).get_paired_execution_legs("grp-1", datetime.now(UTC))
@@ -372,7 +380,7 @@ async def test_on_signal_grouped_ensures_group_and_registers_leg(
     assert legs[0]["command_public_id"] == "cmd-btc"
     assert legs[0]["client_order_id"] == "oid-btc"
     assert legs[0]["leg_index"] == 0
-    assert legs[0]["shard_key"] == "kraken.BTC-USD.live"
+    assert legs[0]["shard_key"] == "kraken.BTC-USD.live.waaaaaaaaaaaa"
 
 
 async def _insert_scope_halt(
@@ -688,10 +696,20 @@ async def test_on_signal_drops_grouped_signal_when_pair_scope_halted(
         group is created on a pair whose prior group broke with exposure.
     """
     _coord._current_topic = "signals.kraken.BTC-USD.live"
-    await _coord._on_signal(_standalone_signal())
-    await _insert_scope_halt(_sql_repo(_coord))
+    await _coord._on_signal(
+        _standalone_signal().model_copy(
+            update={"wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"}
+        )
+    )
+    await _insert_scope_halt(
+        _sql_repo(_coord), wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"
+    )
     _coord._current_topic = "signals.kraken.BTC-USD.live"
-    await _coord._on_signal(_grouped_signal(instrument="BTC-USD", index=0))
+    await _coord._on_signal(
+        _grouped_signal(instrument="BTC-USD", index=0).model_copy(
+            update={"wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"}
+        )
+    )
     group = await _sql_repo(_coord).get_paired_execution_group("grp-1", datetime.now(UTC))
     assert group is None
 

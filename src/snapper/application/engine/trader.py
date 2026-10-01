@@ -6892,6 +6892,9 @@ class TraderCoordinator(RegisterableProcess):
                 self._ownership.instance_count,
             )
             return None
+        if not wallet_public_id.strip():
+            logger.warning("ZMQTrader: dropping signal with missing or blank wallet_public_id")
+            return None
         return SignalRoutingContext(
             exchange=exchange,
             mode=parsed.signal_type,

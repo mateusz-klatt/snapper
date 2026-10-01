@@ -206,9 +206,11 @@ outbox publish, the coordinator registers
 `client_order_id -> shard_key`, so the N>1 CID guard accepts the
 venue ACK/fill/cancel events only on the owning coordinator.
 
-Use `wallet_public_id=""` only for backward-compatible or explicitly
-single-wallet workflows where the wallet segment should be omitted.
-Signal-driven paper orders may still add a `strategy_tag`; REST
+For manual orders, provide a wallet or omit the field to use the existing
+single-accessible-wallet resolution for the requested mode. Explicit blank
+values are rejected. Fresh command writes require a nonblank resolved wallet;
+the shard helper's legacy empty-wallet support does not permit unscoped new
+commands. Signal-driven paper orders may still add a `strategy_tag`; REST
 manual orders intentionally do not.
 
 ## Non-systemd deployments (contract)

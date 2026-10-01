@@ -911,6 +911,13 @@ durable write each cycle until it sticks — probing for an existing
 row first, so a timeout after a committed write cannot insert a
 duplicate accept event.
 
+Fresh ordinary, compensation, and atomic leg-flatten commands require an
+explicit nonblank string `wallet_public_id` before the repository opens a
+session. The coordinator drops signals with missing or blank wallet strings
+before creating an engine or persisting a paired group, then continues
+receiving signals. These checks preserve nonblank identifier spelling; they
+do not validate UUID syntax or repair historical wallet data.
+
 `trade_commands` rows are a fold of the `venue_events` truth plane.
 The coordinator's per-exchange `ReconciliationLoop` folds each active
 command's venue events into a durable status advance through a

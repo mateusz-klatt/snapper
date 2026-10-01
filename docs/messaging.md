@@ -560,6 +560,7 @@ from snapper.messaging.schemas.data import SignalData
 
 signal = SignalData(
     public_id="019e1a2b-0000-7000-8000-000000000201",
+    wallet_public_id="019e1a2b-0000-7000-8000-000000000301",
     session_id="019e1a2b-0000-7000-8000-000000000010",
     sequence_id=1,
     timestamp=datetime.now(UTC),
@@ -594,7 +595,7 @@ signal = SignalData(
 | `paired_group_index` | int \| None | This leg's position in the group (`0 <= index < size`) |
 | `paired_group_policy` | string \| None | Coordination policy: `simultaneous` or `sequential_handoff` |
 | `paired_group_key` | string \| None | Canonical sorted `{exchange}:{instrument}:{mode}` leg-set key |
-| `wallet_public_id` | string | Owning wallet public id (empty string when unscoped) |
+| `wallet_public_id` | string | Owning wallet public id. The schema defaults to empty, but the trade coordinator drops signals whose wallet is empty or whitespace-only before engine/group persistence. |
 | `operator_public_id` | string \| None | Operator scope |
 | `user_public_id` | string \| None | User scope |
 | `ai_review_public_id` | string \| None | Citation of an approved AI delegate review (CONSULT outcome), threaded into the attribution-aware caps gate |
@@ -602,6 +603,11 @@ signal = SignalData(
 
 Paper signals (`exchange == "paper"`) require `strategy_name` to be set. The schema
 enforces this invariant at construction time so invalid paper signals cannot be created.
+
+Missing or blank string wallets are a normal coordinator refusal: the next
+valid signal can still be processed. Explicit JSON `null` is rejected by the
+signal schema before routing; this refusal does not provide recovery from all
+malformed frames. Nonblank wallet spelling is preserved.
 
 The paired-group descriptor is fail-closed and all-or-nothing: a model
 validator requires either every `paired_group_*` field unset (a standalone

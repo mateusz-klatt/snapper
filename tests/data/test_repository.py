@@ -5374,6 +5374,7 @@ async def test_insert_trade_command(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     cmd_id, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -5790,6 +5791,7 @@ async def test_get_undispatched_commands(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -5839,6 +5841,7 @@ async def test_trade_command_query_projections_carry_leverage_and_reduce_only(
     now = datetime.now(UTC)
     await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -5889,6 +5892,7 @@ async def test_update_trade_command_status_scd2(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -5950,6 +5954,7 @@ async def test_update_trade_command_status_carries_forward_leverage_and_reduce_o
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -6018,6 +6023,7 @@ async def test_bulk_dispatch_trade_commands_transitions_all_to_dispatched(
     for idx in range(2):
         _, pid = await r.insert_trade_command(
             {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
                 "command_type": "submit",
                 "shard_key": "kraken.BTC-USD.live",
                 "exchange": "kraken",
@@ -6100,6 +6106,7 @@ async def test_bulk_dispatch_trade_commands_skips_missing_public_id(tmp_path: Pa
     now = datetime.now(UTC)
     _, real_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -6171,6 +6178,7 @@ async def test_bulk_dispatch_trade_commands_clamps_stale_clock_spec(
     for idx in range(2):
         _, pid = await r.insert_trade_command(
             {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
                 "command_type": "submit",
                 "shard_key": "kraken.BTC-USD.live",
                 "exchange": "kraken",
@@ -6389,6 +6397,7 @@ async def test_update_trade_command_status_clears_last_error_on_success(
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -7158,6 +7167,7 @@ async def test_get_active_commands_for_exchange(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -7180,6 +7190,7 @@ async def test_get_active_commands_for_exchange(tmp_path: Path) -> None:
     )
     _, filled_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.ETH-USD.live",
             "exchange": "kraken",
@@ -10136,6 +10147,7 @@ async def test_insert_trade_command_passes_with_owned_shard(tmp_path: Path) -> N
     owner = ShardOwnership(instance_id=owner_id, instance_count=2)
     cmd_id, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": shard,
             "exchange": "kraken",
@@ -10172,6 +10184,7 @@ async def test_insert_trade_command_ownership_none_skips_ownership_guard(
     now = datetime.now(UTC)
     cmd_id, _ = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "any.shard.live",
             "exchange": "kraken",
@@ -10215,6 +10228,7 @@ async def test_get_undispatched_commands_stable_across_same_created_at(
     for i in range(6):
         await r.insert_trade_command(
             {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
                 "command_type": "submit",
                 "shard_key": f"kraken.TIE-{i}.live",
                 "exchange": "kraken",
@@ -10254,6 +10268,7 @@ async def test_get_undispatched_commands_offset_skips_rows(tmp_path: Path) -> No
     for i in range(5):
         await r.insert_trade_command(
             {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
                 "command_type": "submit",
                 "shard_key": f"kraken.INST-{i}.live",
                 "exchange": "kraken",
@@ -10673,6 +10688,7 @@ async def test_get_order_by_command_public_id_returns_none_when_not_acked(tmp_pa
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -11222,6 +11238,7 @@ async def test_bulk_dispatch_skips_concurrently_expired_command(tmp_path: Path) 
     now = datetime.now(UTC)
     _, pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "submit",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -11289,6 +11306,7 @@ async def test_advance_trade_command_lifecycle_carries_ack_fields(tmp_path: Path
     now = datetime.now(UTC)
     _, pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "create",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",
@@ -11695,6 +11713,7 @@ async def test_stop_command_round_trip_preserves_trigger_through_pipeline(
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
         {
+            "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "command_type": "create",
             "shard_key": "kraken.BTC-USD.live",
             "exchange": "kraken",

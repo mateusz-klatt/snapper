@@ -746,8 +746,9 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy-waaaaaaaaaaaa"] = mock_engine
         signal = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -813,8 +814,9 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy-waaaaaaaaaaaa"] = mock_engine
         signal = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -1007,6 +1009,7 @@ class TestTraderSignalHandling:
         mock_engine.execute_desired_units = AsyncMock()
         trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -1022,6 +1025,7 @@ class TestTraderSignalHandling:
         trader._current_topic = "signals.paper.ETH-USD.test_strategy"
         await trader._on_signal(signal)
         assert not mock_engine.execute_desired_units.called
+        assert "ETH-USD@paper-test_strategy-waaaaaaaaaaaa" in trader.engines
 
 
 class _SocketStub:

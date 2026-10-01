@@ -300,8 +300,9 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
         signal_msg = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -324,7 +325,9 @@ class TestTraderCoverage:
         assert forwarded["origin"] == "live"
         assert forwarded["replay_window_start"] is None
         assert forwarded["replay_window_end"] is None
-        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
+        assert trader.last_signal_time["BTC-USD@kraken-live-waaaaaaaaaaaa"] == pytest.approx(
+            1234567890.0
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -360,8 +363,9 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
         signal_msg = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -491,9 +495,10 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live"] = mock_engine
-        trader.last_signal_time["BTC-USD@kraken-live"] = 0.0
+        trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
+        trader.last_signal_time["BTC-USD@kraken-live-waaaaaaaaaaaa"] = 0.0
         signal_msg = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -510,7 +515,9 @@ class TestTraderCoverage:
         trader._current_topic = "signals.kraken.BTC-USD.live"
         with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
             await trader._on_signal(signal_msg)
-        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
+        assert trader.last_signal_time["BTC-USD@kraken-live-waaaaaaaaaaaa"] == pytest.approx(
+            1234567890.0
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -617,6 +624,7 @@ class TestTraderCoverage:
         trader = TraderCoordinator()
         trader._current_topic = "signals.kraken.BTC-USD.live"
         signal_msg = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
@@ -1429,6 +1437,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     coord_any = cast(Any, coord)
     coord_any._current_topic = "signals.invalid"
     signal_invalid_topic = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -1445,6 +1454,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     assert coord.engines == {}
     coord_any._current_topic = "signals.kraken.BTC-USD.live"
     signal_no_price = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -1459,6 +1469,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     await coord_any._on_signal(signal_no_price)
     assert coord.engines == {}
     signal_zero_price = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -1474,6 +1485,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     await coord_any._on_signal(signal_zero_price)
     assert coord.engines == {}
     signal_valid = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -1488,12 +1500,13 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         reason="test",
     )
     await coord_any._on_signal(signal_valid)
-    engine_key = "BTC-USD@kraken-live"
+    engine_key = "BTC-USD@kraken-live-waaaaaaaaaaaa"
     assert engine_key in coord.engines
     engine = cast(_EngineStub, coord.engines[engine_key])
     assert repository.calls[0]["symbol_public_id"] == "stub-spid"
     assert engine.execute_calls[0]["desired_units"] == pytest.approx(0.5)
     signal_sell = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -1542,6 +1555,7 @@ async def test_on_signal_threads_ai_review_attribution_to_engine(
     coord_any = cast(Any, coord)
     coord_any._current_topic = "signals.kraken.BTC-USD.live"
     signal_attributed = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id-attr",
@@ -1558,11 +1572,12 @@ async def test_on_signal_threads_ai_review_attribution_to_engine(
         ai_review_dispatch_version=7,
     )
     await coord_any._on_signal(signal_attributed)
-    engine = cast(_EngineStub, coord.engines["BTC-USD@kraken-live"])
+    engine = cast(_EngineStub, coord.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"])
     call_kwargs = engine.execute_calls[0]
     assert call_kwargs["ai_review_public_id"] == "rev-uuid-trader"
     assert call_kwargs["ai_review_dispatch_version"] == 7
     signal_unattributed = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id-unattr",
@@ -2812,6 +2827,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     coordinator.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
     coordinator._current_topic = "signals.paper.BTC-USD.demo"
     signal = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         session_id="",
         sequence_id=0,
         public_id="test-public-id",
@@ -2826,7 +2842,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         reason="test",
     )
     await coordinator._on_signal(signal)
-    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-demo"])
+    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-demo-waaaaaaaaaaaa"])
     assert engine.calls
     assert isinstance(engine.calls[0][1], float)
 
@@ -2854,8 +2870,9 @@ async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch
     coord._current_topic = "signals.kraken.BTC-USD.live"
     coord.execution_publisher = MagicMock()
     coord.msg_publisher = MagicMock()
-    coord.trade_service.halt_shard("kraken.BTC-USD.live", "test halt")
+    coord.trade_service.halt_shard("kraken.BTC-USD.live.waaaaaaaaaaaa", "test halt")
     signal = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         type="signal",
         public_id="test-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
@@ -2887,8 +2904,9 @@ async def test_on_signal_drops_when_executor_scope_unhealthy(
     monkeypatch.setattr(trader_module, "is_tradeable", lambda _i, _e: True)
     coord = TraderCoordinator()
     coord._current_topic = "signals.kraken.BTC-USD.live"
-    coord._unhealthy_executor_scopes.add("kraken:legacy")
+    coord._unhealthy_executor_scopes.add("kraken:aaaaaaaaaaaa")
     signal = SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         type="signal",
         public_id="test-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
@@ -2904,7 +2922,7 @@ async def test_on_signal_drops_when_executor_scope_unhealthy(
     )
     await coord._on_signal(signal)
     assert len(coord.engines) == 0
-    assert coord.trade_service.is_halted("kraken.BTC-USD.live") is True
+    assert coord.trade_service.is_halted("kraken.BTC-USD.live.waaaaaaaaaaaa") is True
 
 
 def test_gap_detector_initialized_on_coordinator() -> None:

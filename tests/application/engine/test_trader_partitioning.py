@@ -191,6 +191,7 @@ class TestOnSignalOwnershipFilter:
     def _signal(self, instrument: str = "BTC-USD") -> SignalData:
         """Build a valid signal for the test matrix."""
         return SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             type="signal",
             public_id="sig-1",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
@@ -219,7 +220,7 @@ class TestOnSignalOwnershipFilter:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """At N=2 a non-owned shard produces NO engine + debug log."""
-        shard_key = "kraken.BTC-USD.live"
+        shard_key = "kraken.BTC-USD.live.waaaaaaaaaaaa"
         hash_val = ShardOwnership._hash(shard_key)
         foreign_id = 0 if hash_val % 2 == 1 else 1
         coord = _make_coordinator_with_ownership(
@@ -234,7 +235,7 @@ class TestOnSignalOwnershipFilter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Owned shard under N=2 → engine gets ``self._ownership`` plumbed."""
-        shard_key = "kraken.BTC-USD.live"
+        shard_key = "kraken.BTC-USD.live.waaaaaaaaaaaa"
         hash_val = ShardOwnership._hash(shard_key)
         owner_id = hash_val % 2
         coord = _make_coordinator_with_ownership(
@@ -266,9 +267,10 @@ class TestOnSignalOwnershipFilter:
         """
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
         coord._current_topic = "signals.paper.BTC-USD.momentum"
-        expected_shard_key = "paper.BTC-USD.paper.momentum"
+        expected_shard_key = "paper.BTC-USD.paper.waaaaaaaaaaaa.momentum"
         coord.trade_service.halt_shard(expected_shard_key, reason="test")
         paper_signal = SignalData(
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             type="signal",
             public_id="sig-halt",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),

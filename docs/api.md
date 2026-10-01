@@ -1243,6 +1243,7 @@ GET /api/signals?instrument=BTC-USD&strategy=rsi_btc_1h&exchange=paper&hours=24&
         {
             "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
             "type": "signal",
+            "wallet_public_id": "019e1a2b-0000-7000-8000-000000000301",
             "timestamp": "2026-01-18T12:00:00Z",
             "instrument": "BTC-USD",
             "exchange": "paper",
@@ -3589,6 +3590,7 @@ still-forming bar when `false`, and the final bar for its window when
 {
     "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
     "type": "signal",
+    "wallet_public_id": "019e1a2b-0000-7000-8000-000000000301",
     "timestamp": "2026-01-18T12:00:00Z",
     "session_id": "019e0000-0000-7000-0000-000000000001",
     "sequence_id": 7,

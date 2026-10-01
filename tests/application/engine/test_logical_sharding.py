@@ -57,6 +57,7 @@ def _make_signal(
     Defaults to strength=0 so execute_desired_units is a no-op (no order placed).
     """
     return SignalData(
+        wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         type="signal",
         public_id="sig-1",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
@@ -156,16 +157,16 @@ class TestCoordinatorSharding:
 
         Given: signal topic signals.paper.BTC-USD.scalp,
         When: _on_signal processes it,
-        Then: engine has strategy_tag="scalp" and 4-segment shard_key.
+        Then: engine has strategy_tag="scalp" and wallet-scoped shard_key.
         """
         coord = _make_coord(monkeypatch)
         coord._current_topic = "signals.paper.BTC-USD.scalp"
         await coord._on_signal(_make_signal())
 
-        assert "BTC-USD@paper-scalp" in coord.engines
-        engine = coord.engines["BTC-USD@paper-scalp"]
+        assert "BTC-USD@paper-scalp-waaaaaaaaaaaa" in coord.engines
+        engine = coord.engines["BTC-USD@paper-scalp-waaaaaaaaaaaa"]
         assert engine._strategy_tag == "scalp"
-        assert engine._shard_key == "paper.BTC-USD.paper.scalp"
+        assert engine._shard_key == "paper.BTC-USD.paper.waaaaaaaaaaaa.scalp"
 
     @pytest.mark.asyncio
     async def test_live_signal_creates_engine_without_strategy_tag(
@@ -175,16 +176,16 @@ class TestCoordinatorSharding:
 
         Given: signal topic signals.kraken.BTC-USD.live,
         When: _on_signal processes it,
-        Then: engine has strategy_tag=None and 3-segment shard_key.
+        Then: engine has strategy_tag=None and wallet-scoped shard_key.
         """
         coord = _make_coord(monkeypatch)
         coord._current_topic = "signals.kraken.BTC-USD.live"
         await coord._on_signal(_make_signal(exchange="kraken"))
 
-        assert "BTC-USD@kraken-live" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live"]
+        assert "BTC-USD@kraken-live-waaaaaaaaaaaa" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"]
         assert engine._strategy_tag is None
-        assert engine._shard_key == "kraken.BTC-USD.live"
+        assert engine._shard_key == "kraken.BTC-USD.live.waaaaaaaaaaaa"
 
     @pytest.mark.asyncio
     async def test_order_shard_keys_populated_on_order(
@@ -200,7 +201,7 @@ class TestCoordinatorSharding:
         coord._current_topic = "signals.paper.BTC-USD.scalp"
         await coord._on_signal(_make_signal())
 
-        engine = coord.engines["BTC-USD@paper-scalp"]
+        engine = coord.engines["BTC-USD@paper-scalp-waaaaaaaaaaaa"]
 
         def _mock_execute(
             desired_units: float,
@@ -224,7 +225,7 @@ class TestCoordinatorSharding:
         coord._current_topic = "signals.paper.BTC-USD.scalp"
         await coord._on_signal(_make_signal(strength=1.0))
 
-        assert coord._order_shard_keys.get("order-456") == "paper.BTC-USD.paper.scalp"
+        assert coord._order_shard_keys.get("order-456") == "paper.BTC-USD.paper.waaaaaaaaaaaa.scalp"
 
 
 class TestRecoveryShardingClusterGuards:
