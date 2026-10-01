@@ -108,6 +108,7 @@ from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.mcp._manual_order_arguments import preserve_manual_order_numeric_inputs
 from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
 from snapper.mcp.error_envelope import to_call_tool_result
@@ -2389,6 +2390,8 @@ def register_mcp_tools(
             }
         )
         return sanitized
+
+    preserve_manual_order_numeric_inputs(mcp_server)
 
     @mcp_server.tool()
     @_anticipated
