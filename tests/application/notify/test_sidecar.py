@@ -1498,7 +1498,7 @@ class TestSidecarStart:
         await asyncio.wait_for(task, timeout=2.0)
 
         assert sidecar._retry_task is not None
-        await asyncio.gather(sidecar._retry_task, return_exceptions=True)
+        assert sidecar._retry_task.done()
         assert cancelled.is_set()
 
     @pytest.mark.asyncio

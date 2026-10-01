@@ -172,6 +172,9 @@ class NotifySidecar(RegisterableProcess):
         self._publisher = publisher
         self._stop_event = asyncio.Event()
         self._retry_task: asyncio.Task[None] | None = None
+        self._workers: list[asyncio.Task[None] | asyncio.Task[bool]] = []
+        self._running = False
+        self._cleanup_complete = False
         self._registry = registry or load_default_registry()
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
@@ -185,47 +188,116 @@ class NotifySidecar(RegisterableProcess):
         )
 
     async def start(self) -> None:
-        """Run the sidecar main loop until ``stop()`` is signalled.
+        """Own startup, supervised workers and awaited teardown.
 
-        Subscribes to every prefix the rule registry aggregates
-        (``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.`` +
-        ``bus.portfolio_drift_episode`` for the default set), drains the
-        outbox (crash recovery), starts the durable drift-recovery scanner,
-        spawns the background retry loop, and consumes the receive loop until
-        ``_stop_event`` is set. Each entry boundary mints one
-        ``now`` timestamp (single timestamp per entry boundary)
-        which is threaded through every helper and repository call.
+        Drain the outbox, start recovery, then supervise receive, retry and
+        stop together. Retry failure wins over simultaneous receive failure
+        or normal stop. Every exit awaits owned workers and scanner cleanup
+        without replacing the original failure or external cancellation.
         """
-        for prefix in self._registry.all_subscribe_prefixes():
-            self._subscriber.subscribe(prefix)
-        self._subscriber.subscribe("admin.scope_revoked")
-        self._subscriber.subscribe("admin.user_deactivated")
-        self._subscriber.subscribe("admin.membership_revoked")
-        await self._drain_outbox(datetime.now(UTC))
-        await self._portfolio_drift_recovery_scanner.start()
-        self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
+        if self._stop_event.is_set():
+            return
+        self._running = True
+        primary: BaseException | None = None
         try:
-            while not self._stop_event.is_set():
-                recv_task = asyncio.create_task(self._subscriber.recv_multipart())
-                stop_task = asyncio.create_task(self._stop_event.wait())
-                done, pending = await asyncio.wait(
-                    {recv_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-                if recv_task not in done:
-                    break
-                topic, payload = recv_task.result()
-                await self._dispatch(topic, payload, datetime.now(UTC))
+            for prefix in self._registry.all_subscribe_prefixes():
+                self._subscriber.subscribe(prefix)
+            self._subscriber.subscribe("admin.scope_revoked")
+            self._subscriber.subscribe("admin.user_deactivated")
+            self._subscriber.subscribe("admin.membership_revoked")
+            await self._drain_outbox(datetime.now(UTC))
+            await self._portfolio_drift_recovery_scanner.start()
+            await self._run_workers()
+        except BaseException as exc:
+            primary = exc
+        primary = await self._finish_run(primary)
+        if primary is not None:
+            raise primary
+
+    async def _run_workers(self) -> None:
+        """Observe retry before receive when multiple workers finish together."""
+        self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
+        self._workers.append(self._retry_task)
+        receive_task = asyncio.create_task(self._receive_loop())
+        self._workers.append(receive_task)
+        stop_task = asyncio.create_task(self._stop_event.wait())
+        self._workers.append(stop_task)
+        await asyncio.wait(self._workers, return_when=asyncio.FIRST_COMPLETED)
+        for task, name in ((self._retry_task, "retry"), (receive_task, "receive")):
+            if task.done():
+                task.result()
+                if not self._stop_event.is_set():
+                    raise RuntimeError(f"Notify sidecar {name} worker exited before stop")
+
+    async def _receive_loop(self) -> None:
+        """Receive and dispatch frames with one timestamp per received message."""
+        while not self._stop_event.is_set():
+            topic, payload = await self._subscriber.recv_multipart()
+            if self._stop_event.is_set():
+                return
+            await self._dispatch(topic, payload, datetime.now(UTC))
+
+    async def _finish_run(self, primary: BaseException | None) -> BaseException | None:
+        """Finish cleanup even when the owner is cancelled while awaiting it."""
+        cleanup_task = asyncio.create_task(self._cleanup_workers(primary))
+        try:
+            return await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            failure = await cleanup_task
+            primary = primary if primary is not None else exc
+            if failure is not None:
+                primary = self._retain_failure(primary, failure, "cleanup")
+            return primary
         finally:
+            self._running = False
+            self._cleanup_complete = True
+
+    async def _cleanup_workers(self, primary: BaseException | None) -> BaseException | None:
+        """Cancel and retrieve all workers, then always attempt scanner cleanup."""
+        self._stop_event.set()
+        for task in self._workers:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*self._workers, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                primary = self._retain_failure(primary, result, "worker")
+        try:
             await self._portfolio_drift_recovery_scanner.stop()
-            if self._retry_task is not None and not self._retry_task.done():
-                self._retry_task.cancel()
+        except BaseException as exc:
+            primary = self._retain_failure(primary, exc, "scanner")
+        return primary
+
+    @staticmethod
+    def _retain_failure(
+        primary: BaseException | None, failure: BaseException, stage: str
+    ) -> BaseException:
+        """Keep the first failure and report secondary failure types safely."""
+        if primary is None:
+            return failure
+        if failure is not primary:
+            logger.error(
+                "sidecar: secondary cleanup failure stage={stage} type={error_type}",
+                stage=stage,
+                error_type=type(failure).__name__,
+            )
+        return primary
 
     async def stop(self) -> None:
-        """Signal the receive, retry, and drift-recovery loops to stop."""
+        """Signal the owner to stop; completed owner teardown is idempotent.
+
+        While start is active it owns and awaits all cleanup. Before start,
+        stop the scanner once; a later start observes the stop event and
+        creates no workers. Repeated CLI-finally calls cannot repeat a
+        scanner failure already observed during teardown.
+        """
         self._stop_event.set()
-        await self._portfolio_drift_recovery_scanner.stop()
+        if self._running or self._cleanup_complete:
+            return
+        try:
+            await self._portfolio_drift_recovery_scanner.stop()
+        finally:
+            self._cleanup_complete = True
 
     async def _dispatch(self, topic: str, payload: bytes, now: datetime) -> None:
         """Route one received bus frame through the rule registry.

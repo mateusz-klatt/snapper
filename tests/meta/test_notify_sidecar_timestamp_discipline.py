@@ -4,7 +4,8 @@ Invariant: one ``now`` per logical operation, minted at the entry
 boundary and threaded through every helper / repository call. The
 sidecar's three entry boundaries are:
 
-- ``NotifySidecar.start`` -> pre-drain + per-received-message now.
+- ``NotifySidecar.start`` -> pre-drain now.
+- ``NotifySidecar._receive_loop`` -> per-received-message now.
 - ``NotifySidecar._process_retry_queue_loop`` -> per-tick now.
 
 Every other helper takes ``now: datetime`` as an argument and must
@@ -28,6 +29,7 @@ SIDECAR_FILE = (
 ALLOWED_ENTRY_BOUNDARIES: frozenset[str] = frozenset(
     {
         "start",
+        "_receive_loop",
         "_process_retry_queue_loop",
     }
 )
@@ -62,7 +64,7 @@ def _enclosing_function_name(tree: ast.AST, target: ast.AST) -> str | None:
 
 
 def test_datetime_now_only_at_entry_boundaries() -> None:
-    """Only ``start`` and ``_process_retry_queue_loop`` may call ``datetime.now``.
+    """Only startup, receive and retry entry boundaries may call ``datetime.now``.
 
     Given: the sidecar source file,
     When: every ``datetime.now(...)`` call's enclosing function name

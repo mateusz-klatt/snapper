@@ -639,7 +639,9 @@ behind the `delegate` profile and is not part of the default stack.
   records `alert_events`, republishes `alerts.{user}.{type}` for the
   WebSocket bridge, and fans deliveries out to APNs using the
   `apns_*` settings. Without this container the ENTIRE alert chain is
-  dark — no alert rows, no UI alerts, no push.
+  dark — no alert rows, no UI alerts, no push. The process supervises its
+  receive and retry workers, awaits their cleanup on shutdown, and propagates
+  unexpected worker failure to the configured container restart policy.
 - `snapper-delegate` — optional runner-only Python PID1 under the
   `delegate` profile. This no-egress increment is deliberately inert:
   `network_mode: none`, no coordinator, DB, broker, Docker socket,

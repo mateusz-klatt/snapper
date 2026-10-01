@@ -1355,10 +1355,17 @@ owner page when its source bus frame was lost. Bus and scan inserts take the
 same transaction-serialized `(user_public_id, drift.<episode_public_id>)`
 claim, so only the winner reaches web/APNs fanout. The scanner never writes
 episode, reconciliation, position, order, rebase, or trading state. Its
-`apns_*` settings are read from the database;
-its only supervision is the compose `restart: unless-stopped` policy —
-the outbox drain on the next start recovers any queued deliveries left
-behind.
+`apns_*` settings are read from the database.
+
+`NotifySidecar.start` supervises separate receive and retry workers. A retry
+failure, or an unexpected worker exit before shutdown, ends the owning run
+even while receive or dispatch is blocked. Shutdown cancels and awaits the
+owned workers and stops the recovery scanner. An existing failure or
+cancellation remains primary if cleanup also fails; repeated stop calls after
+teardown do not repeat scanner cleanup. Ordinary failures propagate through the
+CLI to the compose `restart: unless-stopped` policy. The outbox drain on the
+next start recovers queued deliveries left behind, using the existing delivery
+and retry rules.
 
 Before each APNs call, the repository allocates and commits the next attempt
 number while replacing the exact active queued delivery version. A competing
