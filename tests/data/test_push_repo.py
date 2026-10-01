@@ -2130,10 +2130,8 @@ class TestConcurrencyInvariants:
     ) -> None:
         """Pure schedule-bump (queued->queued) still emits a successor row.
 
-        The same-status short-circuit in ``_scd2_transition_delivery``
-        must not fire when any ``*_override`` is provided — otherwise
-        ``update_delivery_retry_schedule`` becomes a no-op and the
-        retry counter never advances.
+        Given two committed attempts, when the current attempt schedules
+        a retry, then the queued successor retains the allocated count.
         """
         public_id = await repo.insert_alert_delivery(
             AlertDeliveryInsertRow(
@@ -2148,6 +2146,13 @@ class TestConcurrencyInvariants:
             )
         )
 
+        for attempt in (1, 2):
+            assert (
+                await repo.begin_delivery_attempt(
+                    public_id, transition_at=_ts(), session_id="attempt", sequence_id=attempt
+                )
+                == attempt
+            )
         await repo.update_delivery_retry_schedule(
             public_id,
             attempt_count=2,
@@ -2168,7 +2173,7 @@ class TestConcurrencyInvariants:
                 .scalars()
                 .all()
             )
-        assert len(rows) == 2
+        assert len(rows) == 4
         active = [r for r in rows if r.known_to == KNOWN_TO_MAX][0]
         assert active.status == "queued"
         assert active.attempt_count == 2

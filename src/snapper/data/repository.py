@@ -608,6 +608,14 @@ type _PnlTimelineFallbackPoolKey = (
 
 
 @dataclass(frozen=True, slots=True)
+class _DeliveryAttemptTransition:
+    """Counter operation applied to the exact delivery version being closed."""
+
+    expected_count: int | None = None
+    increment: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _SpotReplayEffectiveRequest:
     """One counted spot replay range and the horizon its corrections are known at.
 
@@ -8237,6 +8245,22 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def begin_delivery_attempt(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """Commit an increment on the selected queued version and return its count.
+
+        Return None when the delivery is absent, terminal, or another writer
+        closes the selected version first. No APNs send is admitted on refusal.
+        """
+        ...
+
+    @abstractmethod
     async def update_delivery_retry_schedule(
         self,
         public_id: str,
@@ -8248,17 +8272,10 @@ class Repository(ABC):
         session_id: str,
         sequence_id: int,
     ) -> bool:
-        """SCD2 close + insert, status remains queued, bumps attempt_count.
+        """Reschedule a queued delivery only at the expected attempt_count.
 
-        Called BEFORE the APNs HTTP call (crash-safety) so a
-        mid-flight sidecar restart leaves a row with incremented
-        attempt_count that is still retriable — bounded ≤1 duplicate
-        send per crash.
-
-        Returns:
-            True on successful transition; False when the active row
-            is no longer ``queued`` (race guard — a scope-
-            revoke cancel raced the retry-loop bump).
+        The counter is preserved. Return False for absent or terminal rows,
+        a different active count, or a lost selected-version close race.
         """
         ...
 
@@ -33349,30 +33366,19 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         apns_id: str | None = None,
         error_reason: str | None = None,
-        attempt_count_override: int | None = None,
+        attempt: _DeliveryAttemptTransition = _DeliveryAttemptTransition(),
         next_attempt_at_override: datetime | None = None,
         last_attempt_at_override: datetime | None = None,
-    ) -> bool:
-        """Close the active ``alert_deliveries`` row and insert a new version.
+    ) -> int | None:
+        """Close the selected queued version and commit its successor.
 
-        Only the ``queued`` active row may transition — every caller
-        wants this guard (``mark_delivery_*``, ``cancel_*``,
-        ``update_delivery_retry_schedule``), so the predicate is
-        enforced unconditionally. Returns True when a transition
-        happened, False when either:
-          - no active row exists for ``public_id``;
-          - the active row is no longer ``status='queued'`` (e.g. a
-            previous ``mark_delivery_sent`` already ran — sequential
-            idempotency);
-          - another worker raced us to close this exact active row
-            (conditional UPDATE rowcount==0 — concurrent idempotency).
+        Return the committed attempt count, or None when the delivery is
+        absent, terminal, at a different expected count, or another writer
+        closes the selected version first. The conditional UPDATE identifies
+        that exact version; a losing writer never inserts a successor.
 
-        The close step is an atomic ``UPDATE ... WHERE id=:id AND
-        known_to=MAX AND status='queued'`` — two concurrent workers
-        both observing the queued row both attempt the UPDATE, but
-        only one matches the post-lock predicate. The loser returns
-        False without inserting a successor row, so the active-
-        ``public_id`` partial unique index is never stressed.
+        Queued successors remain eligible for later allocations. This guards
+        version transitions and counter updates, not exclusive APNs delivery.
         """
         async with self.session() as s:
             existing = (
@@ -33384,9 +33390,14 @@ class SQLAlchemyRepository(Repository):
                 )
             ).scalar_one_or_none()
             if existing is None:
-                return False
+                return None
             if existing.status != "queued":
-                return False
+                return None
+            if (
+                attempt.expected_count is not None
+                and existing.attempt_count != attempt.expected_count
+            ):
+                return None
             close_result = await s.execute(
                 update(AlertDelivery)
                 .where(
@@ -33399,7 +33410,7 @@ class SQLAlchemyRepository(Repository):
             )
             if int(cast(Any, close_result).rowcount or 0) == 0:
                 await s.rollback()
-                return False
+                return None
             new_version = AlertDelivery(
                 public_id=public_id,
                 session_id=session_id,
@@ -33412,11 +33423,7 @@ class SQLAlchemyRepository(Repository):
                 operator_public_id=existing.operator_public_id,
                 wallet_public_id=existing.wallet_public_id,
                 status=new_status,
-                attempt_count=(
-                    attempt_count_override
-                    if attempt_count_override is not None
-                    else existing.attempt_count
-                ),
+                attempt_count=existing.attempt_count + int(attempt.increment),
                 last_attempt_at=(
                     last_attempt_at_override
                     if last_attempt_at_override is not None
@@ -33429,7 +33436,7 @@ class SQLAlchemyRepository(Repository):
             )
             s.add(new_version)
             await s.commit()
-            return True
+            return new_version.attempt_count
 
     async def mark_delivery_sent(
         self,
@@ -33505,6 +33512,28 @@ class SQLAlchemyRepository(Repository):
             error_reason=reason,
         )
 
+    async def begin_delivery_attempt(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """Commit the next attempt count from the selected queued version.
+
+        Reading, incrementing and closing share one transaction. A competing
+        close refuses allocation; only a committed successor admits a send.
+        """
+        return await self._scd2_transition_delivery(
+            public_id,
+            "queued",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            attempt=_DeliveryAttemptTransition(increment=True),
+        )
+
     async def update_delivery_retry_schedule(
         self,
         public_id: str,
@@ -33516,28 +33545,22 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
     ) -> bool:
-        """Bump attempt_count + reschedule next retry via SCD2 close+insert.
+        """Reschedule only the selected queued version at attempt_count.
 
-        Called BEFORE the APNs HTTP call (crash-safety). Status
-        stays ``queued`` across versions.
-
-        Returns:
-            True when the active queued row was transitioned; False
-            when the row is no longer queued (e.g. cancelled mid-send
-            by an admin.scope_revoked handler racing the retry loop —
-            race guard). Callers use the False branch to
-            short-circuit the APNs send.
+        The argument is an expected count, never a replacement counter.
+        Refuse stale results or a lost version-close race without writing.
         """
-        return await self._scd2_transition_delivery(
+        committed_count = await self._scd2_transition_delivery(
             public_id,
             "queued",
             transition_at=transition_at,
             session_id=session_id,
             sequence_id=sequence_id,
             error_reason=error_reason,
-            attempt_count_override=attempt_count,
+            attempt=_DeliveryAttemptTransition(expected_count=attempt_count),
             next_attempt_at_override=next_attempt_at,
         )
+        return committed_count is not None
 
     async def list_users_with_operator_membership(
         self, operator_public_id: str, as_of: datetime

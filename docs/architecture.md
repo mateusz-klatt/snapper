@@ -1360,6 +1360,15 @@ its only supervision is the compose `restart: unless-stopped` policy —
 the outbox drain on the next start recovers any queued deliveries left
 behind.
 
+Before each APNs call, the repository allocates and commits the next attempt
+number while replacing the exact active queued delivery version. A competing
+writer that replaces the selected version before its conditional close prevents
+that allocation from admitting a send.
+Retry scheduling preserves the committed counter and requires the caller's
+attempt number to match the active row. A delayed result from an older attempt
+therefore cannot overwrite a newer attempt's retry schedule. These guards do
+not provide exclusive ownership of an in-flight send or exactly-once delivery.
+
 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
 SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per
 process, so splitting publishers across processes otherwise multiplies the

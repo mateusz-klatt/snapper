@@ -23,11 +23,11 @@ Flow per received ``alerts.`` message:
 
 Retry semantics (attempt-number-before-attempt rule): every
 attempt bumps ``attempt_count`` *before* the APNs call via
-``update_delivery_retry_schedule`` — so a crash between the DB write
-and the APNs call leaves ``attempt_count=N`` and the retry loop will
-pick it up again as the Nth attempt. Terminal outcomes use the
-``mark_delivery_*`` close-and-insert methods (SCD2 atomic transition
-under concurrent retry workers).
+``begin_delivery_attempt``. A crash after this commit leaves the counter
+charged; the next retry allocates a new attempt number. Retry scheduling
+preserves the counter and refuses results from an older attempt. Terminal
+outcomes use the ``mark_delivery_*`` close-and-insert methods. These database
+transitions do not provide exclusive or exactly-once APNs delivery.
 """
 
 import asyncio
@@ -541,34 +541,18 @@ class NotifySidecar(RegisterableProcess):
         return True
 
     async def _bump_attempt(self, delivery_public_id: str, now: datetime) -> int | None:
-        """Increment ``attempt_count`` via SCD2 close+insert.
+        """Return the attempt number committed by the repository, or refuse.
 
-        Reads the active row to learn the current attempt_count, then
-        delegates to ``update_delivery_retry_schedule`` which emits a
-        successor SCD2 row with the incremented counter. The
-        new attempt number is returned when the transition succeeded;
-        ``None`` when the row is no longer queued (a concurrent admin
-        handler cancelled it between our ``should_skip_send`` check
-        and this call — race guard). Callers treating ``None`` as
-        "abort this attempt" keep the sidecar from emitting a send
-        for a row that was just cancelled.
+        The repository increments the selected queued version in its guarded
+        transaction. Missing, terminal or concurrently closed versions return
+        None so the caller does not send an unallocated attempt.
         """
-        sid = self._tracker.session_id
-        seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        row = await self._load_delivery(delivery_public_id)
-        next_attempt = (row["attempt_count"] if row is not None else 0) + 1
-        transitioned = await self._repo.update_delivery_retry_schedule(
+        return await self._repo.begin_delivery_attempt(
             delivery_public_id,
-            attempt_count=next_attempt,
-            next_attempt_at=None,
-            error_reason=None,
             transition_at=now,
-            session_id=sid,
-            sequence_id=seq,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
         )
-        if not transitioned:
-            return None
-        return next_attempt
 
     async def _apply_result(
         self,
@@ -659,17 +643,6 @@ class NotifySidecar(RegisterableProcess):
             session_id=sid,
             sequence_id=seq,
         )
-
-    async def _load_delivery(self, delivery_public_id: str) -> AlertDeliveryRow | None:
-        """Load an active delivery row by public_id, None when closed / unknown.
-
-        Indexed lookup via
-        :meth:`~snapper.data.repository.SQLAlchemyRepository.get_delivery_by_public_id`
-        — replaces the legacy linear scan over
-        :meth:`list_queued_deliveries_all` that paid O(n_queued) per
-        retry attempt on the sidecar hot path.
-        """
-        return await self._repo.get_delivery_by_public_id(delivery_public_id)
 
     async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).

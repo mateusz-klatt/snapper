@@ -1293,29 +1293,6 @@ class TestDrainOutbox:
         apns.send.assert_not_awaited()
 
 
-class TestLoadDelivery:
-    """``_load_delivery`` returns None for closed/unknown public_ids."""
-
-    @pytest.mark.asyncio
-    async def test_unknown_public_id_returns_none(self, repo: SQLAlchemyRepository) -> None:
-        """Public_id that was never persisted yields None."""
-        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
-        await _seed_user(repo, user)
-        device_pid = await _seed_device(repo, user)
-        event = await _seed_alert_event(repo, user)
-        await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-        sidecar, _ = _make_sidecar(repo)
-
-        result = await sidecar._load_delivery("unknown-public-id")
-
-        assert result is None
-
-
 class TestAttemptOnQueuedRowNoCache:
     """``_attempt_on_queued_row`` falls back to per-row repo lookups when caches are absent."""
 
@@ -1345,7 +1322,7 @@ class TestAttemptOnQueuedRowNoCache:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo)
-        row = await sidecar._load_delivery(delivery_pid)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
         await sidecar._attempt_on_queued_row(row, _ts(5))
@@ -1681,6 +1658,12 @@ class TestRetryQueueLoop:
             device_public_id=device_pid,
             user_public_id=user,
         )
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(), session_id="prep", sequence_id=98
+            )
+            == 1
+        )
         await repo.update_delivery_retry_schedule(
             delivery_pid,
             attempt_count=1,
@@ -1702,3 +1685,36 @@ class TestRetryQueueLoop:
         still_queued = await repo.list_queued_deliveries_all()
         assert still_queued == []
         apns.send.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bump_uses_repository_committed_number_without_snapshot_read(
+    repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It returns three without a read.
+
+    Given two committed attempts,
+    When sidecar allocates,
+    Then it returns three without a read.
+    """
+    delivery_pid = await _seed_queued_delivery(
+        repo, event_public_id="event", device_public_id="device", user_public_id="user"
+    )
+    for number in (1, 2):
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(number), session_id="competitor", sequence_id=number
+            )
+            == number
+        )
+    sidecar, _ = _make_sidecar(repo)
+    read = AsyncMock(side_effect=AssertionError("Sidecar must not read an attempt snapshot"))
+    monkeypatch.setattr(repo, "get_delivery_by_public_id", read)
+
+    assert await sidecar._bump_attempt(delivery_pid, _ts(3)) == 3
+
+    read.assert_not_awaited()
+    rows = await repo.list_queued_deliveries_all()
+    assert len(rows) == 1
+    assert rows[0]["attempt_count"] == 3
+    assert rows[0]["last_attempt_at"] == _ts(3)
