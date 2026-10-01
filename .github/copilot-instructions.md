@@ -102,6 +102,8 @@ every agent, every session, and every host sees the same notes.
 - `make check-vendor-neutral`
 - `make check-pydantic-routes`
 - `make check-egress-compose`
+- `make check-delegate-boundary`
+- `make check-read-visibility-boundary`
 
 5) Unit tests
 
@@ -117,6 +119,7 @@ every agent, every session, and every host sees the same notes.
 - `make ui-i18n-check` - Frontend hardcoded-string i18n scan
 - `make ui-i18n-check-alerts` - Verify iOS alerts catalog parity
 - `make ui-i18n-check-market` - Verify iOS market catalog parity
+- `make bridge-check` - Verify MCP wire-contract drift, public-source prose, TypeScript build/type checks, tests, and stdout protocol discipline
 
 7) Exclusion scan (NO pragma/noqa/ignore comments allowed)
 

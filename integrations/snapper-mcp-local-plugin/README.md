@@ -18,3 +18,9 @@ That target renders the templates into `data/snapper-mcp-local-plugin/`
 `~/.claude/settings.json` so the `snapper-mcp-local` marketplace entry points
 at the rendered directory. A `.bak` copy of the previous settings is written
 next to it before any edit.
+
+The renderer also copies the plugin's `skills/` tree and substitutes checkout
+paths there. It qualifies monitor skill triggers with the plugin name so the
+host can associate `/snapper-mcp-local:wake` with the correct monitor. A manual
+monitor invocation must use the absolute path to this plugin's own `env.json`;
+the ambient `CLAUDE_PLUGIN_DATA` shell variable may belong to another plugin.

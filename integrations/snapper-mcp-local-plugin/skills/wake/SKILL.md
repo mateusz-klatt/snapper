@@ -12,18 +12,20 @@ order:
    background monitors, so check the processes:
 
    ```
-   pgrep -af "index\.js watch"
+   pgrep -af '[i]ndex\.js watch'
    ```
 
-   A match means a monitor is already running — report that and STOP: a second
-   monitor double-handles every consult.
+   Treat matches as candidates and verify the configuration path and backend
+   they belong to. If a monitor already watches this local backend, report that
+   and STOP: a second monitor can double-handle its consults. A process match
+   alone does not establish that the current session owns that monitor.
 2. Arm it with the **Monitor tool**, `persistent: true` and no timeout — NOT a
    backgrounded Bash command. The Monitor tool turns every stdout line into an
    event that wakes you; a backgrounded shell command only reports when the
    process exits, and `watch` is built never to exit, so it would deliver no
    wakeups at all:
 
-   - command: `node __SNAPPER_REPO_ROOT__/integrations/snapper-mcp/dist/index.js watch --config="$CLAUDE_PLUGIN_DATA/env.json"`
+   - command: `node __SNAPPER_REPO_ROOT__/integrations/snapper-mcp/dist/index.js watch --config="/absolute/path/to/snapper-mcp-local-plugin-data/env.json"`
    - description: `Snapper consult (ai_review.request) JSONL stream`
    - persistent: true
 
@@ -41,7 +43,8 @@ order:
    ls -d ~/.claude/plugins/data/snapper-mcp-local-*/
    ```
 
-   Pass that absolute path in `--config`. Never print the file — it holds a
+   Replace the command's example config path with that directory's absolute
+   `env.json` path before arming the monitor. Never print the file — it holds a
    credential. (When the HOST arms the monitor, `${CLAUDE_PLUGIN_DATA}` in the
    manifest is expanded per plugin and is correct; this warning is only for the
    self-arm fallback, which runs in a shell.)
@@ -50,7 +53,7 @@ order:
    silently stops every consult.
 3. Confirm it survived startup before reporting success. On connect `watch`
    logs `subscribing to topics: ...`, and that list must include
-   `ai_reviews.`. If credentials cannot be resolved it exits within a couple of
+   both `ai_reviews.` and `ai_research.`. If credentials cannot be resolved it exits within a couple of
    seconds naming every source it tried — read the monitor's output.
 
    This plugin targets **localhost:8000**, so also confirm the local backend is

@@ -6,10 +6,14 @@ Supports Kraken (WebSocket; spot + futures + equities), Walutomat
 
 ## Quick Steps
 
-From a fresh checkout:
+From a fresh checkout, initialize the public submodules first. The private
+`proprietary` strategies/seed profiles and `data/polygon` historical cache are
+optional and require separate repository access.
 
 ```bash
-# One-time bootstrap.
+# One-time bootstrap (HTTPS also works without GitHub SSH credentials).
+git -c url."https://github.com/".insteadOf=git@github.com: \
+  submodule update --init frontend integrations/snapper-mcp ios
 make system-deps
 make setup
 cp .env.example .env
@@ -87,8 +91,10 @@ integration, and notifications. It cannot create or cancel orders, manage
 positions, control processes or strategies, run backtests, manage AI
 integration, or perform administrative mutations. It also cannot create
 backtest comparisons or control runtime diagnostics. Wallet visibility follows
-the viewer's explicit operator memberships and active scope grants; it is not
-the system-wide scope provided by effective `impersonate:operator`. That
+the union of wallets covered by the viewer's operator scope grants and active
+personal wallet read grants, including when the viewer has no operator
+memberships. Personal read grants authorize visibility only; trading remains
+operator-scoped. This differs from the system-wide scope provided by effective `impersonate:operator`. That
 structural permission is non-downscopable for the `admin` named set so
 historically global admin scope cannot disappear when an admin token is
 narrowed. AI-delegate list and detail are the deliberate scope split: a
@@ -115,6 +121,8 @@ set and the token-downscoping rules.
 # Clone repository
 git clone https://github.com/mateusz-klatt/snapper.git
 cd snapper
+git -c url."https://github.com/".insteadOf=git@github.com: \
+  submodule update --init frontend integrations/snapper-mcp ios
 
 # Install system dependencies
 make system-deps
@@ -667,7 +675,7 @@ make docker-build-prod   # UID 888 (matches log file ownership)
 
 # Recreate containers (uses current image, no rebuild):
 make restart-frontend    # Recreate Caddy sidecar [does NOT touch backend]
-make restart-backend     # Recreate backend [drops ticks 30-90s]
+make restart-backend     # Recreate backend [API/trade-runtime interruption; feed and broker stay up]
 make restart-all         # Recreate full stack [drops ticks]
 
 # Common idiom — build + restart in one shot:
@@ -676,7 +684,7 @@ make docker-build-prod restart-backend
 
 `make restart-frontend` is the fast path for shipping UI changes
 without restarting publishers. Only the Caddy container is recreated;
-WS clients reconnect within ~3 s but the backend snapper container's
+WS clients must reconnect, but the backend snapper container's
 PID is unchanged and the Kraken / Walutomat tick streams continue
 uninterrupted.
 
@@ -704,7 +712,9 @@ Detailed documentation in [docs/](docs/) directory:
 - [Paired execution](docs/paired-execution.md) — Multi-leg guard operator runbook
 - [Egress](docs/snapper-egress.md) — WireGuard + SOCKS5 egress sidecar runbook
 
-Regenerate the bundled frontend documentation PDF with `make docs-pdf`.
+Regenerate `frontend/public/snapper.pdf` with `make docs-pdf` before building
+the frontend bundle. The PDF belongs to the frontend submodule; publish its
+commit there before updating the parent repository's frontend gitlink.
 
 ## License
 

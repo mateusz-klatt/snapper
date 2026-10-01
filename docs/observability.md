@@ -58,8 +58,8 @@ state into the `instrument_feed_health` table. A token retaining
 ### Market-data watchdog (whole-exchange silence)
 
 The per-subscription tracker cannot alert on a whole exchange going
-dark: feed heartbeats degrade only on DB flush errors (a venue whose
-matching engine is down behind a healthy WebSocket stays HEALTHY),
+dark: feed heartbeats report DB flush errors and venue-specific health
+contributions, but a healthy socket alone does not prove fresh candles;
 in-process freshness clocks reset on every publisher respawn, and a
 fully hung publisher emits nothing at all. The API lifespan therefore
 runs `MarketDataWatchdog`
@@ -339,8 +339,9 @@ constants in
 | `SYSTEM_METRICS_DISK_FREE_CRIT_BYTES`  | `10737418240` | Free-byte threshold below which disk status becomes `error`. |
 | `SYSTEM_METRICS_DISK_MOUNT_PATH`       | `/`           | Mount path sampled by `shutil.disk_usage`. Empty falls back to `/`. |
 
-Operators can drop the ring buffer cap to reduce resident memory
-(720 ≈ 1h ≈ 360 KB).
+Operators can drop the ring buffer cap to reduce retained history
+(720 snapshots is approximately one hour at the default interval). Actual
+resident memory depends on Python object overhead and snapshot contents.
 
 Publisher hot-path probes are separate, opt-in diagnostics:
 
@@ -355,8 +356,7 @@ the hot path pays only a branch and return.
 ## Sampling cadence + ring buffer
 
 - Sample interval: configurable, default **5 seconds**.
-- Per-snapshot byte budget: ~500 bytes (≈30 metrics, ~15 bytes each).
-- Default cap 17280 snapshots ≈ **8.6 MB resident**.
+- Default cap: 17,280 snapshots; no fixed resident-memory byte budget is enforced.
 - Eviction: oldest-first via `collections.deque(maxlen=N)` semantics.
 - All buffer access goes through an `asyncio.Lock` so concurrent route
   reads see a consistent view (single-writer / multi-reader).
@@ -377,7 +377,7 @@ Runs at every sample and degrades silently when paths are absent:
 
 ## Tracemalloc
 
-Off by default — enabling tracemalloc costs **5-10% CPU** while active
+Off by default — enabling tracemalloc adds workload-dependent CPU overhead
 and holds extra metadata in process memory. A caller with
 `manage:runtime_diagnostics` arms it briefly to capture the
 `python_traced_bytes` byte counter for the `native_bytes` diagnostic, then
@@ -620,8 +620,9 @@ The `archivable` counter computes the same window as the retention service's
 `timestamp >= day_start midnight UTC AND timestamp < day_end + 1d
 midnight UTC` predicate, with the policy's
 `(retain_days, backlog_lookback_days)` knobs. This means dashboard
-`archivable` and the next retention cycle's `archived_rows` MUST agree
-exactly — if they drift, one of the two has a boundary bug. The
+`archivable` and retention export use the same eligibility boundaries. Counts
+can differ between sampling and export if rows arrive or are purged, or the
+UTC day changes; equality requires the same data and evaluation day. The
 `tests/application/db_stats/test_cluster_alignment.py` integration
 test pins the equality contract.
 

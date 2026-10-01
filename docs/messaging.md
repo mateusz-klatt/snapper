@@ -127,7 +127,9 @@ view. Browser clients subscribe to `portfolio.accounts.`, invalidate active
 portfolio-account queries, and rebuild the fail-closed projection through
 `GET /api/portfolio/accounts`. A 60-second safety-net poll heals dropped or
 missed frames. Subscription requires `read:account_state`, and bridge fan-out
-applies the same per-frame accessible-wallet filter as the REST endpoint.
+uses the operator-grant accessible-wallet set for per-frame fan-out. REST
+account reads additionally accept personal `wallet_user_read_grants`; those
+grants do not currently widen this WebSocket filter.
 Malformed frames and topic/payload wallet mismatches fail closed.
 
 ### System
@@ -139,6 +141,7 @@ Malformed frames and topic/payload wallet mismatches fail closed.
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.heartbeats.marketdata.{exchange}` | Synthetic exchange-silence heartbeat from the API-side market-data watchdog; WARNING bursts on whole-exchange candle silence drive the `critical_system_error` alert pipeline (distinct from `feed` on purpose so its WARNING frames satisfy the 3-consecutive gate) |
+| `system.heartbeats.trade_integrity.{m1\|m2}` | Incremental trade-integrity monitor status; WARNING bursts report violations or excessive completed-coverage lag |
 | `system.heartbeats.ai_delegate.global` | Synthetic AI-delegate liveness and response heartbeat; WARNING bursts report no live delegate or a recent unanswered review through the existing `critical_system_error` pipeline |
 | `system.heartbeats.host.disk` | API host disk-pressure heartbeat from `SystemMetricsSnapshotter` |
 | `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
@@ -921,7 +924,7 @@ Programmatically:
 ```python
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 
-async def run_feed():
+async def run_feed() -> None:
     publisher = KrakenMarketDataPublisher(symbols=["BTC-USD", "ETH-USD"])
     await publisher.start()
 ```
@@ -1008,13 +1011,14 @@ Key properties:
     stays cache-served and `1h/4h/1d` are already DB-served regardless.
 - **Native 1m persistence is final-only by default** — every native 1m frame is
     published to ZMQ (the living candle), but the `NativeCandleFinalizer` holds
-    the in-progress minute and persists exactly ONE `complete=True` bar per
-    window — on the next minute's first frame (boundary), or via a 30s wall-clock
+    the in-progress minute and persists one final `complete=True` bar per
+    window (later complete corrections may create a new SCD2 version) — on the next minute's first frame (boundary), or via a 30s wall-clock
     flush for an illiquid/stalled symbol, or on shutdown drain. This eliminates
     the intra-minute SCD2 "temporary candle" churn. Operator caveat: a 1m bar's
     DB row therefore lags the live minute by up to one flush interval (~35s); the
-    cache/`/api/candles` live reads are ZMQ-fed and unaffected, and on a hard
-    crash the current held minute self-heals on restart (the venue re-sends it).
+    cache/`/api/candles` live reads are ZMQ-fed and unaffected. A hard crash
+    loses the held in-memory minute unless a later venue replay or backfill
+    restores it; the finalizer itself is not a durable queue.
     Set `persist_intermediate_candles=true` to also persist the in-progress
     `complete=false` frames (superseded by the final).
 - **Restart rebuild** — on startup the open window of each higher timeframe is
@@ -1149,13 +1153,15 @@ The write queues are bounded (20 000 rows for ticks and candles, 5 000 for
 trades) with drop-oldest overflow: when a queue is full, the enqueue helper
 evicts the oldest queued row to make room for the new one and emits a
 rate-limited `WARNING` with the drop count. This is a persistence backlog,
-not data loss on the wire — subscribers already received the evicted rows
-over ZMQ; only their DB persistence is skipped.
+separate from wire delivery: those rows were already published over ZMQ,
+although publication does not prove subscriber receipt. Queue eviction skips
+their DB persistence.
 
 If a writer task's database session is lost mid-flush, the task holds its
 unflushed rows, reopens the session with capped exponential backoff (1 s
 doubling up to 30 s), and resumes draining — queued and in-flight rows
-survive session loss.
+survive session loss while the process remains alive, subject to queue overflow;
+a process crash loses in-memory queue and batch contents.
 
 On shutdown (launcher cancellation or direct stop), remaining rows are
 flushed by the writer drain loops, which keep draining the queue and the
@@ -1526,7 +1532,10 @@ message payloads.  `ValidatedPublisher.send_multipart()` calls
 ## High Water Mark (HWM) Policy
 
 ZMQ sockets use explicit high water marks via `apply_hwm()` from
-`validated_socket.py` to bound queue depth and prevent silent message loss:
+`validated_socket.py` to configure queue depth. Finite PUB/SUB queues may
+still drop messages under pressure, and a successful send is not a subscriber
+acknowledgement. Order-flow sockets use an unlimited local HWM, but the
+broker remains finite:
 
 | Tier | Constant | Value | Used by |
 | ---- | -------- | ----- | ------- |
@@ -1542,7 +1551,8 @@ ZMQ sockets use explicit high water marks via `apply_hwm()` from
 Sockets automatically:
 
 - Reconnect on connection loss
-- Buffer messages when broker unavailable
+- Queue messages subject to socket connection/subscription state and HWM;
+    disconnected or slow subscribers can miss publications
 - LINGER=0 on close (discard pending)
 - HWM applied before connect/bind (see above)
 
@@ -1604,13 +1614,15 @@ Two destination tables provide always-available observability for non-domain tra
     - **REST middleware** — `_record_telemetry()` records GET reads (health, status,
       entity endpoints)
 
-The non-blocking audit invariant applies to both tables: audit writes never reject,
-delay, or invalidate the primary request/message flow.
+Audit persistence is best-effort: write exceptions are logged and swallowed.
+REST middleware awaits its write after the application response has been sent;
+WS and bridge call sites may also await writes, so this is not a guarantee of
+zero latency or background-only persistence.
 
 ## Best Practices
 
 1. **One broker per system** — All components connect to the same broker
-2. **Topic hierarchy** — Use hierarchy for filtering (`market.kraken.*`)
+2. **Topic hierarchy** — Use hierarchy for prefix filtering (`market.kraken.`); wildcard `*` subscriptions are rejected
 3. **Data types** — Always use typed Data classes from `messaging.schemas.data`
 4. **Provenance** — Use `MessagePublisher` (not `ValidatedPublisher` directly) so every
    message carries `session_id` and `sequence_id` for gap detection

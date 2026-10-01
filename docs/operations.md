@@ -71,8 +71,10 @@ the env file before flipping `SNAPPER_ENV` to a production-like value.
 
 Rotating `MASTER_PASSWORD` (change the `.env` value, rebuild/restart):
 
-- Derived keys (JWT, CSRF, command signing) rotate automatically and
-  atomically across the whole compose — no distribution step.
+- Derived keys (JWT, CSRF, command signing) change in each process when it
+  restarts with the new value. Recreate all participating containers with the
+  same environment; Compose does not switch the fleet atomically, and old-key
+  and new-key processes cannot verify each other's signatures.
 - Every session/JWT is invalidated: all users re-log-in, and MCP
   delegate long-lived tokens MUST be re-minted (they are signed with
   the derived auth key).
@@ -270,7 +272,9 @@ at-most-once ZMQ bus:
 - `docker compose restart snapper-notify` — alert evaluation and APNs
   delivery pause for the restart window; the outbox drain on the next
   start recovers queued deliveries, and rule dedup windows persist in
-  the database, so a brief restart neither drops nor duplicates pages.
+  the database. ZMQ events published while the sidecar is down are not replayed
+  in general, so an event that never reached rule evaluation can be missed.
+  Portfolio-drift pages additionally have a durable database recovery scan.
 
 ### Flat-restart discipline (MANDATORY until venue-truth reconciliation lands)
 

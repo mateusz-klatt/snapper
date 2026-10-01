@@ -167,7 +167,7 @@ class RSIReversion(BaseStrategy):
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
-| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
+| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass permits unscoped configuration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
 
 ### Scoped-strategy reference identities
@@ -412,7 +412,8 @@ cannot desync the regression. A signal fires only when the triggering candle is
 **both legs' current bar** (`open_at == latest common day == latest seen`), so the
 z-score and both legs' order prices are always the same executable day; the
 completing (second-arriving) leg of each period carries the signal. At most one
-signal is emitted per day, and no signal fires on a day at/under the warm-up
+new decision group is emitted per `open_at` interval (hourly or daily according
+to the input timeframe), and no new decision fires at/under the warm-up
 high-water mark (prefilled history is context, not tradeable). This matches the
 date-aligned daily backtest.
 
@@ -653,15 +654,17 @@ Subclassing both `BaseStrategy` and `MultiLegSpreadMixin` gives you:
 | `self.legs: tuple[str, ...]` | Resolved leg instruments in declaration order. Populated by `self._init_legs(expected_count=N)` from `__init__`. |
 | `self._partner_legs(current)` | Tuple of leg names other than `current`, in declaration order. |
 | `self._partner_prices(current)` | `{leg: last_close}` for partners with at least one buffered candle. Partners with empty buffers are omitted (same warmup gate as 2-leg cointegration). |
-| `self._build_partner_signals(current, builder)` | Pure builder: calls `builder(leg, last_close)` for each buffered partner and returns the resulting `list[StrategySignal]`. The host strategy concatenates these after its primary signal and returns `[primary, *partners]` from `on_candle`; `BaseStrategy` emits every leg atomically (see "Signal pairing semantics"). No side-channel queue. |
+| `self._build_partner_signals(current, builder)` | Pure builder: calls `builder(leg, last_close)` for each buffered partner and returns the resulting `list[StrategySignal]`. The host strategy concatenates these after its primary signal and returns `[primary, *partners]` from `on_candle`; `BaseStrategy` validates the group before sending its legs sequentially (see "Signal pairing semantics"). No side-channel queue. |
 
 ### Worked example — 3-leg equal-weight basket
 
 The strategy builds its partner legs with `_build_partner_signals` and
 returns the whole group as `[primary, *partners]` from `on_candle`.
-`BaseStrategy` group-validates and emits every leg atomically on BOTH
-the live/paper path and the backtest path (`process_time_batch`), so the
-synchronized N-leg rebalance behaves identically across paths.
+`BaseStrategy` validates the complete group before emission or backtest
+recording. The live/paper path sends separate ZMQ frames with a shared group
+descriptor; `process_time_batch` simulates each leg independently. The example
+illustrates the callback shape, not execution or sizing parity between paths.
+Its relative-price deviation is not a volatility-normalized statistical z-score.
 
 ```python
 from snapper.messaging.schemas.data import CandleData
@@ -754,9 +757,9 @@ anything is published or recorded:
 If any check fails the whole group is rejected (the call raises) and
 **nothing is emitted** — a malformed multi-leg return can never leave one
 leg of a spread naked. On success, `_listen_loop` emits each leg in order
-and `process_time_batch` records each leg, so the live/paper path and the
-backtest path behave identically: the full N-leg basket is one
-synchronized group.
+and `process_time_batch` records each leg. Group validation is shared, but
+transport and fill semantics differ: see the live-execution fidelity boundary
+in [backtesting.md](backtesting.md).
 
 Every multi-leg strategy **must declare a coordination policy** via the
 `PAIRED_EXECUTION_POLICY` class attribute
@@ -769,9 +772,10 @@ shared `paired_group_id` (uuid7), `paired_group_size`, per-leg
 canonical `paired_group_key` — the descriptors the paired-execution
 guard correlates on.
 
-> **Scope — emission, not venue atomicity.** This wires up paired
-> *emission*: both legs are published together or not at all. It does
-> NOT provide venue-level execution atomicity. If one leg rejects,
+> **Scope — validation and correlation.** Preflight rejects malformed groups
+> before publishing any leg. Valid legs are separate awaited ZMQ sends; a
+> send failure or dropped frame can leave only part of a group delivered.
+> Neither publication nor venue execution is atomic. If one leg rejects,
 > partially fills, or fills late, exposure is still possible because the
 > two legs are independent sends to independent executors/coordinators
 > (and at N≥2 instances the legs can be owned by *different*
@@ -1047,10 +1051,11 @@ the stop is breached. Attach a trailing stop to an open
   persisted every 10 s via the plan-executor checkpoint loop. On
   restart, state is restored and `peak_price` is floored at
   `entry_price` (long: `max(peak, entry)`; short: `min(peak, entry)`).
-- **Downtime semantics:** if the service is down when the true market
-  price crosses the stop, the stop fires on the first tick received
-  after restart. There is no placed order on the exchange — the
-  evaluator is purely server-side.
+- **Downtime semantics:** after restart, the first received tick is evaluated
+    against recovered state. A breach fires only if that tick satisfies the
+    stop condition; a crossing and recovery entirely during downtime is not
+    replayed. Uncheckpointed peak changes can also be lost. There is no placed
+    trailing-stop order on the exchange — the evaluator is server-side.
 
 ### Interaction with brackets
 
@@ -1066,12 +1071,14 @@ is swept by the cycle-close handler.
   `POST /cancel` + re-attach after the new average is known.
 - No exchange-side native trailing stops — every decision is made by
   `PlanExecutorService` against live ticks.
-- Futures only (same capability gate as brackets:
-  `supports_reduce_only`). Not supported on Kraken spot.
+- Requires an instrument capability row with `supports_reduce_only`, like
+    brackets. Admission uses the persisted capability matrix rather than a
+    hard-coded futures-only venue list.
 - No breakeven-move feature (ratchet stop to entry after N % profit).
 - No time-based activation (arm after N minutes regardless of price).
-- Live rollout gated on the same follow-ups (wallet-safe
-  routing + orphan-cycle admin) that brackets depend on.
+- Requires a running plan executor and an accessible open position cycle.
+    Orphan-cycle inspection and cleanup endpoints are implemented; see
+    [architecture.md](architecture.md#execution-plans).
 
 ## Cross-asset market-data pattern
 

@@ -18,9 +18,11 @@ Authorization uses the token's effective permissions from Snapper's
 | Subscribe to backtest progress | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
 
 The current `viewer` set therefore has the full operator read surface but no
-backtest mutation. Wallet-bound REST reads and writes use the active wallet in
-the token. Viewer and operator wallet choices come from the same operator
-memberships; neither receives global wallet visibility.
+backtest mutation. Wallet-bound REST endpoints revalidate the token's active
+wallet on every request. Reads accept operator scope grants plus personal
+`wallet_user_read_grants`; mutations require operator scope grants. A personal
+read grant therefore permits inspection without authorizing a run or comparison
+write. Neither named set receives global wallet visibility.
 
 ## Execution modes
 
@@ -33,8 +35,8 @@ runner instantiates:
 - `zmq_replay` — `ZmqReplayEngine` spins up a private XPUB/XSUB broker
   on OS-assigned local ports, attaches the strategy as a SUB, and
   publishes candles via a `ReplayPublisher`. Exercises the full live
-  message-bus path, so any production wiring bug surfaces in the
-  backtest.
+  candle publication/subscription path on the private broker. It does not
+  exercise production order dispatch, venue execution, or deployment wiring.
 
 Both engines call the same `process_time_batch` helper for fill
 simulation, signal recording, and equity sampling, so artifact parity
@@ -47,7 +49,7 @@ is structural rather than aspirational.
 | Speed | fastest (no IPC) | slower (per-candle ZMQ hop) |
 | Fidelity | bypasses message bus | mirrors live wire path |
 | Concurrency | at most one active run (global `uq_bt_single_running` invariant — see below) | at most one active run (same DB-enforced invariant) |
-| Cancel SLA | bounded by `cancel_poll_ms` | bounded by `cancel_poll_ms` |
+| Cancellation checks | between batches, throttled by `cancel_poll_ms` | per received candle, throttled by `cancel_poll_ms` |
 
 ## At-most-one-running invariant
 
@@ -66,11 +68,11 @@ aiosqlite); see `snapper.data.backtest_conflict` for detection details.
 
 `CancelProbe` polls `backtest_runs.status` between time batches
 (Direct-DB) or per processed candle (ZMQ replay). Throttled by
-`config.cancel_poll_ms` (default 500 ms), each DB read bounded by
-`probe_timeout_s` (default 1.0 s). A stuck DB logs a warning and the
-next probe re-tries — cancel detection degrades gracefully under SQLite
-lock contention rather than hanging behind the driver's 30 s lock
-timeout.
+`config.cancel_poll_ms` (default 500 ms), each DB read uses `asyncio.wait_for` with
+`probe_timeout_s` (default 1.0 s). A timed-out probe logs a warning and
+the next safe point retries. Cancellation is cooperative: strategy work,
+database-driver cancellation cleanup, and terminal-status persistence can
+extend latency beyond those settings.
 
 End-to-end cancel SLA target: ≤ 5 s from the API call
 `POST /api/backtests/{run_id}/cancel` (which sets status to
@@ -108,6 +110,18 @@ FK-linkable in parity tests. The signal row records:
 - `price` from the resolved target close when fill attribution succeeds,
   or from `StrategySignal.price` on the missing-target-close fallback;
 - `timestamp` from the run's `snapshot_as_of` bus-time anchor.
+
+### Live-execution fidelity boundary
+
+Both backtest engines share the same simulator, but that simulator does not
+implement the live coordinator's absolute-position-target contract. A BUY
+spends a fraction of remaining cash; a SELL closes an existing position and
+cannot open a short from flat. A zero-strength BUY produces no fill. Repeated
+BUY targets can therefore buy repeatedly in a backtest even though the live
+engine would treat an unchanged target as a no-op. Multi-leg signals are
+simulated independently, without the paired-execution guard. Direct-DB/ZMQ
+artifact parity is not evidence of live sizing, shorting, or compensation
+parity.
 
 The only current fill model is `market`. `simulate_market_fill` executes
 at the relevant close price adjusted by `slippage_bps`; commission is

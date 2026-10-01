@@ -270,7 +270,7 @@ plugin's `userConfig` schema in
   `@mateusz-klatt/snapper-mcp` bridge accepts the value with or without
   a trailing slash and normalizes it before connecting.
 - **Access token** -- the `access_token` from the `delegate_created`
-  response (or paste from the Settings -> AI Delegates config-snippet
+  response (or paste from the AI Integration page's config-snippet
   generator). Delegates are PAT-style: the JWT lifetime is
   ~3 months (`LONG_LIVED_TOKEN_EXPIRE_DAYS = 90`); operators are
   expected to rotate by minting a fresh delegate via the same flow
@@ -281,14 +281,17 @@ plugin's `userConfig` schema in
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
 version — the manifest hardcodes the exact version string in
-`mcpServers.snapper.args` (currently `@0.12.0`), kept in lockstep
+`mcpServers.snapper.args` (currently `@0.15.0`), kept in lockstep
 with the plugin's own `version` field by the
 `integrations/snapper-mcp/test/plugin_manifest.test.ts` parity
 test so a bump to either side fails CI until both match. Future
 runtime publishes do not silently upgrade existing installs;
-`/plugin update snapper-mcp` opts in. Sensitive values land in the
-OS keychain (with `~/.claude/.credentials.json` fallback) -- never
-in `settings.json` or the plugin manifest.
+`/plugin update snapper-mcp` opts in. The manifest marks the access token
+as `sensitive: true`; the host controls storage of its user configuration.
+In plugin context, the bridge attempts to seed a separate `env.json` under
+`CLAUDE_PLUGIN_DATA`, containing the API URL and token for the watch monitor.
+It writes and chmods the temporary file to mode `0600` before atomically
+renaming it; a seeding failure is logged. Do not print this credential file.
 
 ### Claude Desktop
 
@@ -608,8 +611,10 @@ to `caps_enforcer_getter` at registration.
     absent version. The review service also
     verifies the caller has an active operational delegate lifecycle identity
     and scope grant for the review wallet and instrument. Any such delegate
-    may decide — the selected delegate is who was consulted, not an exclusive
-    decision authority — and a delegate racing an already-resolved
+    may decide after fanout opens (or once the review has entered
+    `fanout_dispatched`); while a review is `pending` and before
+    `fanout_after`, only the selected delegate may decide. Another delegate
+    receives `not_selected_before_fanout`. A delegate racing an already-resolved
     review receives `review_already_resolved_by_peer`. Not gated
     by the caps enforcer (the underlying review-decision path does
     its own SCD2 close-and-insert + bus fanout).
@@ -815,8 +820,10 @@ inventory/cache revocation path has observed the kill switch."
 
 ## Rate limits
 
-REST rate limits apply globally via `RestCallTracker` — observed via
-`GET /api/metrics/rest-rate`. MCP-specific rate limits are enforced
+Outgoing exchange REST traffic is measured by the process-local
+`RestCallTracker`, exposed through `GET /api/metrics/rest-rate`. Call paths
+using its `acquire()` method also wait for local per-exchange capacity; this
+is not a deployment-wide quota shared by every container. MCP-specific rate limits are enforced
 by a separate per-principal middleware on `/api/mcp` (default
 `60/minute`); the per-delegate `max_cancels_per_minute` cap then
 applies on top inside `cancel_order`. Bursts are served best-effort;
@@ -863,7 +870,7 @@ Delegate CRUD:
 | 403    | `Permission 'manage:ai_integration' required` | Token attempts delegate or researcher creation, delegate update, or delegate deactivation without the management permission |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |
-| 409    | `Operator … already owns N active AI delegates (limit 5)` | Owner hit the 5-active-delegates-per-operator cap; deactivate an existing delegate before creating another |
+| 409    | `Operator … already owns N active AI delegates (limit 5)` | Integration owner hit the five-active-delegates cap; deactivate an existing delegate before creating another |
 | 422    | `Operator '<id>' is not in …`          | Caller without effective `impersonate:operator` picked `operator_public_id` outside its claim set |
 | 422    | `Caller has no primary operator …`     | No explicit operator and no primary → binding is ambiguous  |
 

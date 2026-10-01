@@ -140,7 +140,7 @@ help:
 	$(info docker-polygon-grouped        Download Polygon grouped daily to CSV in Docker)
 	$(info docker-stop                   Stop Docker container)
 	$(info restart-frontend              Recreate Caddy sidecar [uses current image; prepend docker-build-{dev,prod} to rebuild])
-	$(info restart-backend               Recreate backend [WARNING: drops ticks 30-90s; uses current image])
+	$(info restart-backend               Recreate backend only [broker/feed remain running; uses current image])
 	$(info restart-all                   Recreate full stack [WARNING: drops ticks; uses current image])
 	$(info server-check                  Health check server [cross-platform])
 	$(info )

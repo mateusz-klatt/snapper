@@ -1,7 +1,8 @@
 # CLI
 
 Snapper provides a command-line interface built on the Typer framework.
-All commands are available through the `snapper` command.
+All commands are available through the `snapper` command in an activated
+virtual environment, or as `.venv/bin/python -m snapper` from this checkout.
 
 ## Usage
 
@@ -204,7 +205,10 @@ orchestrator restarts the feed container. It does not start a broker;
 publisher subprocesses connect to the backend's configured
 `ZMQ_BROKER_*` endpoints. Per-process RSS/CPU summary events are emitted
 best-effort when the backend broker is reachable, but metrics-publisher
-setup failure does not abort feed startup.
+setup failure does not abort feed startup. Set
+`PROCESS_AUTOSTART_PROFILE=feed` to enable desired-state reconciliation and
+the remote process-command listener; the command still starts publishers
+without that profile, but disables those control loops.
 
 ```bash
 snapper feed-engine
@@ -227,6 +231,19 @@ the coordinator summary frames), never container-fatal.
 
 ```bash
 snapper strategies-engine
+```
+
+### `delegate-engine`
+
+Runs registered generic delegate workloads as managed subprocesses. Requires
+`PROCESS_AUTOSTART_PROFILE=delegate` and a loadable extra package that registers
+the runner. This command provides process lifecycle management; it does not
+implement model requests, consult handling, or egress itself. The optional
+Compose `delegate` profile instead starts the separate runner-only PID1 and
+does not invoke this coordinator.
+
+```bash
+snapper delegate-engine
 ```
 
 ### `zmq-logger`
@@ -293,6 +310,34 @@ Use `--all` when checkpoint age cannot distinguish clean state from state
 accumulated under older projection semantics. A confirmed invocation still
 prints the full preview before writing, revalidates that exact set in the
 repository transaction, and refuses if it changed.
+
+### `annulment`
+
+Host-side execution-ledger correction commands use the configured `DB_URL`.
+Start with the read-only inspection:
+
+```bash
+snapper annulment inspect --wallet <wallet-public-id> --mode paper
+```
+
+| Subcommand | Required options | Behavior |
+| ---------- | ---------------- | -------- |
+| `inspect` | `--wallet`, `--mode` | Read unwitnessed executions, canonical row digests, existing annulments, and missing visibility observations. Optional `--exchange` and `--limit` bound discovery. |
+| `annul` | `--request-file`, `--confirm` | Append one guarded annulment from a JSON request. There is no bulk mode. |
+| `complete-visibility` | `--wallet`, `--mode` | Idempotently complete pending durability observations; optional `--limit` bounds one pass. This writes observations. |
+| `retire-derived` | `--wallet`, `--mode`, `--confirm` | Retire affected active trade-projection checkpoints and positions. Repeat `--checkpoint` and `--position` to assert the expected active public IDs; execution-plan checkpoints are not retired. |
+
+Modes are `live` and `paper`. An annulment request must contain exactly
+`target_execution_public_id`, `expected_execution_digest`, `wallet_public_id`,
+`exchange`, `mode`, `scope_sequence`, `annulled_by_user_public_id`,
+`correction_time`, `reason`, and `evidence`. The writer validates the target,
+scope, digest, reason, actor, and absence of a durable fill witness. The acting
+user is an operator assertion checked against an active database user, not an
+authenticated session identity.
+
+Exit `0` means the operation completed, `1` means refusal, and `3` means a
+correction is durable but its knowledge/visibility proof remains incomplete.
+Treat exit `3` as an incomplete operation requiring follow-up, not success.
 
 ### `db-init`
 
@@ -580,6 +625,23 @@ snapper reset-password USERNAME [OPTIONS]
 # never lands in shell history when --new-password is omitted
 snapper reset-password john
 ```
+
+### `token preflight`
+
+Read-only verification of an existing access credential against the deployment's
+signing configuration and token inventory:
+
+```bash
+snapper token preflight --token-file data/dev-pat.json
+```
+
+The required file can contain a raw JWT or the MCP bridge JSON envelope with
+`SNAPPER_ACCESS_TOKEN`. Run against the issuing deployment's `DB_URL` and
+`MASTER_PASSWORD`. The verifier checks the signature, lifecycle, active owner,
+access-token purpose, and signed `jti` agreement using the production token
+verification path. It prints correlation IDs and lifecycle diagnostics, but
+neither the JWT nor its hash. Exit `0` means accepted; `1` means rejected or
+unreadable input. This does not prove permissions for a particular endpoint.
 
 ## Symbol Synchronization
 

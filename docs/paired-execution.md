@@ -1,12 +1,15 @@
 # Operations runbook — paired-execution guard
 
-The paired-execution guard provides atomicity-by-bounded-compensation for
-multi-leg strategies (e.g. `CointegrationPairs`): either every leg of a
-group fills, or the guard cancels the live remainder, flattens the filled
-exposure with reduce-only orders, and halts the pair scope until the books
-are square. The whole guard is gated by `PAIRED_EXECUTION_GUARD_ENABLED`
-(default `false`, fail-closed: live multi-leg signals are refused while the
-flag is off). This runbook covers the operator's share of the lifecycle:
+The paired-execution guard coordinates multi-leg strategies such as
+`CointegrationPairs`. When a group fails to fill completely, it cancels the
+live remainder, attempts reduce-only compensation of filled exposure, and
+halts exposed pair scopes until the books are square or an operator resolves
+a manual-intervention incident. Compensation depends on venue availability
+and may require retries; it is not an atomic venue transaction. The scanner
+handles `simultaneous` groups; `sequential_handoff` is outside its compensation
+policy. `PAIRED_EXECUTION_GUARD_ENABLED` defaults to `false`: the strategy layer
+refuses new live multi-leg signals while it is off. The scanner still runs as
+a recovery backstop for durable groups, including after the flag is disabled. This runbook covers the operator's share of the lifecycle:
 reading incidents, resolving `manual_intervention` groups at the venue, and
 attesting the resolution so the halt clears.
 
@@ -97,7 +100,9 @@ per-leg exposure: `status`, `filled_signed_qty`, `compensated_signed_qty`,
     incident — the guard deliberately leaves it free to re-assemble.
 - Requires `read:positions`. Effective `impersonate:operator` exposes every
     wallet; every other caller, including `viewer`, `operator`, and
-    `ai_delegate`, sees only its accessible wallets.
+    `ai_delegate`, sees only its readable wallets (operator grants plus personal
+    `wallet_user_read_grants`). Terminalization separately requires the
+    operator-grant trade scope; a personal read grant cannot authorize it.
 - Any token retaining `read:positions` can inspect incidents. A long-lived
     AI-delegate token can therefore read incidents, but it receives `403` on
     terminalize because its effective grant lacks
@@ -135,7 +140,7 @@ accounting, and the scanner clears the scope's durable halt and every
 coordinator's in-memory mirror within one cycle — the pair can trade again.
 Responses:
 
-- `404` — no such group in your accessible wallets.
+- `404` — no such group in your tradable wallets.
 - `409` — not attestable right now. The detail's `status` is freshly read.
     Causes: the group is not `manual_intervention` (nor a `compensating`
     group re-opened onto a manual leg); a sibling leg still has automation

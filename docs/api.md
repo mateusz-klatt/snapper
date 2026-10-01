@@ -32,8 +32,11 @@ label; it is not an authorization hierarchy.
 | `operator` | 26 | The complete viewer read set plus trade execution, position management, strategy configuration and lifecycle control, non-strategy process management, AI-integration management, runtime diagnostics, backtest comparisons and run management, and paired-execution terminalization. |
 | `admin` | 34 | Every permission in the current `Permission` catalog, including user and system configuration, wallet credentials, scope grants, and operator impersonation. The mapping is defined as the complete catalog, so newly introduced permissions are included automatically. |
 
-The viewer's wallet and portfolio reads use its explicit operator memberships
-and active scope grants, exactly like an operator's reads. Runtime scope
+Wallet and portfolio reads use the union of active scope grants from the
+caller's operator memberships and its active personal `wallet_user_read_grants`.
+A caller with no operator membership can therefore read a personally granted
+wallet. Personal read grants never authorize orders, cancellation, or plan
+actions, which use the operator scope-grant plane. Runtime scope
 decisions consume effective `impersonate:operator`; the current `admin` set is
 the only set containing it. This structural permission is non-downscopable, so
 an explicitly narrowed admin token retains the historical system-wide operator
@@ -1512,12 +1515,14 @@ persisted JSON strings are never exposed.
 The P&L surfaces require `read:positions`; the current `viewer` set contains
 this permission. They never mutate trading, review, or portfolio-projection
 resources. A current-horizon request that omits `as_of` may atomically persist
-the wallet/mode/currency scope's missing immutable activation anchor before
-reconstruction. Supplying `as_of` disables anchor creation and performs a
-strict historical read; when no anchor was visible at that horizon, the series
-is empty. Both routes enforce the same wallet and operator-membership scope as
-the positions surface; a caller cannot use the query parameters to broaden its
-accessible wallets.
+the wallet/mode/currency scope's missing immutable activation anchor only when
+the caller also has access to that wallet through the trade-scope resolver.
+A personal read grant alone can read existing P&L but cannot create the anchor;
+without one, it receives an empty series. Supplying `as_of` disables anchor
+creation and performs a strict historical read; when no anchor was visible at
+that horizon, the series is empty. Both routes use the same readable-wallet
+scope as positions. An `operator_public_id` filter narrows the operator-grant
+half of that scope; the caller's personal read grants remain included.
 
 ### GET /api/portfolio/pnl/series
 
@@ -3077,17 +3082,19 @@ for invalid parameters and 404 when the underlying cannot be resolved.
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
 Effective `impersonate:operator` provides global operator and wallet scope on
-these read surfaces. Every other principal sees only its explicit operator
-memberships, and wallet reads are further limited by active scope grants.
-Credential endpoints enforce their own permissions independently. This means
-`viewer` resolves wallet scope exactly like `operator`: both are membership
-based, never system-wide.
+wallet-data read surfaces. Other principals see wallets covered by active
+operator scope grants or their own active personal wallet read grants. Both
+`viewer` and `operator` use this read scope, which can include a wallet even
+without any operator membership. Trading and authorization-topology endpoints
+continue to use the operator scope-grant plane; credential endpoints enforce
+their own permissions independently.
 
 ### GET /api/wallets
 
 List wallets accessible to the current principal. Effective
-`impersonate:operator` exposes all wallets; every other caller sees only wallets
-covered by at least one active scope grant from its operator set.
+`impersonate:operator` exposes all active wallets; other callers see the union
+of wallets covered by their operator set's active scope grants and their own
+active personal read grants.
 
 ### GET /api/operators
 
@@ -3100,8 +3107,10 @@ directory; authorization remains bounded by the caller's current signed scope.
 ### GET /api/scope-grants
 
 List active scope grants on a given wallet. Callers lacking effective
-`impersonate:operator` must have visibility into the target wallet; otherwise
-the route returns 403. Required query parameter: `wallet_public_id`.
+`impersonate:operator` must have an active operator scope grant covering the
+target wallet; a personal wallet read grant alone does not expose this
+authorization topology. Otherwise the route returns 403. Required query
+parameter: `wallet_public_id`.
 
 ### POST /api/scope-grants
 

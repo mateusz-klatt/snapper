@@ -12,7 +12,7 @@ Project standards and guidelines: @.github/copilot-instructions.md
 
 ## Memory & Plans
 
-All project memory (feedback, plans, project notes, references) lives in `proprietary/memory/`.
+Project memory (feedback, project notes, references) lives in `proprietary/memory/`.
 The index is `proprietary/memory/MEMORY.md` — read it at the start of every session.
 Write new memory files to `proprietary/memory/`, not to `~/.claude/projects/*/memory/`.
 

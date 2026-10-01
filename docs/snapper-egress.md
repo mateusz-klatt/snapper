@@ -327,15 +327,19 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
     visible with `stale=true`.
 
 5. **WireGuard handshake established?** (operator debugging — uses
-   `iproute2` shipped in the image)
+   `wireguard-tools` and `iproute2` shipped in the image)
 
     ```
+    docker compose exec snapper-egress wg show wg-uk-1 latest-handshakes
+    docker compose exec snapper-egress wg show wg-uk-1 transfer
     docker compose exec snapper-egress ip -d link show wg-uk-1
     docker compose exec snapper-egress ip rule show table 5000
     ```
 
-    The interface should be `UP` and the rule should pin `from
-    <tunnel_addr>` → table N.
+    A nonzero recent handshake and increasing transfer counters after a test
+    request establish peer connectivity. An `UP` interface, `/readyz` success,
+    or a tunnel `status: up` only proves local configuration succeeded. The
+    routing rule should pin `from <tunnel_addr>` → table N.
 
 6. **Kraken WS uses the tunnel?** The pool is a process-local
    singleton inside each feed-publisher process — `get_egress_pool()`
@@ -359,9 +363,10 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
     GROUP BY i.exchange ORDER BY n DESC;
     ```
 
-    Kraken should show consistent counts (~1500-2000 ticks/s in steady
-    state). Drops indicate either the tunnel is flapping or the SOCKS5
-    listener is mis-bound.
+    Compare counts and freshness with this deployment's baseline for the same
+    subscriptions and market activity. Tick persistence policy also affects
+    these counts; a drop alone does not identify an egress failure. Correlate
+    it with publisher logs, handshake age, and transfer counters.
 
 ## Threat-model + security notes
 

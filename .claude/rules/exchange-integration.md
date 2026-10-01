@@ -16,7 +16,7 @@ Each step has an existing reference implementation to copy from.
 
 - `src/snapper/core/types.py` — add to `ExchangeEnum`, `MarketSubscribeExchange`, `MarketDataExchange`, `AllExchange`
 - If new asset types needed, add to `AssetTypeEnum` + update `AssetType` Literal
-- Update migration CHECK constraints in `src/snapper/data/migrations/versions/0001_init.py`
+- Update the affected ORM CHECK constraints and add a new Alembic migration for existing databases. Editing `0001_init.py` alone does not upgrade databases that already applied it; inspect later migrations for constraints introduced after the initial schema.
 
 ## 2. Schemas (Pydantic)
 
@@ -37,7 +37,7 @@ Each step has an existing reference implementation to copy from.
 
 - `src/snapper/infrastructure/symbols/functions.py` — add `native_to_{exchange}_ws()`, `{exchange}_ws_to_native()`, `get_available_{exchange}_symbols()`
 - `src/snapper/infrastructure/symbols/mapper.py` — add forward/reverse shortcut tuples + init dicts + docstring
-- Add to `get_available_symbols()` union
+- Add to the union in `_rebuild_available_symbols_cache()` used by `get_available_symbols()` and `get_available_symbols_set()`; preserve cache invalidation after symbol alias changes.
 - Reference: existing kraken_futures/kraken_equities entries
 
 ## 5. Exchange client
@@ -62,7 +62,7 @@ Each step has an existing reference implementation to copy from.
 
 - `src/snapper/messaging/publishers/{exchange}.py`
 - Extend `MarketDataPublisherService[ExchangeClient]`
-- `@register_process("{exchange}_feed_publisher", enabled=False, ...)`
+- Register `"{exchange}_feed_publisher"` with an explicit startup default and publisher parameters. The existing Kraken Equities publisher has `enabled=True`; the symbol updater is a separate disabled one-shot task.
 - Reference: `publishers/kraken_equities.py`
 
 ## 8. Market data snapshot
@@ -75,8 +75,8 @@ Each step has an existing reference implementation to copy from.
 ## 9. CLI commands
 
 - `src/snapper/cli/app.py` — add import + two commands:
-  - `update-{exchange}-symbols` (with `--force` flag)
-  - `update-{exchange}-market-snapshot`
+    - `update-{exchange}-symbols` (with `--force` flag)
+    - `update-{exchange}-market-snapshot`
 
 ## 10. Makefile
 

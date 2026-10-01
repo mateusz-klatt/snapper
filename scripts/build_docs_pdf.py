@@ -116,7 +116,8 @@ class MermaidRenderer:
         Args:
             assets_dir: Directory path for storing generated diagram assets.
             project_root: Root path of the project for locating Mermaid CLI.
-            width_px: Width in pixels for rendered diagrams.
+            width_px: Legacy parameter name for the Mermaid CLI maximum diagram
+                dimension in pixels (height or width), passed as ``--size``.
             scale: Scale factor for diagram rendering quality.
         """
         self._assets_dir = assets_dir
@@ -185,7 +186,7 @@ class MermaidRenderer:
             str(output_path),
             "-b",
             "transparent",
-            "--width",
+            "--size",
             str(self._width_px),
             "--scale",
             str(self._scale),
@@ -315,6 +316,7 @@ class MarkdownToPdf:
             body {{
                 orphans: 3;
                 widows: 3;
+                overflow-wrap: anywhere;
                 font-family: '{self._config.font_family}',
                     'DejaVu Sans', 'Liberation Sans', sans-serif;
                 color: #111827;
@@ -394,6 +396,7 @@ class MarkdownToPdf:
                 padding: 10px;
                 margin: 0.8em 0;
                 white-space: pre-wrap;
+                word-break: break-all;
                 font-family: '{mono_family}', 'DejaVu Sans Mono', 'Liberation Mono', monospace;
                 font-size: {max(self._config.body_font_size_pt - 1, 6)}pt;
                 color: #111827;
@@ -417,6 +420,7 @@ class MarkdownToPdf:
                 margin: 0;
                 padding: 10px;
                 white-space: pre-wrap;
+                word-break: break-all;
                 overflow-x: auto;
                 color: inherit;
                 font-family: '{mono_family}', 'DejaVu Sans Mono', 'Liberation Mono', monospace;
@@ -443,9 +447,13 @@ class MarkdownToPdf:
                 font-size: {self._config.body_font_size_pt - 1}pt;
             }}
             table th, table td {{
+                min-width: 5em;
                 border: 1px solid #e5e7eb;
                 padding: 6px 8px;
                 text-align: left;
+            }}
+            table th {{
+                overflow-wrap: normal;
             }}
             a {{
                 color: #0d6efd;

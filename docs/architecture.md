@@ -113,10 +113,11 @@ Persistence layer with SQLAlchemy:
     - `Telemetry` — Toggleable high-volume table for pings, heartbeats, pongs, and
       GET read requests. Recording gated by `TELEMETRY_RECORDING_ENABLED` setting
 
-    Most ORM models carry provenance via `TemporalMixin` (the few
-    exceptions — `UserActiveToken`, `AiDelegate`, `AiReview`,
-    `AiReviewEvent`, `InstrumentFeedHealth` — opt out because they manage their own
-    lifecycle / revocation semantics):
+    Temporal ORM models carry provenance via `TemporalMixin`. Tables with
+    independent lifecycle semantics do not inherit it, including token/OAuth
+    inventory, AI delegate/review/research records, market views and sources,
+    trade-integrity work items/cursors, and feed-health snapshots. The temporal
+    provenance fields are:
 
     - `session_id` (str, required) — producer session identity
     - `sequence_id` (int, required) — per-table monotonic counter for gap detection
@@ -125,7 +126,7 @@ Persistence layer with SQLAlchemy:
     Producers must obtain values from a `SequenceTracker` before creating
     the event, ensuring every payload is complete and identifiable from birth.
 
-    All ORM models use a dual-key identity pattern:
+    Models inheriting `TemporalMixin` use this dual-key identity pattern:
 
     - `id` (INTEGER, internal PK) — row/version identifier for SCD2 close
         operations: SELECT → lock → close by id → INSERT new version.
@@ -162,6 +163,7 @@ Built-in strategies:
 - `RSIReversion` (`rsi.py`) — Mean reversion on RSI
 - `MACDCrossover` (`macd.py`) — MACD crossover
 - `CointegrationPairs` (`cointegration.py`) — Pairs trading
+- `HeartbeatConsult` (`heartbeat_consult.py`) — Scoped paper-only AI consultation exercise
 
 ### Indicators (`src/snapper/indicators/`)
 
@@ -716,12 +718,16 @@ Authentication system:
     permissions. Session profiles expose the resulting
     `effective_permissions` to clients.
 - Read-only operator visibility for `viewer`, including market data and views,
-    account state, membership-scoped wallets and portfolio, orders, positions,
+    account state, scoped wallets and portfolio, orders, positions,
     signals, AI-review decisions, P&L, backtests, strategies, process state,
     health, AI integration, and notifications. It has no trading, process,
     strategy, backtest, diagnostic, AI-integration, or administrative control
     permissions; ownership-constrained notification-device self-service
-    remains available.
+    remains available. REST wallet reads combine operator scope grants with
+    personal `wallet_user_read_grants`; trade mutations use operator grants
+    alone. WebSocket wallet filters and MCP tools currently still use the
+    operator-grant plane, so a personal REST read grant does not by itself
+    authorize those transports.
 - Complete-catalog mapping for `admin`. Its named set is constructed from
     all 34 `Permission` values, including `impersonate:operator` for global
     wallet and operator scope.
@@ -1102,13 +1108,14 @@ runs. Operator surface: `GET /api/paired-execution/incidents` and
 
 Most entity tables inherit `TemporalMixin` which provides `id`,
 `public_id`, `timestamp` (bus-time / known_from), and `known_to`
-columns. A small number of tables that manage their own
-lifecycle (notably `user_active_tokens`, `ai_delegates`,
-`ai_reviews`, `ai_review_events`, and `instrument_feed_health`) opt out.
+columns. Tables with their own lifecycle, such as token/OAuth inventory,
+AI delegate/review/research records, market views and sources, trade-integrity
+work items/cursors, and feed-health snapshots, opt out. Inspect the model
+base classes before applying temporal repository helpers to a table.
 
 Key concepts:
 
-- **SCD Type 2** — No in-place UPDATE or DELETE. Mutations use a close+insert
+- **SCD Type 2** — Business-state changes use a close+insert
     pattern: the current row is closed (known_to set to now) and a new row is
     inserted with the updated values and known_to = KNOWN_TO_MAX.
 - **KNOWN_TO_MAX** — Sentinel value (9999-12-31T23:59:59 UTC) marking the
@@ -1450,9 +1457,10 @@ caps-violation external fanout.
 ## Execution Plans
 
 The Execution Plans framework provides a unified control plane above the
-existing TradeCommand spine. All manual and algorithmic trading actions
-become `ExecutionPlan` instances evaluated by pluggable `PlanEvaluator`
-classes running inside `PlanExecutorService`.
+existing TradeCommand spine. Manual orders, brackets, and trailing stops use
+`ExecutionPlan` instances evaluated by pluggable `PlanEvaluator` classes
+running inside `PlanExecutorService`. Strategy signals also have a direct
+trade-runtime path that writes `TradeCommand` rows without creating a plan.
 
 **Tables:** `execution_plans` (plan state + lifecycle), `execution_plan_checkpoints`
 (high-churn evaluator state), `execution_plan_decisions` (tiered decision log),
@@ -1467,7 +1475,8 @@ REST-surface decision rows are logged without an outbox entry),
 `bracket` (shipped — attaches to a `position_cycles` row),
 `trailing_stop` (shipped — stateful ratcheting stop with
 checkpoint persistence, separate `/api/trailing-stops` route module),
-`passive_mm`, `peg`, `scheduler`.
+`passive_mm`, `peg`, and `scheduler` are reserved vocabulary without registered
+evaluators in `application/plans/service.py`; they are not executable plan types.
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id` and `native_instrument`

@@ -50,7 +50,7 @@ derived key at the next restart — see the rotation runbook in
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
 | `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (separate-engine boots). Multi-worker uvicorn (multiple FastAPI processes sharing a broker) is supported — see `docs/architecture.md` Deployment Modes for the AI-review fanout dedup contract under N>1. Set `SNAPPER_COORDINATOR_INSTANCE_ID` + `SNAPPER_COORDINATOR_INSTANCE_COUNT` per worker to enable the shared partitioning. |
-| `PROCESS_AUTOSTART_PROFILE` | `all` | Select which enabled process configs this node starts: `all` for single-container/dev, `api` for backend-without-market-publishers, `feed` for the dedicated feed container. |
+| `PROCESS_AUTOSTART_PROFILE` | `all` | Select which enabled process configs this node starts: `all` for single-container/dev; `api` excludes market publishers and delegate workloads; `feed` selects market publishers; `strategy` selects strategies; `delegate` selects generic delegate workloads. `STRATEGIES_EMBEDDED` separately controls strategy ownership. |
 | `TELEMETRY_RECORDING_ENABLED` | `false` | Record pings, heartbeats, and GET reads to `telemetry` table. High volume — enable for debugging only |
 
 The `Default` column reflects the Pydantic defaults on

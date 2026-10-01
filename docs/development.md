@@ -15,6 +15,17 @@ Guidelines for developers working on the Snapper project.
 
 ## Environment Setup
 
+Initialize the public submodules before installing frontend tools or running the
+full gate; this HTTPS override also works without GitHub SSH credentials:
+
+```bash
+git -c url."https://github.com/".insteadOf=git@github.com: \
+  submodule update --init frontend integrations/snapper-mcp ios
+```
+
+The private `proprietary` and `data/polygon` submodules require separate access
+and are optional for the public checkout.
+
 ```bash
 # Install system dependencies (Linux/macOS)
 make system-deps
@@ -71,7 +82,10 @@ from `master` and prepares the full verification harness:
     `frontend/dist` through a symlink when one exists, and installs
     `snapper-mcp` node modules
 
-The target requires a POSIX shell and is not available on Windows. Tear
+The target requires access to the private `proprietary` repository as well as a
+POSIX shell, and is not available in native Windows shells. For a public-only
+checkout, create a worktree with Git and initialize only the public submodules
+using the setup command above, then install its dependencies and build its UI. Tear
 a worktree down with:
 
 ```bash
@@ -99,12 +113,14 @@ Executes the complete quality gate:
 8.  No forbidden temporal mutations
 9.  Vendor-neutrality check (`check-vendor-neutral`)
 10. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
-11. Egress compose safety check (`check-egress-compose`)
+11. Egress compose safety and delegate/read-visibility boundary checks
+    (`check-egress-compose`, `check-delegate-boundary`, `check-read-visibility-boundary`)
 12. Frontend checks (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks)
 13. Generated frontend/iOS type and backend i18n drift check (`ui-check-types`)
-14. No pragma/noqa/ignore exclusions
-15. Backend tests with 100% coverage of the configured unit-testable scope
-16. Frontend tests with coverage
+14. MCP wire-contract drift, public prose, type, lint, test, and stdout checks (`bridge-check`)
+15. No pragma/noqa/ignore exclusions
+16. Backend tests with 100% line and branch coverage of the configured source roots
+17. Frontend tests with 100% coverage
 
 ### Individual Steps
 
@@ -341,8 +357,9 @@ make cov
 
 Coverage is configured under `[tool.coverage.run]` /
 `[tool.coverage.report]` in `pyproject.toml`. The `fail_under = 100`
-threshold enforces the TDD requirement over the configured unit-testable
-scope, and a contract test pins the complete omit allowlist.
+threshold enforces line and branch coverage for `src/snapper`,
+`proprietary/src` when present, `integrations/snapper-delegate/src/snapper_delegate`,
+and `scripts`. There is no file omit list.
 
 ## Frontend
 
@@ -631,9 +648,10 @@ For debugging a failing `make check-all` locally, the equivalent steps are:
 1.  `make check` — Backend quality checks
 2.  `make ui-check` — Frontend lint, format, dead-code, type, and i18n catalog checks (`ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market`)
 3.  `make ui-check-types` — Generated frontend/iOS type and backend i18n drift check
-4.  `make check-exclusions` — No pragma/noqa/ignore bypasses
-5.  `make cov` — Backend tests with coverage
-6.  `make ui-cov` — Frontend tests with coverage
+4.  `make bridge-check` — MCP wire-contract drift, public prose, type, lint, test, and stdout checks
+5.  `make check-exclusions` — No pragma/noqa/ignore bypasses
+6.  `make cov` — Backend tests with coverage
+7.  `make ui-cov` — Frontend tests with coverage
 
 ## Workflow
 
