@@ -137,8 +137,9 @@ async def test_invalid_wallet_refuses_before_session(
     poison = MagicMock(side_effect=AssertionError("invalid wallet reached session acquisition"))
     monkeypatch.setattr(repo, "session", poison)
     try:
+        row = _command(wallet)
         with pytest.raises(ValueError, match="wallet_public_id"):
-            await _insert(repo, entry, _command(wallet))
+            await _insert(repo, entry, row)
         poison.assert_not_called()
     finally:
         await repo.engine.dispose()
@@ -186,8 +187,9 @@ async def test_invalid_flatten_wallet_preserves_complete_leg_history(
     Then: The original leg remains the only open version and no command exists.
     """
     await _seed_leg(repository)
+    row = _command(wallet)
     with pytest.raises(ValueError, match="wallet_public_id"):
-        await _insert(repository, "flatten", _command(wallet))
+        await _insert(repository, "flatten", row)
     async with repository.session() as session:
         legs: list[PairedExecutionLeg] = list(
             (await session.scalars(select(PairedExecutionLeg))).all()

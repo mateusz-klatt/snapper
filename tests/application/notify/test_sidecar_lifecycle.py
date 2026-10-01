@@ -676,8 +676,8 @@ async def test_direct_start_does_not_adopt_outer_handled_exception() -> None:
         try:
             raise ValueError("unrelated handled caller error")
         except ValueError:
-            with pytest.raises(RuntimeError) as caught:
-                async with asyncio.timeout(1):
+            async with asyncio.timeout(1):
+                with pytest.raises(RuntimeError) as caught:
                     await harness.sidecar.start()
             assert caught.value is failure
         assert harness.receive.finalized.is_set()
