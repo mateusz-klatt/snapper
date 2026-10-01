@@ -3281,9 +3281,14 @@ class Repository(ABC):
         database.
 
         Args:
-            timeout_s: Maximum seconds to wait before raising. Default 120s
-                covers Postgres coming up during a slow host reboot without
-                churning container restarts.
+            timeout_s: Cancellation deadline covering session acquisition,
+                the probe query, and retry sleeps. After session acquisition
+                succeeds, the timer is suspended before session exit so
+                rollback and close are awaited and may extend elapsed time
+                beyond this deadline. Cleanup internal to a custom context
+                manager during acquisition remains subject to the deadline.
+                Default 120s covers Postgres coming up during a slow host reboot
+                without churning container restarts.
             interval_s: Seconds slept between connection attempts.
 
         Returns:
@@ -3293,28 +3298,43 @@ class Repository(ABC):
             RuntimeError: If the database is still unreachable after
                 ``timeout_s``.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
         warned = False
         waited = False
-        while True:
-            try:
-                async with self.session() as session:
-                    await session.execute(text("SELECT 1"))
-            except (OSError, DBAPIError) as exc:
-                if not self._is_transient_db_connection_error(exc):
-                    raise
-                if loop.time() >= deadline:
-                    raise RuntimeError(f"database not ready after {timeout_s}s") from exc
-                if not warned:
-                    logger.warning("database not ready, waiting up to {}s: {}", timeout_s, exc)
-                    warned = True
-                waited = True
-                await asyncio.sleep(interval_s)
-                continue
-            if waited:
-                logger.info("database ready")
-            return
+        last_transient: OSError | DBAPIError | None = None
+        try:
+            async with asyncio.timeout(timeout_s) as readiness_timeout:
+                deadline = readiness_timeout.when()
+                while True:
+                    try:
+                        async with self.session() as session:
+                            try:
+                                await session.execute(text("SELECT 1"))
+                            finally:
+                                if not readiness_timeout.expired():
+                                    readiness_timeout.reschedule(None)
+                    except (OSError, DBAPIError) as exc:
+                        if not self._is_transient_db_connection_error(exc):
+                            raise
+                        last_transient = exc
+                        if readiness_timeout.expired():
+                            raise RuntimeError(f"database not ready after {timeout_s}s") from exc
+                        if not warned:
+                            logger.warning(
+                                "database not ready, waiting up to {}s: {}", timeout_s, exc
+                            )
+                            warned = True
+                        waited = True
+                        readiness_timeout.reschedule(deadline)
+                        await asyncio.sleep(interval_s)
+                        continue
+                    if readiness_timeout.expired():
+                        raise TimeoutError("readiness deadline expired")
+                    if waited:
+                        logger.info("database ready")
+                    return
+        except TimeoutError as exc:
+            cause = last_transient if last_transient is not None else exc
+            raise RuntimeError(f"database not ready after {timeout_s}s") from cause
 
     @staticmethod
     def _is_transient_db_connection_error(exc: OSError | DBAPIError) -> bool:

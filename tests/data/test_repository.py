@@ -10865,6 +10865,231 @@ class TestRepositoryWaitUntilReady:
     """Tests for the Repository.wait_until_ready startup gate."""
 
     @pytest.mark.asyncio
+    async def test_successful_probe_awaits_cleanup_beyond_deadline(self) -> None:
+        """A successful query completes cleanup even when cleanup exceeds the budget."""
+        cleaned = asyncio.Event()
+        session = _ReadinessProbeSession([])
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            finally:
+                await asyncio.sleep(0.04)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        assert cleaned.is_set()
+        assert session.execute_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_transient_probe_cleanup_uses_original_retry_deadline(self) -> None:
+        """Cleanup finishes after the deadline, then no fresh probe gets another budget."""
+        cleaned = asyncio.Event()
+        failure = ConnectionRefusedError("offline")
+        session = _ReadinessProbeSession([failure])
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            finally:
+                await asyncio.sleep(0.04)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        with pytest.raises(RuntimeError, match="database not ready") as raised:
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01, interval_s=0), 1.0)
+        assert cleaned.is_set()
+        assert session.execute_calls == 1
+        assert raised.value.__cause__ is failure
+
+    @pytest.mark.asyncio
+    async def test_permanent_probe_error_survives_cleanup_beyond_deadline(self) -> None:
+        """Slow cleanup preserves the original permanent error without retrying."""
+        cleaned = asyncio.Event()
+        failure = _dbapi_error(_FakePgError("28P01"))
+        session = _ReadinessProbeSession([failure])
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            finally:
+                await asyncio.sleep(0.04)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        with pytest.raises(DBAPIError) as raised:
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        assert cleaned.is_set()
+        assert session.execute_calls == 1
+        assert raised.value is failure
+
+    @pytest.mark.asyncio
+    async def test_cleanup_connection_error_after_deadline_retains_cause(self) -> None:
+        """Cleanup replacing deadline cancellation cannot rearm an expired timer."""
+        cleaned = asyncio.Event()
+        failure = ConnectionResetError("cleanup failed")
+        session = _ReadinessProbeSession([])
+
+        async def execute(statement: object) -> None:
+            await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+                raise failure
+
+        repository = _make_repo(factory)
+        with (
+            patch.object(session, "execute", execute),
+            pytest.raises(RuntimeError, match="database not ready") as raised,
+        ):
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        assert cleaned.is_set()
+        assert raised.value.__cause__ is failure
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phase", ["checkout", "query"])
+    async def test_deadline_cancels_pending_probe_and_awaits_cleanup(self, phase: str) -> None:
+        """Given a stuck checkout/query, when time expires, then cleanup completes."""
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+        pending = asyncio.Event()
+        session = _ReadinessProbeSession([])
+
+        async def execute(statement: object) -> None:
+            entered.set()
+            await pending.wait()
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                if phase == "checkout":
+                    entered.set()
+                    await pending.wait()
+                yield session
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        with (
+            patch.object(session, "execute", execute),
+            pytest.raises(RuntimeError, match="database not ready") as raised,
+        ):
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.02), 1.0)
+        assert entered.is_set()
+        assert cleaned.is_set()
+        assert isinstance(raised.value.__cause__, TimeoutError)
+
+    @pytest.mark.asyncio
+    async def test_deadline_interrupts_retry_sleep(self) -> None:
+        """Given a transient failure, when a long retry sleep expires, then no retry runs."""
+        failure = ConnectionRefusedError("offline")
+        session = _ReadinessProbeSession([failure])
+        repository = _make_repo(lambda: _readiness_factory(session))
+        with pytest.raises(RuntimeError, match="database not ready") as raised:
+            await asyncio.wait_for(
+                repository.wait_until_ready(timeout_s=0.02, interval_s=10.0), 1.0
+            )
+        assert session.execute_calls == 1
+        assert raised.value.__cause__ is failure
+
+    @pytest.mark.asyncio
+    async def test_late_success_is_cancelled_before_return(self) -> None:
+        """Given a slow successful query, when the deadline expires, then success is rejected."""
+        session = _ReadinessProbeSession([])
+        completed = asyncio.Event()
+
+        async def execute(statement: object) -> None:
+            await asyncio.sleep(0.1)
+            completed.set()
+
+        repository = _make_repo(lambda: _readiness_factory(session))
+        with (
+            patch.object(session, "execute", execute),
+            pytest.raises(RuntimeError, match="database not ready"),
+        ):
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.02), 1.0)
+        assert not completed.is_set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("suppressed_by", ["query", "context"])
+    async def test_suppressed_deadline_cancellation_cannot_report_ready(
+        self, suppressed_by: str
+    ) -> None:
+        """Suppressed deadline cancellation still rejects readiness after cleanup."""
+        cancelled = asyncio.Event()
+        cleaned = asyncio.Event()
+        session = _ReadinessProbeSession([])
+
+        async def execute(statement: object) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                if suppressed_by != "query":
+                    raise
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            except asyncio.CancelledError:
+                if suppressed_by != "context":
+                    raise
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        with (
+            patch.object(session, "execute", execute),
+            pytest.raises(RuntimeError, match="database not ready") as raised,
+        ):
+            await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        assert cancelled.is_set()
+        assert cleaned.is_set()
+        assert isinstance(raised.value.__cause__, TimeoutError)
+
+    @pytest.mark.asyncio
+    async def test_external_cancellation_propagates_after_cleanup(self) -> None:
+        """Given a pending query, when its caller cancels, then cleanup precedes cancellation."""
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+        session = _ReadinessProbeSession([])
+
+        async def execute(statement: object) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_ReadinessProbeSession]:
+            try:
+                yield session
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        repository = _make_repo(factory)
+        with patch.object(session, "execute", execute):
+            async with asyncio.timeout(1.0):
+                task = asyncio.create_task(repository.wait_until_ready(timeout_s=10.0))
+                await entered.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        assert cleaned.is_set()
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
     async def test_ready_on_first_attempt_returns_after_one_probe(self) -> None:
         """A reachable DB returns after a single SELECT 1.
 
