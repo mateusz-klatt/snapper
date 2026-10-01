@@ -1361,8 +1361,8 @@ episode, reconciliation, position, order, rebase, or trading state. Its
 failure, or an unexpected worker exit before shutdown, ends the owning run
 even while receive or dispatch is blocked. Shutdown cancels and awaits the
 owned workers and stops the recovery scanner. An existing failure or
-cancellation remains primary if cleanup also fails; repeated stop calls after
-teardown do not repeat scanner cleanup. Ordinary failures propagate through the
+cancellation remains primary if ordinary cleanup also fails; repeated stop calls
+after teardown do not repeat scanner cleanup. Ordinary failures propagate through the
 CLI to the compose `restart: unless-stopped` policy. The outbox drain on the
 next start recovers queued deliveries left behind, using the existing delivery
 and retry rules.

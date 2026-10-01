@@ -649,6 +649,13 @@ unreadable input. This does not prove permissions for a particular endpoint.
 
 Synchronizes symbol mappings from the Kraken API.
 
+Tokenized assets are classified as equity. Other pairs are classified as forex
+when both currency codes supplied by their mapping or discovery path are in
+`USD`, `EUR`, `GBP`, `JPY`, `CAD`, `AUD`, and `CHF`; remaining pairs are classified
+as crypto. This rule applies to REST, WebSocket-only, and BTNL records. A changed
+classification creates a new symbol version while preserving its public
+identity and history.
+
 ```bash
 snapper update-kraken-symbols [OPTIONS]
 ```

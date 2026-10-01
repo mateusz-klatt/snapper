@@ -201,8 +201,8 @@ for the `NotificationMetricsResponse` wire schema.
 
 Use container state, restart history and sidecar logs to investigate retry-worker
 failure. The sidecar propagates unexpected worker failure through its CLI and
-awaits owned-task cleanup. A secondary cleanup failure is logged by stage and
-exception class while the original failure remains primary. Delivery totals
+awaits owned-task cleanup. An ordinary secondary cleanup failure is logged by
+stage and exception class while the original failure remains primary. Delivery totals
 describe persisted outbox state; they do not certify worker liveness or APNs
 receipt.
 

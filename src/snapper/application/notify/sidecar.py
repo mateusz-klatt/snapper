@@ -210,9 +210,15 @@ class NotifySidecar(RegisterableProcess):
             await self._run_workers()
         except BaseException as exc:
             primary = exc
-        primary = await self._finish_run(primary)
-        if primary is not None:
-            raise primary
+            raise
+        finally:
+            try:
+                failure = await self._finish_run(primary)
+                if primary is None and failure is not None:
+                    raise failure
+            finally:
+                if primary is not None:
+                    raise primary
 
     async def _run_workers(self) -> None:
         """Observe retry before receive when multiple workers finish together."""
@@ -237,20 +243,40 @@ class NotifySidecar(RegisterableProcess):
                 return
             await self._dispatch(topic, payload, datetime.now(UTC))
 
+    async def _join_cleanup(
+        self, cleanup_task: asyncio.Task[BaseException | None]
+    ) -> BaseException | None:
+        """Join teardown and propagate the first observed cancellation.
+
+        Each cancellation while teardown remains pending adds one stack frame;
+        this handles ordinary repeated cancellation within Python's recursion limit.
+        """
+        try:
+            return await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                if not cleanup_task.done():
+                    await self._join_cleanup(cleanup_task)
+            finally:
+                raise cancellation
+
     async def _finish_run(self, primary: BaseException | None) -> BaseException | None:
         """Finish cleanup even when the owner is cancelled while awaiting it."""
         cleanup_task = asyncio.create_task(self._cleanup_workers(primary))
         try:
-            return await asyncio.shield(cleanup_task)
+            return await self._join_cleanup(cleanup_task)
         except asyncio.CancelledError as exc:
-            failure = await cleanup_task
-            primary = primary if primary is not None else exc
+            failure = None if cleanup_task.cancelled() else cleanup_task.result()
             if failure is not None:
-                primary = self._retain_failure(primary, failure, "cleanup")
-            return primary
+                self._retain_failure(primary if primary is not None else exc, failure, "cleanup")
+            raise
         finally:
             self._running = False
-            self._cleanup_complete = True
+            self._cleanup_complete = (
+                cleanup_task.done()
+                and not cleanup_task.cancelled()
+                and cleanup_task.exception() is None
+            )
 
     async def _cleanup_workers(self, primary: BaseException | None) -> BaseException | None:
         """Cancel and retrieve all workers, then always attempt scanner cleanup."""
@@ -262,10 +288,12 @@ class NotifySidecar(RegisterableProcess):
         for result in results:
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 primary = self._retain_failure(primary, result, "worker")
-        try:
-            await self._portfolio_drift_recovery_scanner.stop()
-        except BaseException as exc:
-            primary = self._retain_failure(primary, exc, "scanner")
+        scanner_results = await asyncio.gather(
+            self._portfolio_drift_recovery_scanner.stop(), return_exceptions=True
+        )
+        scanner_failure = scanner_results[0]
+        if isinstance(scanner_failure, BaseException):
+            primary = self._retain_failure(primary, scanner_failure, "scanner")
         return primary
 
     @staticmethod

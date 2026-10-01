@@ -1209,6 +1209,18 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     direction,
                 )
 
+    @classmethod
+    def _classify_spot_record(cls, record: KrakenSymbolRecord) -> AssetTypeEnum:
+        """Classify resolved currency legs while preserving tokenized equity priority."""
+        if record.get("asset_class") == "tokenized_asset":
+            return AssetTypeEnum.EQUITY
+        if (
+            record["base_currency"] in cls._FIAT_CURRENCIES
+            and record["quote_currency"] in cls._FIAT_CURRENCIES
+        ):
+            return AssetTypeEnum.FOREX
+        return AssetTypeEnum.CRYPTO
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist symbol catalog and alias rows to the database.
 
@@ -1235,11 +1247,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 now = datetime.now(UTC)
                 for symbol_data in records:
                     native_symbol = symbol_data["native_symbol"]
-                    asset_type: AssetTypeEnum = (
-                        AssetTypeEnum.EQUITY
-                        if symbol_data.get("asset_class") == "tokenized_asset"
-                        else AssetTypeEnum.CRYPTO
-                    )
+                    asset_type = self._classify_spot_record(symbol_data)
                     symbol_public_id = self._upsert_symbol(
                         session,
                         native_symbol,

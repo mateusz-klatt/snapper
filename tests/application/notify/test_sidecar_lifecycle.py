@@ -543,3 +543,306 @@ async def test_stop_arriving_with_received_frame_prevents_dispatch() -> None:
         assert harness.start.exception() is None
         dispatch.assert_not_awaited()
         assert harness.retry.finalized.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_primary", [False, True], ids=["normal-stop", "retry-error"])
+async def test_scanner_self_cancellation_preserves_primary(has_primary: bool) -> None:
+    """Observe scanner cancellation without discarding an earlier retry failure.
+
+    Given scanner cleanup independently cancels after all workers have joined,
+    When normal stop or a retry failure initiates teardown,
+    Then cancellation surfaces only without an older failure and stop stays idempotent.
+    """
+    async with _running() as harness:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        primary = RuntimeError("retry failed before scanner cancellation")
+
+        async def stop_scanner() -> None:
+            """Cancel independently after the test observes scanner cleanup entry."""
+            entered.set()
+            await release.wait()
+            raise asyncio.CancelledError("scanner cancelled itself")
+
+        harness.scanner.stop.side_effect = stop_scanner
+        try:
+            if has_primary:
+                harness.retry.failure = primary
+                harness.retry.release.set()
+            else:
+                await harness.sidecar.stop()
+            await asyncio.wait_for(entered.wait(), 1)
+            assert harness.receive.finalized.is_set()
+            assert harness.retry.finalized.is_set()
+            release.set()
+            assert await _completed(harness.start)
+            if has_primary:
+                assert harness.start.exception() is primary
+            else:
+                assert harness.start.cancelled()
+            await harness.sidecar.stop()
+            harness.scanner.stop.assert_awaited_once()
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_partial_scanner_start_cleans_once() -> None:
+    """Cancellation during startup still releases the partially started scanner.
+
+    Given scanner startup is blocked before any workers can be created,
+    When the start owner receives external cancellation,
+    Then startup finalizes, scanner cleanup runs once and cancellation propagates.
+    """
+    baseline = asyncio.all_tasks()
+    harness = _Harness()
+    harness.configure()
+    entered = asyncio.Event()
+    finalized = asyncio.Event()
+    release = asyncio.Event()
+
+    async def start_scanner() -> None:
+        """Expose partial startup and completion of its cancellation finalizer."""
+        entered.set()
+        try:
+            await release.wait()
+        finally:
+            finalized.set()
+
+    harness.scanner.start.side_effect = start_scanner
+    harness.start = asyncio.create_task(harness.sidecar.start())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        harness.start.cancel()
+        assert await _completed(harness.start)
+        assert harness.start.cancelled()
+        assert finalized.is_set()
+        assert not harness.receive.entered.is_set()
+        assert not harness.retry.entered.is_set()
+        harness.scanner.stop.assert_awaited_once()
+        await harness.sidecar.stop()
+        harness.scanner.stop.assert_awaited_once()
+    finally:
+        release.set()
+        await harness.cleanup(baseline)
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_failure_precedes_scanner_failure_on_normal_stop() -> None:
+    """The first teardown failure becomes primary when workers were healthy.
+
+    Given receive finalization fails before scanner cleanup also fails,
+    When normal stop joins the sidecar's owned tasks,
+    Then the receive failure surfaces unchanged after all cleanup completes.
+    """
+    async with _running() as harness:
+        primary = RuntimeError("receive cleanup failed first")
+        harness.receive.cleanup_failure = primary
+        harness.scanner.stop.side_effect = RuntimeError("scanner cleanup failed second")
+        await harness.sidecar.stop()
+        assert await _completed(harness.start)
+        assert harness.start.exception() is primary
+        assert harness.receive.finalized.is_set()
+        assert harness.retry.finalized.is_set()
+        harness.scanner.stop.assert_awaited_once()
+        await harness.sidecar.stop()
+        harness.scanner.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_start_does_not_adopt_outer_handled_exception() -> None:
+    """An unrelated exception handled by the caller is not a lifecycle failure.
+
+    Given the caller directly awaits start from inside an unrelated except block,
+    When healthy workers stop normally and scanner cleanup fails,
+    Then the scanner error surfaces instead of the caller's ambient exception.
+    """
+    harness = _Harness()
+    harness.configure()
+    harness.receive.cleanup_release.set()
+    harness.retry.cleanup_release.set()
+    failure = RuntimeError("scanner failed during direct start")
+    harness.scanner.stop.side_effect = failure
+
+    async def stop_after_entry() -> None:
+        """Signal stop after both owned workers enter their controlled waits."""
+        await harness.receive.entered.wait()
+        await harness.retry.entered.wait()
+        await harness.sidecar.stop()
+
+    stopper = asyncio.create_task(stop_after_entry())
+    try:
+        try:
+            raise ValueError("unrelated handled caller error")
+        except ValueError:
+            with pytest.raises(RuntimeError) as caught:
+                async with asyncio.timeout(1):
+                    await harness.sidecar.start()
+            assert caught.value is failure
+        assert harness.receive.finalized.is_set()
+        assert harness.retry.finalized.is_set()
+        await harness.sidecar.stop()
+        harness.scanner.stop.assert_awaited_once()
+    finally:
+        harness.sidecar._stop_event.set()
+        for task in [stopper, *harness.sidecar._workers]:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stopper, *harness.sidecar._workers, return_exceptions=True)
+
+
+@dataclass
+class _RepeatedCancellationProbe:
+    """Observe actual shield cancellation and a gated scanner finalizer."""
+
+    scanner_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    scanner_release: asyncio.Event = field(default_factory=asyncio.Event)
+    scanner_finalized: asyncio.Event = field(default_factory=asyncio.Event)
+    cancellations: list[asyncio.CancelledError] = field(default_factory=list)
+
+    async def stop_scanner(self) -> None:
+        """Record successful scanner cleanup only after its gate is released."""
+        self.scanner_entered.set()
+        await self.scanner_release.wait()
+        self.scanner_finalized.set()
+
+    def observe_shield(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Record the real cancellation instance without replacing shield behavior."""
+        real_shield = asyncio.shield
+
+        async def observed_shield[T](awaitable: Awaitable[T]) -> T:
+            """Delegate to asyncio and rethrow the exact delivered cancellation."""
+            try:
+                return await real_shield(awaitable)
+            except asyncio.CancelledError as exc:
+                self.cancellations.append(exc)
+                raise
+
+        monkeypatch.setattr(asyncio, "shield", observed_shield)
+
+
+async def _cancel_at_loop_checkpoints(task: asyncio.Task[None], count: int) -> None:
+    """Deliver distinct cancellations separated by scheduled owner execution."""
+    loop = asyncio.get_running_loop()
+    for index in range(count):
+        task.cancel(f"owner cancellation {index + 1}")
+        checkpoint: asyncio.Future[None] = loop.create_future()
+        loop.call_soon(checkpoint.set_result, None)
+        await checkpoint
+
+
+async def _assert_repeated_cancel_outcome(
+    harness: _Harness, probe: _RepeatedCancellationProbe, primary: RuntimeError | None
+) -> None:
+    """Read the owner's actual exception after all cleanup gates have opened."""
+    assert await _completed(harness.start)
+    if primary is not None:
+        with pytest.raises(RuntimeError) as failure:
+            await harness.start
+        assert failure.value is primary
+    else:
+        with pytest.raises(asyncio.CancelledError) as cancellation:
+            await harness.start
+        assert cancellation.value is probe.cancellations[0]
+    assert harness.receive.finalized.is_set()
+    assert harness.retry.finalized.is_set()
+    assert probe.scanner_finalized.is_set()
+    assert all(task.done() for task in harness.sidecar._workers)
+    assert harness.sidecar._cleanup_complete is True
+    assert harness.sidecar._running is False
+    await harness.sidecar.stop()
+    harness.scanner.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3], ids=["two-cancellations", "three-cancellations"])
+@pytest.mark.parametrize("during_workers", [False, True], ids=["scanner-gate", "worker-gate"])
+@pytest.mark.parametrize("has_primary", [False, True], ids=["cancel-primary", "retry-primary"])
+async def test_repeated_owner_cancellation_keeps_cleanup_owned(
+    monkeypatch: pytest.MonkeyPatch, count: int, during_workers: bool, has_primary: bool
+) -> None:
+    """Repeated cancellation cannot abandon teardown or publish false completion.
+
+    Given worker or scanner finalization is gated after stop or retry failure,
+    When the owner receives two or three distinct cancellation requests,
+    Then cleanup remains owned until release and the original primary survives.
+    """
+    probe = _RepeatedCancellationProbe()
+    probe.observe_shield(monkeypatch)
+    primary = RuntimeError("retry primary before repeated cancellation") if has_primary else None
+    async with _running(gated_cleanup=during_workers) as harness:
+        harness.scanner.stop.side_effect = probe.stop_scanner
+        try:
+            if primary is not None:
+                harness.retry.cleanup_release.set()
+                harness.retry.failure = primary
+                harness.retry.release.set()
+            else:
+                await harness.sidecar.stop()
+            cleanup_entered = (
+                harness.receive.finalizing if during_workers else probe.scanner_entered
+            )
+            await asyncio.wait_for(cleanup_entered.wait(), 1)
+            await _cancel_at_loop_checkpoints(harness.start, count)
+            prematurely_completed = await _completed(harness.start)
+            assert harness.sidecar._cleanup_complete is False
+            assert harness.sidecar._running is True
+            assert prematurely_completed is False
+            assert len(probe.cancellations) == count
+            assert not probe.scanner_finalized.is_set()
+            harness.receive.cleanup_release.set()
+            harness.retry.cleanup_release.set()
+            probe.scanner_release.set()
+            await _assert_repeated_cancel_outcome(harness, probe, primary)
+        finally:
+            probe.scanner_release.set()
+            harness.receive.cleanup_release.set()
+            harness.retry.cleanup_release.set()
+
+
+@pytest.mark.asyncio
+async def test_independent_cleanup_cancellation_does_not_mark_complete() -> None:
+    """An independently aborted cleanup remains incomplete and can be retried.
+
+    Given normal stop has reached scanner cleanup owned by the cleanup task,
+    When that cleanup task is cancelled independently rather than its owner,
+    Then cancellation propagates without false completion and later stop retries cleanup.
+    """
+    probe = _RepeatedCancellationProbe()
+    async with _running() as harness:
+        cleanup_tasks: list[asyncio.Task[BaseException | None]] = []
+        original_cleanup: Callable[[BaseException | None], Awaitable[BaseException | None]] = (
+            harness.sidecar._cleanup_workers
+        )
+
+        async def observe_cleanup(primary: BaseException | None) -> BaseException | None:
+            """Expose the real cleanup task while delegating its entire implementation."""
+            current = asyncio.current_task()
+            assert current is not None
+            cleanup_tasks.append(cast(asyncio.Task[BaseException | None], current))
+            return await original_cleanup(primary)
+
+        harness.sidecar._cleanup_workers = observe_cleanup
+        harness.scanner.stop.side_effect = probe.stop_scanner
+        try:
+            await harness.sidecar.stop()
+            await asyncio.wait_for(probe.scanner_entered.wait(), 1)
+            (cleanup_task,) = cleanup_tasks
+            cleanup_task.cancel("independent cleanup cancellation")
+            assert await _completed(harness.start)
+            assert harness.start.cancelled()
+            assert cleanup_task.cancelled()
+            assert harness.sidecar._cleanup_complete is False
+            assert harness.sidecar._running is False
+            assert harness.receive.finalized.is_set()
+            assert harness.retry.finalized.is_set()
+            assert not probe.scanner_finalized.is_set()
+            harness.scanner.stop.assert_awaited_once()
+            probe.scanner_release.set()
+            await harness.sidecar.stop()
+            assert probe.scanner_finalized.is_set()
+            assert harness.scanner.stop.await_count == 2
+            assert harness.sidecar._cleanup_complete is True
+        finally:
+            probe.scanner_release.set()
