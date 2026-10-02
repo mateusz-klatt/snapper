@@ -635,6 +635,7 @@ async def test_async_finalizer_failure_keeps_primary_and_joins_other_children(
     outbox.finish.set()
     assert await _outcome(owner) is primary
     assert outbox.finalized.is_set()
-    assert outbox.task is not None and outbox.task.done()
+    assert outbox.task is not None
+    assert outbox.task.done()
     assert lifecycle.listener_finished.is_set()
     assert lifecycle.health.finalized.is_set()

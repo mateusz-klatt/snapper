@@ -74,6 +74,22 @@ async def cancel_and_join(
     return primary
 
 
+def validate_completed_workers(done: list[asyncio.Task[None]]) -> None:
+    """Raise the first real failure before considering child cancellation.
+
+    Args:
+        done: Completed owned tasks in stable creation order, listener first.
+    """
+    for task in done:
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                raise failure
+    for task in done:
+        if task.cancelled():
+            task.result()
+
+
 async def supervise_workers(workers: list[asyncio.Task[None]]) -> Never:
     """Observe required intake and preserve optional normal worker completion.
 
@@ -94,14 +110,7 @@ async def supervise_workers(workers: list[asyncio.Task[None]]) -> Never:
     while True:
         await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
         done = [task for task in workers if task.done()]
-        for task in done:
-            if not task.cancelled():
-                failure = task.exception()
-                if failure is not None:
-                    raise failure
-        for task in done:
-            if task.cancelled():
-                task.result()
+        validate_completed_workers(done)
         if workers[0].done():
             raise RuntimeError("TraderCoordinator signal listener exited before stop")
         pending.difference_update(done)
@@ -197,7 +206,11 @@ class CoordinatorLifetime:
         return self.cleanup_task
 
     async def _cleanup(self, cleanup: Callable[[], BaseException | None]) -> BaseException | None:
-        """Run native destruction synchronously on the resource-owning loop.
+        """Run native destruction before yielding to publish its cached outcome.
+
+        The finalizer runs synchronously on the resource-owning loop. A completion
+        checkpoint keeps the independently scheduled cleanup task joinable while
+        stop callers observe cancellation or await its cached result.
 
         Args:
             cleanup: Finalizer that attempts each resource independently.
@@ -205,7 +218,7 @@ class CoordinatorLifetime:
         Returns:
             The cached first cleanup failure, if any.
         """
-        return cleanup()
+        return await asyncio.sleep(0, result=cleanup())
 
     def request_stop(self) -> None:
         """Cancel an active owner once without interrupting its joined finalizers."""
@@ -218,9 +231,9 @@ class CoordinatorLifetime:
             and not owner.done()
             and not self.joining_workers
             and not self.finishing
+            and owner.cancelling() <= self._cancellation_baseline
         ):
-            if owner.cancelling() <= self._cancellation_baseline:
-                owner.cancel()
+            owner.cancel()
 
     async def stop(self, cleanup: Callable[[], BaseException | None]) -> None:
         """Request owner termination, join it, and expose only cleanup failure.

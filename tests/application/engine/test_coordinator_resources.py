@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Coroutine
-from collections.abc import Generator
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -388,9 +387,9 @@ class ResourceHarness:
 
 
 @pytest.fixture
-def resources(monkeypatch: pytest.MonkeyPatch) -> Generator[ResourceHarness]:
-    """Expose an inert constructor fixture with per-test monkeypatch lifetime."""
-    yield ResourceHarness(monkeypatch)
+def resources(monkeypatch: pytest.MonkeyPatch) -> ResourceHarness:
+    """Return an inert harness; individual tests own bounded emergency cleanup."""
+    return ResourceHarness(monkeypatch)
 
 
 async def outcome(task: asyncio.Task[None]) -> BaseException | None:
@@ -1053,13 +1052,16 @@ async def test_first_start_retains_failed_idle_cleanup(resources: ResourceHarnes
         await resources.cleanup()
 
 
+@pytest.mark.parametrize("deferred_cancellation", [False, True], ids=["immediate", "deferred"])
 async def test_stop_caller_cancellation_at_cleanup_completion_is_preserved(
-    resources: ResourceHarness, monkeypatch: pytest.MonkeyPatch
+    resources: ResourceHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    deferred_cancellation: bool,
 ) -> None:
     """Completion in the same turn cannot swallow the stop caller's cancellation.
 
     Given: Idle stop is awaiting context cleanup on the same event loop,
-    When: Final context termination cancels the stop caller just before returning,
+    When: Final termination cancels its caller immediately or through a queued callback,
     Then: All resources close and that caller still receives its first cancellation.
     """
     resources.owner._setup_external_execution()
@@ -1070,7 +1072,10 @@ async def test_stop_caller_cancellation_at_cleanup_completion_is_preserved(
     def terminate_and_cancel_caller() -> None:
         """Cancel the awaiting caller at the final synchronous resource boundary."""
         actual_term()
-        stopping.cancel("cancel at cleanup completion")
+        if deferred_cancellation:
+            asyncio.get_running_loop().call_soon(stopping.cancel, "cancel at cleanup completion")
+        else:
+            stopping.cancel("cancel at cleanup completion")
 
     monkeypatch.setattr(context, "term", terminate_and_cancel_caller)
     try:

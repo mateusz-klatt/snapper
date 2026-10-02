@@ -6328,7 +6328,8 @@ class TraderCoordinator(RegisterableProcess):
                 interval_seconds=60.0,
                 ownership=self._ownership,
             )
-            yield asyncio.create_task(recon.run())
+            task = asyncio.create_task(recon.run())
+            yield task
         logger.info("TraderCoordinator: reconciliation loops enabled for {}", exchanges)
 
     async def _on_command_expired(self, cmd: TradeCommandRow) -> None:
@@ -6588,9 +6589,12 @@ class TraderCoordinator(RegisterableProcess):
         workers: list[asyncio.Task[None]] = []
         self._lifetime.workers = workers
         try:
-            workers.append(asyncio.create_task(self._listen_signals()))
-            workers.append(asyncio.create_task(self._signal_health_monitor()))
-            workers.append(asyncio.create_task(self._funding_accrual_loop()))
+            for worker in (
+                self._listen_signals,
+                self._signal_health_monitor,
+                self._funding_accrual_loop,
+            ):
+                workers.append(asyncio.create_task(worker()))
             if self.outbox is not None:
                 workers.append(asyncio.create_task(self.outbox.run()))
             scanner = self._create_guard_scanner_task()
