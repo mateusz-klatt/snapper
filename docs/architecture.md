@@ -1056,6 +1056,29 @@ loops that drive the trade-command lifecycle fold and feed the
 circuit breaker. Canonical `Order` and `Execution`
 rows are persisted on the exchange/executor path.
 
+The coordinator completes startup recovery before accepting signals and owns
+the lifetime of its receive and background tasks. An unhandled receive,
+message-validation or handler failure ends the owning run with the original
+error. Unexpected normal completion of the required receiver also fails the
+run; normal completion of an optional worker is allowed. If multiple failures
+are observed together, a receiver error takes priority, followed by other
+worker errors in creation order. Existing message-specific refusal paths,
+such as dropping a blank wallet identifier, retain their normal behavior.
+
+Stop and failed startup both await owned-task cleanup before releasing the
+coordinator's private ZMQ contexts with zero linger. Partially created workers
+and sockets are included. A secondary teardown failure does not replace the
+original operational error or cancellation, and repeated stop does not retry
+a failed context destruction. Shared repository resources remain owned by
+their application lifecycle. This supervision adds no signal replay or
+listener-only restart; configured process supervision still decides whether
+to restart a failed coordinator.
+
+Each process launch constructs a fresh coordinator instance. An instance accepts
+one start; concurrent or repeated starts are rejected. Calling stop before its
+first start remains supported and does not skip cleanup of resources acquired
+by that later start.
+
 Multiple `TraderCoordinator` processes can run against the same DB
 + broker with deterministic SHA-256 shard partitioning via
 `snapper.core.partitioning.ShardOwnership`. Each coordinator owns

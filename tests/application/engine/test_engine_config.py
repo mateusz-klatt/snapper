@@ -43,6 +43,16 @@ from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SignalData
 
 
+def _constructed_coordinator() -> TraderCoordinator:
+    """Build real coordinator lifetime state with an inert repository boundary.
+
+    Returns:
+        Normally constructed coordinator with no database resource acquisition.
+    """
+    with patch("snapper.application.engine.trader.get_repository", return_value=MagicMock()):
+        return TraderCoordinator()
+
+
 class FakeSocket:
     """Fake socket that collects sent messages."""
 
@@ -2322,7 +2332,7 @@ async def test_stop_stops_outbox() -> None:
     When: stop is called,
     Then: outbox stop is called.
     """
-    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord = _constructed_coordinator()
     coord.signal_subscriber = None
     coord.zmq_context = None
     coord.execution_publisher = None
@@ -2342,7 +2352,7 @@ async def test_stop_stops_guard_scanner() -> None:
     When: stop is called,
     Then: the guard scanner stop is called so the scan loop exits.
     """
-    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord = _constructed_coordinator()
     coord.signal_subscriber = None
     coord.zmq_context = None
     coord.execution_publisher = None
@@ -2362,7 +2372,7 @@ async def test_run_trading_loop_includes_outbox_task() -> None:
     When: the trading loop is started and immediately cancelled,
     Then: outbox run was invoked as a task.
     """
-    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord = _constructed_coordinator()
     mock_outbox = MagicMock()
     mock_outbox.run = AsyncMock()
     coord.outbox = mock_outbox
@@ -2441,7 +2451,7 @@ async def test_run_trading_loop_includes_guard_scanner_task() -> None:
     When: the trading loop is started and immediately cancelled,
     Then: a guard scanner was created and appended (self.guard_scanner is set).
     """
-    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord = _constructed_coordinator()
     coord.outbox = None
     coord.guard_scanner = None
     coord.settings = MagicMock()
@@ -2735,7 +2745,7 @@ async def test_create_reconciliation_tasks_with_sql_repo() -> None:
     coord.repository = mock_repo
     coord.settings = MagicMock()
     coord._ownership = None
-    tasks = coord._create_reconciliation_tasks()
+    tasks = list(coord._create_reconciliation_tasks())
     assert len(tasks) > 0
     for t in tasks:
         t.cancel()
@@ -2758,7 +2768,7 @@ async def test_run_trading_loop_with_recon_task() -> None:
     Then:
         No error occurs (reconciliation tasks run alongside signals).
     """
-    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord = _constructed_coordinator()
     coord.outbox = None
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     coord.repository = mock_repo

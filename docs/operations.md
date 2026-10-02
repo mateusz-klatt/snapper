@@ -154,6 +154,34 @@ The `~10s` dispatch pause for owned shards during the cutover
 window is the explicit no-HA trade-off. HA was excluded from
 scope by design.
 
+## Coordinator failure and shutdown
+
+The required signal receiver is supervised together with the coordinator's
+background workers. An unhandled receive, validation or handler error, or an
+unexpected receiver exit, fails the owning run. Check its failure and the
+configured process restart policy when intake stops. Receiver failure initiates
+the owner's shutdown instead of silently leaving its sibling workers running.
+
+Shutdown cancels and awaits owned workers before releasing the coordinator's
+private socket contexts. The same cleanup applies to partial startup and
+recovery failures. Concurrent stop callers join that shutdown, and a later
+stop does not repeat successful cleanup. If context destruction failed, later
+stop reports the retained cleanup failure without automatically retrying it.
+An earlier operational failure remains the primary run error. Zero socket
+linger does not provide a hard deadline for native resource teardown.
+
+No message replay or independent receiver restart is performed by this
+cleanup. The systemd and application process-manager restart policies retain
+their existing roles; a replacement coordinator performs its ordinary
+startup recovery before receiving signals.
+
+The API container probes `/api/health` directly with curl. Its connection budget
+is one second and its total request budget is two seconds, within Docker's
+three-second healthcheck timeout. The probe runs without a shell wrapper so
+curl is the process Docker supervises. A timeout reports an unhealthy probe;
+it does not diagnose the cause of an unresponsive API or automatically restart
+the container.
+
 ## Crash recovery (systemd)
 
 If instance K crashes:

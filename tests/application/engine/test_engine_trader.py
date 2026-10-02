@@ -42,6 +42,7 @@ from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderData
@@ -166,10 +167,8 @@ class TestTraderCoverage:
         trader.execution_publisher = mock_execution_socket
         trader.execution_context = mock_execution_context
         await trader.stop()
-        mock_signal_sub.close.assert_called_once()
-        mock_zmq_context.term.assert_called_once()
-        mock_execution_socket.close.assert_called_once()
-        mock_execution_context.term.assert_called_once()
+        mock_zmq_context.destroy.assert_called_once_with(linger=0)
+        mock_execution_context.destroy.assert_called_once_with(linger=0)
         assert trader.signal_subscriber is None
         assert trader.zmq_context is None
 
@@ -697,14 +696,27 @@ class _ContextStub:
     def __init__(self, factory: Callable[[int], _SocketStub]) -> None:
         self._factory = factory
         self.created: list[int] = []
+        self.sockets: list[_SocketStub] = []
         self.terminated = False
 
     def socket(self, socket_type: int) -> _SocketStub:
         self.created.append(socket_type)
-        return self._factory(socket_type)
+        socket = self._factory(socket_type)
+        self.sockets.append(socket)
+        return socket
 
     def term(self) -> None:
         self.terminated = True
+
+    def destroy(self, linger: int | None = None) -> None:
+        """Close every acquired fake socket before terminating its context.
+
+        Args:
+            linger: Requested linger value, inert for these fake sockets.
+        """
+        for socket in self.sockets:
+            socket.close()
+        self.term()
 
 
 class _PublisherStub:
@@ -1186,11 +1198,13 @@ async def test_trader_coordinator_stop_closes_resources(monkeypatch: pytest.Monk
     sub_stub = _SubscriberStub(signal_socket)
     coordinator.signal_subscriber = cast(Any, sub_stub)
     zmq_context = _ContextStub(lambda _t: signal_socket)
+    zmq_context.socket(0)
     coordinator.zmq_context = cast(Any, zmq_context)
     exec_socket = _SocketStub()
     exec_pub = _PublisherStub(exec_socket)
     coordinator.execution_publisher = cast(Any, exec_pub)
     exec_context = _ContextStub(lambda _t: exec_socket)
+    exec_context.socket(0)
     coordinator.execution_context = cast(Any, exec_context)
     await coordinator.stop()
     assert signal_socket.closed is True
@@ -2552,27 +2566,27 @@ async def test_handle_order_status_topic_payload_mismatch(
 
 @pytest.mark.asyncio
 async def test_listen_signals_handles_general_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify listen_signals handles and logs unexpected exceptions.
+    """Expose the same unexpected listener exception to its lifecycle owner.
 
-    Given a TraderCoordinator with subscriber that raises RuntimeError,
-    When _listen_signals is called,
-    Then the exception is caught and logged without propagating.
+    Given: A constructed coordinator whose subscriber raises an operational error,
+    When: The real listener receives from that subscriber,
+    Then: The exact error propagates after safe diagnostic logging.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
+    error = RuntimeError("boom")
 
     class _FailingSubscriber:
-        def __init__(self) -> None:
-            self._socket = _SocketStub()
-
-        def close(self) -> None:
-            self._socket.close()
+        """Expose one inert transport failure without creating a socket."""
 
         async def recv_multipart(self) -> tuple[str, bytes]:
-            raise RuntimeError("boom")
+            """Raise the original transport error."""
+            raise error
 
-    coord.signal_subscriber = cast(Any, _FailingSubscriber())
-    await cast(Any, coord)._listen_signals()
+    coord.signal_subscriber = cast(ValidatedSubscriber, _FailingSubscriber())
+    with pytest.raises(RuntimeError) as raised:
+        await coord._listen_signals()
+    assert raised.value is error
 
 
 @pytest.mark.asyncio
@@ -2654,85 +2668,71 @@ async def test_signal_health_monitor_skips_debug_for_recent_signals(
 
 @pytest.mark.asyncio
 async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify trading loop cancels pending tasks on CancelledError.
+    """Cancel and join actual pending children through the real trading loop.
 
-    Given a TraderCoordinator with pending listener and monitor tasks,
-    When _run_trading_loop is cancelled,
-    Then all pending tasks are cancelled.
+    Given: Three mandatory children have entered inert pending work,
+    When: The actual loop task receives cancellation,
+    Then: Every recorded child is cancelled and complete before the loop finishes.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
+    entered = [asyncio.Event() for _ in range(3)]
+    children: list[asyncio.Task[object]] = []
 
-    async def _stub_listener() -> None:
+    async def pending_worker() -> None:
+        """Record a real child before waiting for production cancellation."""
+        task = asyncio.current_task()
+        assert task is not None
+        index = len(children)
+        children.append(task)
+        entered[index].set()
         await asyncio.Event().wait()
 
-    async def _stub_monitor() -> None:
-        await asyncio.Event().wait()
-
-    created_tasks: list[asyncio.Task[Any]] = []
-    original_create_task = asyncio.create_task
-
-    async def _stub_accrual() -> None:
-        await asyncio.Event().wait()
-
-    coord_any = cast(Any, coord)
-    coord_any._listen_signals = _stub_listener
-    coord_any._signal_health_monitor = _stub_monitor
-    coord_any._funding_accrual_loop = _stub_accrual
-
-    def _fake_create_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-        task = original_create_task(coro)
-        created_tasks.append(task)
-        return task
-
-    async def _fake_gather(*_tasks: Any) -> None:
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(asyncio, "create_task", _fake_create_task, raising=False)
-    monkeypatch.setattr(asyncio, "gather", _fake_gather, raising=False)
-    with pytest.raises(asyncio.CancelledError):
-        await coord_any._run_trading_loop()
-    assert [task.cancelled() for task in created_tasks] == [True, True, True]
+    monkeypatch.setattr(coord, "_listen_signals", pending_worker)
+    monkeypatch.setattr(coord, "_signal_health_monitor", pending_worker)
+    monkeypatch.setattr(coord, "_funding_accrual_loop", pending_worker)
+    owner = asyncio.create_task(coord._run_trading_loop())
+    try:
+        async with asyncio.timeout(1):
+            await asyncio.gather(*(event.wait() for event in entered))
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        assert len(children) == 3
+        assert all(task.done() and task.cancelled() for task in children)
+    finally:
+        if not owner.done():
+            owner.cancel()
+        await asyncio.gather(owner, *children, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_run_trading_loop_skips_cancelling_completed_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify trading loop does not cancel already completed tasks.
+    """Fail unexpected intake completion without cancelling completed children.
 
-    Given a TraderCoordinator with tasks that complete immediately,
-    When _run_trading_loop finishes,
-    Then completed tasks are not cancelled.
+    Given: All three mandatory child coroutines return normally in one ready batch,
+    When: The actual trading loop observes that its required listener has ended,
+    Then: It raises a lifecycle error while preserving completed child outcomes.
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
+    children: list[asyncio.Task[object]] = []
 
-    async def _stub_listener() -> None:
-        return None
+    async def completed_worker() -> None:
+        """Record a real child that completes without waiting."""
+        task = asyncio.current_task()
+        assert task is not None
+        children.append(task)
 
-    async def _stub_monitor() -> None:
-        return None
-
-    created_tasks: list[asyncio.Task[Any]] = []
-    original_create_task = asyncio.create_task
-
-    def _tracking_create_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-        task = original_create_task(coro)
-        created_tasks.append(task)
-        return task
-
-    async def _stub_accrual() -> None:
-        return None
-
-    coord_any = cast(Any, coord)
-    coord_any._listen_signals = _stub_listener
-    coord_any._signal_health_monitor = _stub_monitor
-    coord_any._funding_accrual_loop = _stub_accrual
-    monkeypatch.setattr(asyncio, "create_task", _tracking_create_task, raising=False)
-    await cast(Any, coord)._run_trading_loop()
-    assert [task.done() for task in created_tasks] == [True, True, True]
-    assert [task.cancelled() for task in created_tasks] == [False, False, False]
+    monkeypatch.setattr(coord, "_listen_signals", completed_worker)
+    monkeypatch.setattr(coord, "_signal_health_monitor", completed_worker)
+    monkeypatch.setattr(coord, "_funding_accrual_loop", completed_worker)
+    with pytest.raises(RuntimeError):
+        await coord._run_trading_loop()
+    assert len(children) == 3
+    assert all(task.done() and not task.cancelled() for task in children)
 
 
 @pytest.mark.asyncio

@@ -12,12 +12,12 @@ The coordinator:
 """
 
 import asyncio
-import contextlib
 import json
 import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -34,6 +34,11 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.coordinator_lifecycle import CoordinatorLifetime
+from snapper.application.engine.coordinator_lifecycle import cancel_and_join
+from snapper.application.engine.coordinator_lifecycle import join_cleanup
+from snapper.application.engine.coordinator_lifecycle import retain_failure
+from snapper.application.engine.coordinator_lifecycle import supervise_workers
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
@@ -337,6 +342,7 @@ class TraderCoordinator(RegisterableProcess):
                 upgrades ``self.settings`` via
                 :func:`get_settings_with_service` exactly as before.
         """
+        self._lifetime = CoordinatorLifetime()
         self.settings = get_settings()
         self._injected_settings: AppSettings | None = settings
         self.signal_topics = signal_topics or ["signals."]
@@ -447,14 +453,16 @@ class TraderCoordinator(RegisterableProcess):
         return parse_shard_key(shard_key)
 
     async def start(self) -> None:
-        """Start the trader coordinator.
+        """Own setup, recovery, supervised workers and final resource cleanup.
 
-        Sets up ZMQ connections, initializes trading components
-        and enters the main trading loop.
-        ``self._ownership`` is built AFTER settings resolve
-        (``_initialize_settings``) and BEFORE the trade service / outbox
-        / reconciliation loops are constructed.
+        Recovery remains ordered before intake. Each constructed coordinator
+        supports one start; external stop joins this lifetime before resources
+        are released, including when setup or recovery fails.
         """
+        await self._lifetime.run(self._start_trading, self._cleanup_owned_resources)
+
+    async def _start_trading(self) -> None:
+        """Initialize settings and recover state before starting signal intake."""
         logger.info("Starting ZMQ Signal TraderCoordinator")
         logger.info(f"Signal Topics: {self.signal_topics}")
         await self._initialize_settings()
@@ -6115,27 +6123,59 @@ class TraderCoordinator(RegisterableProcess):
         return None
 
     async def stop(self) -> None:
-        """Stop the trader coordinator and cleanup resources.
+        """Join the owning lifetime and report its cached resource-cleanup result."""
+        await self._lifetime.stop(self._cleanup_owned_resources)
 
-        Closes all ZMQ sockets and terminates contexts.
+    def _cleanup_owned_resources(self) -> BaseException | None:
+        """Attempt each local finalizer once after all child tasks have joined.
+
+        Failed contexts and wrappers remain strongly referenced. Native socket
+        close can unregister a still-open socket before raising, so retrying
+        destroy or calling term after failure could block. Cleanup failure is
+        cached by the lifetime; neither implicit retry nor shared disposal occurs.
+
+        Returns:
+            The first ordinary cleanup failure, after every finalizer was attempted.
         """
-        logger.info("Stopping ZMQ Signal TraderCoordinator")
+        failure: BaseException | None = None
+        for finalizer in (
+            self._stop_outbox,
+            self._stop_guard_scanner,
+            self._destroy_signal_context,
+            self._destroy_execution_context,
+        ):
+            try:
+                finalizer()
+            except Exception as exc:
+                failure = retain_failure(failure, exc, "resource cleanup")
+        return failure
+
+    def _stop_outbox(self) -> None:
+        """Signal the local outbox after its run task has been joined."""
         if self.outbox is not None:
             self.outbox.stop()
+            self.outbox = None
+
+    def _stop_guard_scanner(self) -> None:
+        """Signal the local scanner after its run task has been joined."""
         if self.guard_scanner is not None:
             self.guard_scanner.stop()
-        if self.signal_subscriber:
-            self.signal_subscriber.setsockopt(zmq.LINGER, 0)
-            self.signal_subscriber.close()
-            self.signal_subscriber = None
-        if self.zmq_context:
-            self.zmq_context.term()
+            self.guard_scanner = None
+
+    def _destroy_signal_context(self) -> None:
+        """Release subscribed sockets, including sockets acquired before wrapping."""
+        if self.zmq_context is not None:
+            self.zmq_context.destroy(linger=0)
             self.zmq_context = None
-        if self.execution_publisher:
-            self.execution_publisher.setsockopt(zmq.LINGER, 0)
-            self.execution_publisher.close()
-        if self.execution_context:
-            self.execution_context.term()
+            self.signal_subscriber = None
+
+    def _destroy_execution_context(self) -> None:
+        """Release publishing sockets and clear wrappers only after successful destroy."""
+        if self.execution_context is not None:
+            self.execution_context.destroy(linger=0)
+            self.execution_context = None
+            self.execution_publisher = None
+            self.msg_publisher = None
 
     def _setup_trading_components(self) -> None:
         """Initialize trading components.
@@ -6267,21 +6307,18 @@ class TraderCoordinator(RegisterableProcess):
         )
         return asyncio.create_task(self.guard_scanner.run())
 
-    def _create_reconciliation_tasks(self) -> list[asyncio.Task[None]]:
-        """Create per-exchange reconciliation background tasks.
+    def _create_reconciliation_tasks(self) -> Iterator[asyncio.Task[None]]:
+        """Yield each reconciliation task immediately to the lifecycle owner.
 
-        Reconciliation loops (one per configured exchange, querying
-        ``TradeCommand.exchange``) share the ``TradeService`` for
-        circuit-breaker state. Skipped when no SQL-backed repository
-        is wired (tests running with MagicMock repos).
+        The caller must consume incrementally into its protected worker list.
+        A later constructor failure cannot conceal tasks already yielded.
+        Non-SQL repositories create no reconciliation workers.
 
-        Returns:
-            List of asyncio tasks, one per supported exchange; empty
-            list when the repository is not a ``SQLAlchemyRepository``.
+        Yields:
+            Each newly created exchange reconciliation task in configured order.
         """
-        tasks: list[asyncio.Task[None]] = []
         if not isinstance(self.repository, SQLAlchemyRepository):
-            return tasks
+            return
         exchanges: list[str] = list(get_args(OrderExchange))
         for exchange_name in exchanges:
             recon = ReconciliationLoop(
@@ -6291,9 +6328,8 @@ class TraderCoordinator(RegisterableProcess):
                 interval_seconds=60.0,
                 ownership=self._ownership,
             )
-            tasks.append(asyncio.create_task(recon.run()))
-        logger.info(f"TraderCoordinator: reconciliation loops enabled for {exchanges}")
-        return tasks
+            yield asyncio.create_task(recon.run())
+        logger.info("TraderCoordinator: reconciliation loops enabled for {}", exchanges)
 
     async def _on_command_expired(self, cmd: TradeCommandRow) -> None:
         """Release engine intent for a command the outbox expired.
@@ -6548,33 +6584,27 @@ class TraderCoordinator(RegisterableProcess):
             await self.msg_publisher.send(topic, envelope)
 
     async def _run_trading_loop(self) -> None:
-        """Run the main trading loop.
-
-        Spawns tasks for signal listening and health monitoring.
-        Runs until cancelled.
-        """
-        tasks = [
-            asyncio.create_task(self._listen_signals()),
-            asyncio.create_task(self._signal_health_monitor()),
-            asyncio.create_task(self._funding_accrual_loop()),
-        ]
-        if self.outbox is not None:
-            tasks.append(asyncio.create_task(self.outbox.run()))
-        scanner_task = self._create_guard_scanner_task()
-        if scanner_task is not None:
-            tasks.append(scanner_task)
-        tasks.extend(self._create_reconciliation_tasks())
+        """Supervise required intake and join every incrementally acquired child."""
+        workers: list[asyncio.Task[None]] = []
+        self._lifetime.workers = workers
         try:
-            await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            logger.info("Trading loop cancelled")
-            raise
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+            workers.append(asyncio.create_task(self._listen_signals()))
+            workers.append(asyncio.create_task(self._signal_health_monitor()))
+            workers.append(asyncio.create_task(self._funding_accrual_loop()))
+            if self.outbox is not None:
+                workers.append(asyncio.create_task(self.outbox.run()))
+            scanner = self._create_guard_scanner_task()
+            if scanner is not None:
+                workers.append(scanner)
+            workers.extend(self._create_reconciliation_tasks())
+            await supervise_workers(workers)
+        except BaseException as primary:
+            self._lifetime.joining_workers = True
+            try:
+                cleanup = asyncio.create_task(cancel_and_join(workers, primary))
+                await join_cleanup(cleanup)
+            finally:
+                raise primary
 
     async def _listen_signals(self) -> None:
         """Listen for incoming signals and system events.
@@ -6617,8 +6647,9 @@ class TraderCoordinator(RegisterableProcess):
         except asyncio.CancelledError:
             logger.info("ZMQTrader: Signal listen loop cancelled")
             raise
-        except Exception as e:
-            logger.error(f"ZMQTrader: Error in signal listen loop: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error("TraderCoordinator signal listener failed: {}", type(exc).__name__)
+            raise
 
     async def _on_signal(self, signal: SignalData) -> None:
         """Process incoming trading signal.
