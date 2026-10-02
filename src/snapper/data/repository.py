@@ -1936,14 +1936,8 @@ type _PnlOrderMinimumIdentityRecord = Row[
 type _PnlOrderMinimumCapabilityRecord = Row[str, str, bool, datetime, datetime]
 type _PnlOrderMinimumInstrumentRecord = Row[str, str, str, datetime, datetime, int]
 type _PnlOrderMinimumOrphanSpecRecord = Row[str, str, datetime, datetime]
-type _InstrumentSymbolRefRecord = Row[
-    str, str, str, str, str, str | None, datetime, datetime, datetime, datetime
-]
 type _PnlFxRateRecord = Row[
     str, str | None, str, datetime, float, str, str, int, str, str, int, datetime, datetime
-]
-type _PnlCryptoUsdPlaneRecord = Row[
-    str, str | None, str, str, str, int, str, datetime, float, datetime
 ]
 
 
@@ -19756,7 +19750,7 @@ class SQLAlchemyRepository(Repository):
                     instrument_to,
                     symbol_from,
                     symbol_to,
-                ) in cast(Sequence[_InstrumentSymbolRefRecord], result.all())
+                ) in result.all()
             ]
             refs.sort(
                 key=lambda row: (
@@ -20190,7 +20184,7 @@ class SQLAlchemyRepository(Repository):
                     open_at,
                     close,
                     candle_timestamp,
-                ) in cast(Sequence[_PnlCryptoUsdPlaneRecord], result.all())
+                ) in result.all()
             ]
             rows.sort(
                 key=lambda row: (
