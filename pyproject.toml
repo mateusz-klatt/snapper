@@ -52,7 +52,7 @@ statsmodels = "^0.15.0"
 python-socks = {extras = ["asyncio"], version = "^3.1.1"}
 PySocks = "^1.7.1"
 pyroute2 = "^0.9.6"
-websockets = "^17.1"
+websockets = "^17.2"
 
 [tool.poetry.group.cloud.dependencies]
 asyncpg = "^0.31.0"
