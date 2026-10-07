@@ -3454,21 +3454,21 @@ test = ["flake8", "matplotlib", "nbdime", "nbval", "notebook", "pytest"]
 
 [[package]]
 name = "mcp"
-version = "2.2.0"
+version = "2.3.0"
 description = "Model Context Protocol SDK"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "mcp-2.2.0-py3-none-any.whl", hash = "sha256:bde982589473a060ae145e3406e9a5333fe538c97229ba841f5a7f92be004f81"},
-    {file = "mcp-2.2.0.tar.gz", hash = "sha256:2dc37ecb1974becdcebdbf7561e7c15a07dbbf20ba21ba16c3593b3038b3afbd"},
+    {file = "mcp-2.3.0-py3-none-any.whl", hash = "sha256:dd0c44c089d16453e8ae31a3877a0054d7a2314caaa81f5e0541b9b1734b2377"},
+    {file = "mcp-2.3.0.tar.gz", hash = "sha256:8b147a50441cf059dc88c684e0aeed3687f0aa0f39c6cde7b90330effd2b34d8"},
 ]
 
 [package.dependencies]
 anyio = {version = ">=4.10", markers = "python_version >= \"3.14\""}
-httpx2 = ">=2.5.0"
+httpx2 = ">=2.10.0"
 jsonschema = ">=4.20.0"
-mcp-types = "2.2.0"
+mcp-types = "2.3.0"
 opentelemetry-api = ">=1.28.0"
 pydantic = ">=2.12.0"
 pyjwt = {version = ">=2.10.1", extras = ["crypto"]}
@@ -3486,14 +3486,14 @@ rich = ["rich (>=13.9.4)"]
 
 [[package]]
 name = "mcp-types"
-version = "2.2.0"
+version = "2.3.0"
 description = "Model Context Protocol wire types"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "mcp_types-2.2.0-py3-none-any.whl", hash = "sha256:ea476b73ee86709ab5abc9452385ed36cc05907e582355622e294595c9a04f13"},
-    {file = "mcp_types-2.2.0.tar.gz", hash = "sha256:d3ed53703ddd10d9c6399f29d322bb66f3f67ab41348ac8556ba23e07fedefad"},
+    {file = "mcp_types-2.3.0-py3-none-any.whl", hash = "sha256:968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d"},
+    {file = "mcp_types-2.3.0.tar.gz", hash = "sha256:d1e46549edb35ee19a94940fcee6d1addd7e589ab7ea92dda83f5d84781fc362"},
 ]
 
 [package.dependencies]
@@ -7099,7 +7099,7 @@ description = "Fast implementation of asyncio event loop on top of libuv"
 optional = false
 python-versions = ">=3.8.1"
 groups = ["main"]
-markers = "sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\" or platform_system != \"Windows\" and implementation_name == \"cpython\""
+markers = "platform_system != \"Windows\" and implementation_name == \"cpython\" or sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\""
 files = [
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:ef6f0d4cc8a9fa1f6a910230cd53545d9a14479311e87e3cb225495952eb672c"},
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7cd375a12b71d33d46af85a3343b35d98e8116134ba404bd657b3b1d15988792"},
@@ -7937,4 +7937,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "34a27ca663c620b5e85c770cfc5ceb5c824fe87ce94c67986bcd837da51847b0"
+content-hash = "9df4a484ba0644d798c828db15c62efa24bc2eb774656da1e85c5cf9a33be860"
