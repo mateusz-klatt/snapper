@@ -1,5 +1,10 @@
 # Snapper
 
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mateusz-klatt_snapper)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper&metric=bugs)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper&metric=vulnerabilities)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=mateusz-klatt_snapper&metric=code_smells)](https://sonarcloud.io/summary/overall?id=mateusz-klatt_snapper)
+
 Trading platform with market data collection, trade runtime, and backtester.
 Supports Kraken (WebSocket; spot + futures + equities), Walutomat
 (REST polling), and Polygon.io (REST) market data.
