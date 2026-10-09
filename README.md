@@ -9,6 +9,13 @@ Trading platform with market data collection, trade runtime, and backtester.
 Supports Kraken (WebSocket; spot + futures + equities), Walutomat
 (REST polling), and Polygon.io (REST) market data.
 
+<a href="https://snapper.ch/">
+    <img src="docs/assets/snapper-showcase.gif" alt="Snapper console tour: market data, linked instruments, historical navigation, and configuration" width="480" style="max-width: 100%; height: auto;">
+</a>
+
+A short tour of the [Snapper console](https://snapper.ch/): live market data,
+linked instruments, historical navigation, and configuration.
+
 ## Quick Steps
 
 From a fresh checkout, initialize the public submodules first. The private
