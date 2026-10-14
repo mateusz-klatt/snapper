@@ -60,7 +60,7 @@ psycopg2-binary = "^2.9.13"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.16.10"
-black = {extras = ["jupyter"], version = "^26.10.0"}
+black = {extras = ["jupyter"], version = "^26.10.1"}
 isort = "^9.0.2"
 mypy = "^2.4.0"
 types-PyYAML = ">=6.0.12.20260906"
