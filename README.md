@@ -570,12 +570,18 @@ The public MIT [Android client](https://github.com/mateusz-klatt/snapper-android
 application in the `android/` submodule. Open that directory in Android Studio
 or use `make android-check` and `make android-build` with JDK 17 and Android SDK
 37.0 / Build Tools 36.0.0 installed. Android build, unit tests, lint and debug
-APK artifacts also run in the client's own GitHub Actions workflow.
+APK artifacts also run in the client's own GitHub Actions workflow. Its
+[SonarCloud analysis](https://sonarcloud.io/project/overview?id=mateusz-klatt_snapper-android)
+imports combined JVM/device coverage and checks the quality gate in that workflow.
 
 Use `http://10.0.2.2:8000` in the debug emulator, or an HTTPS origin for a
 self-hosted backend. The Android README includes USB/ADB instructions for a
 physical phone. Release builds require HTTPS. The backend's existing APNs
 device registration does not yet accept Android FCM tokens.
+
+Remembered Android sessions require Android 11 or newer, a secure screen lock,
+and device authentication within the last five minutes. Otherwise, credentials
+stay in memory and restarting the app requires signing in again.
 
 ### Deterministic P&L browser UAT
 

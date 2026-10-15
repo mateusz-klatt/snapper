@@ -633,7 +633,7 @@ used locally in additional build and smoke stages:
 
 SonarCloud analyzes checked-out backend code, data, migrations, and tooling without
 coverage, duplication, or issue suppressions. The parent project excludes
-`frontend/`, `integrations/snapper-mcp/`, and `ios/` because those public submodules
+`frontend/`, `integrations/snapper-mcp/`, `ios/`, and `android/` because those public submodules
 have independent SonarCloud projects. It also carries one temporary exact-file
 analyzer exception for `src/snapper/data/repository.py`: the 35,000-line module
 exhausts the scanner JVM while the rest of the project remains analyzable. Local and
@@ -652,10 +652,14 @@ a CI credential with read access to that repository or a separate private
 SonarCloud workflow/project; the root configuration cannot compensate for an absent
 checkout.
 
-The `android/` submodule is also not initialized by the backend workflow. Its
+The `android/` submodule is initialized so the parent gate can validate its
+Sonar configuration alongside the other public projects. Its
 independent [Android workflow](https://github.com/mateusz-klatt/snapper-android/actions/workflows/ci.yml)
-builds the APK, runs JVM tests and lint, and executes Compose interaction tests
-on an Android 17 emulator. Android is not currently a separate SonarCloud project.
+builds the APK, runs JVM tests and lint, executes Compose interaction tests
+on an Android 17 emulator, and merges JVM/device coverage into one JaCoCo XML
+report. Its full-source [SonarCloud project](https://sonarcloud.io/project/overview?id=mateusz-klatt_snapper-android)
+imports that report and blocks CI on its quality gate. The backend gate does
+not require an Android SDK.
 
 For debugging a failing `make check-all` locally, the equivalent steps are:
 

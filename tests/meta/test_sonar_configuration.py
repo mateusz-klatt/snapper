@@ -31,9 +31,16 @@ _PROJECT_SCOPES = (
         _REPO_ROOT / "ios",
         "SnapperTests/**,SnapperUITests/**",
     ),
+    (
+        Path("android/sonar-project.properties"),
+        _REPO_ROOT / "android",
+        "app/src/test/**,app/src/androidTest/**",
+    ),
 )
 _PARENT_CONFIG_PATH = Path("sonar-project.properties")
-_PARENT_SUBMODULE_EXCLUSIONS = frozenset({"frontend/**", "integrations/snapper-mcp/**", "ios/**"})
+_PARENT_SUBMODULE_EXCLUSIONS = frozenset(
+    {"frontend/**", "integrations/snapper-mcp/**", "ios/**", "android/**"}
+)
 _PARENT_TEMPORARY_SOURCE_EXCLUSIONS = frozenset({"src/snapper/data/repository.py"})
 _PARENT_EXCLUSIONS = _PARENT_SUBMODULE_EXCLUSIONS | _PARENT_TEMPORARY_SOURCE_EXCLUSIONS
 _PARENT_OWNED_INTEGRATION_WITNESS = "integrations/snapper-delegate/src/snapper_delegate/runner.py"
@@ -42,12 +49,14 @@ _SONAR_WORKFLOWS = (
     Path("frontend/.github/workflows/sonarcloud.yml"),
     Path("integrations/snapper-mcp/.github/workflows/sonarcloud.yml"),
     Path("ios/.github/workflows/sonarcloud.yml"),
+    Path("android/.github/workflows/ci.yml"),
 )
 _WORKFLOW_PROJECT_ROOTS = (
     _REPO_ROOT,
     _REPO_ROOT / "frontend",
     _REPO_ROOT / "integrations" / "snapper-mcp",
     _REPO_ROOT / "ios",
+    _REPO_ROOT / "android",
 )
 _ALL_WORKFLOWS = tuple(
     workflow_path.relative_to(_REPO_ROOT)
@@ -59,8 +68,8 @@ _QUALITY_GATE_ACTION_PREFIX = "SonarSource/sonarqube-quality-gate-action@"
 _PINNED_QUALITY_GATE_ACTION = (
     "SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa"
 )
-"""v1.2.1. Bumping this is a deliberate two-step: move all four workflows, then
-move this pin. The test exists so the four cannot drift apart silently, which
+"""v1.2.1. Bumping this is a deliberate two-step: move all project workflows, then
+move this pin. The test exists so their versions cannot drift apart silently, which
 means a refresh that touches only the workflows is SUPPOSED to fail here."""
 _PINNED_ACTION_PATTERN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 _UNTRUSTED_SHELL_CONTEXT_PATTERN = re.compile(
@@ -70,7 +79,7 @@ _UNTRUSTED_SHELL_CONTEXT_PATTERN = re.compile(
 _NPM_CI_PATTERN = re.compile(r"\bnpm\s+ci\b")
 _DOCUMENT_DIRECTORIES = frozenset({"docs", "documentation"})
 _TEST_DIRECTORIES = frozenset(
-    {"__tests__", "e2e", "snappertests", "snapperuitests", "test", "tests"}
+    {"__tests__", "androidtest", "e2e", "snappertests", "snapperuitests", "test", "tests"}
 )
 _CLI_PROPERTY_PATTERN = re.compile(
     r"-D\s*[\"']?(?P<key>sonar\.[A-Za-z0-9_.-]+)\s*=",
@@ -192,7 +201,7 @@ def test_sonar_configs_analyze_the_full_checked_out_scope(
 ) -> None:
     """Require the complete declared scope and only approved exact exclusions.
 
-    Given: one of the four active Snapper Sonar project configurations,
+    Given: one of the active Snapper Sonar project configurations,
     When: its source, test, and suppressive properties are inspected,
     Then: the complete checked-out project is analyzed with tests classified explicitly,
         and only the parent carries the explicitly approved exact exclusions.
@@ -299,7 +308,7 @@ def test_parent_sonar_scan_has_explicit_heap_for_declared_source_analysis() -> N
 def test_full_scope_workflows_use_hardened_execution(relative_path: Path) -> None:
     """Keep workflow findings out of every full-source Sonar project.
 
-    Given: A tracked workflow analyzed by one of the four Sonar projects,
+    Given: A tracked workflow analyzed by one of the Sonar projects,
     When: Its jobs, actions, and shell commands are inspected,
     Then: Permissions are job-local, actions are immutable, and untrusted values use env.
     """
