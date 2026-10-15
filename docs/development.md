@@ -76,7 +76,7 @@ make worktree NAME=my-task
 This creates `../snapper-wt-<NAME>` on a fresh `wt/<NAME>` branch cut
 from `master` and prepares the full verification harness:
 
-- initializes the `frontend`, `integrations/snapper-mcp`, `ios`, and
+- initializes the `frontend`, `integrations/snapper-mcp`, `ios`, `android`, and
     `proprietary` submodules, because missing submodules manufacture
     failures that look inherited but are environmental
 - writes a minimal `.env` pointing `DB_URL` at the isolated SQLite test
@@ -99,8 +99,9 @@ git worktree remove --force ../snapper-wt-<NAME>
 git branch -D wt/<NAME>
 ```
 
-For native Android work in a prepared worktree, also run
-`git submodule update --init android` there, then run the client's own checks.
+For native Android work in a prepared worktree, install its Android toolchain
+and run the client's own checks. The parent verification gate needs only the
+initialized checkout for scanner-policy checks.
 
 ## Quality Gates
 

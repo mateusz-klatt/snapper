@@ -232,7 +232,7 @@ ifeq ($(OS),Windows_NT)
 else
 	@test -n "$(NAME)" || { echo "Usage: make worktree NAME=<slug>"; exit 1; }
 	git worktree add -b wt/$(NAME) $(WORKTREE_DIR) master
-	git -C $(WORKTREE_DIR) submodule update --init frontend integrations/snapper-mcp ios proprietary
+	git -C $(WORKTREE_DIR) submodule update --init frontend integrations/snapper-mcp ios android proprietary
 	printf 'DB_URL=sqlite+aiosqlite:///./data/dev.db\n' > $(WORKTREE_DIR)/.env
 	chmod 644 $(WORKTREE_DIR)/.env
 	cd $(WORKTREE_DIR) && PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring $(MAKE) setup
