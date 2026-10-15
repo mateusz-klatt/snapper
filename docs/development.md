@@ -32,6 +32,12 @@ Android Studio, or run `make android-check` with JDK 17 and Android SDK Platform
 for backend configuration, ADB setup and APK installation. The backend's
 `make check-all` does not require an Android SDK.
 
+The separate manual [Android release workflow](https://github.com/mateusz-klatt/snapper-android/blob/master/RELEASING.md)
+builds an unsigned bundle without signing credentials, or verifies a signed
+bundle against the configured upload-certificate pin. Google Play publication
+requires separate account setup and credentials; both Play modes require
+successful native CI and secret scanning on `master` for the exact commit.
+
 ```bash
 # Install system dependencies (Linux/macOS)
 make system-deps

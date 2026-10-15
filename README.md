@@ -87,9 +87,9 @@ or rotate after first login via
 - **Web dashboard** — FastAPI + React with real-time WebSocket
 - **Native mobile clients** — [iOS with SwiftUI](https://github.com/mateusz-klatt/snapper-ios)
     and [Android with Kotlin and Jetpack Compose](https://github.com/mateusz-klatt/snapper-android),
-    both using the same backend. The initial Android client provides login,
-    wallet-scoped snapshots, alerts and candle charts; its README tracks the
-    remaining iOS features.
+    both using the same backend. The Android client provides login,
+    wallet-scoped snapshots, alerts, candle charts, reviewed manual order entry
+    and confirmed cancellation; its README tracks the remaining iOS features.
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
 
@@ -573,6 +573,11 @@ or use `make android-check` and `make android-build` with JDK 17 and Android SDK
 APK artifacts also run in the client's own GitHub Actions workflow. Its
 [SonarCloud analysis](https://sonarcloud.io/project/overview?id=mateusz-klatt_snapper-android)
 imports combined JVM/device coverage and checks the quality gate in that workflow.
+
+The [Android release guide](https://github.com/mateusz-klatt/snapper-android/blob/master/RELEASING.md)
+describes the manual workflow for unsigned bundles or signed bundles verified
+against an upload-certificate pin. Google Play publication requires separate
+account setup and credentials, plus successful native CI for the exact commit.
 
 Use `http://10.0.2.2:8000` in the debug emulator, or an HTTPS origin for a
 self-hosted backend. The Android README includes USB/ADB instructions for a
