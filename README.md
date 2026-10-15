@@ -25,7 +25,7 @@ optional and require separate repository access.
 ```bash
 # One-time bootstrap (HTTPS also works without GitHub SSH credentials).
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios
+  submodule update --init frontend integrations/snapper-mcp ios android
 make system-deps
 make setup
 cp .env.example .env
@@ -85,6 +85,11 @@ or rotate after first login via
   `sequence_id` for gap detection. Control table (always-on) and telemetry
   table (toggleable) record all commands and operational events
 - **Web dashboard** — FastAPI + React with real-time WebSocket
+- **Native mobile clients** — [iOS with SwiftUI](https://github.com/mateusz-klatt/snapper-ios)
+    and [Android with Kotlin and Jetpack Compose](https://github.com/mateusz-klatt/snapper-android),
+    both using the same backend. The initial Android client provides login,
+    wallet-scoped snapshots, alerts and candle charts; its README tracks the
+    remaining iOS features.
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
 
@@ -134,7 +139,7 @@ set and the token-downscoping rules.
 git clone https://github.com/mateusz-klatt/snapper.git
 cd snapper
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios
+  submodule update --init frontend integrations/snapper-mcp ios android
 
 # Install system dependencies
 make system-deps
@@ -558,6 +563,19 @@ frontend OpenAPI/WebSocket/Zod/entity/permission types,
 `make ios-gen-types` refreshes Swift models, and `make ts-bridge` (or
 `make bridge-regen`) refreshes the opt-in snapper-mcp bridge wire
 contract.
+
+### Native Android client
+
+The public MIT [Android client](https://github.com/mateusz-klatt/snapper-android#readme) is a separate native
+application in the `android/` submodule. Open that directory in Android Studio
+or use `make android-check` and `make android-build` with JDK 17 and Android SDK
+37.0 / Build Tools 36.0.0 installed. Android build, unit tests, lint and debug
+APK artifacts also run in the client's own GitHub Actions workflow.
+
+Use `http://10.0.2.2:8000` in the debug emulator, or an HTTPS origin for a
+self-hosted backend. The Android README includes USB/ADB instructions for a
+physical phone. Release builds require HTTPS. The backend's existing APNs
+device registration does not yet accept Android FCM tokens.
 
 ### Deterministic P&L browser UAT
 

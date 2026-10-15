@@ -20,11 +20,17 @@ full gate; this HTTPS override also works without GitHub SSH credentials:
 
 ```bash
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios
+  submodule update --init frontend integrations/snapper-mcp ios android
 ```
 
 The private `proprietary` and `data/polygon` submodules require separate access
 and are optional for the public checkout.
+
+The native Android client has its own build and device tests. Open `android/` in
+Android Studio, or run `make android-check` with JDK 17 and Android SDK Platform
+37.0 / Build Tools 36.0.0. See the [Android README](https://github.com/mateusz-klatt/snapper-android#readme)
+for backend configuration, ADB setup and APK installation. The backend's
+`make check-all` does not require an Android SDK.
 
 ```bash
 # Install system dependencies (Linux/macOS)
@@ -92,6 +98,9 @@ a worktree down with:
 git worktree remove --force ../snapper-wt-<NAME>
 git branch -D wt/<NAME>
 ```
+
+For native Android work in a prepared worktree, also run
+`git submodule update --init android` there, then run the client's own checks.
 
 ## Quality Gates
 
@@ -642,6 +651,11 @@ so it is not present in the current SonarCloud analysis. Covering it requires ei
 a CI credential with read access to that repository or a separate private
 SonarCloud workflow/project; the root configuration cannot compensate for an absent
 checkout.
+
+The `android/` submodule is also not initialized by the backend workflow. Its
+independent [Android workflow](https://github.com/mateusz-klatt/snapper-android/actions/workflows/ci.yml)
+builds the APK, runs JVM tests and lint, and executes Compose interaction tests
+on an Android 17 emulator. Android is not currently a separate SonarCloud project.
 
 For debugging a failing `make check-all` locally, the equivalent steps are:
 

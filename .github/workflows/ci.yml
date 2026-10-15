@@ -94,3 +94,6 @@ jobs:
   # iOS validation lives in the snapper-ios submodule's own CI.
   # See https://github.com/mateusz-klatt/snapper-ios/actions for build / test /
   # SonarCloud / gitleaks runs against the public repo.
+  # Android build, tests, lint and APK artifacts use snapper-android's own CI.
+  # See https://github.com/mateusz-klatt/snapper-android/actions.
+  # Its checkout is not needed by the backend gate or backend Sonar analysis.
