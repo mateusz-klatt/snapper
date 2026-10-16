@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -2963,3 +2964,44 @@ class TestConcurrencyInvariants:
 
         queued_after = await repo.list_queued_deliveries_all()
         assert queued_after == []
+
+
+@pytest.mark.asyncio
+async def test_device_retry_warning_redacts_token_and_database_error_payload(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Exhaust real upsert retries without logging token or SQL exception parameters."""
+    token = "distinctive-fake-push-token-never-log"
+    payload = "sensitive-simulated-sql-error-payload"
+    error = IntegrityError(
+        "INSERT notification_devices", {"device_token": token}, RuntimeError(payload)
+    )
+    row = NotificationDeviceUpsertRow(
+        user_public_id="log-test-user",
+        device_token=token,
+        device_id="log-test-device",
+        env="sandbox",
+        registered_at=_ts(),
+        session_id="log-test-session",
+        sequence_id=1,
+        timestamp=_ts(),
+    )
+    output = StringIO()
+    sink = repository_module.logger.add(output, format="{message}", level="WARNING")
+    try:
+        with (
+            patch.object(AsyncSession, "commit", new=AsyncMock(side_effect=error)) as commit,
+            pytest.raises(IntegrityError) as raised,
+        ):
+            await repo.upsert_notification_device(row)
+        assert raised.value is error
+        assert commit.await_count == 20
+        warning = output.getvalue()
+        assert "upsert_notification_device: sustained contention exhausted" in warning
+        assert "20-attempt retry budget" in warning
+        assert "IntegrityError" in warning
+        assert token not in warning
+        assert payload not in warning
+        assert "INSERT notification_devices" not in warning
+    finally:
+        repository_module.logger.remove(sink)

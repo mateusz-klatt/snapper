@@ -32551,10 +32551,9 @@ class SQLAlchemyRepository(Repository):
                     continue
         logger.warning(
             "upsert_notification_device: sustained contention exhausted"
-            " {max_attempts}-attempt retry budget on device_token={tok};"
+            " {max_attempts}-attempt retry budget;"
             " raising last_error={err}",
             max_attempts=max_attempts,
-            tok=row["device_token"],
             err=type(last_error).__name__,
         )
         raise last_error
