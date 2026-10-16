@@ -87,9 +87,14 @@ or rotate after first login via
 - **Web dashboard** — FastAPI + React with real-time WebSocket
 - **Native mobile clients** — [iOS with SwiftUI](https://github.com/mateusz-klatt/snapper-ios)
     and [Android with Kotlin and Jetpack Compose](https://github.com/mateusz-klatt/snapper-android),
-    both using the same backend. The Android client provides login,
-    wallet-scoped snapshots, alerts, candle charts, reviewed manual order entry
-    and confirmed cancellation; its README tracks the remaining iOS features.
+    both using the same backend. The Android client provides wallet-scoped
+    positions, balances and P&L, signals with CSV export, market discovery,
+    live candle charts and related instruments, orders and fills, alerts, desks,
+    account settings and system inventories. Manual orders, position actions,
+    process controls and delegated AI-review decisions require permission checks
+    and confirmation. Country formatting and financial colors are independent
+    of the interface language. Its README
+    tracks the remaining iOS features and partial translations in 45 languages.
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
 
