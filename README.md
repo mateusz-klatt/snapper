@@ -92,8 +92,8 @@ or rotate after first login via
     live candle charts and related instruments, orders and fills, alerts, desks,
     account settings and system inventories. Manual orders, position actions,
     process controls and delegated AI-review decisions require permission checks
-    and confirmation. Country formatting and financial colors are independent
-    of the interface language. Its README
+    and confirmation. Interface language synchronizes with the backend account;
+    country formatting and financial colors remain independent. Its README
     tracks the remaining iOS features and partial translations in 45 languages.
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
