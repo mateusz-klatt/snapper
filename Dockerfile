@@ -2,7 +2,7 @@ ARG CADDY_TAG=2-alpine
 FROM caddy:${CADDY_TAG} AS caddy-source
 
 FROM node:26-alpine AS ui-build
-ARG COREPACK_VERSION=0.35.0
+ARG COREPACK_VERSION=0.36.0
 WORKDIR /app
 
 RUN (corepack --version 2>/dev/null || \
@@ -17,8 +17,8 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY frontend/ /app/frontend/
 RUN pnpm build
 
-FROM python:3.15-slim AS py-build
-ARG POETRY_VERSION=2.4.1
+FROM python:3.14-slim AS py-build
+ARG POETRY_VERSION=2.5.1
 
 ENV PIP_NO_CACHE_DIR=1
 WORKDIR /app
@@ -48,7 +48,7 @@ RUN python -m venv /opt/poetry \
     --no-compile \
     snapper==0.1.0
 
-FROM python:3.15-slim AS runtime
+FROM python:3.14-slim AS runtime
 LABEL org.opencontainers.image.title="snapper"
 LABEL org.opencontainers.image.description="snapper — market data + execution platform. Modes selected at runtime via the snapper CLI: 'snapper server' (monolith) or 'snapper egress' (sidecar)."
 
