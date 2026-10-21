@@ -17,7 +17,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY frontend/ /app/frontend/
 RUN pnpm build
 
-FROM python:3.14-slim AS py-build
+FROM python:3.15-slim AS py-build
 ARG POETRY_VERSION=2.4.1
 
 ENV PIP_NO_CACHE_DIR=1
@@ -48,7 +48,7 @@ RUN python -m venv /opt/poetry \
     --no-compile \
     snapper==0.1.0
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 LABEL org.opencontainers.image.title="snapper"
 LABEL org.opencontainers.image.description="snapper — market data + execution platform. Modes selected at runtime via the snapper CLI: 'snapper server' (monolith) or 'snapper egress' (sidecar)."
 
