@@ -19,4 +19,5 @@ snapper-delegate/src/snapper_delegate/**/__pycache__/
 !snapper-mcp/tsup.config.ts
 !snapper-mcp/eslint.config.js
 !snapper-mcp/LICENSE
+!snapper-mcp/NOTICE
 !snapper-agent-console/snapper-mcp-wrapper.sh

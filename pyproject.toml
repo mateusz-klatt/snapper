@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Kraken data collector, trading engine, and backtester"
 readme = "README.md"
 authors = ["Mateusz Klatt"]
-license = "MIT"
+license = "Apache-2.0"
 keywords = ["trading", "kraken", "backtest", "rsi", "macd", "websocket"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
 ]

@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml poetry.lock README.md ./
+COPY pyproject.toml poetry.lock README.md LICENSE NOTICE ./
 COPY vendor/ccxt/ ./vendor/ccxt/
 COPY src/ ./src/
 COPY *proprietary/data/seed/ ./src/snapper/data/seed/
@@ -72,6 +72,7 @@ ARG UID=888
 RUN adduser --disabled-password --gecos '' --no-create-home --uid "$UID" snapper
 
 COPY --from=py-build /opt/appenv /opt/appenv
+COPY LICENSE NOTICE ./
 
 COPY --from=ui-build /app/frontend/dist ./frontend/dist
 COPY --from=ui-build /app/frontend/dist /srv/dist

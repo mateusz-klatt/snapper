@@ -571,7 +571,7 @@ contract.
 
 ### Native Android client
 
-The public MIT [Android client](https://github.com/mateusz-klatt/snapper-android#readme) is a separate native
+The public Apache-2.0 [Android client](https://github.com/mateusz-klatt/snapper-android#readme) is a separate native
 application in the `android/` submodule. Open that directory in Android Studio
 or use `make android-check` and `make android-build` with JDK 17 and Android SDK
 37.0 / Build Tools 36.0.0 installed. Android build, unit tests, lint and debug
@@ -770,4 +770,11 @@ commit there before updating the parent repository's frontend gitlink.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) file.
+Original code and documentation are licensed under the
+[Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
+Third-party components, including the vendored CCXT wheel, retain their own
+licenses. Each submodule has its own licensing terms; cached market data is not
+covered by this license.
+
+Revisions through the `last-mit` tag were released under MIT. Subsequent revisions
+use Apache-2.0 for original work; earlier MIT grants remain valid.

@@ -99,7 +99,7 @@ and `licenses/PROVENANCE.md`):
 
 - **Redistribution permitted with notices**: Codex CLI (Apache-2.0, and its
   upstream NOTICE travels with it in `licenses/codex-cli-NOTICE`), Node.js
-  (MIT), `snapper-mcp` (MIT, LICENSE at `/usr/local/lib/snapper-mcp/LICENSE`),
+  (MIT), `snapper-mcp` (Apache-2.0, LICENSE and NOTICE at `/usr/local/lib/snapper-mcp/`),
   and **Kimi Code CLI** (MIT) — with an explicit reservation, below.
 - **Kimi Code CLI, stated precisely**: its *code* grant is confirmed MIT
   (`MoonshotAI/kimi-code` @ tag `@moonshot-ai/kimi-code@0.38.0`, text vendored

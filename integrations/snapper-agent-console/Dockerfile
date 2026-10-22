@@ -778,6 +778,7 @@ COPY --from=mcp-build /build/snapper-mcp/dist /usr/local/lib/snapper-mcp/dist
 COPY --from=mcp-build /build/snapper-mcp/node_modules /usr/local/lib/snapper-mcp/node_modules
 COPY --from=mcp-build /build/snapper-mcp/package.json /usr/local/lib/snapper-mcp/package.json
 COPY snapper-mcp/LICENSE /usr/local/lib/snapper-mcp/LICENSE
+COPY snapper-mcp/NOTICE /usr/local/lib/snapper-mcp/NOTICE
 # License texts are vendored in the repo so this layer needs no network and
 # can never substitute a synthetic fallback for a fetch failure.
 # licenses/PROVENANCE.md records the pinned source ref and SHA-256 of every
