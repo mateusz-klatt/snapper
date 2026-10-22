@@ -14,7 +14,7 @@ _PROJECT_SCOPES = (
     (
         Path("sonar-project.properties"),
         _REPO_ROOT,
-        "tests/**,integrations/snapper-delegate/tests/**",
+        "tests/**",
     ),
     (
         Path("frontend/sonar-project.properties"),
@@ -25,6 +25,11 @@ _PROJECT_SCOPES = (
         Path("integrations/snapper-mcp/sonar-project.properties"),
         _REPO_ROOT / "integrations" / "snapper-mcp",
         "test/**",
+    ),
+    (
+        Path("integrations/snapper-delegate/sonar-project.properties"),
+        _REPO_ROOT / "integrations" / "snapper-delegate",
+        "tests/**",
     ),
     (
         Path("ios/sonar-project.properties"),
@@ -39,23 +44,28 @@ _PROJECT_SCOPES = (
 )
 _PARENT_CONFIG_PATH = Path("sonar-project.properties")
 _PARENT_SUBMODULE_EXCLUSIONS = frozenset(
-    {"frontend/**", "integrations/snapper-mcp/**", "ios/**", "android/**"}
+    {
+        "frontend/**",
+        "integrations/snapper-mcp/**",
+        "integrations/snapper-delegate/**",
+        "ios/**",
+        "android/**",
+    }
 )
 _PARENT_TEMPORARY_SOURCE_EXCLUSIONS = frozenset({"src/snapper/data/repository.py"})
 _PARENT_EXCLUSIONS = _PARENT_SUBMODULE_EXCLUSIONS | _PARENT_TEMPORARY_SOURCE_EXCLUSIONS
-_PARENT_ANALYZED_INTEGRATION_WITNESS = (
+_INDEPENDENT_DELEGATE_SOURCE_WITNESS = (
     "integrations/snapper-delegate/src/snapper_delegate/runner.py"
 )
 _SONAR_WORKFLOWS = (
     Path(".github/workflows/ci.yml"),
     Path("frontend/.github/workflows/sonarcloud.yml"),
     Path("integrations/snapper-mcp/.github/workflows/sonarcloud.yml"),
+    Path("integrations/snapper-delegate/.github/workflows/ci.yml"),
     Path("ios/.github/workflows/sonarcloud.yml"),
     Path("android/.github/workflows/ci.yml"),
 )
-_TRACKED_TEXT_PROJECT_ROOTS = tuple(project_root for _, project_root, _ in _PROJECT_SCOPES) + (
-    _REPO_ROOT / "integrations" / "snapper-delegate",
-)
+_TRACKED_TEXT_PROJECT_ROOTS = tuple(project_root for _, project_root, _ in _PROJECT_SCOPES)
 _WORKFLOW_PROJECT_ROOTS = _TRACKED_TEXT_PROJECT_ROOTS
 _ALL_WORKFLOWS = tuple(
     workflow_path.relative_to(_REPO_ROOT)
@@ -218,12 +228,12 @@ def test_sonar_configs_analyze_the_full_checked_out_scope(
         )
         assert exclusions == _PARENT_EXCLUSIONS, (
             "only independently analyzed projects and the temporary oversized repository "
-            "module may be excluded; integrations/snapper-delegate must remain in parent analysis"
+            "module may be excluded; each public submodule must have independent analysis"
         )
-        assert (_REPO_ROOT / _PARENT_ANALYZED_INTEGRATION_WITNESS).is_file()
+        assert (_REPO_ROOT / _INDEPENDENT_DELEGATE_SOURCE_WITNESS).is_file()
         assert (_REPO_ROOT / next(iter(_PARENT_TEMPORARY_SOURCE_EXCLUSIONS))).is_file()
-        assert not any(
-            fnmatchcase(_PARENT_ANALYZED_INTEGRATION_WITNESS, pattern) for pattern in exclusions
+        assert any(
+            fnmatchcase(_INDEPENDENT_DELEGATE_SOURCE_WITNESS, pattern) for pattern in exclusions
         )
         suppressions.remove("sonar.exclusions")
     assert suppressions == set()

@@ -646,16 +646,20 @@ used locally in additional build and smoke stages:
 
 SonarCloud analyzes checked-out backend code, data, migrations, and tooling without
 coverage, duplication, or issue suppressions. The parent project excludes
-`frontend/`, `integrations/snapper-mcp/`, `ios/`, and `android/` because those public submodules
+`frontend/`, `integrations/snapper-mcp/`, `integrations/snapper-delegate/`,
+`ios/`, and `android/` because those public submodules
 have independent SonarCloud projects. It also carries one temporary exact-file
 analyzer exception for `src/snapper/data/repository.py`: the 35,000-line module
 exhausts the scanner JVM while the rest of the project remains analyzable. Local and
 CI lint, type, test, and coverage gates still include it. The exception must be
 removed after the repository is split into bounded domain modules. The
-`integrations/snapper-delegate/` submodule remains in the parent backend analysis,
-lint, type, test, and coverage gates. Its tracked source and workflows are checked
-separately across the Git boundary so the submodule conversion preserves the
-policy scans. Each independent project likewise suppresses no owned sources or findings.
+`integrations/snapper-delegate/` submodule has its own SonarCloud project and
+CI workflow: standalone unit tests produce line and branch coverage before the
+scanner and blocking Quality Gate run. Its optional managed-process adapter is
+covered by integration tests in the parent backend. The parent local gate retains
+delegate lint, type, test, and complete integration coverage checks. Its tracked
+source and workflows remain checked separately across the Git boundary. Each
+independent project likewise suppresses no owned sources or findings.
 `tests/meta/test_sonar_configuration.py` pins this boundary and also rejects
 equivalent workflow, command-line, and inline overrides. Every project workflow
 waits for the pin-versioned SonarCloud Quality Gate after its scan, so a failed gate
