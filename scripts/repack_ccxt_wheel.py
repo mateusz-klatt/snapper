@@ -1,4 +1,4 @@
-"""Repackage verified CCXT 4.5.84 metadata with urllib3 and multidict security updates.
+"""Repackage verified CCXT 4.5.84 metadata with urllib3, multidict and certifi security updates.
 
 Download the exact upstream wheel from ``UPSTREAM_URL`` separately and supply its
 bytes on standard input. This command checks its fixed SHA-256 before preserving
@@ -25,17 +25,18 @@ UPSTREAM_URL: Final = (
 )
 UPSTREAM_SHA256: Final = "b920f7d92c0fb62873a900c96ee2cfb76ec6ffeaa7343bf5be0cc01b9b2e9617"
 SOURCE_DIST_INFO: Final = "ccxt-4.5.84.dist-info/"
-TARGET_DIST_INFO: Final = "ccxt-4.5.84+snapper.2.dist-info/"
-WHEEL_NAME: Final = "ccxt-4.5.84+snapper.2-py3-none-any.whl"
+TARGET_DIST_INFO: Final = "ccxt-4.5.84+snapper.3.dist-info/"
+WHEEL_NAME: Final = "ccxt-4.5.84+snapper.3-py3-none-any.whl"
 OUTPUT_DIRECTORY: Final = Path(__file__).resolve().parents[1] / "vendor" / "ccxt"
 
 
 def _patch_metadata(metadata: bytes) -> bytes:
     """Replace exactly the expected version and patched dependency headers."""
     replacements = (
-        (b"Version: 4.5.84\n", b"Version: 4.5.84+snapper.2\n"),
+        (b"Version: 4.5.84\n", b"Version: 4.5.84+snapper.3\n"),
         (b"Requires-Dist: urllib3==2.7.0\n", b"Requires-Dist: urllib3==2.8.0\n"),
         (b"Requires-Dist: multidict==6.7.1\n", b"Requires-Dist: multidict==6.9.1\n"),
+        (b"Requires-Dist: certifi==2026.6.17\n", b"Requires-Dist: certifi==2026.10.19\n"),
     )
     for before, after in replacements:
         if metadata.count(before) != 1:

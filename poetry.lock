@@ -844,13 +844,13 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.84+snapper.2"
+version = "4.5.84+snapper.3"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.84+snapper.2-py3-none-any.whl", hash = "sha256:bcaee97515d277c4e920b18089e0f2607b429d0d3ab60896ec556e90d522e801"},
+    {file = "ccxt-4.5.84+snapper.3-py3-none-any.whl", hash = "sha256:687e19db719d172ddf89e3082423f4773135fa3a6195ed6664a1994c46ae91b6"},
 ]
 
 [package.dependencies]
@@ -859,7 +859,7 @@ aiohttp = ">=3.14.3,<3.15"
 aiohttp-fast-zlib = "0.3.0"
 aiosignal = "1.4.0"
 attrs = "26.1.0"
-certifi = "2026.6.17"
+certifi = "2026.10.19"
 cffi = "2.0.0"
 charset_normalizer = "3.4.7"
 cryptography = ">=50,<51"
@@ -884,18 +884,18 @@ type = ["mypy (==1.6.1)"]
 
 [package.source]
 type = "file"
-url = "vendor/ccxt/ccxt-4.5.84+snapper.2-py3-none-any.whl"
+url = "vendor/ccxt/ccxt-4.5.84+snapper.3-py3-none-any.whl"
 
 [[package]]
 name = "certifi"
-version = "2026.6.17"
+version = "2026.10.19"
 description = "Python package for providing Mozilla's CA Bundle."
 optional = false
 python-versions = ">=3.7"
 groups = ["main", "dev"]
 files = [
-    {file = "certifi-2026.6.17-py3-none-any.whl", hash = "sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db"},
-    {file = "certifi-2026.6.17.tar.gz", hash = "sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432"},
+    {file = "certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b"},
+    {file = "certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae"},
 ]
 
 [[package]]
@@ -8262,4 +8262,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "ec0c270d6c2dac237da38d567ff9167a23453df03439ae6186613fa6bb99cedb"
+content-hash = "f5c07b76a8cbb498f487b10daa34ecb18608640656aa0e859bda1dc6634ebd43"

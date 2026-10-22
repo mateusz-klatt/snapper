@@ -17,6 +17,7 @@ METADATA = (
     b"Metadata-Version: 2.4\nName: ccxt\nVersion: 4.5.84\n"
     b"Requires-Dist: urllib3==2.7.0\nRequires-Dist: requests>=2.32,<3\n"
     b"Requires-Dist: multidict==6.7.1\n"
+    b"Requires-Dist: certifi==2026.6.17\n"
     b"License-Expression: MIT\nLicense-File: LICENSE.txt\n"
 )
 
@@ -65,9 +66,11 @@ def test_repack_preserves_code_license_and_builds_valid_record(
         }
         metadata = after.read(repack_ccxt_wheel.TARGET_DIST_INFO + "METADATA")
         assert metadata == METADATA.replace(
-            b"Version: 4.5.84\n", b"Version: 4.5.84+snapper.2\n"
+            b"Version: 4.5.84\n", b"Version: 4.5.84+snapper.3\n"
         ).replace(b"urllib3==2.7.0", b"urllib3==2.8.0").replace(
             b"multidict==6.7.1", b"multidict==6.9.1"
+        ).replace(
+            b"certifi==2026.6.17", b"certifi==2026.10.19"
         )
         record_path = repack_ccxt_wheel.TARGET_DIST_INFO + "RECORD"
         rows = list(csv.reader(io.StringIO(after.read(record_path).decode())))
@@ -105,6 +108,9 @@ def test_repack_refuses_modified_source(monkeypatch: pytest.MonkeyPatch) -> None
         METADATA + b"Requires-Dist: urllib3==2.7.0\n",
         METADATA.replace(b"Requires-Dist: multidict==6.7.1\n", b""),
         METADATA + b"Requires-Dist: multidict==6.7.1\n",
+        METADATA.replace(b"Requires-Dist: certifi==2026.6.17\n", b""),
+        METADATA + b"Requires-Dist: certifi==2026.6.17\n",
+        METADATA.replace(b"certifi==2026.6.17", b"certifi==2026.7.22"),
     ],
 )
 def test_patch_metadata_refuses_missing_or_duplicate_headers(metadata: bytes) -> None:
@@ -135,7 +141,7 @@ def test_main_reports_artifact_digest(
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(source)))
     monkeypatch.chdir(tmp_path)
     assert repack_ccxt_wheel.main([]) == 0
-    output = output_directory / "ccxt-4.5.84+snapper.2-py3-none-any.whl"
+    output = output_directory / "ccxt-4.5.84+snapper.3-py3-none-any.whl"
     assert output.read_bytes() == repack_ccxt_wheel.repack_wheel(source)
     assert capsys.readouterr().out == (
         f"{hashlib.sha256(output.read_bytes()).hexdigest()}  {output}\n"
