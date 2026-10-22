@@ -225,7 +225,7 @@ backend subscriber that cares about user/operator state changes.
 
 | Topic | Description |
 | ----- | ----------- |
-| `admin.user_deactivated` | A user (or AI delegate) was deactivated; immediate revocation hook for in-process token caches, WebSocket close fanout, and APNs push fan-out via the notify sidecar. Auth listeners also poll the DB-backed `users.is_active=False` registry as broker-outage fallback |
+| `admin.user_deactivated` | A user (or AI delegate) was deactivated; immediate revocation hook for in-process token caches, WebSocket close fanout, and notification fan-out via the notify sidecar. Auth listeners also poll the DB-backed `users.is_active=False` registry as broker-outage fallback |
 | `admin.membership_revoked` | A human viewer was detached from a desk; post-commit wake-up for token-cache invalidation, WebSocket retirement, and queued desk-notification cancellation |
 | `admin.scope_granted` | `create_grant` published a new active scope row (instrument-exclusive grant just inserted) |
 | `admin.scope_handed_over` | `handover` finalized a scope handover (old row closed, new row open, both committed) |
@@ -261,7 +261,7 @@ The consumers are:
   for other desks. Cancellation is bounded by the event's detach time, inclusive,
   so delayed or duplicate events cannot cancel deliveries created after a later
   reattachment. A database membership check after the durable attempt bump and
-  immediately before APNs admission prevents a lost event from starting a new
+  immediately before provider admission prevents a lost event from starting a new
   send under detached authority. A network call already admitted before the
   detach commit may still complete.
 
@@ -284,11 +284,11 @@ Shape: `accruals.{exchange}.{instrument}.{accrual_type}` (4 segments).
 
 ### Alerts
 
-Per-user alert fanout. The notify (APNs) sidecar consumes domain topics
+Per-user alert fanout. The notification sidecar consumes domain topics
 (`orders.events.`, `plans.decisions.`, `system.heartbeats.`, and
 `bus.portfolio_drift_episode`), persists
 each alert, publishes it as an `AlertEventData` frame on this topic
-family before the APNs fanout, and also delivers iOS pushes in-process;
+family before provider fanout, and also sends APNs and optional Android FID hints;
 the WS bridge is the consumer, forwarding frames to authenticated
 WebSocket clients with per-user scope enforcement. A periodic database
 scan in the same sidecar recovers open drift episodes whose real-time
@@ -296,6 +296,12 @@ scan in the same sidecar recovers open drift episodes whose real-time
 resolution, alert-row builder, and `drift.<episode_public_id>` identity as
 the bus rule; the insert claim is transaction-serialized so the two paths
 cannot double-page.
+
+Android provider messages are separate data-only hints containing opaque configuration,
+binding, registration and alert IDs plus a fixed expiry. They do not forward the
+private `AlertEventData` payload. The client fetches authorized details in the
+foreground; see [Android push](android-push.md). Existing WebSocket payloads and APNs
+content remain unchanged.
 
 | Topic | Description |
 | ----- | ----------- |
@@ -324,7 +330,7 @@ background drain loop after broker outages; the same drain also runs once
 at startup, so decisions that never published before a restart replay
 from their durable rows. A row whose third publish attempt fails is
 marked `failed` terminally. The notify sidecar subscribes to turn
-stop-loss / trailing-stop fires into iOS pushes (take-profit fires are
+stop-loss / trailing-stop fires into configured-provider notifications (take-profit fires are
 explicitly excluded as non-loss outcomes).
 
 | Topic | Description |

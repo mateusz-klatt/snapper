@@ -13,6 +13,11 @@ Guidelines for developers working on the Snapper project.
   Python implementations otherwise.
 - Pre-commit hooks
 
+Docker builds use Python 3.14 and require binary distributions for all locked
+dependencies. The vendored CCXT package currently pins `cffi==2.0.0`, which has no
+compatible Python 3.15 wheel. Python image minor and major upgrades therefore
+require a separate dependency compatibility review; patch updates remain enabled.
+
 ## Environment Setup
 
 Initialize the public submodules before installing frontend tools or running the

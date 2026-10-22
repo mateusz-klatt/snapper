@@ -370,7 +370,7 @@ snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + 
 snapper executor            # Standalone order executor helper
 snapper feed                # Direct Kraken market data publisher helper
 snapper feed-engine         # Dedicated feed container entrypoint
-snapper notify              # iOS push sidecar + durable drift-page recovery
+snapper notify              # Notification sidecar + durable drift-page recovery
 snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 ```
 
@@ -586,8 +586,10 @@ account setup and credentials, plus successful native CI for the exact commit.
 
 Use `http://10.0.2.2:8000` in the debug emulator, or an HTTPS origin for a
 self-hosted backend. The Android README includes USB/ADB instructions for a
-physical phone. Release builds require HTTPS. The backend's existing APNs
-device registration does not yet accept Android FCM tokens.
+physical phone. Release builds require HTTPS. Optional backend Android push uses
+a separate FCM FID registration contract; the APNs endpoint remains unchanged.
+See [Android push configuration](docs/android-push.md) for explicit, disabled-by-default
+server configuration and the remaining real-provider validation boundary.
 
 Remembered Android sessions require Android 11 or newer, a secure screen lock,
 and device authentication within the last five minutes. Otherwise, credentials
@@ -678,13 +680,15 @@ behind the `delegate` profile and is not part of the default stack.
   `STRATEGIES_EMBEDDED=false` so the same strategy can never run twice.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher
   traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
-- `snapper-notify` — alert-rule evaluator + iOS Push Foundation sidecar
+- `snapper-notify` — alert-rule evaluator and notification sidecar
   (`command: ["notify"]`). Subscribes to the rule registry's ZMQ
   prefixes (heartbeats, order events, committed portfolio-drift lifecycle),
   evaluates the alert rules,
   records `alert_events`, republishes `alerts.{user}.{type}` for the
   WebSocket bridge, and fans deliveries out to APNs using the
-  `apns_*` settings. Without this container the ENTIRE alert chain is
+  `apns_*` settings, plus optional backend-owned FCM FID delivery configured through
+  `SNAPPER_ANDROID_PUSH_CONFIG_FILE`. FCM-only startup can disable APNs without
+  requiring APNs credentials. Without this container the ENTIRE alert chain is
   dark — no alert rows, no UI alerts, no push. The process supervises its
   receive and retry workers, awaits their cleanup on shutdown, and propagates
   unexpected worker failure to the configured container restart policy.

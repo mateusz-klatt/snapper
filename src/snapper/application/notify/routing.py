@@ -22,6 +22,7 @@ we just refuse to silently shove them behind a quiet-hour wall.
 """
 
 from datetime import datetime
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -33,6 +34,13 @@ from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.data.repository_types import UserAlertDefaultRow
+
+
+class DeviceIdentity(TypedDict):
+    """Provider-neutral identity used by the unchanged preference cascade."""
+
+    public_id: str
+
 
 _PRIORITY_RANK: dict[str, int] = {"low": 1, "medium": 2, "high": 3}
 
@@ -99,7 +107,7 @@ async def route_alert_to_devices(
 
 def _policy_allows(
     *,
-    device: NotificationDeviceRow,
+    device: DeviceIdentity,
     alert: AlertEventRow,
     device_prefs: list[DeviceAlertPrefRow],
     user_defaults: list[UserAlertDefaultRow],
@@ -130,7 +138,7 @@ def _policy_allows(
 
 def _narrowest_matches(
     *,
-    device: NotificationDeviceRow,
+    device: DeviceIdentity,
     alert: AlertEventRow,
     prefs: list[DeviceAlertPrefRow],
 ) -> list[DeviceAlertPrefRow]:
@@ -207,3 +215,31 @@ def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     if start < end:
         return start <= current_min < end
     return current_min >= start or current_min < end
+
+
+def allows_device_alert(
+    public_id: str,
+    alert: AlertEventRow,
+    prefs: list[DeviceAlertPrefRow],
+    defaults: list[UserAlertDefaultRow],
+    now: datetime,
+) -> bool:
+    """Apply the existing cascade without manufacturing an APNs token for Android.
+
+    Args:
+        public_id: Owned registration ID used to match device preferences.
+        alert: Persisted alert and its priority, safety and scope fields.
+        prefs: Current device-scoped preference rows.
+        defaults: Current user-level fallback preferences.
+        now: UTC boundary used to evaluate quiet hours.
+
+    Returns:
+        Whether the existing preference cascade permits this alert for the device.
+    """
+    return _policy_allows(
+        device=DeviceIdentity(public_id=public_id),
+        alert=alert,
+        device_prefs=prefs,
+        user_defaults=defaults,
+        now=now,
+    )

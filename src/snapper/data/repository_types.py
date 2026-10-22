@@ -3743,6 +3743,11 @@ class AlertDeliveryInsertRow(TypedDict, total=False):
     attempt_count: int
     last_attempt_at: datetime | None
     next_attempt_at: datetime | None
+    provider: NotRequired[str]
+    configuration_id: NotRequired[str | None]
+    binding_id: NotRequired[str | None]
+    expires_at: NotRequired[datetime | None]
+    provider_receipt: NotRequired[str | None]
     apns_id: str | None
     error_reason: str | None
     created_at: datetime
@@ -3770,6 +3775,11 @@ class AlertDeliveryRow(TypedDict):
     attempt_count: int
     last_attempt_at: datetime | None
     next_attempt_at: datetime | None
+    provider: NotRequired[str]
+    configuration_id: NotRequired[str | None]
+    binding_id: NotRequired[str | None]
+    expires_at: NotRequired[datetime | None]
+    provider_receipt: NotRequired[str | None]
     apns_id: str | None
     error_reason: str | None
     created_at: datetime

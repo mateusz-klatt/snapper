@@ -4181,8 +4181,8 @@ memberships.
 
 ## Devices
 
-APNs device registration for the iOS app (push notifications for
-order / position / system events) plus per-device alert preferences.
+APNs registration for iOS and optional FCM FID registration for Android,
+plus shared per-device alert preferences for order, position and system events.
 All rows are bound to `user_public_id` and follow the SCD2
 close-and-insert convention.
 
@@ -4196,10 +4196,35 @@ the stable `public_id` reused across versions. Returns
 
 ### GET /api/devices
 
-List the caller's active devices, newest registered first. Returns
+List the caller's active APNs devices, newest registered first. Android
+registrations use the separate inventory below. Returns
 `NotificationDeviceListResponse` (`payload` + `count` — `PayloadListResponse` base); rows whose
 active version has `token_status='user_unregistered'` (tombstones)
 are excluded.
+
+### Android configuration and registration
+
+These routes require authentication but no trading permission or active wallet.
+Mutations also require CSRF. Existing APNs request/response semantics remain unchanged.
+
+| Method | Route | Contract |
+| ------ | ----- | -------- |
+| GET | `/api/devices/android/config` | `android_push_config_response`; configured public Firebase options or `availability: "unavailable"` with null configuration |
+| GET | `/api/devices/android/registration-state` | Requires `configuration_id` and `installation_id`; returns opaque `revision` and `current_binding_id`, disclosed only to its owner |
+| POST | `/api/devices/android` | `register_android_device_command` with explicit `fcm_fid`, configuration/package, installation/binding IDs, FID, `expected_user_public_id`, `expected_revision` and optional app version |
+| GET | `/api/devices/android` | `android_device_list_response` with owned active registrations and `count`; never returns FIDs |
+
+Successful registration returns `android_device_response`; its payload public ID
+is the server registration ID. Same equivalent active-binding retries retain that
+ID; retired bindings never reactivate. Installation revision CAS prevents a delayed
+submission from replacing a newer binding. Another installation claiming an active
+FID receives a conflict without takeover or counterparty disclosure. Known refusals
+use HTTP status plus FastAPI `detail`; transport loss remains uncertain and does not
+authorize automatic POST replay. See [Android push](android-push.md) for lifecycle,
+configuration and delivery rules.
+
+The following owned delete and preference routes support both providers and preserve
+all seven alert types. No preferences transfer to a replacement registration.
 
 ### DELETE /api/devices/{device_public_id}
 
@@ -4238,7 +4263,7 @@ prefs are filtered out server-side via the join to
 
 ## Alerts
 
-Real-time alert feed for the dashboard + iOS notification panel.
+Real-time alert feed for authenticated web and native clients.
 Alert events are minted by various subsystems and surfaced via WS
 on `alerts.*` (see [messaging.md](messaging.md) for the canonical
 `AlertType` enumeration) plus this REST catch-up tail.
@@ -4298,7 +4323,8 @@ system-metrics pipeline and snapshot schemas.
 ### GET /api/metrics/notifications
 
 Current notify-sidecar outbox counters (per-status row counts —
-*not* a rolling window). Returns `NotificationMetricsResponse`.
+*not* a rolling window), aggregated across providers without a provider breakdown.
+`sent` records provider acceptance, not device delivery. Returns `NotificationMetricsResponse`.
 
 ### GET /api/metrics/system
 

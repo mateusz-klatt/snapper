@@ -206,7 +206,7 @@ below. Shared market-data provider keys stay in `settings`.
 | --- | ----------- |
 | `polygon_api_key` | Polygon.io API key (shared market data — not wallet-scoped) |
 
-### Push Notifications (APNs)
+### Push Notifications
 
 The notification sidecar reads its APNs credentials and the push-beta
 rollout gate from the `settings` table:
@@ -221,11 +221,24 @@ rollout gate from the `settings` table:
 | `apns_private_key_p8_base64` | APNs auth key (`.p8` PKCS#8 PEM) encoded as base64 so it round-trips through the TOML seed |
 | `push_beta_config` | JSON `{"enabled": bool, "user_public_ids": [...]}` rollout gate (category `notifications`). Disabled by default — every user receives pushes; when enabled, only allowlisted users do. An absent or malformed value falls back to the disabled default so a misedit can never silence pushes. Managed via [Manage Push-Beta Gate](#manage-push-beta-gate) |
 
-All six `apns_*` keys are required when the notification sidecar
-starts: `load_apns_config` fails loud at startup with the full list
+All six `apns_*` keys are required when APNs is enabled at sidecar
+startup (the default): `load_apns_config` fails loud at startup with the full list
 of missing keys rather than producing cryptic APNs errors at
 first-send time. They are seeded under category `apns` via the
 proprietary seed profile (`proprietary/data/seed/{dev,prod}.toml`).
+
+Optional Android delivery uses `SNAPPER_ANDROID_PUSH_CONFIG_FILE`, an explicit
+runtime JSON file separate from the APNs settings. Empty means Android is disabled
+for that process; it does not retire a shared configuration. Set `apns_enabled:false`
+in the runtime file for FCM-only startup without APNs credentials. Credential-file
+paths resolve relative to the runtime JSON, and metadata exposes only public
+Firebase options. The shared push-beta gate still applies.
+
+Use `snapper android-push-state` to read the opaque configuration revision before
+activation or explicit global disable. Runtime `expected_configuration_revision`
+compares that durable active/disabled head; initial null cannot become valid again
+after a decision. See [Android push configuration](android-push.md) for the exact
+JSON, immutable configuration IDs, disabled-state semantics and validation boundary.
 
 ### Wallet Credentials
 

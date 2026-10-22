@@ -125,6 +125,7 @@ from snapper.application.db_stats.snapshotter import (
     resolve_disabled as _resolve_db_metrics_disabled,
 )
 from snapper.application.market_data_watchdog.watchdog import MarketDataWatchdog
+from snapper.application.notify.android_runtime import android_runtime_lifespan
 from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter_config import (
@@ -237,6 +238,7 @@ from snapper.server.ai_researcher_routes import router as ai_researcher_router
 from snapper.server.ai_review_routes import router as ai_review_router
 from snapper.server.alert_default_routes import router as alert_default_router
 from snapper.server.alerts_routes import router as alerts_router
+from snapper.server.android_device_routes import router as android_device_router
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.backtest_routes import router as backtest_router
 from snapper.server.command_ack_registry import ProcessCommandAckRegistry
@@ -1401,7 +1403,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
         try:
-            async with mcp_sub_app.router.lifespan_context(mcp_sub_app):
+            async with android_runtime_lifespan(
+                app, get_repository(settings.db_url)
+            ), mcp_sub_app.router.lifespan_context(mcp_sub_app):
                 logger.info("MCP sub-app session manager started")
                 yield
         except RuntimeError as exc:
@@ -1486,6 +1490,12 @@ def _prepare_request_context(request: Request) -> None:
     set_log_context("api")
 
 
+def _include_device_routers(app: FastAPI) -> None:
+    """Register static Android paths before the shared device ownership routes."""
+    app.include_router(android_device_router, prefix=API_PREFIX)
+    app.include_router(device_router, prefix=API_PREFIX)
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -1560,7 +1570,7 @@ def create_app() -> FastAPI:
     app.include_router(portfolio_timeline_router, prefix=API_PREFIX)
     app.include_router(trailing_stop_router, prefix=API_PREFIX)
     app.include_router(backtest_router, prefix=API_PREFIX)
-    app.include_router(device_router, prefix=API_PREFIX)
+    _include_device_routers(app)
     app.include_router(egress_health_router, prefix=API_PREFIX)
     app.include_router(alert_default_router, prefix=API_PREFIX)
     app.include_router(metrics_router, prefix=API_PREFIX)

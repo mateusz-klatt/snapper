@@ -43,6 +43,7 @@ from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository import AndroidDeviceStore
 from snapper.data.repository import Repository
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
@@ -248,7 +249,9 @@ async def delete_device(
             caller or is already inactive.
     """
     owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
-    if not any(d["public_id"] == device_public_id for d in owned):
+    if not any(
+        d["public_id"] == device_public_id for d in owned
+    ) and not await _owns_android_device(repo, principal.user_public_id, device_public_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Device {device_public_id} not found or not owned by caller.",
@@ -302,7 +305,9 @@ async def update_device_pref(
         HTTPException: 404 when the device is not owned by caller.
     """
     owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
-    if not any(d["public_id"] == device_public_id for d in owned):
+    if not any(
+        d["public_id"] == device_public_id for d in owned
+    ) and not await _owns_android_device(repo, principal.user_public_id, device_public_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Device {device_public_id} not found or not owned by caller.",
@@ -399,7 +404,9 @@ async def revoke_device_pref(
             already-closed pref also 404s).
     """
     owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
-    if not any(d["public_id"] == device_public_id for d in owned):
+    if not any(
+        d["public_id"] == device_public_id for d in owned
+    ) and not await _owns_android_device(repo, principal.user_public_id, device_public_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Device {device_public_id} not found or not owned by caller.",
@@ -458,7 +465,9 @@ async def list_device_prefs(
         HTTPException: 404 when the device is not owned by caller.
     """
     owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
-    if not any(d["public_id"] == device_public_id for d in owned):
+    if not any(
+        d["public_id"] == device_public_id for d in owned
+    ) and not await _owns_android_device(repo, principal.user_public_id, device_public_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Device {device_public_id} not found or not owned by caller.",
@@ -478,3 +487,9 @@ async def list_device_prefs(
         payload=items,
         count=len(items),
     )
+
+
+async def _owns_android_device(repo: Repository, owner: str, public_id: str) -> bool:
+    """Extend ownership checks without admitting Android rows to APNs lists."""
+    devices = await AndroidDeviceStore(repo).list_owned(owner)
+    return any(device.public_id == public_id for device in devices)
