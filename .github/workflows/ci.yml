@@ -18,10 +18,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Init public submodules (frontend, snapper-mcp, ios, android)
+      - name: Init public submodules (frontend, snapper-mcp, snapper-delegate, ios, android)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init frontend integrations/snapper-mcp ios android
+          git submodule update --init frontend integrations/snapper-mcp integrations/snapper-delegate ios android
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

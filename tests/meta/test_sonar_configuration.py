@@ -43,7 +43,9 @@ _PARENT_SUBMODULE_EXCLUSIONS = frozenset(
 )
 _PARENT_TEMPORARY_SOURCE_EXCLUSIONS = frozenset({"src/snapper/data/repository.py"})
 _PARENT_EXCLUSIONS = _PARENT_SUBMODULE_EXCLUSIONS | _PARENT_TEMPORARY_SOURCE_EXCLUSIONS
-_PARENT_OWNED_INTEGRATION_WITNESS = "integrations/snapper-delegate/src/snapper_delegate/runner.py"
+_PARENT_ANALYZED_INTEGRATION_WITNESS = (
+    "integrations/snapper-delegate/src/snapper_delegate/runner.py"
+)
 _SONAR_WORKFLOWS = (
     Path(".github/workflows/ci.yml"),
     Path("frontend/.github/workflows/sonarcloud.yml"),
@@ -51,13 +53,10 @@ _SONAR_WORKFLOWS = (
     Path("ios/.github/workflows/sonarcloud.yml"),
     Path("android/.github/workflows/ci.yml"),
 )
-_WORKFLOW_PROJECT_ROOTS = (
-    _REPO_ROOT,
-    _REPO_ROOT / "frontend",
-    _REPO_ROOT / "integrations" / "snapper-mcp",
-    _REPO_ROOT / "ios",
-    _REPO_ROOT / "android",
+_TRACKED_TEXT_PROJECT_ROOTS = tuple(project_root for _, project_root, _ in _PROJECT_SCOPES) + (
+    _REPO_ROOT / "integrations" / "snapper-delegate",
 )
+_WORKFLOW_PROJECT_ROOTS = _TRACKED_TEXT_PROJECT_ROOTS
 _ALL_WORKFLOWS = tuple(
     workflow_path.relative_to(_REPO_ROOT)
     for project_root in _WORKFLOW_PROJECT_ROOTS
@@ -221,20 +220,18 @@ def test_sonar_configs_analyze_the_full_checked_out_scope(
             "only independently analyzed projects and the temporary oversized repository "
             "module may be excluded; integrations/snapper-delegate must remain in parent analysis"
         )
-        assert (_REPO_ROOT / _PARENT_OWNED_INTEGRATION_WITNESS).is_file()
+        assert (_REPO_ROOT / _PARENT_ANALYZED_INTEGRATION_WITNESS).is_file()
         assert (_REPO_ROOT / next(iter(_PARENT_TEMPORARY_SOURCE_EXCLUSIONS))).is_file()
         assert not any(
-            fnmatchcase(_PARENT_OWNED_INTEGRATION_WITNESS, pattern) for pattern in exclusions
+            fnmatchcase(_PARENT_ANALYZED_INTEGRATION_WITNESS, pattern) for pattern in exclusions
         )
         suppressions.remove("sonar.exclusions")
     assert suppressions == set()
 
 
-@pytest.mark.parametrize(("_relative_path", "project_root", "_test_inclusions"), _PROJECT_SCOPES)
+@pytest.mark.parametrize("project_root", _TRACKED_TEXT_PROJECT_ROOTS)
 def test_tracked_project_text_does_not_bypass_sonar_policy(
-    _relative_path: Path,
     project_root: Path,
-    _test_inclusions: str,
 ) -> None:
     """Reject command-line and inline bypasses outside docs and tests.
 
@@ -251,6 +248,18 @@ def test_tracked_project_text_does_not_bypass_sonar_policy(
             if pattern.search(content):
                 violations.append(f"{display_path}: {label}")
     assert violations == []
+
+
+def test_tracked_text_scan_includes_delegate_submodule_source() -> None:
+    """Keep the delegate source visible across its separate Git index.
+
+    Given: The delegate runner is tracked by its own repository,
+    When: The parent Sonar policy scans that submodule's tracked text,
+    Then: The runner source participates in the suppression checks.
+    """
+    delegate_root = _REPO_ROOT / "integrations" / "snapper-delegate"
+    tracked_paths = {path for path, _ in _tracked_text_files(delegate_root)}
+    assert delegate_root / "src" / "snapper_delegate" / "runner.py" in tracked_paths
 
 
 @pytest.mark.parametrize("relative_path", _SONAR_WORKFLOWS)

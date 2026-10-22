@@ -1,8 +1,9 @@
 """Refresh GitHub Actions versions across all workflow files in the workspace.
 
 Walks ``<root>/.github/workflows/*.yml`` for the parent repo plus the
-``frontend``, ``ios``, and ``integrations/snapper-mcp`` submodules, and bumps
-each ``uses: <owner>/<repo>@<ref>`` reference to the latest release.
+``frontend``, ``ios``, ``integrations/snapper-mcp``, and
+``integrations/snapper-delegate`` submodules, and bumps each
+``uses: <owner>/<repo>@<ref>`` reference to the latest release.
 
 Three pinning styles are recognised and preserved:
 
@@ -36,6 +37,7 @@ SUBPROJECT_DIRS: Final[tuple[str, ...]] = (
     "frontend",
     "ios",
     "integrations/snapper-mcp",
+    "integrations/snapper-delegate",
 )
 
 USES_RE: Final = re.compile(

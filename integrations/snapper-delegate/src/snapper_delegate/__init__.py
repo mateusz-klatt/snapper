@@ -1,1 +1,0 @@
-"""Managed delegate integration package."""

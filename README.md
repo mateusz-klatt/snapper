@@ -25,7 +25,7 @@ optional and require separate repository access.
 ```bash
 # One-time bootstrap (HTTPS also works without GitHub SSH credentials).
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios android
+  submodule update --init frontend integrations/snapper-mcp integrations/snapper-delegate ios android
 make system-deps
 make setup
 cp .env.example .env
@@ -144,7 +144,7 @@ set and the token-downscoping rules.
 git clone https://github.com/mateusz-klatt/snapper.git
 cd snapper
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios android
+  submodule update --init frontend integrations/snapper-mcp integrations/snapper-delegate ios android
 
 # Install system dependencies
 make system-deps
@@ -692,8 +692,10 @@ behind the `delegate` profile and is not part of the default stack.
   dark — no alert rows, no UI alerts, no push. The process supervises its
   receive and retry workers, awaits their cleanup on shutdown, and propagates
   unexpected worker failure to the configured container restart policy.
-- `snapper-delegate` — optional runner-only Python PID1 under the
-  `delegate` profile. This no-egress increment is deliberately inert:
+- `snapper-delegate` — optional runner-only Python PID1 from the
+  [snapper-delegate](https://github.com/mateusz-klatt/snapper-delegate) submodule
+  at `integrations/snapper-delegate/`, under the `delegate` profile.
+  This no-egress increment is deliberately inert:
   `network_mode: none`, no coordinator, DB, broker, Docker socket,
   source-tree bind mount, full `data/` mount, secret mount, or host port.
   It runs as `888:888` on a read-only root filesystem with all

@@ -17,3 +17,7 @@
 	path = android
 	url = git@github.com:mateusz-klatt/snapper-android.git
 	branch = master
+[submodule "integrations/snapper-delegate"]
+	path = integrations/snapper-delegate
+	url = git@github.com:mateusz-klatt/snapper-delegate.git
+	branch = master

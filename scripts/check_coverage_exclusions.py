@@ -169,6 +169,8 @@ def run_scan(
     py_results = scan_python_files(root / "src")
     py_results.update(scan_python_files(root / "tests"))
     py_results.update(scan_python_files(root / "scripts"))
+    py_results.update(scan_python_files(root / "integrations" / "snapper-delegate" / "src"))
+    py_results.update(scan_python_files(root / "integrations" / "snapper-delegate" / "tests"))
     if (root / "proprietary" / "src").exists():
         py_results.update(scan_python_files(root / "proprietary" / "src"))
     if (root / "proprietary" / "tests").exists():

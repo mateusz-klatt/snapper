@@ -181,7 +181,7 @@ RUN curl -fsSL --proto '=https' --tlsv1.2 "https://x.ai/cli/grok-${GROK_VERSION}
 FROM base AS lineage
 ARG BASE_IMAGE
 # sha256 of integrations/snapper-delegate/Dockerfile as reviewed for this image.
-ARG DELEGATE_BASE_DOCKERFILE_SHA256=4ae640a31e2d47714b1321aed17986ce21ab58437e486e33a47073a351066618
+ARG DELEGATE_BASE_DOCKERFILE_SHA256=39d872cf8f49e449b609e2c2528abd6341f553784d788f7290f33d0f7bc3fa29
 COPY snapper-delegate/src/snapper_delegate /tmp/lineage/delegate
 COPY snapper-delegate/requirements.lock /tmp/lineage/requirements.lock
 COPY snapper-delegate/Dockerfile /tmp/lineage/base.Dockerfile

@@ -482,6 +482,23 @@ class TestRunScan:
         assert "proprietary/src/bad.py" in captured.out
         assert "proprietary/tests/bad.py" in captured.out
 
+    @pytest.mark.parametrize("subtree", ["src", "tests"])
+    def test_scans_delegate_submodule(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], subtree: str
+    ) -> None:
+        """Reject exclusions inside delegate source and tests after extraction.
+
+        Given: A delegate submodule file containing a coverage bypass,
+        When: The parent scans its complete Python analysis surface,
+        Then: Strict mode fails and reports the delegate path.
+        """
+        delegate_file = tmp_path / "integrations" / "snapper-delegate" / subtree / "bad.py"
+        delegate_file.parent.mkdir(parents=True)
+        delegate_file.write_text("x = 1  # pragma: no cover\n", encoding="utf-8")
+
+        assert run_scan(tmp_path, strict_mode=True) == 1
+        assert f"integrations/snapper-delegate/{subtree}/bad.py" in capsys.readouterr().out
+
 
 class TestMain:
     """Test suite for Main functionality."""

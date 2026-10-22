@@ -25,7 +25,7 @@ full gate; this HTTPS override also works without GitHub SSH credentials:
 
 ```bash
 git -c url."https://github.com/".insteadOf=git@github.com: \
-  submodule update --init frontend integrations/snapper-mcp ios android
+  submodule update --init frontend integrations/snapper-mcp integrations/snapper-delegate ios android
 ```
 
 The private `proprietary` and `data/polygon` submodules require separate access
@@ -87,8 +87,9 @@ make worktree NAME=my-task
 This creates `../snapper-wt-<NAME>` on a fresh `wt/<NAME>` branch cut
 from `master` and prepares the full verification harness:
 
-- initializes the `frontend`, `integrations/snapper-mcp`, `ios`, `android`, and
-    `proprietary` submodules, because missing submodules manufacture
+- initializes the `frontend`, `integrations/snapper-mcp`,
+    `integrations/snapper-delegate`, `ios`, `android`, and `proprietary`
+    submodules, because missing submodules manufacture
     failures that look inherited but are environmental
 - writes a minimal `.env` pointing `DB_URL` at the isolated SQLite test
     fixture (`./data/dev.db`); the real `.env` is never copied because it
@@ -650,9 +651,11 @@ have independent SonarCloud projects. It also carries one temporary exact-file
 analyzer exception for `src/snapper/data/repository.py`: the 35,000-line module
 exhausts the scanner JVM while the rest of the project remains analyzable. Local and
 CI lint, type, test, and coverage gates still include it. The exception must be
-removed after the repository is split into bounded domain modules. Parent-owned
-`integrations/snapper-delegate/` remains in the backend analysis; each independent
-project likewise suppresses no owned sources or findings.
+removed after the repository is split into bounded domain modules. The
+`integrations/snapper-delegate/` submodule remains in the parent backend analysis,
+lint, type, test, and coverage gates. Its tracked source and workflows are checked
+separately across the Git boundary so the submodule conversion preserves the
+policy scans. Each independent project likewise suppresses no owned sources or findings.
 `tests/meta/test_sonar_configuration.py` pins this boundary and also rejects
 equivalent workflow, command-line, and inline overrides. Every project workflow
 waits for the pin-versioned SonarCloud Quality Gate after its scan, so a failed gate
@@ -732,6 +735,9 @@ snapper/
 ├── tests/                 # Tests
 ├── frontend/              # React dashboard submodule
 ├── ios/                   # SwiftUI iOS client submodule
+├── integrations/
+│   ├── snapper-delegate/   # Python delegate runner submodule
+│   └── snapper-mcp/        # TypeScript MCP bridge submodule
 ├── docs/                  # Documentation
 ├── scripts/               # Helper scripts
 └── data/                  # Local data

@@ -514,14 +514,15 @@ class TestRefreshWorkflowFile:
 class TestRefreshGithubActions:
     """Test suite for the top-level refresh_github_actions orchestrator."""
 
-    def test_walks_files_and_returns_total(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("relative_root", [".", "integrations/snapper-delegate"])
+    def test_walks_files_and_returns_total(self, tmp_path: Path, relative_root: str) -> None:
         """Verify refresh_github_actions walks all roots and aggregates the bump count.
 
-        Given: A parent root with one workflow file containing a bumpable use,
+        Given: A parent or delegate root with a workflow containing a bumpable use,
         When: refresh_github_actions is called,
         Then: ensure_gh_authenticated runs, the file is rewritten, total is 1.
         """
-        wf_dir = tmp_path / ".github" / "workflows"
+        wf_dir = tmp_path / relative_root / ".github" / "workflows"
         wf_dir.mkdir(parents=True)
         ci = wf_dir / "ci.yml"
         ci.write_text(
