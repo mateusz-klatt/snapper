@@ -166,7 +166,7 @@ publishes one HEALTHY frame to reset the alert rule's rolling state.
 
 The existing `critical_system_error` rule owns the three-frame gate,
 rolling one-hour cooldown, hour-bucket deduplication, permission-based
-fan-out, localization, and APNs delivery. The one-timeout threshold is
+fan-out and configured provider delivery (including APNs localization). The one-timeout threshold is
 intentional: a single unanswered LIVE consult already vetoes a trading
 window, while the existing cooldown prevents repeated pages. The
 one-hour lookback keeps that failure visible across a notify-sidecar or
@@ -194,17 +194,22 @@ wired, that same eager sample also publishes the first
 the ring buffer (the failure contract above does not apply to it).
 Each request aggregates active `alert_deliveries` rows (SCD2
 predecessor versions excluded) into per-status delivery totals —
-`sent`, `failed`, APNs-410 `unregistered`, `cancelled_scope` — plus
+`sent`, `failed`, `unregistered`, `cancelled_scope` — plus
 the `queued` backlog depth of the notify sidecar's retry loop.
-Statuses absent from the database report `0`. See [api.md](api.md)
+Counters aggregate APNs and Android rows without a provider breakdown.
+`unregistered` includes APNs 410 and explicit FCM UNREGISTERED outcomes; `sent`
+means provider acceptance, not device delivery. Android expiry and its bounded
+attempt budget can produce terminal `failed` rows. Statuses absent from the
+database report `0`. See [api.md](api.md)
 for the `NotificationMetricsResponse` wire schema.
 
 Use container state, restart history and sidecar logs to investigate retry-worker
 failure. The sidecar propagates unexpected worker failure through its CLI and
 awaits owned-task cleanup. An ordinary secondary cleanup failure is logged by
 stage and exception class while the original failure remains primary. Delivery totals
-describe persisted outbox state; they do not certify worker liveness or APNs
-receipt.
+describe persisted outbox state; they do not certify worker liveness or device receipt. Android metadata marked
+configured likewise proves local sender configuration, not Google reachability.
+See [Android push](android-push.md) for configuration and delivery diagnostics.
 
 ## Snapshot fields
 

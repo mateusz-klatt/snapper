@@ -38,6 +38,17 @@ from snapper.server.device_routes import update_device_pref
 from snapper.server.json_body import json_body
 
 
+def _empty_android_session() -> MagicMock:
+    """Keep APNs unit fixtures explicit about the separate empty Android inventory."""
+    result = MagicMock()
+    result.__iter__.return_value = iter(())
+    session = AsyncMock()
+    session.scalars.return_value = result
+    factory = MagicMock()
+    factory.return_value.__aenter__.return_value = session
+    return factory
+
+
 def _ts() -> datetime:
     """Deterministic UTC now for test fixtures."""
     return datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
@@ -152,7 +163,7 @@ class TestRegisterDevice:
         exactly the values they sent, plus the stable ``public_id``
         the upsert returned.
         """
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.upsert_notification_device = AsyncMock(return_value="dev-pub-1")
 
         response = await register_device(
@@ -177,7 +188,7 @@ class TestListDevices:
     @pytest.mark.asyncio
     async def test_returns_only_principal_owned_devices(self) -> None:
         """The repo is queried with the caller's ``user_public_id``."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-1"), _device_row("dev-2")]
         )
@@ -191,7 +202,7 @@ class TestListDevices:
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_devices(self) -> None:
         """Empty repo projection returns count=0 envelope, not 404."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(return_value=[])
 
         response = await list_devices(request=_make_request(), principal=_principal(), repo=repo)
@@ -211,7 +222,7 @@ class TestDeleteDevice:
         ``as_of`` query after the delete sees a tombstone successor
         row rather than a gap (INV-9).
         """
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -237,7 +248,7 @@ class TestDeleteDevice:
         Returning 404 prevents a caller from probing whether a
         given ``public_id`` exists on another user's account.
         """
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -291,7 +302,7 @@ class TestUpdateDevicePref:
         with defaults). Eliminates the post-upsert race that could
         surface as a 500.
         """
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -315,7 +326,7 @@ class TestUpdateDevicePref:
     @pytest.mark.asyncio
     async def test_returns_404_when_device_not_owned(self) -> None:
         """Pref updates are blocked when the caller doesn't own the device."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -340,7 +351,7 @@ class TestUpdateDevicePref:
     @pytest.mark.asyncio
     async def test_scope_narrow_fields_flow_to_response(self) -> None:
         """Operator-narrowed scope is reflected in the synthesized response."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -372,7 +383,7 @@ class TestListDevicePrefs:
         addressed device so an iOS notifications screen does not
         leak prefs from another device the user happens to own.
         """
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own"), _device_row("dev-other")]
         )
@@ -402,7 +413,7 @@ class TestListDevicePrefs:
     @pytest.mark.asyncio
     async def test_returns_empty_envelope_when_device_has_no_prefs(self) -> None:
         """Owned device with no prefs yet returns count=0 (not 404)."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -421,7 +432,7 @@ class TestListDevicePrefs:
     @pytest.mark.asyncio
     async def test_returns_404_when_device_not_owned(self) -> None:
         """Foreign or unknown ``public_id`` yields 404 to prevent existence probing."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -458,7 +469,7 @@ class TestRevokeDevicePref:
     @pytest.mark.asyncio
     async def test_revokes_owned_pref_and_synthesizes_response(self) -> None:
         """Closed projection from repo is wrapped into the response envelope."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -485,7 +496,7 @@ class TestRevokeDevicePref:
     @pytest.mark.asyncio
     async def test_returns_404_when_device_not_owned(self) -> None:
         """Foreign device id is rejected before the repo is touched."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
@@ -511,7 +522,7 @@ class TestRevokeDevicePref:
     @pytest.mark.asyncio
     async def test_returns_404_when_pref_already_closed_or_missing(self) -> None:
         """Repo returning ``None`` (no active row) maps to 404 — idempotent re-revoke."""
-        repo = AsyncMock()
+        repo = AsyncMock(session=_empty_android_session())
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )

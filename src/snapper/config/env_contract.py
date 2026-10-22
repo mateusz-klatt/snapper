@@ -53,6 +53,7 @@ from snapper.application.portfolio.pnl_snapshotter_config import (
 )
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
+from snapper.config.android_push import ENV_VARS as ANDROID_PUSH_ENV_VARS
 from snapper.config.delegate_profile import ENV_VARS as DELEGATE_PROFILE_ENV_VARS
 from snapper.data.repository import ENV_VARS as DB_ENGINE_ENV_VARS
 from snapper.messaging.infrastructure.tick_probe import ENV_VARS as TICK_PROBE_ENV_VARS
@@ -118,6 +119,7 @@ stay aligned with the actual loader fields.
 
 KNOWN_ENV_KEYS: frozenset[str] = (
     BOOTSTRAP_ENV_VARS
+    | ANDROID_PUSH_ENV_VARS
     | AI_RESEARCH_TRIGGER_ENV_VARS
     | AI_REVIEW_MAINTENANCE_ENV_VARS
     | TRADE_INTEGRITY_ENV_VARS

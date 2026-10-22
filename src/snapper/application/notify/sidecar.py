@@ -42,6 +42,8 @@ from loguru import logger
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.fcm_client import FcmClient
+from snapper.application.notify.fcm_delivery import FcmDeliveryService
 from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_ALERT_TYPE
 from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.push_beta import PushBetaConfig
@@ -114,7 +116,7 @@ class NotifySidecar(RegisterableProcess):
         self,
         subscriber: ValidatedSubscriber,
         repo: Repository,
-        apns: ApnsClientPool,
+        apns: ApnsClientPool | None,
         apns_topic: str,
         tracker: SequenceTracker,
         publisher: MessagePublisher,
@@ -166,6 +168,7 @@ class NotifySidecar(RegisterableProcess):
         """
         self._subscriber = subscriber
         self._repo = repo
+        self._android: FcmDeliveryService | None = None
         self._apns = apns
         self._apns_topic = apns_topic
         self._tracker = tracker
@@ -186,6 +189,17 @@ class NotifySidecar(RegisterableProcess):
                 emit_alert_row=self._persist_and_fanout_row,
             )
         )
+
+    def configure_android(self, sender: FcmClient) -> None:
+        """Attach an independently configured sender while preserving APNs defaults.
+
+        Args:
+            sender: Validated sender for one immutable Android project configuration.
+        """
+        self._android = FcmDeliveryService(
+            self._repo, sender, self._tracker, self._scope_revalidator
+        )
+        self._android.push_beta_provider = self._push_beta_provider
 
     async def start(self) -> None:
         """Own startup, supervised workers and awaited teardown.
@@ -408,6 +422,10 @@ class NotifySidecar(RegisterableProcess):
             return
         await self._publish_alert_event_frame(event, now)
         push_beta = self._push_beta_provider() if self._push_beta_provider is not None else None
+        if self._android is not None:
+            await self._android.fanout(event, now, push_beta)
+        if self._apns is None:
+            return
         recipients = await route_alert_to_devices(
             alert=event,
             repo=self._repo,
@@ -566,6 +584,8 @@ class NotifySidecar(RegisterableProcess):
         user's chosen language. Falls back to the EN ``event.title``/
         ``event.body`` otherwise.
         """
+        if self._apns is None:
+            return
         if await self._cancel_if_scope_revoked(delivery_public_id, event, now):
             return
         current_attempt = await self._bump_attempt(delivery_public_id, now)
@@ -817,6 +837,10 @@ class NotifySidecar(RegisterableProcess):
         keeping the path correct for cancellation-event handlers that
         process a single delivery without a surrounding batch.
         """
+        if row.get("provider", "apns") == "fcm":
+            if self._android is not None:
+                await self._android.attempt(row, now)
+            return
         event_pid = row["alert_event_public_id"]
         if events_cache is not None and event_pid in events_cache:
             event: AlertEventRow | None = events_cache[event_pid]

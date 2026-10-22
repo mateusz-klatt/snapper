@@ -684,6 +684,50 @@ def _swift_struct_property_specs(
     return specs
 
 
+_SWIFT_PROPERTY_KEYWORDS = frozenset(SWIFT_KEYWORD_RENAMES) | frozenset(
+    {
+        "associatedtype",
+        "defer",
+        "do",
+        "fallthrough",
+        "guard",
+        "inout",
+        "repeat",
+        "rethrows",
+        "subscript",
+        "typealias",
+        "where",
+        "while",
+        "fileprivate",
+        "precedencegroup",
+        "some",
+        "any",
+        "actor",
+        "async",
+        "await",
+        "borrowing",
+        "consuming",
+        "distributed",
+        "isolated",
+        "nonisolated",
+        "package",
+        "sending",
+    }
+)
+
+
+def _swift_property_identifier(name: str) -> str:
+    """Escape Swift declaration keywords without changing their wire spelling.
+
+    Args:
+        name: Camel-cased property or coding-key identifier.
+
+    Returns:
+        A backtick-escaped keyword or the unchanged identifier.
+    """
+    return f"`{name}`" if name in _SWIFT_PROPERTY_KEYWORDS else name
+
+
 def _swift_struct_field_lines(properties: list[SwiftPropertySpec]) -> list[str]:
     """Render stored properties for a generated Swift struct.
 
@@ -693,7 +737,10 @@ def _swift_struct_field_lines(properties: list[SwiftPropertySpec]) -> list[str]:
     Returns:
         Swift stored-property declarations.
     """
-    return [f"    let {swift_name}: {swift_type}" for _, swift_name, swift_type, _ in properties]
+    return [
+        f"    let {_swift_property_identifier(swift_name)}: {swift_type}"
+        for _, swift_name, swift_type, _ in properties
+    ]
 
 
 def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[str]:
@@ -710,9 +757,11 @@ def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[
     lines = ["", "    enum CodingKeys: String, CodingKey {"]
     for property_name, swift_name, _, _ in properties:
         if swift_name == property_name:
-            lines.append(f"        case {swift_name}")
+            lines.append(f"        case {_swift_property_identifier(swift_name)}")
         else:
-            lines.append(f'        case {swift_name} = "{property_name}"')
+            lines.append(
+                f'        case {_swift_property_identifier(swift_name)} = "{property_name}"'
+            )
     lines.append("    }")
     return lines
 
@@ -2451,6 +2500,174 @@ def _hoist_openapi_literal_unions(content: str) -> str:
     return "\n".join(lines[:insert_at] + declarations + [""] + lines[insert_at:])
 
 
+_OPENAPI_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
+_OPENAPI_PATH_ENTRY = re.compile(
+    r'^(    "(?:[^"\\]|\\.)+": )\{\n'
+    r"        parameters: \{\n(?P<parameters>.*?)^        \};\n"
+    r"(?P<methods>.*?)^    \};$",
+    re.MULTILINE | re.DOTALL,
+)
+_OPENAPI_PATH_METHOD = re.compile(
+    r"        (?P<method>\w+)(?P<optional>\?): never;"
+    r'|        (?P<required>\w+): (?P<operation>Operations\["(?:[^"\\]|\\.)+"\]);'
+)
+_OPENAPI_EMPTY_PARAMETERS = """            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+"""
+_OPENAPI_PATH_HELPER = """type OpenApiPathItem<T, P = {
+    query?: never;
+    header?: never;
+    path?: never;
+    cookie?: never;
+}> = { parameters: P } & T & {
+    [M in Exclude<"get" | "put" | "post" | "delete" | "options" | "head" | "patch" | "trace", keyof T>]?: never;
+};
+
+"""
+
+
+def _openapi_path_operations(methods: str) -> list[str] | None:
+    """Accept only the complete generated method inventory without losing modifiers.
+
+    Args:
+        methods: Generated method property lines for one path.
+
+    Returns:
+        Required operation properties, or None for an unfamiliar or incomplete shape.
+    """
+    seen: set[str] = set()
+    required: list[str] = []
+    for line in methods.splitlines():
+        match = _OPENAPI_PATH_METHOD.fullmatch(line)
+        if match is None:
+            return None
+        method = match.group("method") or match.group("required")
+        if method not in _OPENAPI_METHODS or method in seen:
+            return None
+        seen.add(method)
+        if match.group("required") is not None:
+            required.append(line)
+    return required if seen == _OPENAPI_METHODS else None
+
+
+def _openapi_operation_alias(operation_id: str) -> str:
+    """Derive one meaningful PascalCase alias from a validated operation identifier.
+
+    Args:
+        operation_id: Nonempty generated operation identifier.
+
+    Returns:
+        Stable PascalCase alias using the generator's existing naming convention.
+    """
+    name = snake_to_camel(operation_id)
+    return "OpenApiOperation" + name[0].upper() + name[1:]
+
+
+def _openapi_operation_collisions(paths: str) -> set[str]:
+    """Reserve every ambiguous normalized alias before rewriting any path.
+
+    Args:
+        paths: Original Paths declaration.
+
+    Returns:
+        Alias names shared by distinct operation identifiers.
+    """
+    aliases: dict[str, set[str]] = {}
+    for identifier in re.findall(r'Operations\["(_*[A-Za-z][A-Za-z0-9_]*)"\]', paths):
+        alias = _openapi_operation_alias(identifier)
+        aliases.setdefault(alias, set()).add(identifier)
+    return {alias for alias, identifiers in aliases.items() if len(identifiers) > 1}
+
+
+def _openapi_aliased_operations(
+    operations: list[str], occupied: set[str]
+) -> tuple[list[str], dict[str, str]] | None:
+    """Name operation references by their stable IDs without colliding with source names.
+
+    Args:
+        operations: Required operation properties of one recognized path.
+        occupied: Identifier spellings already present in the original generated source.
+
+    Returns:
+        Rewritten properties and alias declarations, or None for unsafe identifiers.
+    """
+    rewritten: list[str] = []
+    pending: dict[str, str] = {}
+    for line in operations:
+        operation = re.search(r'Operations\["(_*[A-Za-z][A-Za-z0-9_]*)"\]', line)
+        if operation is None:
+            return None
+        alias = _openapi_operation_alias(operation.group(1))
+        if alias in occupied:
+            return None
+        pending[alias] = operation.group(0)
+        rewritten.append(line.replace(operation.group(0), alias))
+    return rewritten, pending
+
+
+def _hoist_openapi_path_items(content: str) -> str:
+    """Share path boilerplate while preserving required operations and parameter shapes.
+
+    Args:
+        content: Renamed and comment-stripped openapi-typescript source.
+
+    Returns:
+        Source with recognized Paths entries represented by a structural mapped helper.
+    """
+    if "OpenApiPathItem" in content:
+        return content
+    root = re.search(
+        r"^export (?:interface Paths|type Paths =) \{\n.*?^\};?",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    if root is None:
+        return content
+
+    aliases: dict[str, str] = {}
+    occupied = set(re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", content))
+    occupied.update(_openapi_operation_collisions(root.group(0)))
+
+    def replace(entry: re.Match[str]) -> str:
+        """Retain unfamiliar entries verbatim instead of widening their public type."""
+        operations = _openapi_path_operations(entry.group("methods"))
+        if operations is None:
+            return entry.group(0)
+        aliased = _openapi_aliased_operations(operations, occupied)
+        if aliased is None:
+            return entry.group(0)
+        operations, pending = aliased
+        aliases.update(pending)
+        parameters = entry.group("parameters")
+        suffix = "" if parameters == _OPENAPI_EMPTY_PARAMETERS else ", {\n" + parameters + "    }"
+        return (
+            entry.group(1)
+            + "OpenApiPathItem<{\n"
+            + "\n".join(operations)
+            + "\n    }"
+            + suffix
+            + ">;"
+        )
+
+    original = root.group(0)
+    updated = _OPENAPI_PATH_ENTRY.sub(replace, original)
+    if updated == original:
+        return content
+    declarations = "\n".join(
+        f"type {name} = {expression};" for name, expression in sorted(aliases.items())
+    )
+    return (
+        content[: root.start()]
+        + declarations
+        + "\n\n"
+        + _OPENAPI_PATH_HELPER
+        + updated
+        + content[root.end() :]
+    )
+
+
 def postprocess_openapi_typescript_file(
     file_path: Path, *, openapi_spec_path: Path | None = None
 ) -> None:
@@ -2506,6 +2723,7 @@ def postprocess_openapi_typescript_file(
     updated = _widen_optional_nullable_to_undefined(updated, request_schema_names)
     updated = _strip_jsdoc_blocks(updated)
     updated = _hoist_openapi_literal_unions(updated)
+    updated = _hoist_openapi_path_items(updated)
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")

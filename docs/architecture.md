@@ -870,10 +870,11 @@ ai_reviews          -- Human-in-the-loop review queue rows
 ai_review_events    -- Per-review lifecycle audit trail
 
 -- Notifications
-alert_events        -- APNs alert payloads
+alert_events        -- Shared alert history
 alert_deliveries    -- Per-device delivery attempts
 device_alert_prefs  -- Per-(device, alert_type, scope) preferences
-notification_devices -- Registered APNs device tokens
+notification_devices -- APNs tokens and separate Android FID bindings
+android_push_configurations -- Active/disabled revision head and retired configuration tombstones
 user_alert_defaults -- Per-user fallback alert preferences
 
 -- System
@@ -1374,8 +1375,8 @@ plus `admin.scope_revoked`
 `AlertEventData`, persists it SCD2 (`alert_events` plus one queued
 `alert_deliveries` row per active device), publishes an `AlertEventData`
 frame on `alerts.{user_public_id}.{alert_type}` for the web live-refresh
-bridge, and fans each delivery out to the target user's active APNs
-devices via the outbox-backed `NotifySidecar`
+bridge, and fans each delivery out to the target user's eligible APNs
+or configured Android FID registrations via the outbox-backed `NotifySidecar`
 (`application/notify/sidecar.py`), retrying server/throttled failures on
 its own 30s scheduler. The same process owns a guarded periodic recovery
 scanner for sentinel-current open portfolio-drift episodes. An eager pass
@@ -1383,9 +1384,11 @@ at startup and later
 `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` ticks rebuild the exact Stage 1
 owner page when its source bus frame was lost. Bus and scan inserts take the
 same transaction-serialized `(user_public_id, drift.<episode_public_id>)`
-claim, so only the winner reaches web/APNs fanout. The scanner never writes
+claim, so only the winner reaches web and provider fanout. The scanner never writes
 episode, reconciliation, position, order, rebase, or trading state. Its
-`apns_*` settings are read from the database.
+`apns_*` settings are read from the database. Optional Android sender configuration
+comes from an explicit runtime JSON; it is disabled by default and does not change
+APNs payloads or registration semantics. See [Android push](android-push.md).
 
 `NotifySidecar.start` supervises separate receive and retry workers. A retry
 failure, or an unexpected worker exit before shutdown, ends the owning run
@@ -1405,6 +1408,16 @@ Retry scheduling preserves the committed counter and requires the caller's
 attempt number to match the active row. A delayed result from an older attempt
 therefore cannot overwrite a newer attempt's retry schedule. These guards do
 not provide exclusive ownership of an in-flight send or exactly-once delivery.
+
+Android outbox rows additionally retain immutable registration/configuration/binding
+IDs and an expiry fixed at allocation plus 24 hours. Fresh user, registration,
+configuration, scope and preference checks precede sending, including after OAuth
+acquisition. All FCM terminal outcomes compare the charged attempt count, so an old
+worker cannot cancel a newer attempt. Retries respect the original expiry and a
+three-attempt budget, including attempts charged before admission fails. FCM sends
+only opaque data hints; private content waits for foreground authentication.
+The persisted active/disabled configuration revision prevents stale activation after
+a disable, while retired configuration UUIDs can never reactivate.
 
 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
 SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per

@@ -32,6 +32,7 @@ from snapper.application.notify.portfolio_drift_recovery import (
 )
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
+from snapper.config.android_push import ENV_VARS as ANDROID_PUSH_ENV_VARS
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.delegate_profile import ENV_VARS as DELEGATE_PROFILE_ENV_VARS
 from snapper.config.env_contract import BOOTSTRAP_ENV_VARS
@@ -71,6 +72,23 @@ class TestKnownEnvKeys:
         assert "SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS" in KNOWN_ENV_KEYS
         assert "MCP_OAUTH_ENABLED" in KNOWN_ENV_KEYS
         assert "MCP_PUBLIC_RESOURCE_URL" in KNOWN_ENV_KEYS
+
+    def test_android_push_configuration_key_is_accepted_without_accepting_typos(self) -> None:
+        """Validate the optional sender path while retaining typo detection.
+
+        Given: The documented Android push configuration key and a misspelled variant.
+        When: The shared environment contract validates each key.
+        Then: The documented key is accepted and the typo suggests the canonical spelling.
+        """
+        expected = "SNAPPER_ANDROID_PUSH_CONFIG_FILE"
+        assert frozenset({expected}) == ANDROID_PUSH_ENV_VARS
+        assert ANDROID_PUSH_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        validate_env_keys([expected])
+        typo = "SNAPPER_ANDROID_PUSH_CONFIG_FIEL"
+        with pytest.raises(UnknownEnvKeyError) as captured:
+            validate_env_keys([typo])
+        assert captured.value.unknown_keys == [typo]
+        assert captured.value.suggestions == {typo: expected}
 
     def test_includes_delegate_profile_keys(self) -> None:
         """The optional Compose profile contributes only its host inputs."""

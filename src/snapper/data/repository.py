@@ -141,6 +141,9 @@ from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.orm.util import AliasedInsp
 from sqlalchemy.pool import StaticPool
 
+from snapper.api.schemas.android_devices import AndroidDeviceInfo
+from snapper.api.schemas.android_devices import AndroidPushConfiguration
+from snapper.api.schemas.android_devices import RegisterAndroidDeviceBody
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import execution_row_digest
@@ -190,6 +193,13 @@ from snapper.core.types import TradeSideEnum
 from snapper.core.types import UpsertResult
 from snapper.core.wallet_short import compute_legacy_wallet_short
 from snapper.core.wallet_short import compute_wallet_short
+from snapper.data.android_devices import AndroidConfigurationError
+from snapper.data.android_devices import AndroidConfigurationRevision
+from snapper.data.android_devices import AndroidDeliveryResult
+from snapper.data.android_devices import AndroidRegistrationError
+from snapper.data.android_devices import RegistrationWrite
+from snapper.data.android_devices import android_device_info
+from snapper.data.android_devices import registration_revision
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
@@ -205,6 +215,7 @@ from snapper.data.models import AiReview
 from snapper.data.models import AiReviewEvent
 from snapper.data.models import AlertDelivery
 from snapper.data.models import AlertEvent
+from snapper.data.models import AndroidPushConfigurationState
 from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import DeviceAlertPref
@@ -613,6 +624,7 @@ class _DeliveryAttemptTransition:
 
     expected_count: int | None = None
     increment: bool = False
+    provider_receipt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -8188,6 +8200,13 @@ class Repository(ABC):
     @abstractmethod
     async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
         """Active queued deliveries with ``next_attempt_at`` NULL or <= ``now``."""
+        ...
+
+    @abstractmethod
+    async def finish_android_delivery(
+        self, public_id: str, result: AndroidDeliveryResult, write: RegistrationWrite
+    ) -> bool:
+        """Apply an FCM terminal outcome only to its exact charged attempt."""
         ...
 
     @abstractmethod
@@ -32365,6 +32384,8 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _notification_device_row_from(model: NotificationDevice) -> NotificationDeviceRow:
         """Map ORM ``NotificationDevice`` (SCD2) to its TypedDict row shape."""
+        if model.device_token is None or model.env is None:
+            raise ValueError("APNs projection requires an APNs registration")
         return NotificationDeviceRow(
             public_id=model.public_id,
             session_id=model.session_id,
@@ -32460,6 +32481,11 @@ class SQLAlchemyRepository(Repository):
             attempt_count=model.attempt_count,
             last_attempt_at=model.last_attempt_at,
             next_attempt_at=model.next_attempt_at,
+            provider=model.provider,
+            configuration_id=model.configuration_id,
+            binding_id=model.binding_id,
+            expires_at=model.expires_at,
+            provider_receipt=model.provider_receipt,
             apns_id=model.apns_id,
             error_reason=model.error_reason,
             created_at=model.created_at,
@@ -32578,6 +32604,7 @@ class SQLAlchemyRepository(Repository):
                     NotificationDevice.user_public_id == user_public_id,
                     NotificationDevice.known_to == KNOWN_TO_MAX,
                     NotificationDevice.token_status == "active",
+                    NotificationDevice.provider == "apns",
                 )
                 .order_by(NotificationDevice.registered_at.desc())
             )
@@ -32605,6 +32632,7 @@ class SQLAlchemyRepository(Repository):
                     NotificationDevice.user_public_id.in_(unique_ids),
                     NotificationDevice.known_to == KNOWN_TO_MAX,
                     NotificationDevice.token_status == "active",
+                    NotificationDevice.provider == "apns",
                 )
                 .order_by(NotificationDevice.registered_at.desc())
             )
@@ -32644,6 +32672,12 @@ class SQLAlchemyRepository(Repository):
                 timestamp=timestamp,
                 known_to=KNOWN_TO_MAX,
                 user_public_id=existing.user_public_id,
+                provider=existing.provider,
+                configuration_id=existing.configuration_id,
+                binding_id=existing.binding_id,
+                installation_id=existing.installation_id,
+                firebase_installation_id=existing.firebase_installation_id,
+                package_name=existing.package_name,
                 device_token=existing.device_token,
                 device_id=existing.device_id,
                 platform=existing.platform,
@@ -33305,6 +33339,11 @@ class SQLAlchemyRepository(Repository):
                 attempt_count=row.get("attempt_count", 0),
                 last_attempt_at=row.get("last_attempt_at"),
                 next_attempt_at=row.get("next_attempt_at"),
+                provider=row.get("provider", "apns"),
+                configuration_id=row.get("configuration_id"),
+                binding_id=row.get("binding_id"),
+                expires_at=row.get("expires_at"),
+                provider_receipt=row.get("provider_receipt"),
                 apns_id=row.get("apns_id"),
                 error_reason=row.get("error_reason"),
                 created_at=row["created_at"],
@@ -33437,6 +33476,11 @@ class SQLAlchemyRepository(Repository):
                     else transition_at
                 ),
                 next_attempt_at=next_attempt_at_override,
+                provider=existing.provider,
+                configuration_id=existing.configuration_id,
+                binding_id=existing.binding_id,
+                expires_at=existing.expires_at,
+                provider_receipt=attempt.provider_receipt or existing.provider_receipt,
                 apns_id=apns_id if apns_id is not None else existing.apns_id,
                 error_reason=error_reason if error_reason is not None else existing.error_reason,
                 created_at=existing.created_at,
@@ -33444,6 +33488,23 @@ class SQLAlchemyRepository(Repository):
             s.add(new_version)
             await s.commit()
             return new_version.attempt_count
+
+    async def finish_android_delivery(
+        self, public_id: str, result: AndroidDeliveryResult, write: RegistrationWrite
+    ) -> bool:
+        """Reject obsolete FCM outcomes without cancelling a newer queued attempt."""
+        committed = await self._scd2_transition_delivery(
+            public_id,
+            result.status,
+            transition_at=write.timestamp,
+            session_id=write.session_id,
+            sequence_id=write.sequence_id,
+            error_reason=result.reason,
+            attempt=_DeliveryAttemptTransition(
+                expected_count=result.expected_attempt_count, provider_receipt=result.receipt
+            ),
+        )
+        return committed is not None
 
     async def mark_delivery_sent(
         self,
@@ -33935,6 +33996,11 @@ class SQLAlchemyRepository(Repository):
             attempt_count=existing.attempt_count,
             last_attempt_at=existing.last_attempt_at,
             next_attempt_at=None,
+            provider=existing.provider,
+            configuration_id=existing.configuration_id,
+            binding_id=existing.binding_id,
+            expires_at=existing.expires_at,
+            provider_receipt=existing.provider_receipt,
             apns_id=existing.apns_id,
             error_reason=error_reason,
             created_at=existing.created_at,
@@ -36800,3 +36866,408 @@ class DatabaseRepository:
             engine.dispose()
         except Exception:
             return
+
+
+class AndroidDeviceStore:
+    """Separate Android queries prevent accidental admission to the APNs sender."""
+
+    def __init__(self, repo: Repository) -> None:
+        """Reuse the injected repository transaction factory, never global settings."""
+        self.repo = repo
+
+    async def state(self, configuration: str, installation: str) -> NotificationDevice | None:
+        """Read the latest binding or tombstone without changing its revision."""
+        async with self.repo.session() as session:
+            return await self._current(session, configuration, installation)
+
+    async def list_owned(self, owner: str) -> list[AndroidDeviceInfo]:
+        """Return only active Android registrations belonging to the principal."""
+        async with self.repo.session() as session:
+            rows = await session.scalars(
+                select(NotificationDevice)
+                .where(
+                    NotificationDevice.provider == "fcm",
+                    NotificationDevice.user_public_id == owner,
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                    NotificationDevice.token_status == "active",
+                )
+                .order_by(NotificationDevice.registered_at.desc())
+            )
+            return [android_device_info(row) for row in rows]
+
+    async def delivery_target(self, row: AlertDeliveryRow) -> NotificationDevice | None:
+        """Admit only the exact active registration/configuration captured by the outbox."""
+        async with self.repo.session() as session:
+            return await session.scalar(
+                select(NotificationDevice)
+                .join(
+                    AndroidPushConfigurationState,
+                    AndroidPushConfigurationState.configuration_id
+                    == NotificationDevice.configuration_id,
+                )
+                .join(User, User.public_id == NotificationDevice.user_public_id)
+                .where(
+                    User.is_active.is_(True),
+                    *where_active_now(User),
+                    NotificationDevice.public_id == row["device_public_id"],
+                    NotificationDevice.user_public_id == row["user_public_id"],
+                    NotificationDevice.configuration_id == row.get("configuration_id"),
+                    NotificationDevice.binding_id == row.get("binding_id"),
+                    NotificationDevice.provider == "fcm",
+                    NotificationDevice.token_status == "active",
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                    AndroidPushConfigurationState.state == "active",
+                    AndroidPushConfigurationState.known_to == KNOWN_TO_MAX,
+                )
+            )
+
+    async def register(
+        self, body: RegisterAndroidDeviceBody, write: RegistrationWrite
+    ) -> AndroidDeviceInfo:
+        """Compare and replace atomically; first-insert races fail closed on uniqueness."""
+        try:
+            async with self.repo.session() as session:
+                result = await self._register(session, body, write)
+                await session.commit()
+                return result
+        except IntegrityError:
+            code = await self._conflict_code(body)
+            raise AndroidRegistrationError(code) from None
+
+    async def _conflict_code(self, body: RegisterAndroidDeviceBody) -> str:
+        """Classify a rolled-back race without exposing the conflicting owner or FID."""
+        async with self.repo.session() as session:
+            other = await session.scalar(
+                select(NotificationDevice.id).where(
+                    NotificationDevice.provider == "fcm",
+                    NotificationDevice.configuration_id == body.configuration_id,
+                    NotificationDevice.firebase_installation_id == body.firebase_installation_id,
+                    NotificationDevice.installation_id != body.installation_id,
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                    NotificationDevice.token_status == "active",
+                )
+            )
+        return (
+            "android_push_binding_conflict"
+            if other is not None
+            else "android_push_revision_changed"
+        )
+
+    async def _current(
+        self, session: AsyncSession, configuration: str, installation: str
+    ) -> NotificationDevice | None:
+        """Lock an existing installation head; the partial index fences absent heads."""
+        return await session.scalar(
+            select(NotificationDevice)
+            .where(
+                NotificationDevice.provider == "fcm",
+                NotificationDevice.configuration_id == configuration,
+                NotificationDevice.installation_id == installation,
+                NotificationDevice.known_to == KNOWN_TO_MAX,
+            )
+            .with_for_update()
+        )
+
+    async def _register(
+        self, session: AsyncSession, body: RegisterAndroidDeviceBody, write: RegistrationWrite
+    ) -> AndroidDeviceInfo:
+        """Reject retired/reused bindings before changing the installation head."""
+        active = await session.scalar(
+            select(AndroidPushConfigurationState.id)
+            .where(
+                AndroidPushConfigurationState.configuration_id == body.configuration_id,
+                AndroidPushConfigurationState.state == "active",
+                AndroidPushConfigurationState.known_to == KNOWN_TO_MAX,
+            )
+            .with_for_update()
+        )
+        if active is None:
+            raise AndroidRegistrationError("android_push_configuration_changed")
+        current = await self._current(session, body.configuration_id, body.installation_id)
+        previous = await session.scalar(
+            select(NotificationDevice)
+            .where(
+                NotificationDevice.provider == "fcm",
+                NotificationDevice.binding_id == body.binding_id,
+            )
+            .order_by(NotificationDevice.timestamp.desc())
+            .limit(1)
+        )
+        if previous is not None:
+            return self._existing(previous, current, body, write)
+        if body.expected_revision != registration_revision(current):
+            raise AndroidRegistrationError("android_push_revision_changed")
+        if current is not None:
+            result = await session.execute(
+                update(NotificationDevice)
+                .where(
+                    NotificationDevice.id == current.id,
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                )
+                .values(known_to=write.timestamp)
+                .returning(NotificationDevice.id)
+            )
+            if result.scalar_one_or_none() is None:
+                raise AndroidRegistrationError("android_push_revision_changed")
+        row = self._new(body, write)
+        session.add(row)
+        await session.flush()
+        return android_device_info(row)
+
+    @staticmethod
+    def _existing(
+        previous: NotificationDevice,
+        current: NotificationDevice | None,
+        body: RegisterAndroidDeviceBody,
+        write: RegistrationWrite,
+    ) -> AndroidDeviceInfo:
+        """Only an unchanged active binding can return its original receipt."""
+        actual = (
+            previous.user_public_id,
+            previous.configuration_id,
+            previous.installation_id,
+            previous.firebase_installation_id,
+            previous.package_name,
+            previous.app_version,
+        )
+        expected = (
+            write.owner,
+            body.configuration_id,
+            body.installation_id,
+            body.firebase_installation_id,
+            body.package_name,
+            body.app_version,
+        )
+        if actual != expected:
+            raise AndroidRegistrationError("android_push_binding_conflict")
+        if current is None or previous.id != current.id or previous.token_status != "active":
+            raise AndroidRegistrationError("android_push_binding_retired")
+        return android_device_info(previous)
+
+    @staticmethod
+    def _new(body: RegisterAndroidDeviceBody, write: RegistrationWrite) -> NotificationDevice:
+        """Allocate a new public identity so preferences never follow another owner."""
+        return NotificationDevice(
+            public_id=str(uuid7()),
+            session_id=write.session_id,
+            sequence_id=write.sequence_id,
+            timestamp=write.timestamp,
+            known_to=KNOWN_TO_MAX,
+            user_public_id=write.owner,
+            provider="fcm",
+            platform="android",
+            device_token=None,
+            env=None,
+            device_id=body.installation_id,
+            installation_id=body.installation_id,
+            binding_id=body.binding_id,
+            configuration_id=body.configuration_id,
+            firebase_installation_id=body.firebase_installation_id,
+            package_name=body.package_name,
+            app_version=body.app_version,
+            registered_at=write.timestamp,
+            last_seen_at=None,
+            token_status="active",
+            previews_mode="private",
+        )
+
+    @staticmethod
+    async def retire(
+        session: AsyncSession, device: NotificationDevice, write: RegistrationWrite
+    ) -> None:
+        """Preserve an Android binding tombstone when its configuration is retired."""
+        result = await session.execute(
+            update(NotificationDevice)
+            .where(
+                NotificationDevice.id == device.id,
+                NotificationDevice.known_to == KNOWN_TO_MAX,
+            )
+            .values(known_to=write.timestamp)
+            .returning(NotificationDevice.id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise AndroidConfigurationError("android_push_configuration_changed")
+        session.add(
+            NotificationDevice(
+                public_id=device.public_id,
+                session_id=write.session_id,
+                sequence_id=write.sequence_id,
+                timestamp=write.timestamp,
+                known_to=KNOWN_TO_MAX,
+                provider="fcm",
+                platform="android",
+                user_public_id=device.user_public_id,
+                configuration_id=device.configuration_id,
+                binding_id=device.binding_id,
+                installation_id=device.installation_id,
+                firebase_installation_id=device.firebase_installation_id,
+                package_name=device.package_name,
+                device_token=None,
+                env=None,
+                device_id=device.device_id,
+                app_version=device.app_version,
+                previews_mode=device.previews_mode,
+                registered_at=device.registered_at,
+                last_seen_at=device.last_seen_at,
+                token_status="user_unregistered",
+            )
+        )
+
+
+class AndroidConfigurationStore:
+    """Persisted predecessor CAS prevents stale processes from reactivating a project."""
+
+    def __init__(self, repo: Repository) -> None:
+        """Reuse the repository transaction boundary."""
+        self.repo = repo
+
+    async def revision(self) -> AndroidConfigurationRevision:
+        """Return operator CAS inputs without changing state or exposing credentials."""
+        async with self.repo.session() as session:
+            current = await self._head(session)
+            return AndroidConfigurationRevision(
+                current.public_id if current is not None else None,
+                current.configuration_id if current is not None else None,
+            )
+
+    async def matches(self, configuration: AndroidPushConfiguration) -> bool:
+        """Read-only admission check for local sender/public-option consistency."""
+        async with self.repo.session() as session:
+            current = await self._head(session)
+            return (
+                current is not None
+                and current.configuration_id == configuration.configuration_id
+                and current.public_options_json == self._canonical(configuration)
+            )
+
+    async def activate(
+        self,
+        configuration: AndroidPushConfiguration,
+        expected: str | None,
+        write: RegistrationWrite,
+    ) -> None:
+        """Activate once at composition startup, refusing stale or retired identities."""
+        try:
+            async with self.repo.session() as session:
+                await self._activate(session, configuration, expected, write)
+                await session.commit()
+        except IntegrityError:
+            if not await self.matches(configuration):
+                raise AndroidConfigurationError("android_push_configuration_changed") from None
+
+    async def disable(self, expected: str | None, write: RegistrationWrite) -> None:
+        """Explicitly retire the expected active configuration without reviving old IDs."""
+        try:
+            async with self.repo.session() as session:
+                current = await self._head(session)
+                actual = current.public_id if current is not None else None
+                if actual != expected:
+                    raise AndroidConfigurationError("android_push_configuration_changed")
+                if current is not None:
+                    await self._retire(session, current, write)
+                session.add(self._version(None, "{}", "disabled", write))
+                await session.commit()
+        except IntegrityError:
+            raise AndroidConfigurationError("android_push_configuration_changed") from None
+
+    async def _head(self, session: AsyncSession) -> AndroidPushConfigurationState | None:
+        """Lock the active head; its unique slot fences simultaneous first activation."""
+        return await session.scalar(
+            select(AndroidPushConfigurationState)
+            .where(
+                AndroidPushConfigurationState.state.in_(("active", "disabled")),
+                AndroidPushConfigurationState.known_to == KNOWN_TO_MAX,
+            )
+            .with_for_update()
+        )
+
+    async def _activate(
+        self,
+        session: AsyncSession,
+        configuration: AndroidPushConfiguration,
+        expected: str | None,
+        write: RegistrationWrite,
+    ) -> None:
+        """Retire the previous head and registrations in the same transaction."""
+        current = await self._head(session)
+        canonical = self._canonical(configuration)
+        if current is not None and current.configuration_id == configuration.configuration_id:
+            if current.public_options_json != canonical:
+                raise AndroidConfigurationError("android_push_configuration_immutable")
+            return
+        previous = await session.scalar(
+            select(AndroidPushConfigurationState.id)
+            .where(
+                AndroidPushConfigurationState.configuration_id == configuration.configuration_id,
+            )
+            .limit(1)
+        )
+        if previous is not None:
+            raise AndroidConfigurationError("android_push_configuration_retired")
+        actual = current.public_id if current is not None else None
+        if actual != expected:
+            raise AndroidConfigurationError("android_push_configuration_changed")
+        if current is not None:
+            await self._retire(session, current, write)
+        session.add(self._version(configuration.configuration_id, canonical, "active", write))
+        await session.flush()
+
+    async def _retire(
+        self,
+        session: AsyncSession,
+        current: AndroidPushConfigurationState,
+        write: RegistrationWrite,
+    ) -> None:
+        """Close and insert a permanent configuration tombstone before its replacement."""
+        result = await session.execute(
+            update(AndroidPushConfigurationState)
+            .where(
+                AndroidPushConfigurationState.id == current.id,
+                AndroidPushConfigurationState.known_to == KNOWN_TO_MAX,
+            )
+            .values(known_to=write.timestamp)
+            .returning(AndroidPushConfigurationState.id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise AndroidConfigurationError("android_push_configuration_changed")
+        if current.state == "disabled":
+            return
+        session.add(
+            self._version(current.configuration_id, current.public_options_json, "retired", write)
+        )
+        devices = await session.scalars(
+            select(NotificationDevice)
+            .where(
+                NotificationDevice.provider == "fcm",
+                NotificationDevice.configuration_id == current.configuration_id,
+                NotificationDevice.known_to == KNOWN_TO_MAX,
+                NotificationDevice.token_status == "active",
+            )
+            .with_for_update()
+        )
+        for device in devices:
+            await AndroidDeviceStore.retire(session, device, write)
+
+    @staticmethod
+    def _canonical(configuration: AndroidPushConfiguration) -> str:
+        """Credential changes are excluded; public options are compared byte-for-byte."""
+        return json.dumps(
+            configuration.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+
+    @staticmethod
+    def _version(
+        configuration_id: str | None, canonical: str, state: str, write: RegistrationWrite
+    ) -> AndroidPushConfigurationState:
+        """Stamp each durable head or tombstone with immutable server provenance."""
+        return AndroidPushConfigurationState(
+            public_id=str(uuid7()),
+            session_id=write.session_id,
+            sequence_id=write.sequence_id,
+            timestamp=write.timestamp,
+            known_to=KNOWN_TO_MAX,
+            slot="android",
+            configuration_id=configuration_id,
+            public_options_json=canonical,
+            state=state,
+        )

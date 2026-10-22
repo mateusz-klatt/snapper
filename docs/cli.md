@@ -1468,15 +1468,17 @@ snapper polygon-load-csv --all --timespan day
 
 ### `notify`
 
-Long-running iOS Push Foundation sidecar (domain events → alert history,
-web fanout, and APNs HTTP/2). It evaluates the registered notify rules,
+Long-running notification sidecar (domain events → alert history, web fanout,
+APNs HTTP/2 and optional Android FCM HTTP v1 FID delivery). It evaluates the registered notify rules,
 fans each resulting alert out through the outbox-backed `NotifySidecar`,
 and retries server/throttled failures on its own 30-second scheduler.
 It also eagerly scans current open portfolio-drift episodes and repeats
 that recovery every `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` (default
 60), restoring any `drift.<episode_public_id>` page whose real-time bus
-event was lost. Configuration is otherwise read from the `apns_*`
-settings provisioned through the seed profile.
+event was lost. APNs configuration comes from the `apns_*` settings provisioned
+through the seed profile. Android is disabled unless an explicit
+`SNAPPER_ANDROID_PUSH_CONFIG_FILE` configures its sender; `apns_enabled:false`
+permits FCM-only startup without APNs credentials. See [Android push](android-push.md).
 
 ```bash
 snapper notify
@@ -1488,6 +1490,21 @@ start recovers any queued deliveries left behind. Drift recovery is
 notify-only: it reads episode/ownership/dedup evidence and writes only the
 normal alert/delivery outbox rows; it never trades, rebases, or mutates
 portfolio truth.
+
+### `android-push-state`
+
+Read the configured database's current Android configuration head without loading
+sender credentials or changing state:
+
+```sh
+snapper android-push-state
+```
+
+The JSON contains `revision` and `active_configuration_id`. Copy the opaque revision
+into runtime `expected_configuration_revision` before a new activation or explicit
+disable. Both fields are null only before any decision; a disabled head retains its
+revision. This command neither enables delivery nor contacts Google. See
+[configuration decisions](android-push.md#runtime-configuration).
 
 ## AI Integration
 

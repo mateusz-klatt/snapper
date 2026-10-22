@@ -91,6 +91,7 @@ from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.notify.android_runtime import android_runtime_context
 from snapper.application.notify.apns_client import build_apns_client_pool
 from snapper.application.notify.apns_config import load_apns_config
 from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
@@ -137,6 +138,7 @@ from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdate
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
+from snapper.cli.android_push import android_push_state
 from snapper.cli.candle_audit import audit_candles
 from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
@@ -146,6 +148,7 @@ from snapper.cli.mcp_oauth import mcp_oauth_app
 from snapper.cli.pnl_minimum_activation_gate import pnl_minimum_gate_app
 from snapper.cli.token_preflight import token_app
 from snapper.cli.trade_projection_checkpoints import retire_trade_projection_checkpoints
+from snapper.config.android_push import CONFIG_FILE_ENV as ANDROID_PUSH_CONFIG_FILE_ENV
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
@@ -2944,7 +2947,7 @@ def backtest_rerun(
 
 @app.command()
 def notify() -> None:
-    """Run the iOS Push Foundation sidecar (domain events -> APNs HTTP/2).
+    """Run the notification sidecar with APNs and explicitly configured FCM FID delivery.
 
     Long-running process. Evaluates registered notify rules, fans each
     resulting alert out to the target user's active devices via the
@@ -2964,49 +2967,53 @@ def notify() -> None:
         bootstrap = get_bootstrap_settings()
         repo = get_repository(bootstrap.db_url)
         settings_svc = await get_settings_service(bootstrap.db_url, bootstrap.zmq_broker_xsub)
-        apns_config = load_apns_config(settings_svc)
-        apns_pool = build_apns_client_pool(apns_config)
+        async with android_runtime_context(
+            repo, os.getenv(ANDROID_PUSH_CONFIG_FILE_ENV)
+        ) as android_runtime:
+            apns_config = load_apns_config(settings_svc) if android_runtime.apns_enabled else None
+            apns_pool = build_apns_client_pool(apns_config) if apns_config is not None else None
+            apns_topic = apns_config.topic if apns_config is not None else ""
 
-        zmq_ctx = zmq.asyncio.Context()
-        sub_sock = zmq_ctx.socket(zmq.SUB)
-        apply_hwm(sub_sock, rcvhwm=HWM_ORDER_FLOW)
-        broker_addr = bootstrap.zmq_broker_xpub
-        sub_sock.connect(broker_addr)
-        subscriber = ValidatedSubscriber(sub_sock)
-        pub_sock = zmq_ctx.socket(zmq.PUB)
-        apply_hwm(pub_sock, sndhwm=HWM_AUDIT)
-        pub_sock.connect(bootstrap.zmq_broker_xsub)
-        tracker = SequenceTracker()
-        publisher = MessagePublisher(ValidatedPublisher(pub_sock), tracker)
+            zmq_ctx = zmq.asyncio.Context()
+            sub_sock = zmq_ctx.socket(zmq.SUB)
+            apply_hwm(sub_sock, rcvhwm=HWM_ORDER_FLOW)
+            broker_addr = bootstrap.zmq_broker_xpub
+            sub_sock.connect(broker_addr)
+            subscriber = ValidatedSubscriber(sub_sock)
+            pub_sock = zmq_ctx.socket(zmq.PUB)
+            apply_hwm(pub_sock, sndhwm=HWM_AUDIT)
+            pub_sock.connect(bootstrap.zmq_broker_xsub)
+            tracker = SequenceTracker()
+            publisher = MessagePublisher(ValidatedPublisher(pub_sock), tracker)
 
-        sidecar = NotifySidecar(
-            subscriber=subscriber,
-            repo=repo,
-            apns=apns_pool,
-            apns_topic=apns_config.topic,
-            tracker=tracker,
-            publisher=publisher,
-            push_beta_provider=lambda: parse_push_beta_config(
-                settings_svc.get_setting(PUSH_BETA_SETTING_KEY)
-            ),
-        )
-        typer.echo(
-            f"snapper-notify: connected to {broker_addr}; topic={apns_config.topic}"
-            f"; env={apns_config.environment}"
-        )
-        try:
-            await sidecar.start()
-        except KeyboardInterrupt:
-            typer.echo("snapper-notify: stopped by user")
-        finally:
-            await sidecar.stop()
-            sub_sock.close()
-            pub_sock.close()
-            zmq_ctx.term()
+            sidecar = NotifySidecar(
+                subscriber=subscriber,
+                repo=repo,
+                apns=apns_pool,
+                apns_topic=apns_topic,
+                tracker=tracker,
+                publisher=publisher,
+                push_beta_provider=lambda: parse_push_beta_config(
+                    settings_svc.get_setting(PUSH_BETA_SETTING_KEY)
+                ),
+            )
+            if android_runtime.sender is not None:
+                sidecar.configure_android(android_runtime.sender)
+            typer.echo(f"snapper-notify: connected to {broker_addr}; topic={apns_topic}")
+            try:
+                await sidecar.start()
+            except KeyboardInterrupt:
+                typer.echo("snapper-notify: stopped by user")
+            finally:
+                await sidecar.stop()
+                sub_sock.close()
+                pub_sock.close()
+                zmq_ctx.term()
 
     asyncio.run(_run())
 
 
+app.command(name="android-push-state")(android_push_state)
 app.command(name="dev-mint-pat")(dev_mint_pat)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.add_typer(annulment_app, name="annulment")

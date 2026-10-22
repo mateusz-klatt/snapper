@@ -5060,6 +5060,40 @@ class NotificationDevice(TemporalMixin, Base):
     __tablename__ = "notification_devices"
     __table_args__ = (
         CheckConstraint(
+            "(provider = 'apns' AND device_token IS NOT NULL AND env IS NOT NULL) OR "
+            "(provider = 'fcm' AND device_token IS NULL AND env IS NULL AND "
+            "configuration_id IS NOT NULL AND binding_id IS NOT NULL AND "
+            "installation_id IS NOT NULL AND firebase_installation_id IS NOT NULL AND package_name IS NOT NULL)",
+            name="ck_notification_devices_provider_identity",
+        ),
+        Index(
+            "uq_android_binding_current",
+            "binding_id",
+            unique=True,
+            sqlite_where=text("provider = 'fcm' AND known_to = '9999-12-31 23:59:59.000000'"),
+            postgresql_where=text("provider = 'fcm' AND known_to = '9999-12-31 23:59:59+00'"),
+        ),
+        Index(
+            "uq_android_installation_current",
+            "configuration_id",
+            "installation_id",
+            unique=True,
+            sqlite_where=text("provider = 'fcm' AND known_to = '9999-12-31 23:59:59.000000'"),
+            postgresql_where=text("provider = 'fcm' AND known_to = '9999-12-31 23:59:59+00'"),
+        ),
+        Index(
+            "uq_android_fid_active",
+            "configuration_id",
+            "firebase_installation_id",
+            unique=True,
+            sqlite_where=text(
+                "provider = 'fcm' AND token_status = 'active' AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "provider = 'fcm' AND token_status = 'active' AND known_to = '9999-12-31 23:59:59+00'"
+            ),
+        ),
+        CheckConstraint(
             _CK_NOTIFICATION_DEVICE_TOKEN_STATUS,
             name="ck_notification_devices_token_status",
         ),
@@ -5085,11 +5119,17 @@ class NotificationDevice(TemporalMixin, Base):
         ),
     )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
-    device_token: Mapped[str] = mapped_column(String(200), nullable=False)
+    device_token: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider: Mapped[str] = mapped_column(String(10), nullable=False, server_default="apns")
+    configuration_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    binding_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    installation_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    firebase_installation_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    package_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     device_id: Mapped[str] = mapped_column(String(64), nullable=False)
     platform: Mapped[str] = mapped_column(String(10), nullable=False, server_default="ios")
-    env: Mapped[str] = mapped_column(String(10), nullable=False)
-    app_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    env: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     previews_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="private")
     registered_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
@@ -5309,6 +5349,10 @@ class AlertDelivery(TemporalMixin, Base):
 
     __tablename__ = "alert_deliveries"
     __table_args__ = (
+        CheckConstraint(
+            "provider = 'apns' OR (provider = 'fcm' AND configuration_id IS NOT NULL AND binding_id IS NOT NULL AND expires_at IS NOT NULL)",
+            name="ck_alert_delivery_provider_identity",
+        ),
         Index(
             "ix_alert_deliveries_public_id",
             "public_id",
@@ -5363,6 +5407,11 @@ class AlertDelivery(TemporalMixin, Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     next_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    provider: Mapped[str] = mapped_column(String(10), nullable=False, server_default="apns")
+    configuration_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    binding_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    provider_receipt: Mapped[str | None] = mapped_column(String(512), nullable=True)
     apns_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
@@ -5855,3 +5904,40 @@ class InstrumentFeedHealth(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     snapshot_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+class AndroidPushConfigurationState(TemporalMixin, Base):
+    """SCD2 active configuration head and irreversible retired UUID tombstones."""
+
+    __tablename__ = "android_push_configurations"
+    __table_args__ = (
+        CheckConstraint(
+            "(state = 'disabled' AND configuration_id IS NULL) OR (state IN ('active', 'retired') AND configuration_id IS NOT NULL)",
+            name="ck_android_push_configuration_identity",
+        ),
+        CheckConstraint(
+            "state IN ('active', 'retired', 'disabled')", name="ck_android_push_configuration_state"
+        ),
+        Index(
+            "uq_android_push_configuration_current",
+            "configuration_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_android_push_configuration_active",
+            "slot",
+            unique=True,
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND state IN ('active', 'disabled')"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31 23:59:59+00' AND state IN ('active', 'disabled')"
+            ),
+        ),
+    )
+    slot: Mapped[str] = mapped_column(String(16), nullable=False, server_default="android")
+    configuration_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    public_options_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
