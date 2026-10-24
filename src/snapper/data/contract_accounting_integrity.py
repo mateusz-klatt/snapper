@@ -30,9 +30,9 @@ from snapper.data.contract_accounting_guards import acquire_contract_accounting_
 from snapper.data.contract_accounting_store import AccountingRepository
 from snapper.data.contract_position_ledger_store import _event_projection
 from snapper.data.contract_position_ledger_store import get_bound_contract_position_event
-from snapper.data.financial_publication_delivery import _verify_delivery
-from snapper.data.financial_publication_store import BoundFinancialPublication
-from snapper.data.financial_publication_store import get_bound_financial_publication
+from snapper.data.financial_publication_history import BoundVersionedFinancialPublication
+from snapper.data.financial_publication_history import get_bound_versioned_financial_publication
+from snapper.data.financial_publication_history import verify_versioned_financial_delivery
 from snapper.data.futures_cash_ledger_store import _verify_event_row
 from snapper.data.futures_cash_ledger_store import load_observed_futures_cash
 from snapper.data.models import AccountingHoldResolution
@@ -42,11 +42,15 @@ from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import FinancialPublicationDelivery
 from snapper.data.models import FinancialPublicationIntent
 from snapper.data.models import is_open_ended_version
+from snapper.data.native_admitted_position_guards import (
+    acquire_native_admitted_position_restore_barrier,
+)
 from snapper.data.native_cash_history_v2 import load_native_cash_history_v2
 from snapper.data.native_contract_accounting_guards import (
     acquire_native_contract_accounting_restore_barrier,
 )
-from snapper.data.native_financial_event_binding_v2 import get_native_financial_event_material
+from snapper.data.native_financial_event_family import get_native_financial_event_family
+from snapper.data.native_position_family_history import get_bound_native_position_family
 from snapper.data.native_position_history_v2 import get_bound_native_position_event_v2
 
 
@@ -56,7 +60,7 @@ class _NativeKind(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     kind: Literal["native_cash", "contract_position_fill"]
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -120,7 +124,7 @@ async def _cash_scope(
         cash = FuturesNativeCashEvent.model_validate_json(row.canonical_payload)
         _verify_event_row(row, cash)
         return cash.scope
-    material = await get_native_financial_event_material(session, row.public_id, as_of)
+    material = await get_native_financial_event_family(session, row.public_id, as_of)
     _require(
         isinstance(material.payload, FuturesNativeCashEventV2),
         "accounting_restore_native_cash_kind_mismatch",
@@ -136,13 +140,35 @@ async def _position_scope(
         position = ContractPositionEventPayload.model_validate_json(row.canonical_payload)
         _event_projection(row, position)
         return position.scope, position.instrument_public_id
-    material = await get_native_financial_event_material(session, row.public_id, as_of)
+    material = await get_native_financial_event_family(session, row.public_id, as_of)
     _require(
         isinstance(material.payload, ContractPositionEventV2),
         "accounting_restore_native_position_kind_mismatch",
     )
     payload = cast(ContractPositionEventV2, material.payload)
     return payload.operands.scope, payload.operands.instrument_public_id
+
+
+async def _native_restore_guards(
+    session: AsyncSession, events: tuple[ContractAccountingEvent, ...]
+) -> tuple[PhysicalAccountingGuard, ...]:
+    """Select the complete physical closure for every declared retained native financial family.
+
+    Args:
+        session: Actual restore transaction already retaining its global startup barrier.
+        events: Every actual retained event before any kind, scope or family projection filter.
+
+    Returns:
+        The strongest required native guard closure, or no extra guards for legacy-only history.
+    """
+    versions = {
+        _NativeKind.model_validate_json(row.canonical_payload).schema_version for row in events
+    }
+    if 3 in versions:
+        return await acquire_native_admitted_position_restore_barrier(session)
+    if 2 in versions:
+        return await acquire_native_contract_accounting_restore_barrier(session)
+    return ()
 
 
 async def _financial_inventory(session: AsyncSession, as_of: datetime) -> _FinancialInventory:
@@ -154,14 +180,7 @@ async def _financial_inventory(session: AsyncSession, as_of: datetime) -> _Finan
             )
         ).all()
     )
-    native_guards = (
-        await acquire_native_contract_accounting_restore_barrier(session)
-        if any(
-            _NativeKind.model_validate_json(row.canonical_payload).schema_version == 2
-            for row in events
-        )
-        else ()
-    )
+    native_guards = await _native_restore_guards(session, events)
     latest_positions: dict[tuple[int, str, str], ContractAccountingEvent] = {}
     cash_scopes: dict[tuple[int, str], ExecutionAccountScope] = {}
     scopes: dict[str, ExecutionAccountScope] = {}
@@ -195,8 +214,10 @@ async def _financial_inventory(session: AsyncSession, as_of: datetime) -> _Finan
     for (version, _digest, _instrument), row in latest_positions.items():
         if version == 1:
             await get_bound_contract_position_event(session, row.public_id)
-        else:
+        elif version == 2:
             await get_bound_native_position_event_v2(session, row.public_id, as_of)
+        else:
+            await get_bound_native_position_family(session, row.public_id, as_of)
     return _FinancialInventory(
         events,
         tuple(scopes[key] for key in sorted(scopes)),
@@ -271,13 +292,15 @@ async def _publications(
             )
         ).all()
     )
-    bound: dict[str, BoundFinancialPublication] = {}
+    bound: dict[str, BoundVersionedFinancialPublication] = {}
     for row in rows:
         _require(
             is_open_ended_version(row.known_to) and row.timestamp <= as_of,
             "accounting_restore_publication_knowledge_invalid",
         )
-        bound[row.public_id] = await get_bound_financial_publication(session, row.public_id)
+        bound[row.public_id] = await get_bound_versioned_financial_publication(
+            session, row.public_id
+        )
     deliveries = tuple(
         (
             await session.scalars(
@@ -293,7 +316,7 @@ async def _publications(
             is_open_ended_version(delivery.known_to) and delivery.timestamp <= as_of,
             "accounting_restore_delivery_knowledge_invalid",
         )
-        _verify_delivery(delivery, intent)
+        verify_versioned_financial_delivery(delivery, intent)
     return rows, deliveries
 
 

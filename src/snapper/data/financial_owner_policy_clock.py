@@ -16,6 +16,7 @@ from snapper.application.portfolio.contract_position_ledger import ContractPosit
 from snapper.application.portfolio.futures_cash_ledger import FuturesNativeCashEvent
 from snapper.application.portfolio.native_financial_payloads_v2 import ContractPositionEventV2
 from snapper.application.portfolio.native_financial_payloads_v2 import FuturesNativeCashEventV2
+from snapper.application.portfolio.native_position_admission_v3 import AdmittedNativePositionEventV3
 from snapper.core.execution_unit_snapshot import EvidenceInstant
 from snapper.core.execution_unit_snapshot import SnapshotWriteProvenance
 from snapper.core.financial_account_owner import FinancialAccountOwnerEvidence
@@ -26,8 +27,9 @@ from snapper.data.contract_position_ledger_store import _event_projection
 from snapper.data.futures_cash_ledger_store import _verify_event_row
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
+from snapper.data.native_admitted_position_guards import require_native_admitted_position_guards
 from snapper.data.native_contract_accounting_guards import require_native_contract_accounting_guards
-from snapper.data.native_financial_event_binding_v2 import bind_native_financial_event_material
+from snapper.data.native_financial_event_family import bind_native_financial_event_family
 from snapper.data.session_context import session_no_autoflush
 
 type _RetainedFinancialPayload = (
@@ -35,6 +37,7 @@ type _RetainedFinancialPayload = (
     | ContractPositionEventPayload
     | FuturesNativeCashEventV2
     | ContractPositionEventV2
+    | AdmittedNativePositionEventV3
 )
 _PAYLOAD: TypeAdapter[_RetainedFinancialPayload] = TypeAdapter(_RetainedFinancialPayload)
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
@@ -67,8 +70,10 @@ async def _bound_decision(
 ) -> FinancialAccountOwnerEvidence | None:
     """Verify all row mirrors and actual native source graphs before selecting a policy reference."""
     _require_retained_row(row)
-    if isinstance(payload, FuturesNativeCashEventV2 | ContractPositionEventV2):
-        material = await bind_native_financial_event_material(session, row, row.timestamp)
+    if isinstance(
+        payload, FuturesNativeCashEventV2 | ContractPositionEventV2 | AdmittedNativePositionEventV3
+    ):
+        material = await bind_native_financial_event_family(session, row, row.timestamp)
         return material.payload.source.owner_evidence
     if isinstance(payload, FuturesNativeCashEvent):
         _verify_event_row(row, payload)
@@ -112,6 +117,10 @@ async def require_financial_owner_policy_close_clock(
         try:
             material = tuple((row, _PAYLOAD.validate_json(row.canonical_payload)) for row in rows)
             if any(
+                isinstance(payload, AdmittedNativePositionEventV3) for _row, payload in material
+            ):
+                await require_native_admitted_position_guards(session)
+            elif any(
                 isinstance(payload, FuturesNativeCashEventV2 | ContractPositionEventV2)
                 for _row, payload in material
             ):

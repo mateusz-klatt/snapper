@@ -144,6 +144,7 @@ async def _seed_catalog(
     now: datetime,
     source: AdmissionSource,
     paper: bool,
+    catalog_symbol: Symbol | None = None,
 ) -> OrderRequestData:
     """Persist actual source/Paper identities plus the original durable CREATE."""
     exchange: OrderExchange
@@ -158,20 +159,17 @@ async def _seed_catalog(
     mode: Literal["live", "paper"] = "paper" if paper else "live"
     spec_at = now - timedelta(hours=1)
     intent_at = now - timedelta(seconds=30)
+    if catalog_symbol is not None:
+        spec_at = max(spec_at, catalog_symbol.timestamp)
+        intent_at = max(intent_at, spec_at)
     native = "AAPL" if source == "polygon" else "BTC-USD"
     shard = f"{exchange}.{native}.{mode}" + (".strategy-test" if paper else "")
     rows = [
-        Symbol(
-            **admission_stamp(1, spec_at).model_dump(mode="python"),
-            native_symbol=native,
-            base="AAPL" if source == "polygon" else "BTC",
-            quote="USD",
-            asset_type="equity" if source == "polygon" else "crypto",
-            created_at=spec_at,
-        ),
         Instrument(
             **admission_stamp(2, spec_at).model_dump(mode="python"),
-            symbol_public_id=admission_id(1),
+            symbol_public_id=(
+                admission_id(1) if catalog_symbol is None else catalog_symbol.public_id
+            ),
             exchange=source,
         ),
         _source_spec(source, spec_at, admission_id(2)),
@@ -209,12 +207,30 @@ async def _seed_catalog(
             correlation_id=admission_id(15),
         ),
     ]
+    if catalog_symbol is None:
+        rows.insert(
+            0,
+            Symbol(
+                **admission_stamp(1, spec_at).model_dump(mode="python"),
+                native_symbol=native,
+                base="AAPL" if source == "polygon" else "BTC",
+                quote="USD",
+                asset_type="equity" if source == "polygon" else "crypto",
+                created_at=spec_at,
+            ),
+        )
+    else:
+        assert catalog_symbol.native_symbol == native
+        assert catalog_symbol.base == ("AAPL" if source == "polygon" else "BTC")
+        assert catalog_symbol.quote == "USD"
     if paper:
         rows.extend(
             [
                 Instrument(
                     **admission_stamp(140, spec_at).model_dump(mode="python"),
-                    symbol_public_id=admission_id(1),
+                    symbol_public_id=(
+                        admission_id(1) if catalog_symbol is None else catalog_symbol.public_id
+                    ),
                     exchange="paper",
                     source_exchange=source,
                 ),
@@ -331,6 +347,7 @@ async def seed_admission_scenario(
     now: datetime,
     source: AdmissionSource = "kraken",
     paper: bool = False,
+    catalog_symbol: Symbol | None = None,
 ) -> AdmissionScenario:
     """Persist real isolated source, intent, account and immutable route authority.
 
@@ -339,11 +356,12 @@ async def seed_admission_scenario(
         now: Deterministic actual producer clock used by the scenario.
         source: Explicit real source venue, independent of a Paper target.
         paper: Select simulated execution and its own distinct instrument UUID.
+        catalog_symbol: Compatible retained migration seed whose original identity and clocks stay unchanged.
 
     Returns:
         A genuine durable scenario without an exchange client, server or production access.
     """
-    order = await _seed_catalog(repository, now, source, paper)
+    order = await _seed_catalog(repository, now, source, paper, catalog_symbol)
     authority = await _seed_account(repository, order, now)
     result = await insert_execution_route_authority(repository, authority, admission_stamp(93, now))
     route = ExecutionRouteReference(

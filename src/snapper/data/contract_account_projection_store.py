@@ -11,6 +11,7 @@ from snapper.application.portfolio.contract_position_ledger import ContractPosit
 from snapper.application.portfolio.futures_cash_ledger import FuturesNativeCashEvent
 from snapper.application.portfolio.native_financial_payloads_v2 import ContractPositionEventV2
 from snapper.application.portfolio.native_financial_payloads_v2 import FuturesNativeCashEventV2
+from snapper.application.portfolio.native_position_admission_v3 import AdmittedNativePositionEventV3
 from snapper.core.contract_account_projection import ContractAccountSnapshot
 from snapper.core.contract_account_projection import ContractJournalReference
 from snapper.core.contract_account_projection import ContractProjectionHold
@@ -29,10 +30,13 @@ from snapper.data.models import AccountingRawReceipt
 from snapper.data.models import AccountingScopeHold
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.native_cash_history_v2 import load_native_cash_history_v2
+from snapper.data.native_position_family_history import get_bound_native_position_family
 from snapper.data.native_position_history_v2 import get_bound_native_position_event_v2
 
-_POSITION: TypeAdapter[ContractPositionEventPayload | ContractPositionEventV2] = TypeAdapter(
-    ContractPositionEventPayload | ContractPositionEventV2
+_POSITION: TypeAdapter[
+    ContractPositionEventPayload | ContractPositionEventV2 | AdmittedNativePositionEventV3
+] = TypeAdapter(
+    ContractPositionEventPayload | ContractPositionEventV2 | AdmittedNativePositionEventV3
 )
 _CASH: TypeAdapter[FuturesNativeCashEvent | FuturesNativeCashEventV2] = TypeAdapter(
     FuturesNativeCashEvent | FuturesNativeCashEventV2
@@ -153,7 +157,9 @@ async def _verify_position_graphs(
     for row in latest.values():
         public_id = row.public_id
         payload = _POSITION.validate_json(row.canonical_payload)
-        if isinstance(payload, ContractPositionEventV2):
+        if isinstance(payload, AdmittedNativePositionEventV3):
+            await get_bound_native_position_family(session, public_id, as_of)
+        elif isinstance(payload, ContractPositionEventV2):
             await get_bound_native_position_event_v2(session, public_id, as_of)
         else:
             await get_bound_contract_position_event(session, public_id)
@@ -175,6 +181,8 @@ def _project_rows(rows: tuple[ContractAccountingEvent, ...], scope: ExecutionAcc
         currency = None
         if row.kind == "contract_position_fill":
             material = _POSITION.validate_json(row.canonical_payload)
+            if isinstance(material, AdmittedNativePositionEventV3):
+                material = material.position
             payload = (
                 material.operands if isinstance(material, ContractPositionEventV2) else material
             )

@@ -534,14 +534,14 @@ async def test_local_receipt_retry_returns_original_acknowledgement_without_dupl
     assert await _count(repository, FinancialPublicationDelivery) == 1
 
 
-async def test_corrupt_delivery_digest_cannot_suppress_the_actual_pending_intent(
+async def test_corrupt_delivery_digest_refuses_recovery_without_losing_actual_intent(
     scenario: ContractPositionScenario,
 ) -> None:
     """No false delivery is accepted.
 
-    Given: an imported receipt with the wrong digest,
-    When: read or retried,
-    Then: no false delivery is accepted.
+    Given: an imported receipt with the wrong digest alongside its genuine committed intent,
+    When: pending recovery or receipt retry reads that inconsistent evidence,
+    Then: both refuse before publication and the original intent remains independently readable.
     """
     repository = scenario.fill.admission.repository
     recorded = await _record(scenario)
@@ -559,8 +559,25 @@ async def test_corrupt_delivery_digest_cannot_suppress_the_actual_pending_intent
             )
         )
         await session.commit()
-    pending = await load_pending_financial_publications(repository, scope)
-    assert [item.public_id for item in pending] == [recorded.publication.public_id]
+    with pytest.raises(
+        FinancialPublicationError, match="financial_delivery_actual_intent_mismatch"
+    ):
+        await load_pending_financial_publications(repository, scope)
+    async with repository.session() as session:
+        retained = await get_bound_financial_publication(session, recorded.publication.public_id)
+        receipt = (
+            await session.scalars(
+                select(FinancialPublicationDelivery).where(
+                    FinancialPublicationDelivery.publication_public_id
+                    == recorded.publication.public_id
+                )
+            )
+        ).one()
+        assert retained.public_id == recorded.publication.public_id
+        assert retained.content_digest == recorded.publication.content_digest
+        assert receipt.publication_digest == "f" * 64
+    assert await _count(repository, FinancialPublicationIntent) == 1
+    assert await _count(repository, FinancialPublicationDelivery) == 1
     with pytest.raises(
         FinancialPublicationError, match="financial_delivery_actual_intent_mismatch"
     ):
