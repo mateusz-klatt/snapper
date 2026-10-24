@@ -13,14 +13,17 @@ from snapper.core.execution_unit_snapshot import EvidenceUUID
 from snapper.core.execution_unit_snapshot import SnapshotWriteProvenance
 from snapper.data.contract_accounting_guards import acquire_contract_accounting_write_barrier
 from snapper.data.contract_accounting_store import AccountingRepository
+from snapper.data.financial_publication_delivery_types import PublicationReceiptSource
 from snapper.data.financial_publication_store import BoundFinancialPublication
 from snapper.data.financial_publication_store import FinancialPublicationError
 from snapper.data.financial_publication_store import get_bound_financial_publication
 from snapper.data.models import FinancialPublicationDelivery
 from snapper.data.models import FinancialPublicationIntent
+from snapper.data.models import is_open_ended_version
+from snapper.data.session_context import session_no_autoflush
 
 
-def _verify_delivery(row: FinancialPublicationDelivery, intent: BoundFinancialPublication) -> None:
+def _verify_delivery(row: FinancialPublicationDelivery, intent: PublicationReceiptSource) -> None:
     """Require the actual intent scope and digest before accepting a previous delivery receipt."""
     scope = intent.payload.scope
     actual = (
@@ -43,13 +46,17 @@ def _verify_delivery(row: FinancialPublicationDelivery, intent: BoundFinancialPu
         intent.content_digest,
         "publisher_returned",
     )
-    if actual != expected or not (intent.payload.recorded_at <= row.published_at <= row.timestamp):
+    if (
+        not is_open_ended_version(row.known_to)
+        or actual != expected
+        or not intent.payload.recorded_at <= row.published_at <= row.timestamp
+    ):
         raise FinancialPublicationError("financial_delivery_actual_intent_mismatch")
 
 
 async def _append_delivery(
     session: AsyncSession,
-    intent: BoundFinancialPublication,
+    intent: PublicationReceiptSource,
     published_at: datetime,
     provenance: SnapshotWriteProvenance,
 ) -> str:
@@ -126,6 +133,59 @@ async def load_pending_financial_publications(
     scope = ExecutionAccountScope.model_validate(scope)
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("Financial publication page limit must be between one and one thousand")
+    async with repository.session() as session:
+        identities = await _pending_publication_ids(session, scope, limit)
+        return await _current_pending_legacy(session, identities)
+
+
+async def _current_pending_legacy(
+    session: AsyncSession, identities: tuple[str, ...]
+) -> tuple[BoundFinancialPublication, ...]:
+    """Recheck actual legacy receipts before callback and skip a concurrently acknowledged intent."""
+    pending: list[BoundFinancialPublication] = []
+    for public_id in identities:
+        intent = await get_bound_financial_publication(session, public_id)
+        receipt = await session.scalar(
+            select(FinancialPublicationDelivery).where(
+                FinancialPublicationDelivery.publication_public_id == public_id
+            )
+        )
+        if receipt is None:
+            pending.append(intent)
+        else:
+            _verify_delivery(receipt, intent)
+    return tuple(pending)
+
+
+async def _pending_publication_ids(
+    session: AsyncSession, scope: ExecutionAccountScope, limit: int
+) -> tuple[str, ...]:
+    """Select actual pending identities using the complete local receipt scope and clock shape."""
+    digest = account_scope_digest(scope)
+    with session_no_autoflush(session):
+        await _verify_scoped_delivery_markers(session, digest)
+        return await _pending_unacknowledged_ids(session, digest, limit)
+
+
+async def _verify_scoped_delivery_markers(session: AsyncSession, scope_digest: str) -> None:
+    """Refuse damaged raw lifetime markers before receipts can exclude any recovery candidates."""
+    markers = await session.scalars(
+        select(FinancialPublicationDelivery.known_to)
+        .join(
+            FinancialPublicationIntent,
+            FinancialPublicationIntent.public_id
+            == FinancialPublicationDelivery.publication_public_id,
+        )
+        .where(FinancialPublicationIntent.account_scope_digest == scope_digest)
+    )
+    if any(not is_open_ended_version(marker) for marker in markers):
+        raise FinancialPublicationError("financial_delivery_actual_intent_mismatch")
+
+
+async def _pending_unacknowledged_ids(
+    session: AsyncSession, scope_digest: str, limit: int
+) -> tuple[str, ...]:
+    """Apply bounded ordering after scoped raw receipt markers have passed exact validation."""
     acknowledged = exists(
         select(FinancialPublicationDelivery.id).where(
             and_(
@@ -142,21 +202,19 @@ async def load_pending_financial_publications(
                 == FinancialPublicationIntent.margin_account,
                 FinancialPublicationDelivery.published_at >= FinancialPublicationIntent.timestamp,
                 FinancialPublicationDelivery.delivery_semantics == "publisher_returned",
+                FinancialPublicationDelivery.published_at <= FinancialPublicationDelivery.timestamp,
             )
         )
     )
-    async with repository.session() as session:
-        identities = (
-            await session.scalars(
-                select(FinancialPublicationIntent.public_id)
-                .where(
-                    FinancialPublicationIntent.account_scope_digest == account_scope_digest(scope),
-                    ~acknowledged,
-                )
-                .order_by(FinancialPublicationIntent.id)
-                .limit(limit)
+    identities = (
+        await session.scalars(
+            select(FinancialPublicationIntent.public_id)
+            .where(
+                FinancialPublicationIntent.account_scope_digest == scope_digest,
+                ~acknowledged,
             )
-        ).all()
-        return tuple(
-            [await get_bound_financial_publication(session, public_id) for public_id in identities]
+            .order_by(FinancialPublicationIntent.id)
+            .limit(limit)
         )
+    ).all()
+    return tuple(identities)

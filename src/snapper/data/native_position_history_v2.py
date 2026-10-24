@@ -24,7 +24,9 @@ from snapper.data.accounting_native_source_store_v2 import get_bound_native_sour
 from snapper.data.models import ContractAccountingAnchor
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
-from snapper.data.native_financial_event_binding_v2 import bind_native_financial_event_material
+from snapper.data.native_financial_event_family import (
+    bind_native_financial_event_family as bind_native_financial_event_material,
+)
 from snapper.data.native_financial_source_binding_v2 import BoundNativeFinancialSource
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding

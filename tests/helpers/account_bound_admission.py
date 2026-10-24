@@ -14,6 +14,7 @@ from snapper.core.execution_unit_admission import ExecutionRouteReference
 from snapper.data.execution_unit_snapshot_store import SnapshotWriteResult
 from snapper.data.models import TradeCommand
 from snapper.messaging.schemas.data import OrderRequestData
+from tests.helpers.native_account_authority import NativeAuthorityDatabase
 from tests.helpers.native_account_authority import NativeAuthorityScenario
 from tests.helpers.native_account_authority import build_native_authority_payload
 from tests.helpers.native_account_authority import capture_native_account_read
@@ -82,22 +83,28 @@ async def _native_intent(
 
 @asynccontextmanager
 async def account_admission_scenario(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database: NativeAuthorityDatabase | None = None,
 ) -> AsyncIterator[AccountAdmissionScenario]:
     """Own real source rows and closed HTTP clients without external venue or order access.
 
     Args:
         tmp_path: Isolated caller-owned directory for the actual SQLite fixture.
         monkeypatch: Controlled source/producer clocks and socket-free requests routing.
+        database: Already migrated isolated repository and its genuine committed-source observer.
 
     Yields:
         Both real account-source families and independently stored native command material.
     """
-    async with native_authority_scenario(tmp_path, monkeypatch) as native:
+    async with native_authority_scenario(tmp_path, monkeypatch, database) as native:
         monkeypatch.setattr(account_producer, "datetime", native.clock)
         monkeypatch.setattr(legacy_producer, "datetime", native.clock)
         legacy = await seed_admission_scenario(
-            native.repository, native.clock.current, source="kraken_futures"
+            native.repository,
+            native.clock.current,
+            source="kraken_futures",
+            catalog_symbol=None if database is None else database.catalog_symbol,
         )
         order = await _native_intent(native, legacy)
         outcome = await capture_native_account_read(native)

@@ -39,8 +39,12 @@ from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
 from snapper.data.native_contract_accounting_guards import require_native_contract_accounting_guards
 from snapper.data.native_financial_event_binding_v2 import NativeFinancialEventMaterialV2
-from snapper.data.native_financial_event_binding_v2 import bind_native_financial_event_material
-from snapper.data.native_financial_event_binding_v2 import get_native_financial_event_material
+from snapper.data.native_financial_event_family import (
+    bind_native_financial_event_family as bind_native_financial_event_material,
+)
+from snapper.data.native_financial_event_family import (
+    get_native_financial_event_family as get_native_financial_event_material,
+)
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
 from snapper.data.session_context import session_no_autoflush

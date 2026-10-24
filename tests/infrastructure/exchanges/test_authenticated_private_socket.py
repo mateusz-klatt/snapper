@@ -9,13 +9,11 @@ import asyncio
 import json
 import logging
 import pickle
-import sqlite3
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -87,12 +85,8 @@ class _ProviderSocket:
         return await self.incoming.get()
 
     def _assert_proof_committed(self) -> None:
-        """Observe the actual proof using an independent SQLite connection at physical auth send."""
-        path = self.owner.source.adapter.path
-        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
-            rows = connection.execute(
-                "SELECT public_id, canonical_payload FROM native_account_identity_proofs"
-            ).fetchall()
+        """Observe the actual committed proof independently in the same database at physical auth send."""
+        rows = self.owner.source.adapter.identity_proofs()
         assert self.owner.proof_public_id in {row[0] for row in rows}
         assert all(_KEY not in row[1] and _CHALLENGE not in row[1] for row in rows)
         self.owner.proof_seen_at_send += 1

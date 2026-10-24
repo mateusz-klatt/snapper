@@ -40,6 +40,7 @@ from snapper.messaging.schemas.data import StrategyListEventData
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.data import TradeData
+from snapper.messaging.schemas.financial_publication import FinancialPublicationData
 
 MarketDataMessage = TickData | CandleData | TradeData
 """Union type for all market data message types."""
@@ -87,6 +88,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "order_replace": OrderReplaceData,
     "order_event": OrderEventData,
     "execution": ExecutionData,
+    "financial_publication": FinancialPublicationData,
     "heartbeat": HeartbeatData,
     "egress_pool_snapshot_event": EgressPoolSnapshotEventData,
     "egress_transfer_event": EgressTransferEventData,
@@ -109,7 +111,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
 """Mapping from message type string to Data class for deserialization."""
 
 
-def parse_message(data: str) -> StrictDataSchema[Any]:
+def parse_message(data: str, *, topic: str | None = None) -> StrictDataSchema[Any]:
     """Parse JSON string into typed Data instance.
 
     Deserializes a JSON message string and returns the appropriate
@@ -117,6 +119,7 @@ def parse_message(data: str) -> StrictDataSchema[Any]:
 
     Args:
         data: JSON string containing the serialized message.
+        topic: Actual independently received frame topic, required for financial publications.
 
     Returns:
         Typed Data instance (TickData, CandleData, etc.).
@@ -136,6 +139,11 @@ def parse_message(data: str) -> StrictDataSchema[Any]:
     if not message_class:
         raise MessageParseError(f"Unknown message type: {msg_type}")
     try:
-        return message_class.model_validate_json(data)
+        message = message_class.model_validate_json(data)
+        if isinstance(message, FinancialPublicationData):
+            if topic is None:
+                raise ValueError("Financial publication requires its actual received topic")
+            message.require_topic(topic)
+        return message
     except Exception as e:
         raise MessageParseError(f"Failed to validate {msg_type} message: {e}") from e
