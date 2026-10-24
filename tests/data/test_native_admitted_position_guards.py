@@ -1,10 +1,17 @@
-"""Actual SQLite physical guards for the strict native admitted-position graph and restore boundary."""
+"""Check actual SQLite guards and PostgreSQL admitted-position command boundaries.
+
+PostgreSQL session responses below exercise dispatch and fail-closed command
+ordering only. They do not replace the separate owned PostgreSQL physical proof.
+"""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from shutil import copy2
 from typing import Literal
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -15,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from snapper.data.contract_accounting_guards import ACCOUNTING_STARTUP_LOCK_DOMAIN
+from snapper.data.contract_accounting_guards import ACCOUNTING_STARTUP_LOCK_NAMESPACE
 from snapper.data.contract_accounting_guards import ContractAccountingIntegrityError
 from snapper.data.contract_accounting_guards import PhysicalAccountingGuard
 from snapper.data.contract_accounting_guards import require_contract_accounting_guards
@@ -44,6 +53,27 @@ _ALL_TABLES = (
     "private_source_ownership_receipts",
     "submission_unit_admissions",
 )
+
+
+def _postgres_boundary_session(
+    restore: bool, isolation: object = "read committed"
+) -> tuple[AsyncSession, AsyncMock]:
+    """Provide explicit SQL response operands with an empty, deliberately unproven guard catalog."""
+    binding = MagicMock()
+    binding.dialect.name = "postgresql"
+    mode = MagicMock()
+    mode.scalar_one.return_value = isolation
+    catalog = MagicMock()
+    catalog.mappings.return_value = []
+    responses = [mode, MagicMock(), MagicMock(), catalog]
+    if restore:
+        responses[:0] = [mode, MagicMock()]
+    execute = AsyncMock(side_effect=responses)
+    session = MagicMock(spec=AsyncSession)
+    session.in_transaction.return_value = True
+    session.get_bind.return_value = binding
+    session.execute = execute
+    return cast(AsyncSession, session), execute
 
 
 @asynccontextmanager
@@ -287,3 +317,63 @@ async def test_actual_original_ddl_reinstallation_restores_physical_precondition
         connection = await session.connection()
         await connection.run_sync(_repair, table)
         assert len(await acquire_native_admitted_position_restore_barrier(session)) == 30
+
+
+@pytest.mark.parametrize("restore", (False, True))
+async def test_postgres_admitted_boundary_locks_exact_closure_before_refusing_unproven_guards(
+    restore: bool,
+) -> None:
+    """Route PostgreSQL through its isolation and lock boundary before catalog verification.
+
+    Given: Explicit PostgreSQL command responses with no physical guard metadata,
+    When: The writer or restore entrypoint inspects its native admitted-position closure,
+    Then: Isolation and the original global locks precede the exact fifteen-table catalog refusal.
+    """
+    session, execute = _postgres_boundary_session(restore)
+    with pytest.raises(
+        ContractAccountingIntegrityError,
+        match="^accounting_physical_guard_invalid:accounting_hold_resolutions_reject_row_mutation$",
+    ):
+        await _check(session, restore)
+    commands = [str(call.args[0]) for call in execute.await_args_list]
+    prefix = (
+        [
+            "SHOW transaction_isolation",
+            "SELECT pg_advisory_xact_lock(hashtext(:namespace), hashtext(:domain))",
+        ]
+        if restore
+        else []
+    )
+    assert commands[:-1] == [
+        *prefix,
+        "SHOW transaction_isolation",
+        "SELECT pg_advisory_xact_lock_shared(hashtext(:namespace), hashtext(:domain))",
+        "LOCK TABLE " + ", ".join(f'"{table}"' for table in _ALL_TABLES) + " IN ROW EXCLUSIVE MODE",
+    ]
+    for call in execute.await_args_list:
+        if "pg_advisory_xact_lock" in str(call.args[0]):
+            assert call.args[1] == {
+                "namespace": ACCOUNTING_STARTUP_LOCK_NAMESPACE,
+                "domain": ACCOUNTING_STARTUP_LOCK_DOMAIN,
+            }
+    assert "FROM pg_trigger t" in commands[-1]
+    assert execute.await_args_list[-1].args[1] == {
+        f"table{index}": table for index, table in enumerate(_ALL_TABLES)
+    }
+
+
+@pytest.mark.parametrize("restore", (False, True))
+@pytest.mark.parametrize("isolation", ("repeatable read", "serializable", "autocommit", None))
+async def test_postgres_admitted_boundary_refuses_unproven_isolation_before_any_lock(
+    restore: bool, isolation: object
+) -> None:
+    """Refuse snapshot ambiguity before waiting for the writer or exclusive restore barrier.
+
+    Given: A PostgreSQL command boundary reports unsupported or unknown transaction isolation,
+    When: Either native admitted-position entrypoint begins,
+    Then: It refuses after SHOW without acquiring locks or interpreting any guard catalog.
+    """
+    session, execute = _postgres_boundary_session(restore, isolation)
+    with pytest.raises(RuntimeError, match="READ COMMITTED"):
+        await _check(session, restore)
+    assert [str(call.args[0]) for call in execute.await_args_list] == ["SHOW transaction_isolation"]

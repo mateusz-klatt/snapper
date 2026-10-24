@@ -51,8 +51,25 @@ jobs:
       - name: Check for type drift
         run: make ui-check-types
 
+      - name: Report runner storage before quality gate
+        continue-on-error: true
+        run: |
+          df -h / /tmp "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          df -i / /tmp "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          du -sh "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+
       - name: Run complete quality gate
+        env:
+          PYTEST_ADDOPTS: -o tmp_path_retention_policy=failed -o tmp_path_retention_count=1 -ra
         run: make check-all
+
+      - name: Report runner storage after quality gate
+        if: always()
+        continue-on-error: true
+        run: |
+          df -h / /tmp "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          df -i / /tmp "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          du -sh "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
 
       - name: Export Python coverage XML
         run: make cov-xml

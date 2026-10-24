@@ -491,17 +491,19 @@ class TestDevMintPatErrorPaths:
         patch_httpx_client(_build_mock_transport())
         original_os_open = os.open
 
-        def _selective_open(path: object, flags: int, mode: int = 0o777) -> int:
+        def _selective_open(
+            path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
             if isinstance(path, (str, os.PathLike)) and ".tmp." in str(path):
                 raise OSError("simulated EACCES on tmp create")
-            return original_os_open(path, flags, mode)
+            return original_os_open(path, flags, mode, dir_fd=dir_fd)
 
-        monkeypatch.setattr(os, "open", _selective_open)
-
-        result = runner.invoke(
-            app,
-            ["dev-mint-pat", "--output", str(output_path)],
-        )
+        with monkeypatch.context() as context:
+            context.setattr(os, "open", _selective_open)
+            result = runner.invoke(
+                app,
+                ["dev-mint-pat", "--output", str(output_path)],
+            )
 
         assert result.exit_code != 0
         assert "Failed to write" in result.stderr
@@ -689,16 +691,18 @@ class TestDevMintPatFileWriteHardening:
         captured_modes: list[int] = []
         original_open = os.open
 
-        def _capture_open(path: object, flags: int, mode: int = 0o777) -> int:
+        def _capture_open(
+            path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
             captured_modes.append(mode)
-            return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
 
-        monkeypatch.setattr(os, "open", _capture_open)
-
-        result = runner.invoke(
-            app,
-            ["dev-mint-pat", "--output", str(output_path)],
-        )
+        with monkeypatch.context() as context:
+            context.setattr(os, "open", _capture_open)
+            result = runner.invoke(
+                app,
+                ["dev-mint-pat", "--output", str(output_path)],
+            )
 
         assert result.exit_code == 0
         assert any(
