@@ -9,6 +9,7 @@ checks, so this module promises ownership rather than a hard duration limit.
 import asyncio
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Literal
 
 from kraken.futures import User
@@ -117,12 +118,15 @@ async def _await_owned_completion(
 async def _settle_owned_future(
     completion: asyncio.Future[None], cancellation: _CallerCancellation
 ) -> None:
-    """Join an independently resolved completion promise through repeated actual caller cancellation."""
+    """Join one owned completion promise while deferring recorded caller cancellation to its owner.
+
+    The narrow suppression scope covers only the await that records and rethrows each real
+    cancellation. The outer source owner retains the first signal, disposes any late result
+    after dispatch and any started source complete, and then raises that same cancellation.
+    """
     while not completion.done():
-        try:
+        with suppress(asyncio.CancelledError):
             await _await_owned_completion(completion, cancellation)
-        except asyncio.CancelledError:
-            continue
 
 
 async def read_owned_native_source[ResultT](

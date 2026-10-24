@@ -43,6 +43,7 @@ from snapper.data.native_financial_event_binding_v2 import bind_native_financial
 from snapper.data.native_financial_event_binding_v2 import get_native_financial_event_material
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
+from snapper.data.session_context import session_no_autoflush
 from snapper.infrastructure.exchanges.execution_wire_receipts import (
     decode_private_execution_receipt,
 )
@@ -174,7 +175,7 @@ async def get_bound_native_source_claim_v2(
     Returns:
         Its exact source/event/policy/sidecar claim, without a current financial admission grant.
     """
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         row = await session.scalar(
             select(AccountingNativeSourceClaim).where(
                 AccountingNativeSourceClaim.accounting_event_public_id == accounting_event_public_id
@@ -279,7 +280,7 @@ async def claim_new_accounting_source_v2(
         and not any(isinstance(row, AccountingNativeSourceClaim) for row in session.new),
         "native_financial_claim_requires_one_immediate_pending_event",
     )
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         await require_native_contract_accounting_guards(session)
         material = await bind_native_financial_event_material(session, event, event.timestamp)
         payload = native_claim_payload_v2(material)

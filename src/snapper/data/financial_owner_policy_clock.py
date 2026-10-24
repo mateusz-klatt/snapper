@@ -28,6 +28,7 @@ from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
 from snapper.data.native_contract_accounting_guards import require_native_contract_accounting_guards
 from snapper.data.native_financial_event_binding_v2 import bind_native_financial_event_material
+from snapper.data.session_context import session_no_autoflush
 
 type _RetainedFinancialPayload = (
     FuturesNativeCashEvent
@@ -100,7 +101,7 @@ async def require_financial_owner_policy_close_clock(
     current = FinancialAccountOwnerPolicyReference.model_validate(reference)
     clock = _INSTANT.validate_python(sampled_at)
     await require_contract_accounting_guards(session)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         rows = tuple(
             (
                 await session.scalars(

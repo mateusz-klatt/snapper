@@ -406,11 +406,11 @@ def _receipt(status: int = 200, **updates: object) -> FuturesAccountsWireReceipt
 
 
 async def test_capture_awaits_actual_committed_identity_before_return() -> None:
-    """Source interpretation waits for the sink; HTTP failures receive a separately refused channel.
+    """Source interpretation waits for the sink after successful status and privacy checks.
 
     Given: A source receipt and a durable sink paused before acknowledgement,
     When: capture waits while the sink commits,
-    Then: only its actual UUID is returned and HTTP failures retain a separate channel.
+    Then: only its actual UUID and the successful native account channel are returned.
     """
     entered = asyncio.Event()
     release = asyncio.Event()

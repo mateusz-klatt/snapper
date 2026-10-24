@@ -30,6 +30,7 @@ from snapper.data.native_financial_source_binding_v2 import BoundNativeFinancial
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import bind_native_financial_source
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
+from snapper.data.session_context import session_no_autoflush
 
 _EVENT: TypeAdapter[NativeFinancialEventV2] = TypeAdapter(NativeFinancialEventV2)
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
@@ -172,7 +173,7 @@ async def get_native_financial_event_material(
         Actual source material; full cash/position readers add their chain/unit verification.
     """
     identifier = _UUID.validate_python(public_id)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         row = await session.scalar(
             select(ContractAccountingEvent).where(ContractAccountingEvent.public_id == identifier)
         )

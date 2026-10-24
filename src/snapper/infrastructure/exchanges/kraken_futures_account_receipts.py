@@ -256,11 +256,7 @@ async def capture_futures_accounts_wire(
         raise NativeAccountsBodyPrivacyError("http_error")
     if not native_accounts_body_is_classified(source.entity_bytes):
         raise NativeAccountsBodyPrivacyError("source_invalid")
-    channel = (
-        FUTURES_NATIVE_ACCOUNTS_CHANNEL
-        if source.status_code == 200
-        else "kraken_futures.rest.accounts.http_error.v1"
-    )
+    channel = FUTURES_NATIVE_ACCOUNTS_CHANNEL
     observation = PrivateExecutionObservation(
         context=ExecutionObservationContext(
             kind="account_cash", channel=channel, observed_at=source.observed_at

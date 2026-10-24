@@ -47,6 +47,7 @@ from snapper.data.execution_route_authority_store import get_bound_route_authori
 from snapper.data.models import AccountingNativeSourceClaim
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
+from snapper.data.session_context import session_no_autoflush
 
 
 class AccountingNativeSourceError(ValueError):
@@ -371,7 +372,7 @@ async def claim_new_accounting_source(
         AccountingNativeSourceError: For prior source ownership or unclaimed historical facts.
     """
     _require(event in session.new, "native_source_claim_requires_new_pending_event")
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         await require_contract_accounting_guards(session)
         payload = await _claim_payload(session, event)
         await _require_claimed_history(session, payload.scope)
