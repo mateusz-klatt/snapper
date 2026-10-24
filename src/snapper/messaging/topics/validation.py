@@ -67,6 +67,8 @@ from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
 from snapper.messaging.schemas.data import AlertType
 from snapper.messaging.schemas.data import BacktestProgressEvent
+from snapper.messaging.topics.financial_publication import validate_financial_publication_prefix
+from snapper.messaging.topics.financial_publication import validate_financial_publication_topic
 
 __all__ = [
     "validate_topic",
@@ -118,6 +120,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("backtest.", _validate_backtest_topic),
         ("alerts.", _validate_alerts_topic),
         ("portfolio.accounts.", _validate_portfolio_accounts_topic),
+        ("accounting.", validate_financial_publication_topic),
         ("plans.decisions.", _validate_plans_decisions_topic),
         ("ai_reviews.", _validate_ai_reviews_topic),
         ("ai_research.", _validate_ai_research_topic),
@@ -1337,6 +1340,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "backtest",
         "alerts",
         "portfolio",
+        "accounting",
         "plans",
         "ai_reviews",
         "ai_research",
@@ -1346,6 +1350,8 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
     }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"
+    if category == "accounting":
+        return validate_financial_publication_prefix(pattern)
     if category == "orders":
         return _validate_orders_prefix(segments)
     if category == "market":

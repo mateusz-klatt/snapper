@@ -18,6 +18,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from snapper.application.portfolio.native_financial_payloads_v2 import FuturesNativeCashEventV2
 from snapper.application.portfolio.native_financial_payloads_v2 import NativeFinancialEventV2
+from snapper.application.portfolio.native_position_admission_v3 import AdmittedNativePositionEventV3
 from snapper.core.execution_route_authority import ExecutionAccountScope
 from snapper.core.execution_route_authority import account_scope_digest
 from snapper.core.execution_unit_snapshot import EvidenceInstant
@@ -27,6 +28,7 @@ from snapper.data.models import ContractAccountingAnchor
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.native_cash_history_v2 import BoundNativeCashEventV2
 from snapper.data.native_cash_history_v2 import load_native_cash_history_v2
+from snapper.data.native_financial_event_family import bind_native_financial_event_family
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
 from snapper.data.native_position_history_v2 import BoundNativePositionEventV2
@@ -34,7 +36,9 @@ from snapper.data.native_position_history_v2 import load_native_position_history
 from snapper.data.session_context import session_no_autoflush
 
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
-_EVENT: TypeAdapter[NativeFinancialEventV2] = TypeAdapter(NativeFinancialEventV2)
+_EVENT: TypeAdapter[NativeFinancialEventV2 | AdmittedNativePositionEventV3] = TypeAdapter(
+    NativeFinancialEventV2 | AdmittedNativePositionEventV3
+)
 type _NativeBookEvent = BoundNativeCashEventV2 | BoundNativePositionEventV2
 type _FinancialModel = (
     type[ContractAccountingEvent]
@@ -71,6 +75,9 @@ async def _bound_native_books(
             raise NativeFinancialBindingError(
                 "native_financial_owner_history_or_migration_unproven"
             ) from None
+        if isinstance(payload, AdmittedNativePositionEventV3):
+            material = await bind_native_financial_event_family(session, row, known_at)
+            payload = material.payload
         scope = payload.operands.scope
         digest = account_scope_digest(scope)
         if isinstance(payload, FuturesNativeCashEventV2):

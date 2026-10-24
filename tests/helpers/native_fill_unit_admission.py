@@ -37,6 +37,7 @@ from snapper.data.account_bound_submission_admission_store import (
     get_bound_account_submission_admission,
 )
 from snapper.data.contract_accounting_capture_session import capture_bound_accounting_observation
+from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import Order
 from snapper.data.models import SymbolAlias
@@ -193,6 +194,11 @@ async def _seed_original_intent(
     wallet = account.native.selection.wallet_public_id
     client_id = "native-fill-unit-client-1"
     async with account.native.repository.session() as session:
+        symbol_public_id = (
+            await session.execute(
+                select(Instrument.symbol_public_id).where(Instrument.public_id == admission_id(2))
+            )
+        ).scalar_one()
         session.add(
             TradeCommand(
                 **admission_stamp(7101, at).model_dump(mode="python"),
@@ -219,7 +225,7 @@ async def _seed_original_intent(
         session.add(
             SymbolAlias(
                 **admission_stamp(7103, at).model_dump(mode="python"),
-                symbol_public_id=admission_id(1),
+                symbol_public_id=symbol_public_id,
                 exchange="kraken_futures",
                 channel="ws",
                 exchange_symbol="PF_XBTUSD",
