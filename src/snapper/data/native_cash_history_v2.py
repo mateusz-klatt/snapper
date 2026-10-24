@@ -33,6 +33,7 @@ from snapper.data.native_financial_source_binding_v2 import BoundNativeFinancial
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
 from snapper.data.native_financial_source_binding_v2 import bind_native_financial_source
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
+from snapper.data.session_context import session_no_autoflush
 
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
 
@@ -185,7 +186,7 @@ async def load_native_cash_history_v2(
     """
     actual_scope = ExecutionAccountScope.model_validate(scope)
     clock = _INSTANT.validate_python(known_at)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         rows = (
             await session.scalars(
                 select(ContractAccountingEvent)
@@ -228,7 +229,7 @@ async def get_bound_native_cash_event_v2(
     Returns:
         The actual full event with source, policy, sidecar, anchor and native claim conservation.
     """
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         row = await session.scalar(
             select(ContractAccountingEvent).where(ContractAccountingEvent.public_id == public_id)
         )

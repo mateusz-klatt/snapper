@@ -30,6 +30,7 @@ from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindi
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
 from snapper.data.native_position_fill_binding_v2 import BoundOriginalPositionFillV2
 from snapper.data.native_position_source_v2 import bind_native_position_source_v2
+from snapper.data.session_context import session_no_autoflush
 
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
 _UUID: TypeAdapter[str] = TypeAdapter(EvidenceUUID)
@@ -170,7 +171,7 @@ async def load_native_position_history_v2(
     actual_scope = ExecutionAccountScope.model_validate(scope)
     instrument = _UUID.validate_python(instrument_public_id)
     clock = _INSTANT.validate_python(known_at)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         rows = (
             await session.scalars(
                 select(ContractAccountingEvent)
@@ -223,7 +224,7 @@ async def get_bound_native_position_event_v2(
         The fully source/unit/policy/anchor/claim-bound event, without current admission.
     """
     identifier = _UUID.validate_python(public_id)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         row = await session.scalar(
             select(ContractAccountingEvent).where(ContractAccountingEvent.public_id == identifier)
         )

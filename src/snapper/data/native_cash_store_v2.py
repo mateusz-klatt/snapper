@@ -54,6 +54,7 @@ from snapper.data.native_financial_event_binding_v2 import native_event_columns_
 from snapper.data.native_financial_source_binding_v2 import BoundNativeFinancialSource
 from snapper.data.native_financial_source_binding_v2 import bind_native_financial_receipt
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
+from snapper.data.session_context import session_no_autoflush
 
 
 class NativeCashAccountingRequestV2(BaseModel):
@@ -269,7 +270,7 @@ async def append_bound_native_cash_v2(
     binding = NativeCashAccountingRequestV2.model_validate(request)
     stamp = SnapshotWriteProvenance.model_validate(provenance)
     await require_native_contract_accounting_guards(session)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         received = await bind_native_financial_receipt(
             session, binding.authority_reference, binding.raw_receipt_public_id, stamp.timestamp
         )

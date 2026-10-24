@@ -33,6 +33,7 @@ from snapper.data.native_account_identity_store import get_bound_native_account_
 from snapper.data.native_contract_accounting_guards import require_native_contract_accounting_guards
 from snapper.data.native_financial_owner_history_v2 import require_uid_native_financial_history_v2
 from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindingError
+from snapper.data.session_context import session_no_autoflush
 
 FINANCIAL_OWNER_LOCK_NAMESPACE = "snapper_financial_owner"
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
@@ -159,7 +160,7 @@ async def load_current_financial_owner_evidence(
         ),
         "financial_owner_staged_financial_rows_unsupported",
     )
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         await require_native_contract_accounting_guards(session)
         bound = await get_bound_account_authority_reference(session, reference)
         native = NativeAccountAuthorityPayload.model_validate(bound.payload)

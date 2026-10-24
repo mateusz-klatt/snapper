@@ -31,6 +31,7 @@ from snapper.data.native_financial_source_binding_v2 import NativeFinancialBindi
 from snapper.data.native_financial_source_binding_v2 import require_native_financial_binding
 from snapper.data.native_position_history_v2 import BoundNativePositionEventV2
 from snapper.data.native_position_history_v2 import load_native_position_history_v2
+from snapper.data.session_context import session_no_autoflush
 
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(EvidenceInstant)
 _EVENT: TypeAdapter[NativeFinancialEventV2] = TypeAdapter(NativeFinancialEventV2)
@@ -146,7 +147,7 @@ async def require_uid_native_financial_history_v2(
     actual_key = FinancialAccountOwnerKey.model_validate(key)
     clock = _INSTANT.validate_python(known_at)
     require_native_financial_binding(bool(wallets), "native_financial_owner_roots_missing")
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         rows = tuple(
             (
                 await session.scalars(

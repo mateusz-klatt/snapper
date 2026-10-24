@@ -52,6 +52,7 @@ from snapper.data.native_position_history_v2 import native_position_anchor_colum
 from snapper.data.native_position_source_v2 import BoundNativePositionSourceV2
 from snapper.data.native_position_source_v2 import NativePositionSourceRequestV2
 from snapper.data.native_position_source_v2 import bind_native_position_receipt_v2
+from snapper.data.session_context import session_no_autoflush
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +298,7 @@ async def append_bound_native_position_v2(
     actual = NativePositionSourceRequestV2.model_validate(request)
     stamp = SnapshotWriteProvenance.model_validate(provenance)
     await require_native_contract_accounting_guards(session)
-    with session.no_autoflush:
+    with session_no_autoflush(session):
         source = await bind_native_position_receipt_v2(session, actual, stamp.timestamp)
         scope = source.financial_source.authority.payload.scope
         events = await load_native_position_history_v2(
