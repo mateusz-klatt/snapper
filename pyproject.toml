@@ -28,13 +28,13 @@ pydantic = "^2.14.1"
 pydantic-settings = "^2.16.1"
 sqlalchemy = {extras = ["asyncio"], version = "^2.1.6"}
 aiosqlite = "^0.22.1"
-pandas = "^3.0.6"
+pandas = "^3.1.0"
 numpy = "^2.5.4"
 typer = {extras = ["all"], version = "^0.27.3"}
 python-dotenv = "^1.2.4"
 loguru = "^0.7.3"
-alembic = "^1.20.0"
-fastapi = "^0.159.1"
+alembic = "^1.20.1"
+fastapi = "^0.162.0"
 uvicorn = {extras = ["standard"], version = "^0.54.0"}
 pyzmq = "^27.2.0"
 pyjwt = "^2.15.1"
@@ -51,7 +51,7 @@ psutil = "^7.2.2"
 statsmodels = "^0.15.0"
 python-socks = {extras = ["asyncio"], version = "^3.1.1"}
 PySocks = "^1.7.1"
-pyroute2 = "^0.9.6"
+pyroute2 = "^0.9.7"
 websockets = "^17.3"
 
 [tool.poetry.group.cloud.dependencies]
@@ -59,7 +59,7 @@ asyncpg = "^0.32.0"
 psycopg2-binary = "^2.9.13"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.17.1"
+ruff = "^0.17.2"
 black = {extras = ["jupyter"], version = "^26.10.1"}
 isort = "^9.0.2"
 mypy = "^2.4.0"
