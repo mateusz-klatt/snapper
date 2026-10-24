@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.infrastructure.exchanges.adapters.kraken_futures import _raw_fill_decimal
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _tick_size_to_precision
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_fill
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_instrument
@@ -370,6 +371,87 @@ class TestParseKrakenFuturesTradeList:
 class TestParseKrakenFuturesInstrument:
     """Tests for parse_kraken_futures_instrument."""
 
+    @pytest.mark.parametrize(
+        ("precision", "expected_step", "expected_decimals"),
+        (
+            (4, 0.0001, 4),
+            (2, 0.01, 2),
+            (0, 1.0, 0),
+            (-1, 10.0, 0),
+            (-2, 100.0, 0),
+            (-3, 1000.0, 0),
+            (308, 1e-308, 308),
+            (-308, 1e308, 0),
+        ),
+    )
+    def test_quantity_step_uses_signed_precision_independently_of_multiplier(
+        self,
+        precision: int,
+        expected_step: float,
+        expected_decimals: int,
+    ) -> None:
+        """Derive fractional and whole quantity steps from the catalog precision.
+
+        Given: A venue precision and a separate contract multiplier of 3.5,
+        When: The instrument definition is parsed,
+        Then: Minimum and incremental quantities follow precision without scaling.
+        """
+        raw = {
+            "symbol": "PF_XBTUSD",
+            "type": "flexible_futures",
+            "tickSize": 1.0,
+            "contractSize": 3.5,
+            "contractValueTradePrecision": precision,
+            "tradeable": True,
+        }
+
+        result = parse_kraken_futures_instrument(raw)
+
+        assert result.qty_increment == expected_step
+        assert result.qty_min == expected_step
+        assert result.qty_precision == expected_decimals
+
+    @pytest.mark.parametrize(
+        "precision",
+        (None, True, False, 1.5, 2.0, "2", float("nan"), float("inf"), 309, -309, 10**1000),
+    )
+    def test_invalid_quantity_precision_is_rejected(self, precision: object) -> None:
+        """Refuse missing, coerced, and unrepresentable quantity increments.
+
+        Given: Catalog precision that cannot describe a finite verified quantity step,
+        When: The instrument definition is parsed,
+        Then: Parsing fails before a guessed contract multiplier can become its step.
+        """
+        raw = {
+            "symbol": "PF_XBTUSD",
+            "type": "flexible_futures",
+            "tickSize": 1.0,
+            "contractSize": 1,
+            "contractValueTradePrecision": precision,
+            "tradeable": True,
+        }
+
+        with pytest.raises(ValueError):
+            parse_kraken_futures_instrument(raw)
+
+    def test_absent_quantity_precision_is_rejected(self) -> None:
+        """Refuse a catalog definition that omits quantity precision entirely.
+
+        Given: A valid multiplier without a quantity precision observation,
+        When: The instrument definition is parsed,
+        Then: No default integer quantity step is fabricated.
+        """
+        raw = {
+            "symbol": "PF_XBTUSD",
+            "type": "flexible_futures",
+            "tickSize": 1.0,
+            "contractSize": 1,
+            "tradeable": True,
+        }
+
+        with pytest.raises(ValueError, match="quantity precision"):
+            parse_kraken_futures_instrument(raw)
+
     def test_parse_perpetual(self) -> None:
         """Parse a perpetual futures instrument.
 
@@ -383,7 +465,11 @@ class TestParseKrakenFuturesInstrument:
             "underlying": "rr_xbtusd",
             "tickSize": 0.5,
             "contractSize": 1,
+            "contractValueTradePrecision": 0,
             "tradeable": True,
+            "isExpired": False,
+            "suspended": False,
+            "postOnly": False,
             "base": "BTC",
             "quote": "USD",
             "pair": "BTC:USD",
@@ -412,6 +498,7 @@ class TestParseKrakenFuturesInstrument:
             "type": "futures_vanilla",
             "tickSize": 1.0,
             "contractSize": 0.001,
+            "contractValueTradePrecision": 3,
             "tradeable": False,
         }
         result = parse_kraken_futures_instrument(raw)
@@ -437,6 +524,7 @@ class TestParseKrakenFuturesInstrumentList:
                 "type": "futures_inverse",
                 "tickSize": 0.5,
                 "contractSize": 1,
+                "contractValueTradePrecision": 0,
                 "tradeable": True,
             },
             {
@@ -444,6 +532,7 @@ class TestParseKrakenFuturesInstrumentList:
                 "type": "futures_inverse",
                 "tickSize": 0.05,
                 "contractSize": 1,
+                "contractValueTradePrecision": 0,
                 "tradeable": True,
             },
         ]
@@ -463,6 +552,7 @@ class TestParseKrakenFuturesInstrumentList:
                 "type": "futures_inverse",
                 "tickSize": 0.5,
                 "contractSize": 1,
+                "contractValueTradePrecision": 0,
                 "tradeable": True,
             },
             {"invalid": "data"},
@@ -541,6 +631,7 @@ class TestParseKrakenFuturesFill:
             "fill_type": "taker",
             "order_type": "lmt",
             "fee_paid": 1.25,
+            "fee_currency": "USD",
             "cli_ord_id": "my-order-1",
         }
         mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
@@ -647,12 +738,12 @@ class TestParseKrakenFuturesFill:
         assert len(result.fees) == 1
         assert result.fees[0] == ExecutionFeeBreakdown(asset="ETH", quantity=0.001)
 
-    def test_no_fee_currency_defaults_to_usd(self) -> None:
-        """Default to USD when fee_currency is absent.
+    def test_missing_fee_currency_remains_unproven(self) -> None:
+        """Keep absent fee currency explicit rather than inventing a USD cash leg.
 
         Given: Fill with fee_paid but no fee_currency,
         When: parse_kraken_futures_fill is called,
-        Then: fee_usd_equiv is populated (assumes USD).
+        Then: Neither USD nor another native fee currency is fabricated.
         """
         data = {
             "fill_id": "fill-noc",
@@ -666,7 +757,8 @@ class TestParseKrakenFuturesFill:
         }
         mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
         result = parse_kraken_futures_fill(data, lambda s: mapper[s])
-        assert result.fee_usd_equiv == pytest.approx(1.0)
+        assert result.fee_usd_equiv is None
+        assert result.fee_usd_equiv_decimal is None
         assert result.fees is None
 
 
@@ -847,3 +939,14 @@ class TestParseKrakenFuturesOrderStatus:
         result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
         expected_ts = 1743676200000 / 1000
         assert result.timestamp.timestamp() == pytest.approx(expected_ts)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_boolean_raw_operands_never_become_exact_financial_quantities(value: bool) -> None:
+    """Keep Python boolean integer inheritance out of exact fill evidence.
+
+    Given: A raw financial operand is a boolean instead of a numeric source value.
+    When: The precision-preservation boundary inspects that operand.
+    Then: It refuses exact evidence rather than recording one or zero contracts.
+    """
+    assert _raw_fill_decimal(value) is None

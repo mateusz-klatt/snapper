@@ -36,7 +36,19 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
+from snapper.data.accounting_native_source_schema import accounting_native_source_constraints
+from snapper.data.accounting_native_source_triggers import install_accounting_native_source_triggers
 from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
+from snapper.data.contract_accounting_schema import accounting_evidence_constraints
+from snapper.data.contract_accounting_triggers import install_contract_accounting_table_triggers
+from snapper.data.execution_admission_triggers import install_execution_admission_table_triggers
+from snapper.data.execution_unit_snapshot_triggers import install_execution_unit_snapshot_triggers
+from snapper.data.financial_publication_schema import financial_delivery_constraints
+from snapper.data.financial_publication_schema import financial_intent_constraints
+from snapper.data.financial_publication_triggers import install_financial_publication_triggers
+from snapper.data.futures_product_read_schema import futures_product_read_attempt_constraints
+from snapper.data.futures_product_read_schema import futures_product_read_outcome_constraints
+from snapper.data.futures_product_read_triggers import install_futures_product_read_triggers
 from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.fx_conversion_triggers import install_fx_conversion_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_annulment_immutability_triggers
@@ -44,8 +56,39 @@ from snapper.data.ledger_triggers import (
     install_execution_annulment_visibility_immutability_triggers,
 )
 from snapper.data.ledger_triggers import install_execution_immutability_triggers
+from snapper.data.native_account_authority_schema import native_account_authority_constraints
+from snapper.data.native_account_authority_triggers import install_native_account_authority_triggers
+from snapper.data.native_account_identity_schema import native_account_identity_constraints
+from snapper.data.native_account_identity_schema import native_account_identity_root_indexes
+from snapper.data.native_account_identity_triggers import install_native_account_identity_triggers
+from snapper.data.native_account_read_schema import native_account_read_attempt_constraints
+from snapper.data.native_account_read_schema import native_account_read_outcome_constraints
+from snapper.data.native_account_read_triggers import install_native_account_read_triggers
+from snapper.data.private_source_ownership_schema import private_source_ownership_constraints
+from snapper.data.private_source_ownership_triggers import install_private_source_ownership_triggers
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+
+
+def is_open_ended_version(known_to: datetime) -> bool:
+    """Prove that a loaded temporal row's knowledge interval was never closed.
+
+    This is the single sanctioned exact comparison with ``KNOWN_TO_MAX`` outside
+    ``repository.py``. Proofs over append-only originals, current owners and
+    retained authorities must reject every finite ``known_to``, including one
+    later than the reader's clock: ``timestamp < witness < now < known_to``
+    satisfies a ``known_to > now`` range but is still a closed version.
+    Active-row SELECT/WHERE predicates keep the ``timestamp <= t`` and
+    ``known_to > t`` range; the ``datetime`` parameter keeps a SQL column out
+    of this scalar check, so it cannot stand in for that range in a query.
+
+    Args:
+        known_to: Knowledge end of a row already loaded from the database.
+
+    Returns:
+        True only when the version is still open-ended.
+    """
+    return known_to == KNOWN_TO_MAX
 
 
 def _public_id() -> str:
@@ -194,6 +237,11 @@ __all__ = [
     "KNOWN_TO_MAX",
     "Base",
     "TemporalMixin",
+    "AccountingRawReceipt",
+    "AccountingScopeHold",
+    "AccountingHoldResolution",
+    "ContractAccountingAnchor",
+    "ContractAccountingEvent",
     "Instrument",
     "Candle",
     "Tick",
@@ -238,6 +286,8 @@ __all__ = [
     "WalletUserReadGrant",
     "InstrumentOrderCapability",
     "VenueFeeSchedule",
+    "ExecutionRouteAuthority",
+    "SubmissionUnitAdmission",
     "ExecutionPlan",
     "ExecutionPlanCheckpoint",
     "ExecutionPlanDecision",
@@ -2905,6 +2955,24 @@ class InstrumentSpec(TemporalMixin, Base):
             name="ck_instrument_specs_quantity_unit",
         ),
         CheckConstraint(
+            "native_order_quantity_unit IS NULL OR "
+            "native_order_quantity_unit IN ('base_asset', 'contract_count')",
+            name="ck_instrument_specs_native_order_quantity_unit",
+        ),
+        CheckConstraint(
+            "contract_payoff_model IS NULL OR contract_payoff_model IN ('linear', 'inverse')",
+            name="ck_instrument_specs_payoff_model",
+        ),
+        CheckConstraint(
+            "(contract_payoff_model IS NULL AND contract_value_currency IS NULL "
+            "AND settlement_currency IS NULL) OR "
+            "(contract_payoff_model IS NOT NULL AND contract_value_currency IS NOT NULL "
+            "AND settlement_currency IS NOT NULL "
+            "AND length(trim(contract_value_currency)) > 0 "
+            "AND length(trim(settlement_currency)) > 0)",
+            name="ck_instrument_specs_payoff_evidence",
+        ),
+        CheckConstraint(
             "(spec_source IS NULL AND spec_version IS NULL AND spec_observed_at IS NULL) OR "
             "(spec_source IS NOT NULL AND spec_version IS NOT NULL AND "
             "spec_observed_at IS NOT NULL)",
@@ -2964,7 +3032,20 @@ class InstrumentSpec(TemporalMixin, Base):
         ExactDecimalNumeric(38, 18), comment="Venue contract multiplier"
     )
     quantity_unit: Mapped[str | None] = mapped_column(
-        String(32), comment="Canonical order and position quantity unit"
+        String(32), comment="Internal position and reconciliation quantity unit"
+    )
+    native_order_quantity_unit: Mapped[str | None] = mapped_column(
+        String(32),
+        comment="Explicit venue-native order quantity unit, independent of internal units",
+    )
+    contract_payoff_model: Mapped[str | None] = mapped_column(
+        String(16), comment="Venue derivative payoff model: linear or inverse"
+    )
+    contract_value_currency: Mapped[str | None] = mapped_column(
+        String(32), comment="Currency in which the venue contract multiplier is denominated"
+    )
+    settlement_currency: Mapped[str | None] = mapped_column(
+        String(32), comment="Contract P&L denomination before optional account payout conversion"
     )
     spec_source: Mapped[str | None] = mapped_column(
         String(64), comment="Authoritative instrument metadata source"
@@ -5941,3 +6022,734 @@ class AndroidPushConfigurationState(TemporalMixin, Base):
     configuration_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     public_options_json: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class ExecutionUnitSnapshot(TemporalMixin, Base):
+    """Immutable unit evidence bound to one proven submission or physical execution.
+
+    The typed canonical payload owns economic dimensions. Indexed copies bind
+    account, exact catalog observation and semantic target. Neither target
+    uniqueness nor public identity depends on the digest or an active-row filter.
+    No producer may SCD2-close a snapshot or backfill historical interpretations.
+    """
+
+    __tablename__ = "execution_unit_snapshots"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_unit_snapshot_public_id"),
+        Index(
+            "uq_unit_snapshot_command",
+            "command_public_id",
+            unique=True,
+            sqlite_where=text("command_public_id IS NOT NULL"),
+            postgresql_where=text("command_public_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_unit_snapshot_execution",
+            "execution_public_id",
+            unique=True,
+            sqlite_where=text("execution_public_id IS NOT NULL"),
+            postgresql_where=text("execution_public_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_unit_snapshot_scope", "wallet_public_id", "exchange", "mode", "instrument_public_id"
+        ),
+        CheckConstraint("phase IN ('submission', 'fill')", name="ck_unit_snapshot_phase"),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_unit_snapshot_mode"),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND length(trim(exchange)) > 0",
+            name="ck_unit_snapshot_exchange",
+        ),
+        CheckConstraint(
+            "(phase = 'submission' AND command_public_id IS NOT NULL AND execution_public_id IS NULL) "
+            "OR (phase = 'fill' AND command_public_id IS NULL AND execution_public_id IS NOT NULL)",
+            name="ck_unit_snapshot_target",
+        ),
+        CheckConstraint("length(content_digest) = 64", name="ck_unit_snapshot_digest"),
+        CheckConstraint("length(canonical_payload) > 0", name="ck_unit_snapshot_payload"),
+        CheckConstraint(
+            "known_to = '9999-12-31 23:59:59.000000'",
+            name="ck_unit_snapshot_known_to_max",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "known_to = TIMESTAMPTZ '9999-12-31 23:59:59+00:00'",
+            name="ck_unit_snapshot_known_to_max",
+        ).ddl_if(dialect="postgresql"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    phase: Mapped[str] = mapped_column(String(16))
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    command_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    execution_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    spec_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    spec_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    spec_source: Mapped[str] = mapped_column(String(64))
+    spec_version: Mapped[str] = mapped_column(String(96))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(ExecutionUnitSnapshot.__table__, "after_create")
+def _install_execution_unit_snapshot_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Give create_all stores the same physical snapshot guards as migration 0056."""
+    install_execution_unit_snapshot_triggers(connection)
+
+
+class ExecutionRouteAuthority(TemporalMixin, Base):
+    """Immutable actual account route and bounded observed balance evidence.
+
+    Shared cash identity excludes instruments and credential versions. Each
+    credential rotation or new balance observation produces a separate authority
+    in that same account namespace; it never creates another spendable balance.
+    """
+
+    __tablename__ = "execution_route_authorities"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_execution_route_authority_public_id"),
+        UniqueConstraint("content_digest", name="uq_execution_route_authority_content"),
+        Index("ix_execution_route_authority_scope", "account_scope_digest", "observed_at"),
+        Index("ix_execution_route_authority_wallet", "wallet_public_id", "exchange", "mode"),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND length(trim(exchange)) > 0",
+            name="ck_execution_route_authority_exchange",
+        ),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_execution_route_authority_mode"),
+        CheckConstraint(
+            "environment IN ('production', 'demo', 'paper')",
+            name="ck_execution_route_authority_environment",
+        ),
+        CheckConstraint(
+            "(exchange = 'paper' AND mode = 'paper' AND environment = 'paper') OR (exchange != 'paper' AND mode = 'live' AND environment IN ('production', 'demo'))",
+            name="ck_execution_route_authority_scope",
+        ),
+        CheckConstraint(
+            "length(trim(margin_account)) > 0", name="ck_execution_route_authority_margin_account"
+        ),
+        CheckConstraint(
+            "(credential_public_id IS NULL AND credential_timestamp IS NULL) OR (credential_public_id IS NOT NULL AND credential_timestamp IS NOT NULL)",
+            name="ck_execution_route_authority_credential_pair",
+        ),
+        CheckConstraint(
+            "environment = 'paper' OR credential_public_id IS NOT NULL",
+            name="ck_execution_route_authority_credential_required",
+        ),
+        CheckConstraint(
+            "length(account_scope_digest) = 64 AND length(route_revision) = 64 AND length(content_digest) = 64",
+            name="ck_execution_route_authority_digests",
+        ),
+        CheckConstraint(
+            "length(canonical_payload) > 0", name="ck_execution_route_authority_payload"
+        ),
+        CheckConstraint("observed_at < valid_until", name="ck_execution_route_authority_validity"),
+        CheckConstraint(
+            "known_to = '9999-12-31 23:59:59.000000'",
+            name="ck_execution_route_authority_known_to_max",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "known_to = TIMESTAMPTZ '9999-12-31 23:59:59+00:00'",
+            name="ck_execution_route_authority_known_to_max",
+        ).ddl_if(dialect="postgresql"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    credential_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    credential_timestamp: Mapped[datetime | None] = mapped_column(TZDateTime())
+    venue_account_id: Mapped[str | None] = mapped_column(String(256))
+    account_observation_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    account_observation_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    valid_until: Mapped[datetime] = mapped_column(TZDateTime())
+    route_revision: Mapped[str] = mapped_column(String(64))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class SubmissionUnitAdmission(TemporalMixin, Base):
+    """One immutable v2 attempt linking original units to the current account and catalog."""
+
+    __tablename__ = "submission_unit_admissions"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_submission_unit_admission_public_id"),
+        UniqueConstraint("attempt_public_id", name="uq_submission_unit_admission_attempt"),
+        Index("ix_submission_unit_admission_command", "command_public_id", "interpreted_at"),
+        Index("ix_submission_unit_admission_account", "account_scope_digest", "interpreted_at"),
+        Index(
+            "ix_submission_unit_admission_source", "source_exchange", "source_instrument_public_id"
+        ),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND length(trim(exchange)) > 0",
+            name="ck_submission_unit_admission_exchange",
+        ),
+        CheckConstraint(
+            "source_exchange = LOWER(source_exchange) AND length(trim(source_exchange)) > 0",
+            name="ck_submission_unit_admission_source_exchange",
+        ),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_submission_unit_admission_mode"),
+        CheckConstraint(
+            "length(account_scope_digest) = 64 AND length(authority_content_digest) = 64 AND length(command_snapshot_content_digest) = 64 AND length(economic_context_digest) = 64 AND length(request_digest) = 64 AND length(content_digest) = 64",
+            name="ck_submission_unit_admission_digests",
+        ),
+        CheckConstraint(
+            "length(canonical_payload) > 0", name="ck_submission_unit_admission_payload"
+        ),
+        CheckConstraint(
+            "known_to = '9999-12-31 23:59:59.000000'",
+            name="ck_submission_unit_admission_known_to_max",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "known_to = TIMESTAMPTZ '9999-12-31 23:59:59+00:00'",
+            name="ck_submission_unit_admission_known_to_max",
+        ).ddl_if(dialect="postgresql"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    command_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    client_order_id: Mapped[str] = mapped_column(String(128))
+    authority_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    authority_content_digest: Mapped[str] = mapped_column(String(64))
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    command_snapshot_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    command_snapshot_content_digest: Mapped[str] = mapped_column(String(64))
+    source_exchange: Mapped[str] = mapped_column(String(32))
+    source_instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    current_spec_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    current_spec_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    source_spec_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    source_spec_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    economic_context_digest: Mapped[str] = mapped_column(String(64))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    interpreted_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(ExecutionRouteAuthority.__table__, "after_create")
+def _install_execution_route_authority_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Give create-all route authorities the same physical guards as migration0057."""
+    install_execution_admission_table_triggers(connection, "execution_route_authorities")
+
+
+@event.listens_for(SubmissionUnitAdmission.__table__, "after_create")
+def _install_submission_unit_admission_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Give create-all admission witnesses the same physical guards as migration0057."""
+    install_execution_admission_table_triggers(connection, "submission_unit_admissions")
+
+
+class AccountingRawReceipt(TemporalMixin, Base):
+    """An immutable uninterpreted observation, not a deduplicated venue execution fact."""
+
+    __tablename__ = "accounting_raw_receipts"
+    __table_args__ = (
+        *accounting_evidence_constraints("acct_raw"),
+        CheckConstraint("length(scope_digest) = 64", name="ck_acct_raw_scope_digest"),
+        Index("ix_acct_raw_scope", "scope_digest", "id"),
+        Index("ix_acct_raw_claimed", "claimed_public_id"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    claimed_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    route_authority_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    kind: Mapped[str] = mapped_column(String(32))
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class AccountingScopeHold(TemporalMixin, Base):
+    """An append-only account-family refusal independent of checkpoints and engine halts."""
+
+    __tablename__ = "accounting_scope_holds"
+    __table_args__ = (
+        *accounting_evidence_constraints("acct_hold", has_payload=False),
+        UniqueConstraint("raw_receipt_public_id", "reason", name="uq_acct_hold_receipt_reason"),
+        CheckConstraint("length(scope_digest) = 64", name="ck_acct_hold_scope_digest"),
+        Index("ix_acct_hold_scope", "scope_digest", "margin_account", "id"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    raw_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    reason: Mapped[str] = mapped_column(String(64))
+
+
+class AccountingHoldResolution(TemporalMixin, Base):
+    """A separately proven release; raw evidence and the original hold remain immutable."""
+
+    __tablename__ = "accounting_hold_resolutions"
+    __table_args__ = (
+        *accounting_evidence_constraints("acct_resolution"),
+        UniqueConstraint("hold_public_id", name="uq_acct_resolution_hold"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    hold_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    accounting_event_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    route_authority_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    resolution_kind: Mapped[str] = mapped_column(String(32))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class ContractAccountingAnchor(TemporalMixin, Base):
+    """An actual account-currency seed with explicit native balance/position source evidence."""
+
+    __tablename__ = "contract_accounting_anchors"
+    __table_args__ = (
+        *accounting_evidence_constraints("contract_anchor"),
+        UniqueConstraint(
+            "source_receipt_public_id", "account_scope_digest", name="uq_contract_anchor_source"
+        ),
+        CheckConstraint("length(account_scope_digest) = 64", name="ck_contract_anchor_scope"),
+        CheckConstraint(
+            "anchor_kind IN ('native_cash_old_balance', 'venue_account_snapshot', 'position_source_seed')",
+            name="ck_contract_anchor_kind",
+        ),
+        CheckConstraint(
+            "(source_execution_prefix_status = 'unavailable' AND source_execution_scope_sequence IS NULL) OR (source_execution_prefix_status = 'sealed' AND source_execution_scope_sequence IS NOT NULL AND source_execution_scope_sequence >= 0)",
+            name="ck_contract_anchor_prefix",
+        ),
+        Index("ix_contract_anchor_scope", "account_scope_digest", "id"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    route_authority_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    source_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    anchor_kind: Mapped[str] = mapped_column(String(32))
+    source_execution_prefix_status: Mapped[str] = mapped_column(String(16))
+    source_execution_scope_sequence: Mapped[int | None] = mapped_column(BigInteger())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class ContractAccountingEvent(TemporalMixin, Base):
+    """An immutable position or native-cash event committed with exact source deduplication."""
+
+    __tablename__ = "contract_accounting_events"
+    __table_args__ = (
+        *accounting_evidence_constraints("contract_event"),
+        UniqueConstraint(
+            "account_scope_digest", "ledger_sequence", name="uq_contract_event_sequence"
+        ),
+        UniqueConstraint(
+            "account_scope_digest", "kind", "source_identity", name="uq_contract_event_source"
+        ),
+        Index(
+            "uq_contract_event_execution",
+            "execution_public_id",
+            unique=True,
+            sqlite_where=text("execution_public_id IS NOT NULL"),
+            postgresql_where=text("execution_public_id IS NOT NULL"),
+        ),
+        CheckConstraint("ledger_sequence > 0", name="ck_contract_event_sequence"),
+        CheckConstraint("length(account_scope_digest) = 64", name="ck_contract_event_scope"),
+        Index("ix_contract_event_scope", "account_scope_digest", "ledger_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    route_authority_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    anchor_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    raw_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    ledger_sequence: Mapped[int] = mapped_column(BigInteger())
+    kind: Mapped[str] = mapped_column(String(32))
+    source_identity: Mapped[str] = mapped_column(String(256))
+    instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    execution_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    unit_snapshot_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(AccountingRawReceipt.__table__, "after_create")
+@event.listens_for(AccountingScopeHold.__table__, "after_create")
+@event.listens_for(AccountingHoldResolution.__table__, "after_create")
+@event.listens_for(ContractAccountingAnchor.__table__, "after_create")
+@event.listens_for(ContractAccountingEvent.__table__, "after_create")
+def _install_contract_accounting_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Protect create_all evidence stores before any application writes can occur."""
+    install_contract_accounting_table_triggers(connection, str(getattr(target, "name", "")))
+
+
+class FinancialPublicationIntent(TemporalMixin, Base):
+    """A ledger-bound notification committed atomically with its actual financial facts."""
+
+    __tablename__ = "financial_publication_intents"
+    __table_args__ = (
+        *financial_intent_constraints(),
+        Index("ix_financial_intent_scope", "account_scope_digest", "id"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    source_execution_id: Mapped[str] = mapped_column(String(256))
+    execution_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    position_event_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    topic: Mapped[str] = mapped_column(String(256))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class FinancialPublicationDelivery(TemporalMixin, Base):
+    """Evidence that a local publisher returned, without asserting downstream consumption."""
+
+    __tablename__ = "financial_publication_deliveries"
+    __table_args__ = financial_delivery_constraints()
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    publication_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    publication_digest: Mapped[str] = mapped_column(String(64))
+    delivery_semantics: Mapped[str] = mapped_column(String(32))
+    published_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+@event.listens_for(FinancialPublicationIntent.__table__, "after_create")
+@event.listens_for(FinancialPublicationDelivery.__table__, "after_create")
+def _install_financial_publication_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply the same physical publication guards to create-all and migrated databases."""
+    install_financial_publication_triggers(connection, str(getattr(target, "name", "")))
+
+
+class AccountingNativeSourceClaim(TemporalMixin, Base):
+    """One actual native log owner, independent of financial kind and margin metadata."""
+
+    __tablename__ = "accounting_native_source_claims"
+    __table_args__ = (
+        *accounting_native_source_constraints(),
+        Index("ix_acct_native_claim_family", "scope_digest", "id"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    source_domain: Mapped[str] = mapped_column(Text)
+    source_log_id: Mapped[str] = mapped_column(Text)
+    source_identity_digest: Mapped[str] = mapped_column(String(64))
+    semantic_digest: Mapped[str] = mapped_column(String(64))
+    raw_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    accounting_event_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    route_authority_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    kind: Mapped[str] = mapped_column(String(32))
+    booking_uid: Mapped[str] = mapped_column(Text)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(AccountingNativeSourceClaim.__table__, "after_create")
+def _install_accounting_native_source_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply the exact migration guards to model-created native source claims."""
+    install_accounting_native_source_triggers(connection, str(getattr(target, "name", "")))
+
+
+class NativeAccountReadAttempt(TemporalMixin, Base):
+    """An actual read committed before HTTP, ordered across margin labels and credentials."""
+
+    __tablename__ = "native_account_read_attempts"
+    __table_args__ = (
+        *native_account_read_attempt_constraints(),
+        Index("ix_native_read_attempt_family", "scope_digest", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    client_selection_digest: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class NativeAccountReadOutcome(TemporalMixin, Base):
+    """A historical attempt-bound result whose arrival cannot supersede a newer request."""
+
+    __tablename__ = "native_account_read_outcomes"
+    __table_args__ = (
+        *native_account_read_outcome_constraints(),
+        Index("ix_native_read_outcome_family", "scope_digest", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    attempt_content_digest: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    result_kind: Mapped[str] = mapped_column(String(16))
+    raw_receipt_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(NativeAccountReadAttempt.__table__, "after_create")
+@event.listens_for(NativeAccountReadOutcome.__table__, "after_create")
+def _install_native_account_read_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply identical physical lifecycle guards to model-created and migrated databases."""
+    install_native_account_read_triggers(connection, str(getattr(target, "name", "")))
+
+
+class NativeAccountIdentityProof(TemporalMixin, Base):
+    """A redacted selected-key observation tied to one actual attempt and its original owner."""
+
+    __tablename__ = "native_account_identity_proofs"
+    __table_args__ = (
+        *native_account_identity_constraints(),
+        *native_account_identity_root_indexes(),
+        Index("ix_native_identity_family", "scope_digest", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    client_selection_digest: Mapped[str] = mapped_column(String(64))
+    attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    attempt_content_digest: Mapped[str] = mapped_column(String(64))
+    owner_root_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    owner_root_content_digest: Mapped[str | None] = mapped_column(String(64))
+    owner_root_account_uid: Mapped[str | None] = mapped_column(UUIDColumn())
+    source_policy: Mapped[str] = mapped_column(String(64))
+    account_uid: Mapped[str] = mapped_column(UUIDColumn())
+    general_access: Mapped[str] = mapped_column(String(16))
+    transfer_access: Mapped[str] = mapped_column(String(16))
+    request_started_at: Mapped[datetime] = mapped_column(TZDateTime())
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(NativeAccountIdentityProof.__table__, "after_create")
+def _install_native_account_identity_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply the exact 0062 physical identity guards to model-created proof history."""
+    install_native_account_identity_triggers(connection, str(getattr(target, "name", "")))
+
+
+class NativeAccountAuthority(TemporalMixin, Base):
+    """One actual native profile/read authority whose original source cannot be renewed in place."""
+
+    __tablename__ = "native_account_authorities"
+    __table_args__ = (
+        *native_account_authority_constraints(),
+        Index("ix_native_authority_scope", "account_scope_digest", "timestamp"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str] = mapped_column(String(128))
+    account_scope_digest: Mapped[str] = mapped_column(String(64))
+    credential_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    credential_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    public_api_origin: Mapped[str] = mapped_column(String(256))
+    venue_account_id: Mapped[str] = mapped_column(UUIDColumn())
+    owner_proof_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    read_attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    read_outcome_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    raw_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    valid_until: Mapped[datetime] = mapped_column(TZDateTime())
+    route_revision: Mapped[str] = mapped_column(String(64))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(NativeAccountAuthority.__table__, "after_create")
+def _install_native_account_authority_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply identical physical native-authority guards to model-created and migrated databases."""
+    install_native_account_authority_triggers(connection, str(getattr(target, "name", "")))
+
+
+class PrivateSourceOwnershipReceipt(TemporalMixin, Base):
+    """Original private receive ownership or directly rooted recovery, never a financial permit."""
+
+    __tablename__ = "private_source_ownership_receipts"
+    __table_args__ = (
+        *private_source_ownership_constraints(),
+        Index("ix_private_owner_family", "account_family_digest", "timestamp"),
+        Index("ix_private_owner_receive", "frame_receive_public_id", "target_json_pointer"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_family_digest: Mapped[str] = mapped_column(String(64))
+    client_selection_digest: Mapped[str] = mapped_column(String(64))
+    credential_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    credential_timestamp: Mapped[datetime] = mapped_column(TZDateTime())
+    public_api_origin: Mapped[str] = mapped_column(String(256))
+    raw_receipt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    raw_content_digest: Mapped[str] = mapped_column(String(64))
+    target_json_pointer: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    frame_basis_digest: Mapped[str] = mapped_column(String(64))
+    key_proof_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    key_proof_content_digest: Mapped[str] = mapped_column(String(64))
+    key_proof_recorded_at: Mapped[datetime] = mapped_column(TZDateTime())
+    key_owner_root_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    key_owner_root_content_digest: Mapped[str] = mapped_column(String(64))
+    client_capture_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    connection_epoch_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    subscription_dispatch_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    frame_receive_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    subscription_feed: Mapped[str] = mapped_column(String(32))
+    raw_feed: Mapped[str] = mapped_column(String(32))
+    auth_encoded_at: Mapped[datetime] = mapped_column(TZDateTime())
+    ack_observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    frame_observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    raw_observed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    raw_recorded_at: Mapped[datetime] = mapped_column(TZDateTime())
+    family: Mapped[str] = mapped_column(String(32))
+    schema_version: Mapped[int] = mapped_column(Integer())
+    source_policy: Mapped[str] = mapped_column(String(64))
+    binding_kind: Mapped[str] = mapped_column(String(24))
+    origin_sidecar_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    origin_sidecar_content_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text())
+
+
+@event.listens_for(PrivateSourceOwnershipReceipt.__table__, "after_create")
+def _install_private_source_ownership_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply the same physical guards to fresh model-created transport ownership stores."""
+    install_private_source_ownership_triggers(connection, str(getattr(target, "name", "")))
+
+
+class FuturesProductReadAttempt(TemporalMixin, Base):
+    """An actual read committed before HTTP, ordered across margin labels and credentials."""
+
+    __tablename__ = "futures_product_read_attempts"
+    __table_args__ = (
+        *futures_product_read_attempt_constraints(),
+        Index("ix_futures_product_attempt_family", "scope_digest", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    client_selection_digest: Mapped[str] = mapped_column(String(64))
+    key_proof_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    key_proof_content_digest: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class FuturesProductReadOutcome(TemporalMixin, Base):
+    """A historical attempt-bound result whose arrival cannot supersede a newer request."""
+
+    __tablename__ = "futures_product_read_outcomes"
+    __table_args__ = (
+        *futures_product_read_outcome_constraints(),
+        Index("ix_futures_product_outcome_family", "scope_digest", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    attempt_content_digest: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    result_kind: Mapped[str] = mapped_column(String(16))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(FuturesProductReadAttempt.__table__, "after_create")
+@event.listens_for(FuturesProductReadOutcome.__table__, "after_create")
+def _install_futures_product_read_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply identical physical lifecycle guards to model-created and migrated databases."""
+    install_futures_product_read_triggers(connection, str(getattr(target, "name", "")))

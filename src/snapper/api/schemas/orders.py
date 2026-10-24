@@ -25,7 +25,8 @@ class CreateOrderBody(StrictBody):
         quantity: Order quantity (must be positive and finite).
         price: Positive finite limit price (required for limit and stop_limit).
         stop_price: Positive finite stop trigger price (required for stop and stop_limit).
-        time_in_force: Time-in-force policy (default GTC).
+        time_in_force: Time-in-force policy. Only GTC is currently forwarded
+            faithfully; other policies are rejected before persistence.
         post_only: Post-only flag for maker orders.
         leverage: Optional strict positive int32 leverage multiplier.
         reduce_only: Reduce-only flag for closing positions.
@@ -52,7 +53,7 @@ class CreateOrderBody(StrictBody):
     quantity: PositiveOrderNumber
     price: PositiveOrderNumber | None = None
     stop_price: PositiveOrderNumber | None = None
-    time_in_force: str = "GTC"
+    time_in_force: Literal["GTC"] = "GTC"
     post_only: bool = False
     leverage: OrderLeverage | None = None
     reduce_only: bool = False

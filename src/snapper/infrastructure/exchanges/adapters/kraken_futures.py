@@ -19,6 +19,7 @@ unparseable item does not discard the entire batch.
 
 from collections.abc import Callable
 from decimal import Decimal
+from sys import float_info
 from typing import Any
 
 from loguru import logger
@@ -147,17 +148,21 @@ def parse_kraken_futures_instrument(data: dict[str, Any]) -> InstrumentPairDescr
 
     Returns:
         InstrumentPairDescriptor with product specifications.
+
+    Raises:
+        ValueError: If quantity precision is absent or cannot be represented safely.
     """
     schema = KrakenFuturesInstrumentSchema.model_validate(data)
+    qty_precision, qty_step = _quantity_precision_and_step(schema.contract_value_trade_precision)
     initial_margin = schema.margin_levels[0].initial_margin if schema.margin_levels else None
     return InstrumentPairDescriptor(
         symbol=schema.symbol,
         base=schema.base or "",
         quote=schema.quote or "",
-        status="active" if schema.tradeable else "inactive",
-        qty_precision=schema.contract_value_trade_precision or 0,
-        qty_increment=schema.contract_size,
-        qty_min=schema.contract_size,
+        status=schema.market_status,
+        qty_precision=qty_precision,
+        qty_increment=qty_step,
+        qty_min=qty_step,
         price_precision=_tick_size_to_precision(schema.tick_size),
         price_increment=schema.tick_size,
         cost_precision=2,
@@ -167,6 +172,28 @@ def parse_kraken_futures_instrument(data: dict[str, Any]) -> InstrumentPairDescr
         margin_initial=initial_margin,
         tick_size=schema.tick_size,
     )
+
+
+def _quantity_precision_and_step(precision: int | None) -> tuple[int, float]:
+    """Resolve the signed venue quantity precision without using its multiplier.
+
+    Kraken defines precision ``2`` as a ``0.01`` quantity increment and
+    precision ``-3`` as a ``1000`` increment. Snapper stores a non-negative
+    decimal count separately from that step. Restrict exponents to the
+    finite decimal range of the float descriptor and storage boundary.
+
+    Args:
+        precision: Signed contract quantity precision from the venue catalog.
+
+    Returns:
+        Non-negative quantity decimal count and positive minimum quantity step.
+
+    Raises:
+        ValueError: If precision is missing or exceeds the finite float range.
+    """
+    if precision is None or abs(precision) > float_info.max_10_exp:
+        raise ValueError("Kraken Futures quantity precision is missing or out of range")
+    return max(precision, 0), float(Decimal(1).scaleb(-precision))
 
 
 def parse_kraken_futures_instrument_list(
@@ -261,11 +288,17 @@ def parse_kraken_futures_fill(
     ts = normalize_kraken_timestamp(schema.time)
     side = OrderSideEnum.BUY if schema.buy else OrderSideEnum.SELL
     order_type = _ORDER_TYPE_MAP.get(schema.order_type or "", ExchangeOrderTypeEnum.LIMIT)
-    fee_currency = schema.fee_currency or "USD"
+    fee_currency = schema.fee_currency
     fee_usd: float | None = schema.fee_paid if fee_currency == "USD" else None
     fees: list[ExecutionFeeBreakdown] | None = None
-    if schema.fee_paid and fee_currency != "USD":
-        fees = [ExecutionFeeBreakdown(asset=fee_currency, quantity=schema.fee_paid)]
+    if schema.fee_paid is not None and fee_currency and fee_currency != "USD":
+        fees = [
+            ExecutionFeeBreakdown(
+                asset=fee_currency,
+                quantity=schema.fee_paid,
+                quantity_decimal=_raw_fill_decimal(data.get("fee_paid")),
+            )
+        ]
     return ExecutionUpdate(
         order_id=schema.order_id,
         exec_type="trade",
@@ -279,8 +312,20 @@ def parse_kraken_futures_fill(
         exec_id=schema.fill_id,
         cl_ord_id=schema.cli_ord_id,
         fee_usd_equiv=fee_usd,
+        last_qty_decimal=_raw_fill_decimal(data.get("qty")),
+        last_price_decimal=_raw_fill_decimal(data.get("price")),
+        fee_usd_equiv_decimal=(
+            _raw_fill_decimal(data.get("fee_paid")) if fee_currency == "USD" else None
+        ),
         fees=fees,
     )
+
+
+def _raw_fill_decimal(value: object) -> str | None:
+    """Retain exact SDK operands while leaving float precision and missing currency unproven."""
+    if isinstance(value, bool):
+        return None
+    return str(value) if isinstance(value, str | Decimal | int) else None
 
 
 def parse_kraken_futures_order_status(

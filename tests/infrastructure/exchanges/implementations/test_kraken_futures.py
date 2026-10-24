@@ -87,10 +87,13 @@ def _patch_ccxt() -> Generator[None]:
 
 @pytest.fixture(autouse=True)
 def _patch_sdk() -> Generator[None]:
-    """Patch Kraken SDK Trade and User classes."""
+    """Isolate SDK doubles from the actual Trade, User and pinned private-receiver binding ports."""
     with (
         patch("snapper.infrastructure.exchanges.implementations.kraken_futures.Trade"),
         patch("snapper.infrastructure.exchanges.implementations.kraken_futures.User"),
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.bind_owned_futures_private_callback"
+        ),
     ):
         yield
 
@@ -2834,6 +2837,7 @@ class TestSubscribeInstruments:
             "type": "futures_inverse",
             "tickSize": 0.5,
             "contractSize": 1,
+            "contractValueTradePrecision": 0,
             "tradeable": True,
             "base": "BTC",
             "quote": "USD",
@@ -3212,13 +3216,24 @@ class TestCreateOrderValidation:
         assert call_kwargs["limitPrice"] == pytest.approx(59500.0)
 
     @pytest.mark.asyncio
-    async def test_stop_without_trigger_rejected_pre_send(
-        self, auth_client: KrakenFuturesExchangeClient
+    @pytest.mark.parametrize(
+        "order_type",
+        [
+            ExchangeOrderTypeEnum.STOP_LOSS,
+            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+            ExchangeOrderTypeEnum.TAKE_PROFIT,
+        ],
+    )
+    @pytest.mark.parametrize("price", [None, 59000.0])
+    async def test_trigger_order_without_trigger_rejected_pre_send(
+        self,
+        auth_client: KrakenFuturesExchangeClient,
+        order_type: ExchangeOrderTypeEnum,
+        price: float | None,
     ) -> None:
-        """A stop-typed request without its trigger never reaches the SDK.
+        """A stop or take-profit request without its trigger never reaches the SDK.
 
-        Given: Authenticated client and a STOP_LOSS request lacking
-            stop_price,
+        Given: A trigger order lacks stop_price even when an optional limit price is supplied,
         When: create_order is called,
         Then: a pre-send ValueError surfaces (provably-not-placed) and
             the SDK is never invoked.
@@ -3228,8 +3243,9 @@ class TestCreateOrderValidation:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=ExchangeOrderTypeEnum.STOP_LOSS,
+            type=order_type,
             amount=1.0,
+            price=price,
             client_order_id="coid-stop-without-trigger-rejected-pre-send",
         )
         with (
@@ -3237,10 +3253,16 @@ class TestCreateOrderValidation:
                 "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
                 return_value="PF_XBTUSD",
             ),
+            patch.object(auth_client, "_dispatch_routed_rest", new_callable=AsyncMock) as dispatch,
+            patch.object(auth_client, "_record_rest_call") as record_rest,
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as persist,
             pytest.raises(ValueError, match="requires stop_price"),
         ):
             await auth_client.create_order(request)
         auth_client._trade_client.create_order.assert_not_called()
+        dispatch.assert_not_awaited()
+        persist.assert_not_awaited()
+        record_rest.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_stop_limit_without_limit_leg_rejected_pre_send(
@@ -7328,3 +7350,106 @@ class TestKrakenFuturesWireCorrelationIdFidelity:
         call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
         assert call_kwargs["cliOrdId"] == request.client_order_id
         assert snapshot.client_order_id == request.client_order_id
+
+
+class TestTriggerOrderTransportContracts:
+    """Validate complete trigger requests at the actual Futures SDK boundary."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("price", [None, 69000.0])
+    @pytest.mark.parametrize("side", [OrderSideEnum.BUY, OrderSideEnum.SELL])
+    async def test_take_profit_keeps_explicit_trigger_and_optional_limit_leg(
+        self, auth_client: KrakenFuturesExchangeClient, price: float | None, side: OrderSideEnum
+    ) -> None:
+        """Take profit uses an explicit trigger with a separately optional limit leg.
+
+        Given: A complete take-profit request with an optional limit price,
+        When: The real client serializes and dispatches it to the injected SDK,
+        Then: Exact trigger, limit, reduce-only and correlation fields reach the SDK once.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-take-profit", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=side,
+            type=ExchangeOrderTypeEnum.TAKE_PROFIT,
+            amount=1.0,
+            client_order_id="coid-take-profit-trigger-contract",
+            stop_price=70000.0,
+            price=price,
+            reduce_only=True,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as persist,
+        ):
+            persist.return_value = None
+            result = await auth_client.create_order(request)
+        assert result.id == "ord-take-profit"
+        assert result.type == ExchangeOrderTypeEnum.TAKE_PROFIT
+        assert result.price == price
+        expected: dict[str, str | float | bool] = {
+            "orderType": "take_profit",
+            "symbol": "PF_XBTUSD",
+            "size": 1.0,
+            "side": side.value,
+            "stopPrice": 70000.0,
+            "cliOrdId": "coid-take-profit-trigger-contract",
+            "reduceOnly": True,
+        }
+        if price is not None:
+            expected["limitPrice"] = price
+        auth_client._trade_client.create_order.assert_called_once_with(**expected)
+        persist.assert_awaited_once_with(request, result)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("price", "stop_price"),
+        [(None, None), (69000.0, None), (None, 70000.0), (69000.0, 70000.0)],
+    )
+    async def test_native_trailing_without_typed_deviation_contract_rejects_before_dispatch(
+        self,
+        auth_client: KrakenFuturesExchangeClient,
+        price: float | None,
+        stop_price: float | None,
+    ) -> None:
+        """Ordinary trigger prices cannot substitute for missing trailing deviation semantics.
+
+        Given: A trailing-stop request whose contract cannot carry deviation value and unit,
+        When: The client receives it with any combination of ordinary price fields,
+        Then: It rejects before SDK dispatch or persistence and advertises no native trailing support.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock()
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.TRAILING_STOP,
+            amount=1.0,
+            client_order_id="coid-unsupported-native-trailing",
+            price=price,
+            stop_price=stop_price,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_dispatch_routed_rest", new_callable=AsyncMock) as dispatch,
+            patch.object(auth_client, "_record_rest_call") as record_rest,
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as persist,
+            pytest.raises(ValueError, match="Unsupported order type.*trailing-stop") as refused,
+        ):
+            await auth_client.create_order(request)
+        supported = str(refused.value).partition("Supported: ")[2]
+        assert "trailing-stop" not in supported
+        assert "take-profit" in supported
+        auth_client._trade_client.create_order.assert_not_called()
+        dispatch.assert_not_awaited()
+        persist.assert_not_awaited()
+        record_rest.assert_not_called()

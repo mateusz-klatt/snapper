@@ -443,6 +443,7 @@ class ExecutionInsertRow(TypedDict):
 
     order_public_id: str
     timestamp: datetime
+    executed_at: NotRequired[datetime | None]
     side: str
     status: str
     price: float
@@ -2017,6 +2018,7 @@ class VenueEventRow(TypedDict):
     error: str | None
     venue_timestamp: datetime | None
     received_at: datetime
+    payload_json: NotRequired[str | None]
     liquidity_role: NotRequired[str]
     paired_group_id: NotRequired[str | None]
 
@@ -2070,6 +2072,7 @@ class RecordVenueEventParams(TypedDict, total=False):
     venue_timestamp: datetime | None
     strategy_tag: str | None
     liquidity_role: str | None
+    payload_json: str | None
 
 
 class TradeCommandInsertRow(TypedDict, total=False):
@@ -2314,7 +2317,12 @@ class PairedExecutionLegFieldUpdate(TypedDict, total=False):
 
 
 class InstrumentSpecRow(TypedDict):
-    """Row dict returned by get_instrument_spec."""
+    """Specification read row with optional explicit economic payoff evidence.
+
+    Real repository serializers always emit the nullable monetary fields.
+    Optional keys let older fixtures and callers preserve honest absence;
+    consumers must refuse monetary interpretation when the tuple is missing.
+    """
 
     instrument_public_id: str
     tick_size: float | None
@@ -2329,6 +2337,10 @@ class InstrumentSpecRow(TypedDict):
     status: str | None
     contract_size: Decimal | None
     quantity_unit: str | None
+    native_order_quantity_unit: NotRequired[str | None]
+    contract_payoff_model: NotRequired[str | None]
+    contract_value_currency: NotRequired[str | None]
+    settlement_currency: NotRequired[str | None]
     spec_source: str | None
     spec_version: str | None
     spec_observed_at: datetime | None
@@ -2340,6 +2352,15 @@ class InstrumentSpecRow(TypedDict):
     rollover_rate_long: float | None
     rollover_rate_short: float | None
     max_funding_rate: float | None
+
+
+class InstrumentValuationMetadataRow(TypedDict):
+    """Clock-free active identity and specification for notional valuation."""
+
+    exchange: str
+    base: str
+    quote: str
+    spec: InstrumentSpecRow | None
 
 
 class SpotAssetPrecisionEvidenceRow(TypedDict):

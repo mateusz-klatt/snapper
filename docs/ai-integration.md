@@ -395,6 +395,13 @@ to `caps_enforcer_getter` at registration.
     read-only access is gated by `READ_MARKET_DATA`; the current
     `ai_delegate` named set contains this permission.
 
+- **`get_order_instrument(exchange: str, instrument: str)`** — resolves the
+    exact catalog UUID and discloses native quantity units, increments, contract
+    multiplier, payoff/currency evidence, expiry, provenance and certification.
+    It also reports cached tradability and application accounting refusals.
+    Requires `READ_MARKET_DATA`; account eligibility, balances, risk caps and live
+    activation remain unchecked. See [execution support](order-execution.md).
+
 - **`list_orders(wallet_public_id?, status?, exchange?, instrument?,
     limit=50, offset=0)`** — paged read of the delegate's order
     history within accessible wallets. Requires `READ_ORDERS`.
@@ -487,18 +494,22 @@ to `caps_enforcer_getter` at registration.
     `price` is required for `limit`/`stop_limit` and `stop_price` is
     required for `stop`/`stop_limit` order types.
     `wallet_public_id` is optional — when omitted, Snapper resolves the
-    caller's single accessible live wallet; multiple candidates return
+    caller's single accessible wallet for the derived mode; multiple candidates return
     a structured `wallet_ambiguous` envelope and zero candidates
     `wallet_unresolved` (a blank string returns `invalid_argument`).
-    Wraps the REST `create_order` route.
+    Uses its own preparation path and shares admission policies with REST.
+    The execution venue determines the mode: Paper uses Paper mode and other
+    venues use live mode. Product, exact identity and Paper source-profile
+    checks apply before command creation; see [order execution support](order-execution.md).
     `leverage`, `post_only`, and `reduce_only` are optional execution
     modifiers threaded to the same destinations the REST route uses,
-    and each is omitted from persistence when left at its default:
+    with default optional plan keys omitted and durable command-column defaults
+    retained:
 
     - `leverage` (int, default absent) goes to the plan params only
         when supplied, and always to the `trade_commands.leverage`
-        column. Trading caps measure notional as `quantity x price`, so
-        leverage does not raise the exposure caps evaluate.
+        column. Trading caps measure full notional using the supported product's
+        quantity and monetary dimensions; leverage does not raise those caps.
     - `post_only` (bool, default `false`) reaches the venue since
         migration 0051 carried it onto the `trade_commands` column the
         executor builds its request from. Before that it was plan-params
@@ -522,6 +533,9 @@ to `caps_enforcer_getter` at registration.
     | `leverage` | yes | no | no | no | no |
     | `post_only` | limit, stop_limit | limit | no | no | no |
     | `reduce_only` | yes, margin only | yes | no | no | no |
+
+    These are client modifier capabilities. They do not override the separate
+    product refusal: tokenized and derivative creation remains unavailable.
 
     A venue absent from that table honours nothing, so a venue added
     later cannot silently inherit permission to accept a flag its client
@@ -563,16 +577,11 @@ to `caps_enforcer_getter` at registration.
         version of the rule would refuse every one of them, leaving spot
         positions that can be opened and never closed.
 
-    **`paper` is the exception and is accepted, not refused.** It reads
-    none of the flags, but there is no real position to overshoot and no
-    real money, so the only cost is rehearsal fidelity. Refusing would
-    block the default practice venue for a workflow that becomes
-    legitimate the moment it moves to Kraken, so the order goes through
-    and the inertness is disclosed instead.
+    **`paper` accepts these flags as inert simulation inputs.** Their inertness
+    is disclosed. Exact instrument and supported cash-source admission still
+    apply; accepting a modifier does not admit a contract or tokenized product.
 
-    REST applies none of these gates and is unchanged. Parity with an
-    ungated REST is not the right target for a surface an autonomous
-    agent drives.
+    REST and MCP share modifier, product and source-profile admission policies.
     - **`inert_flags`** on every accepted envelope lists the requested
         flags the resolved venue will not act on. Now that every other
         venue refuses instead, `paper` is the only thing that can make

@@ -10,10 +10,13 @@ from typing import cast
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from snapper.application.process_manager.process_parameters import PolygonSymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.polygon_cash_profile import PolygonCashProfile
+from snapper.application.updaters.symbols.polygon_cash_profile import interpret_polygon_cash_profile
 from snapper.application.updaters.symbols.types import PolygonSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
@@ -23,6 +26,7 @@ from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Symbol
+from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
 
@@ -146,7 +150,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         self,
         session: Any,
         native_symbol: str,
-        ticker: str,
+        symbol_data: PolygonSymbolRecord,
         base: str,
         quote: str | None,
         now: datetime,
@@ -160,7 +164,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         Args:
             session: SQLAlchemy session.
             native_symbol: Native symbol string.
-            ticker: Polygon ticker string.
+            symbol_data: Exact provider reference record with its ticker.
             base: Base currency code.
             quote: Quote currency code or None.
             now: Current timestamp for created_at/updated_at.
@@ -179,6 +183,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         if existing_symbol is None and not self.insert_new:
             stats["skipped"] += 1
             return None
+        ticker = symbol_data["ticker"]
         asset_type = self._determine_polygon_asset_type(ticker)
         sid = self._tracker.session_id
         symbol_public_id = self._upsert_symbol(
@@ -221,21 +226,50 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
-        kind = "spot" if asset_type in (AssetTypeEnum.CRYPTO, AssetTypeEnum.FOREX) else None
-        if kind is not None:
-            self._revise_instrument_spec(
-                session,
-                instrument_public_id,
-                now,
-                session_id=sid,
-                sequence_id=self._tracker.next_sequence("specs"),
-                instrument_kind=kind,
-            )
+        self._revise_polygon_profile(
+            session,
+            instrument_public_id,
+            interpret_polygon_cash_profile(symbol_data, base, quote, now),
+            now,
+        )
         if alias_result == "created":
             stats["inserted"] += 1
         elif alias_result == "updated":
             stats["updated"] += 1
         return symbol_public_id
+
+    def _revise_polygon_profile(
+        self,
+        session: Session,
+        instrument_public_id: str,
+        profile: PolygonCashProfile,
+        now: datetime,
+    ) -> None:
+        """Replace the exact source profile and revoke earlier conflicting evidence.
+
+        Args:
+            session: Active synchronous catalog transaction.
+            instrument_public_id: Exact Polygon source instrument identity.
+            profile: Interpretation of the exact record and catalog base/quote.
+            now: Current catalog revision time, separate from provider accuracy time.
+        """
+        existing = DatabaseRepository.get_instrument_spec_sync(session, instrument_public_id, now)
+        if existing is None and profile.instrument_kind is None:
+            return
+        self._revise_instrument_spec(
+            session,
+            instrument_public_id,
+            now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("specs"),
+            instrument_kind=profile.instrument_kind,
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
+            max_funding_rate=None,
+            metadata=profile.metadata,
+        )
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Update database with fetched symbol data.
@@ -260,7 +294,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                         continue
                     base, quote = self._split_native_symbol(native_symbol, symbol_data)
                     spid = self._upsert_polygon_mapping(
-                        session, native_symbol, ticker, base, quote, now, stats
+                        session, native_symbol, symbol_data, base, quote, now, stats
                     )
                     if spid is not None:
                         processed_symbol_public_ids.add(spid)

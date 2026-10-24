@@ -23,6 +23,7 @@ from abc import ABC
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
@@ -33,6 +34,8 @@ from typing import Self
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
+from snapper.config.credentials import CredentialVersion
+from snapper.core.execution_route_authority import ExecutionClientSelection
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.data.repository import ExecutionScopeResolutionError
@@ -46,11 +49,14 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExecutionApiRoute
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
+from snapper.infrastructure.exchanges.contracts import NativeBalanceObservation
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
+from snapper.infrastructure.exchanges.contracts import PrivateExecutionObservation
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -233,6 +239,95 @@ class ExchangeClientBase(ABC):
         self._health_loop_task: asyncio.Task[None] | None = None
         self._rest_pool: concurrent.futures.ThreadPoolExecutor | None = None
         self._rest_pool_closed: bool = False
+        self._execution_observation_sink: (
+            Callable[[PrivateExecutionObservation], Awaitable[str]] | None
+        ) = None
+        self._execution_wallet_public_id: str | None = None
+        self._execution_credential_version: CredentialVersion | None = None
+
+    def bind_execution_identity(
+        self, wallet_public_id: str, credential_version: CredentialVersion | None
+    ) -> None:
+        """Bind public provenance from the exact credential used to instantiate this client.
+
+        Args:
+            wallet_public_id: Actual executor wallet, never a venue account identifier.
+            credential_version: Public revision selected with the instantiated secret.
+
+        Raises:
+            ValueError: If a credential belongs to another wallet or venue.
+        """
+        if credential_version is not None and (
+            credential_version.wallet_public_id != wallet_public_id
+            or credential_version.exchange != self.exchange_name
+        ):
+            raise ValueError("execution_credential_scope_mismatch")
+        if self._execution_wallet_public_id is not None and (
+            self._execution_wallet_public_id != wallet_public_id
+            or self._execution_credential_version != credential_version
+        ):
+            raise ValueError("execution_client_identity_already_bound")
+        self._execution_wallet_public_id = wallet_public_id
+        self._execution_credential_version = credential_version
+
+    def execution_api_route(self) -> ExecutionApiRoute | None:
+        """Return proven actual SDK routing, absent when an adapter cannot establish it.
+
+        Returns:
+            Explicit public route, without inferring it from a sandbox preference.
+        """
+        return None
+
+    def execution_client_selection(self) -> ExecutionClientSelection | None:
+        """Combine actual endpoint routing with the public selected credential revision.
+
+        Returns:
+            Current client selection, or no proof when identity or routing is missing.
+        """
+        wallet = self._execution_wallet_public_id
+        route = self.execution_api_route()
+        credential = self._execution_credential_version
+        if not wallet or route is None:
+            return None
+        if route.environment != "paper" and credential is None:
+            return None
+        return ExecutionClientSelection.model_validate(
+            {
+                "wallet_public_id": wallet,
+                "exchange": self.exchange_name,
+                "mode": "paper" if route.environment == "paper" else "live",
+                "environment": route.environment,
+                "credential_public_id": credential.public_id if credential else None,
+                "credential_timestamp": credential.timestamp if credential else None,
+                "public_api_origin": route.public_api_origin,
+            }
+        )
+
+    def set_execution_observation_sink(
+        self, sink: Callable[[PrivateExecutionObservation], Awaitable[str]]
+    ) -> None:
+        """Attach the actual executor's durable observation writer before subscribing.
+
+        Args:
+            sink: Account-bound writer returning its committed observation UUID.
+        """
+        self._execution_observation_sink = sink
+
+    async def _capture_private_execution_observation(
+        self, observation: PrivateExecutionObservation
+    ) -> str | None:
+        """Await durable evidence capture before interpreting or suppressing its event.
+
+        Args:
+            observation: Frozen provider evidence, including malformed financial values.
+
+        Returns:
+            The committed observation identity, absent for a standalone unbound client.
+        """
+        sink = self._execution_observation_sink
+        if sink is None:
+            return None
+        return await sink(observation)
 
     def set_tracker(self, tracker: SequenceTracker) -> None:
         """Inject the component-level SequenceTracker for provenance stamping.
@@ -988,6 +1083,20 @@ class ExchangeClientBase(ABC):
         """
         await asyncio.sleep(0)
         return None
+
+    async def read_native_balance_observation(self) -> NativeBalanceObservation:
+        """Return a single native read and its independently proven public route.
+
+        The default preserves existing balance observation without manufacturing
+        account identity. A concrete adapter override performs one actual read,
+        retains its native account labels, and binds the same selected credential
+        and actual SDK read/write endpoints. Separate positions are not part of
+        this response. No implementation may reread balances to attach a route.
+
+        Returns:
+            Native entries and optional actual response-bound route evidence.
+        """
+        return NativeBalanceObservation(await self.read_native_balances())
 
     async def read_native_balances(self) -> list[NativeBalanceEntry]:
         """Read faithful native per-currency balances for the account observer.

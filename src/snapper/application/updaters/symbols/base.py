@@ -12,6 +12,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 from typing import Literal
+from typing import cast
 from uuid import uuid7
 
 import zmq
@@ -95,7 +96,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Configured exchange client for fetching symbol data.
         """
-        ...
 
     @abstractmethod
     def _get_setting_key(self) -> str:
@@ -104,7 +104,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Setting key string unique to this exchange updater.
         """
-        ...
 
     @abstractmethod
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
@@ -113,7 +112,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Args:
             symbols: List of symbol dictionaries from the exchange.
         """
-        ...
 
     def _setup_zmq(self) -> None:
         """Initialize ZMQ context and publisher socket for cache invalidation."""
@@ -528,6 +526,15 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             status=existing.status,
             contract_size=existing.contract_size,
             quantity_unit=quantity_unit,
+            native_order_quantity_unit=cast(
+                Literal["base_asset", "contract_count"] | None,
+                existing.native_order_quantity_unit,
+            ),
+            contract_payoff_model=cast(
+                Literal["linear", "inverse"] | None, existing.contract_payoff_model
+            ),
+            contract_value_currency=existing.contract_value_currency,
+            settlement_currency=existing.settlement_currency,
             spec_source=existing.spec_source,
             spec_version=existing.spec_version,
             spec_observed_at=existing.spec_observed_at,
@@ -539,7 +546,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         metadata: InstrumentMetadataInput,
         provenance_complete: bool,
     ) -> bool:
-        """Return whether replacement metadata can certify contract-count units."""
+        """Certify complete contract units independently of current market order permission."""
         positive_contract_size = metadata.contract_size is not None and metadata.contract_size > 0
         return (
             provenance_complete
@@ -553,7 +560,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             and metadata.min_order_size > 0
             and metadata.qty_decimals is not None
             and metadata.qty_decimals >= 0
-            and metadata.status == "active"
         )
 
     @staticmethod
@@ -594,6 +600,10 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             status=metadata.status,
             contract_size=metadata.contract_size,
             quantity_unit=metadata.quantity_unit,
+            native_order_quantity_unit=metadata.native_order_quantity_unit,
+            contract_payoff_model=metadata.contract_payoff_model,
+            contract_value_currency=metadata.contract_value_currency,
+            settlement_currency=metadata.settlement_currency,
             spec_source=metadata.spec_source if provenance_complete else None,
             spec_version=metadata.spec_version if provenance_complete else None,
             spec_observed_at=metadata.spec_observed_at if provenance_complete else None,
@@ -700,6 +710,10 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             status=resolved_metadata.status,
             contract_size=resolved_metadata.contract_size,
             quantity_unit=resolved_metadata.quantity_unit,
+            native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
+            contract_payoff_model=resolved_metadata.contract_payoff_model,
+            contract_value_currency=resolved_metadata.contract_value_currency,
+            settlement_currency=resolved_metadata.settlement_currency,
             spec_source=resolved_metadata.spec_source,
             spec_version=resolved_metadata.spec_version,
             spec_observed_at=resolved_metadata.spec_observed_at,

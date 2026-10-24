@@ -1080,9 +1080,6 @@
       }
     },
     "src/snapper/messaging/executors/base.py": {
-      "ExchangeExecutorService.__init__": {
-        "PLR0915": 53
-      },
       "ExchangeExecutorService._assemble_spot_replay_boundary": {
         "PLR0913": 8
       },
@@ -1106,9 +1103,6 @@
       },
       "ExchangeExecutorService._schedule_portfolio_reconciliation": {
         "PLR0913": 6
-      },
-      "ExchangeExecutorService.start": {
-        "PLR0915": 55
       }
     },
     "src/snapper/messaging/publishers/base.py": {
@@ -1260,7 +1254,7 @@
         "PLR0913": 6
       },
       "create_order": {
-        "PLR0915": 56
+        "PLR0915": 55
       }
     },
     "src/snapper/server/paired_execution_routes.py": {

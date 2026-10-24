@@ -16,6 +16,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
@@ -288,6 +289,22 @@ class OutboxDispatcher:
                 )
         return True
 
+    async def _material_permits_dispatch(self, command: TradeCommandRow) -> bool:
+        """Skip a durably blocked logical CREATE while retaining healthy batch peers.
+
+        Proof/storage failures propagate out of the dispatcher instead of
+        creating retry versions or repeatedly logging every fifty milliseconds.
+        Cancels remain available; all execution CREATE intents require proof.
+        """
+        if command["command_type"] not in _EXPIRABLE_COMMAND_TYPES:
+            return True
+        try:
+            await self._repo.require_consistent_trade_command_material(command["public_id"])
+        except TradeCommandMaterialChangedError as exc:
+            logger.error("OutboxDispatcher: CREATE held by durable material barrier: {}", exc)
+            return False
+        return True
+
     async def _dispatch_batch(self) -> None:
         """Fetch and dispatch one batch of undispatched commands.
 
@@ -303,6 +320,8 @@ class OutboxDispatcher:
         success_updates: list[TradeCommandDispatchUpdate] = []
         published_pids: list[str] = []
         for cmd in commands:
+            if not await self._material_permits_dispatch(cmd):
+                continue
             if await self._expire_if_stale(cmd):
                 continue
             try:

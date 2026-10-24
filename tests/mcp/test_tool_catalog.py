@@ -135,6 +135,7 @@ async def test_ai_reviewer_sees_review_tool_without_research_or_trading_mutation
 
     assert visible_names == {
         "list_instruments",
+        "get_order_instrument",
         "submit_ai_review_decision",
         "get_latest_research",
         "list_orders",
@@ -172,6 +173,7 @@ async def test_ai_researcher_sees_research_tools_without_review_or_trading_tools
 
     assert visible_names == {
         "list_instruments",
+        "get_order_instrument",
         "submit_market_view",
         "get_latest_research",
         "get_ohlcv",

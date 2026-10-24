@@ -1076,7 +1076,7 @@ X-CSRF-Token: <csrf_token>
 | `quantity` | float | yes | Finite order size greater than zero |
 | `price` | float | cond | Finite value greater than zero when supplied; required for `limit` and `stop_limit` |
 | `stop_price` | float | cond | Finite value greater than zero when supplied; required for `stop` and `stop_limit` |
-| `time_in_force` | string | no | Time-in-force policy (`GTC` default) |
+| `time_in_force` | `"GTC"` | no | Implemented manual-entry policy; other values are rejected |
 | `post_only` | boolean | no | Maker-only order flag (`false` default) |
 | `leverage` | int | no | Optional integer multiplier from 1 through 2147483647; omitted or `null` means no leverage override |
 | `reduce_only` | boolean | no | Reduce-only flag for closing exposure (`false` default) |
@@ -1087,7 +1087,13 @@ X-CSRF-Token: <csrf_token>
 
 **Response (200):** `ExecutionPlanResponse` envelope with plan details.
 
-**Errors:** 403 (disabled/forbidden), 409 (idempotency conflict), 422 (validation).
+**Errors:** 400 (unsupported execution product or terms), 403 (disabled/forbidden),
+409 (idempotency conflict), 422 (validation or catalog capability denial).
+
+Tokenized-asset and derivative creation retain explicit accounting refusals,
+including when a stale catalog capability allows the instrument. Cancellation
+remains available. See [execution support and sizing](order-execution.md) for
+product boundaries, quantity units and contract-aware notional rules.
 
 Numeric strings and booleans are rejected. Quantity and supplied prices must be
 finite and positive; leverage must be an integer, so values such as `2.5` and

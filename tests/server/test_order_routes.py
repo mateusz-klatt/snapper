@@ -20,6 +20,8 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository_types import InstrumentSourceResolution
+from snapper.data.repository_types import InstrumentValuationMetadataRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
@@ -237,8 +239,44 @@ def _paper_market_body(*, side: str = "buy") -> dict[str, Any]:
     return body
 
 
+def _ordinary_btc_source_metadata(public_id: str) -> InstrumentValuationMetadataRow | None:
+    """Resolve only the ordinary Kraken BTC UUID modeled by these route fixtures.
+
+    Args:
+        public_id: Exact source identity requested by shared paper admission.
+
+    Returns:
+        Explicit current Spot dimensions for inst-1, or no evidence for another UUID.
+    """
+    if public_id != "inst-1":
+        return None
+    return {"exchange": "kraken", "base": "BTC", "quote": "USD", "spec": None}
+
+
+def _arm_ordinary_btc_source(repo: AsyncMock) -> None:
+    """Declare the source profile of the existing ordinary BTC route fixture.
+
+    Args:
+        repo: Repository double whose native BTC source identity is inst-1.
+    """
+    resolution: InstrumentSourceResolution = {
+        "valuation_public_id": "inst-1",
+        "is_paper": False,
+        "mapped": False,
+    }
+    repo.resolve_source_instrument_public_id = AsyncMock(return_value=resolution)
+    repo.get_active_instrument_valuation_metadata = AsyncMock(wraps=_ordinary_btc_source_metadata)
+
+
 def _create_order_repo(plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
-    """Build a repository mock for successful create-order tests."""
+    """Build the ordinary Kraken BTC repository mock for successful create orders.
+
+    Args:
+        plan_wallet_public_id: Existing wallet identity used by the returned fixture plan.
+
+    Returns:
+        A repository double with explicit BTC source evidence and configured intent writes.
+    """
     repo = AsyncMock()
     plan_row = _make_plan_row()
     plan_row["wallet_public_id"] = plan_wallet_public_id
@@ -247,6 +285,7 @@ def _create_order_repo(plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
     repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
     repo.update_execution_plan_status = AsyncMock(return_value=2)
     repo.get_execution_plan = AsyncMock(return_value=plan_row)
+    _arm_ordinary_btc_source(repo)
     _arm_execution_venue(repo, wallet_public_id=plan_wallet_public_id)
     return repo
 
@@ -1326,13 +1365,18 @@ def _venue_failure_repo() -> AsyncMock:
     Instrument resolution is stubbed so the request clears the capability
     guard and the instrument lookup and lands on the venue check; the
     execution-plan and trade-command inserts stay unarmed so each matrix
-    violation can assert that neither write fired.
+    violation can assert that neither write fired. Ordinary BTC source evidence
+    also lets reference-price failures reach their intended pricing boundary.
+
+    Returns:
+        A repository double with unarmed intent writes and exact BTC source identity.
     """
     repo = AsyncMock()
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
     repo.insert_execution_plan = AsyncMock()
     repo.insert_trade_command = AsyncMock()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+    _arm_ordinary_btc_source(repo)
     return repo
 
 
@@ -1480,6 +1524,8 @@ class TestExecutionVenueMatrix:
         assert plan_insert["params"]["source_exchange"] == "kraken"
         assert plan_insert["shard_key"] == "paper.BTC-USD.paper.wwallet1"
         assert cmd_insert["exchange"] == "paper"
+        repo.get_active_instrument_valuation_metadata.assert_awaited_once_with("inst-1")
+        repo.resolve_source_instrument_public_id.assert_not_awaited()
         client.close()
 
     def test_live_mode_passes_through_without_source_exchange(self) -> None:

@@ -8,6 +8,29 @@ from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 
 
+@pytest.mark.parametrize("policy", ["IOC", "FOK", "GTD", "gtc", "", "UNKNOWN"])
+def test_unsupported_time_in_force_is_rejected(policy: str) -> None:
+    """Reject an execution instruction that the outbound order cannot carry.
+
+    Given: a manual order requesting a policy other than the implemented GTC.
+    When: the HTTP request body is validated.
+    Then: validation fails instead of silently submitting a resting GTC order.
+    """
+    with pytest.raises(ValidationError, match="time_in_force"):
+        CreateOrderBody.model_validate(
+            {
+                "instrument": "BTC-USD",
+                "instrument_public_id": "instrument-1",
+                "exchange": "kraken",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 1,
+                "price": 2,
+                "time_in_force": policy,
+            }
+        )
+
+
 @pytest.mark.parametrize("field", ["quantity", "price", "stop_price"])
 @pytest.mark.parametrize(
     "value", [0, -1, float("nan"), float("inf"), -float("inf"), True, "1", 10**1000]

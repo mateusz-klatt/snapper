@@ -1514,21 +1514,24 @@ class TestSidecarStart:
         sidecar, apns = _make_sidecar(repo, registry=reg)
 
         received = asyncio.Event()
+        dispatched = asyncio.Event()
 
         async def _one_frame_then_hang() -> tuple[str, bytes]:
-            """Return one frame, then block so the main loop sees the dispatch."""
+            """Observe the next receive only after the first dispatch completes."""
             if not received.is_set():
                 received.set()
                 return ("test.anything", b"{}")
+            dispatched.set()
             await asyncio.sleep(5.0)
             return ("", b"")
 
         sidecar._subscriber.recv_multipart = _one_frame_then_hang
         task = asyncio.create_task(sidecar.start())
-        await asyncio.wait_for(received.wait(), timeout=1.0)
-        await asyncio.sleep(0.1)
-        await sidecar.stop()
-        await asyncio.wait_for(task, timeout=2.0)
+        try:
+            await asyncio.wait_for(dispatched.wait(), timeout=1.0)
+        finally:
+            await sidecar.stop()
+            await asyncio.wait_for(task, timeout=2.0)
 
         history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
         assert len(history) == 1

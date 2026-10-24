@@ -76,6 +76,8 @@ from snapper.application.trade.execution_modifiers import modifier_refusal
 from snapper.application.trade.execution_venue import ExecutionVenueError
 from snapper.application.trade.execution_venue import derive_manual_execution_mode
 from snapper.application.trade.execution_venue import resolve_execution_venue
+from snapper.application.trade.order_terms import ManualOrderTerms
+from snapper.application.trade.order_terms import manual_order_execution_refusal
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
@@ -108,10 +110,12 @@ from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.mcp._manual_order_arguments import preserve_manual_order_numeric_inputs
 from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
 from snapper.mcp.error_envelope import to_call_tool_result
+from snapper.mcp.order_instruments import register_order_instrument_tools
 from snapper.mcp.output_sanitizer import sanitize_output
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -809,6 +813,30 @@ def _manual_order_modifier_refusal_result(refusal: ModifierRefusal) -> CallToolR
     )
 
 
+def _manual_order_market_data_only_result(order: _ManualOrderInput) -> CallToolResult:
+    """Refuse a catalog instrument before creating any execution intent.
+
+    Args:
+        order: Identity-validated manual order targeting a non-tradable market.
+
+    Returns:
+        The same refusal code and capability reason used by REST order entry.
+    """
+    return to_call_tool_result(
+        success=False,
+        error_code="instrument_market_data_only",
+        message="This instrument is not enabled for order execution on the requested venue.",
+        details={
+            "symbol": order.instrument,
+            "exchange": order.exchange,
+            "reason": (
+                "SymbolExchangeCapability.can_trade is False for this "
+                "(symbol, exchange); use an execution-capable instrument"
+            ),
+        },
+    )
+
+
 async def _resolve_manual_order_route(
     repo: Repository,
     claims: TokenClaims,
@@ -926,6 +954,26 @@ async def _prepare_manual_order(
         or order.instrument_public_id != resolved_instrument_public_id
     ):
         return _manual_order_instrument_identity_result(order, resolved_instrument_public_id)
+    if not is_tradeable(order.instrument, order.exchange):
+        return _manual_order_market_data_only_result(order)
+    refusal = await manual_order_execution_refusal(
+        repo,
+        ManualOrderTerms(
+            exchange=execution_exchange,
+            instrument=order.instrument,
+            instrument_public_id=resolved_instrument_public_id,
+            order_type=order.order_type,
+            quantity=Decimal(str(order.quantity)),
+            price=Decimal(str(order.price)) if order.price is not None else None,
+            stop_price=Decimal(str(order.stop_price)) if order.stop_price is not None else None,
+            leverage=order.leverage,
+            reduce_only=order.reduce_only,
+            source_exchange=order.exchange,
+        ),
+        created_at,
+    )
+    if refusal is not None:
+        return _manual_order_modifier_refusal_result(refusal)
     if order.ai_review_public_id is not None:
         await validate_ai_review_citation(
             repo,
@@ -2199,6 +2247,7 @@ def register_mcp_tools(
             prevent cross-call collisions.
     """
     _tracker_getter: Callable[[], SequenceTracker | None] = tracker_getter or (lambda: None)
+    register_order_instrument_tools(mcp_server, repository_getter, claims_getter)
 
     @mcp_server.tool()
     @_anticipated
@@ -2261,7 +2310,10 @@ def register_mcp_tools(
             side: ``buy`` or ``sell``.
             order_type: One of ``market``, ``limit``, ``stop``
                 ``stop_limit``.
-            quantity: Positive finite order size in base asset units.
+            quantity: Positive finite size in the instrument's order quantity
+                unit. Spot uses base-asset units; derivatives use their catalog
+                quantity unit and increment, which must not be inferred from
+                contract size or leverage.
             idempotency_key: Client-supplied uniqueness key; required
                 because MCP clients are the most
                 likely source of accidental retries.
@@ -2291,25 +2343,21 @@ def register_mcp_tools(
                 capabilities — the REST create-order route applies no
                 such gate, and this tool deliberately mirrors it
                 rather than inventing a stricter rule on one surface.
-                Trading caps still measure notional as
-                ``quantity x price``, so raising leverage does NOT
-                raise the exposure the caps enforcer sees; size the
-                order accordingly.
-            post_only: Request maker-only placement. Persisted as
-                execution-plan metadata only — there is no
-                ``trade_commands`` column for it on either surface.
-                Callers must treat this as a stated preference, not a
-                guarantee: the current executor does not forward the
-                flag to the venue, so it does not yet secure maker
-                fees. Left at ``False`` the key is omitted from the
-                plan params entirely.
+                Trading caps measure full exposure using the catalog's
+                payoff and quantity units, independently of leverage or
+                collateral. Raising leverage does not reduce the notional
+                charged against a cap.
+            post_only: Request maker-only placement. Forwarded on Kraken spot
+                limit and stop-limit orders and Kraken Futures limit orders.
+                Unsupported venue/order-type combinations are refused before
+                persistence. Paper discloses that the flag is not enforced.
             reduce_only: Restrict the order to reducing an existing
                 position so a close cannot flip into a new opposite
-                position. Persisted on the command row and honoured
-                by the Kraken futures adapter. The Kraken spot and
-                paper adapters ignore it, so on those venues the flag
-                is recorded for audit but enforces nothing — do not
-                rely on it as the sole overshoot guard there.
+                position. Forwarded on Kraken Futures and Kraken spot margin
+                orders. Manual spot orders must also supply leverage;
+                unsupported combinations are refused before persistence.
+                Paper discloses that the flag is not enforced. Futures
+                leverage is an account/symbol preference, not an order field.
 
         Returns:
             Dict with ``plan_public_id`` (UUID7), ``command_public_id``

@@ -64,7 +64,7 @@ from snapper.infrastructure.exchanges._subscription_request import canonicalise_
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
-from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
+from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_ticker_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_trade_list
@@ -76,18 +76,29 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import ExecutionApiRoute
+from snapper.infrastructure.exchanges.contracts import ExecutionObservationContext
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import PrivateExecutionObservation
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
+from snapper.infrastructure.exchanges.execution_observation_capture import (
+    build_private_execution_observation,
+)
+from snapper.infrastructure.exchanges.execution_wire_receipts import (
+    install_private_execution_wire_capture,
+)
+from snapper.infrastructure.exchanges.execution_wire_receipts import is_execution_control_message
+from snapper.infrastructure.exchanges.kraken_execution_routes import spot_execution_route
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
 from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
@@ -108,6 +119,7 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscript
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import native_to_ccxt
+from snapper.infrastructure.symbols.functions import native_to_kraken_asset_class
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 
@@ -708,7 +720,10 @@ class KrakenExchangeClient(ExchangeClientBase):
             enable_rate_limit: Enable automatic rate limiting (default: True).
             repository: Database repository for order/execution logging.
         """
+        if sandbox:
+            raise ValueError("Kraken Spot demo routing is not supported")
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN)
+        install_private_execution_wire_capture()
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker(
             dark_recovery_channels=frozenset({"ticker", "trade"})
         )
@@ -765,6 +780,16 @@ class KrakenExchangeClient(ExchangeClientBase):
             The CCXT Kraken client for direct access to CCXT methods.
         """
         return self._ccxt_client
+
+    def execution_api_route(self) -> ExecutionApiRoute | None:
+        """Prove the actual production read/write and constructed WebSocket endpoints.
+
+        Returns:
+            The supported actual route, absent when any selected SDK endpoint disagrees.
+        """
+        return spot_execution_route(
+            self._ccxt_client, (self._trade_client, self._user_client), self._ws_client
+        )
 
     async def _dispatch_routed_rest[ResultT](
         self,
@@ -1351,7 +1376,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if request.reduce_only:
                 kraken_params["reduce_only"] = "true"
             extra_params: dict[str, Any] = {"cl_ord_id": request.client_order_id}
-            if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
+            if native_to_kraken_asset_class(request.symbol) == "tokenized_asset":
                 extra_params["asset_class"] = "tokenized_asset"
             result = await self._submit_native_order(
                 trade_client, request, kraken_params, extra_params
@@ -2815,6 +2840,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         Args:
             message: Raw WebSocket message (dict or list).
         """
+        if isinstance(message, dict) and message.get("channel") == "executions":
+            await self._handle_executions_data(message)
+            return
         try:
             if not isinstance(message, dict):
                 return
@@ -3014,6 +3042,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         channel = message_dict["channel"]
         data = message_dict["data"]
+        if channel == "executions":
+            await self._handle_executions_data(message_dict)
+            return
         msg_type = message_dict.get("type")
         if channel in {"ticker", "trade"} and msg_type == "snapshot":
             logger.debug(
@@ -3025,7 +3056,6 @@ class KrakenExchangeClient(ExchangeClientBase):
             "ohlc": self._handle_ohlc_data,
             "ticker": self._handle_ticker_data,
             "trade": self._handle_trade_data,
-            "executions": self._handle_executions_data,
         }
         handler = data_handlers.get(channel)
         if handler:
@@ -3194,18 +3224,59 @@ class KrakenExchangeClient(ExchangeClientBase):
         except ValueError as e:
             logger.warning(f"Failed to parse trade data: {e}")
 
-    def _handle_executions_data(self, data: Any) -> None:
-        """Parse and enqueue execution data.
+    async def _handle_executions_data(self, message: dict[str, Any]) -> None:
+        """Persist full private message selectors before parsing and await execution backpressure.
 
         Args:
-            data: Raw execution data from WebSocket.
+            message: Actual SDK envelope retaining original bytes when the codec observed them.
         """
+        if is_execution_control_message(message):
+            return
+        observed_at = datetime.now(UTC)
+        records = message.get("data")
+        if not isinstance(records, list) or not records:
+            context = ExecutionObservationContext(
+                kind="unknown",
+                channel="kraken.ws.executions",
+                observed_at=observed_at,
+                target_json_pointer="/data" if "data" in message else None,
+            )
+            await self._capture_private_execution_observation(
+                build_private_execution_observation(message, context)
+            )
+            return
+        captured: list[tuple[object, PrivateExecutionObservation, str | None]] = []
+        for index, raw in enumerate(records):
+            identity = raw.get("exec_id") if isinstance(raw, dict) else None
+            context = ExecutionObservationContext(
+                kind="execution",
+                channel="kraken.ws.executions",
+                observed_at=observed_at,
+                target_json_pointer=f"/data/{index}",
+                source_identity=(
+                    identity if isinstance(identity, str) and identity.strip() else None
+                ),
+            )
+            observation = build_private_execution_observation(message, context)
+            public_id = await self._capture_private_execution_observation(observation)
+            captured.append((raw, observation, public_id))
+        for raw, observation, public_id in captured:
+            await self._queue_observed_spot_execution(raw, observation, public_id)
+
+    async def _queue_observed_spot_execution(
+        self, raw: object, observation: PrivateExecutionObservation, public_id: str | None
+    ) -> None:
+        """Keep malformed evidence durable and never discard an older private execution update."""
+        if not isinstance(raw, dict):
+            return
         try:
-            execution_list = parse_kraken_execution_list(data)
-            for execution_data in execution_list:
-                _enqueue_or_drop_oldest(self._execution_queue, execution_data, "execution")
-        except ValueError as e:
-            logger.warning(f"Failed to parse execution data: {e}")
+            update = parse_kraken_execution(raw)
+        except (ValueError, TypeError, KeyError) as error:
+            logger.debug("Retained an unparseable Spot execution: {}", type(error).__name__)
+            return
+        update.source_observation = observation
+        update.observation_public_id = public_id
+        await self._execution_queue.put(update)
 
     async def _handle_instrument_data(self, message_dict: dict[str, Any]) -> None:
         """Parse and enqueue instrument pair data.

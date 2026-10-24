@@ -19,9 +19,12 @@ from pydantic import ValidationError
 
 from snapper.application.engine import trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.config.app import AppSettings
+from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandRow
 from snapper.messaging.schemas.data import SignalData
 
 
@@ -639,3 +642,82 @@ async def test_async_finalizer_failure_keeps_primary_and_joins_other_children(
     assert outbox.task.done()
     assert lifecycle.listener_finished.is_set()
     assert lifecycle.health.finalized.is_set()
+
+
+def _command_awaiting_material_proof() -> TradeCommandRow:
+    """Author a complete fixed CREATE before the supervised outbox attempts its proof.
+
+    Returns:
+        One fixed durable intent independent of listener frames and venue observations.
+    """
+    now = datetime.now(UTC)
+    return TradeCommandRow(
+        public_id="00000000-0000-7000-8000-000000000299",
+        timestamp=now,
+        session_id="outbox-supervision",
+        sequence_id=1,
+        command_type="create",
+        shard_key="kraken.BTC-USD.live.w000000000211",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        strategy_id="proof-test",
+        client_order_id="proof-client",
+        venue_client_id="proof-client",
+        idempotency_key=None,
+        side="buy",
+        order_type="limit",
+        quantity=1.0,
+        price=100.0,
+        stop_price=None,
+        leverage=None,
+        reduce_only=False,
+        post_only=True,
+        status="created",
+        attempt_count=0,
+        last_error=None,
+        created_at=now,
+        dispatched_at=None,
+        acked_at=None,
+        terminal_at=None,
+        exchange_order_id=None,
+        supersedes_command_id=None,
+        correlation_id="00000000-0000-7000-8000-000000000299",
+        wallet_public_id="00000000-0000-7000-8000-000000000211",
+        operator_public_id=None,
+        user_public_id=None,
+        source_surface="strategy",
+    )
+
+
+async def test_outbox_unavailable_material_proof_stops_intake_and_joins_workers(
+    lifecycle: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed durable proof cannot leave intake running behind a dead outbox.
+
+    Given: A real supervised outbox cannot prove its independently authored CREATE,
+    When: The actual repository proof boundary raises its dedicated unavailable error,
+    Then: That same error escapes only after intake and siblings stop, without order mutations.
+    """
+    command = _command_awaiting_material_proof()
+    error = TradeCommandMaterialUnavailableError(command["public_id"], "marker storage unavailable")
+    repository = MagicMock(spec=SQLAlchemyRepository)
+    repository.get_undispatched_commands = AsyncMock(return_value=[command])
+    repository.require_consistent_trade_command_material = AsyncMock(side_effect=error)
+    publish = AsyncMock()
+    outbox = OutboxDispatcher(repository, publish_fn=publish, poll_interval=0.001)
+    monkeypatch.setattr(lifecycle.coordinator, "outbox", outbox)
+    owner = lifecycle.start()
+    await lifecycle.ready()
+    assert await _outcome(owner) is error
+    repository.require_consistent_trade_command_material.assert_awaited_once_with(
+        command["public_id"]
+    )
+    repository.update_trade_command_status.assert_not_awaited()
+    repository.bulk_dispatch_trade_commands.assert_not_awaited()
+    publish.assert_not_awaited()
+    assert lifecycle.listener_finished.is_set()
+    assert lifecycle.health.finalized.is_set()
+    assert lifecycle.funding.finalized.is_set()
+    assert not outbox._running
+    assert all(worker.done() for worker in lifecycle.coordinator._lifetime.workers)

@@ -19,6 +19,7 @@ entire batch.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from time import monotonic
 from typing import Any
 from typing import cast
@@ -338,7 +339,7 @@ def _parse_execution_fees(
             ExecutionFeeBreakdown(
                 asset=fee.asset or "",
                 quantity=float(fee.qty) if fee.qty else 0.0,
-                quantity_decimal=raw_quantity if isinstance(raw_quantity, str) else None,
+                quantity_decimal=_raw_execution_decimal({"qty": raw_quantity}, "qty"),
             )
         )
     return parsed
@@ -349,7 +350,7 @@ def _execution_validation_data(data: dict[str, Any]) -> dict[str, Any]:
     validation_data = data.copy()
     for field in ("last_qty", "last_price", "fee_usd_equiv"):
         raw_value = validation_data.get(field)
-        if isinstance(raw_value, str):
+        if isinstance(raw_value, str | Decimal):
             validation_data[field] = float(raw_value)
     raw_fees = validation_data.get("fees")
     if not isinstance(raw_fees, list):
@@ -359,7 +360,7 @@ def _execution_validation_data(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw_fee, dict):
             validation_fee = raw_fee.copy()
             raw_quantity = validation_fee.get("qty")
-            if isinstance(raw_quantity, str):
+            if isinstance(raw_quantity, str | Decimal):
                 validation_fee["qty"] = float(raw_quantity)
             validation_fees.append(validation_fee)
         else:
@@ -369,9 +370,11 @@ def _execution_validation_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _raw_execution_decimal(data: dict[str, Any], field: str) -> str | None:
-    """Return one original decimal string without coercing other payload types."""
+    """Retain exact text, Decimal or integer operands without promoting float mirrors."""
     value = data.get(field)
-    return value if isinstance(value, str) else None
+    if isinstance(value, bool):
+        return None
+    return str(value) if isinstance(value, str | Decimal | int) else None
 
 
 def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:

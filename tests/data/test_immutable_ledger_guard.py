@@ -27,12 +27,16 @@ from sqlalchemy import Table
 from sqlalchemy import column
 from sqlalchemy import create_engine
 from sqlalchemy import func
+from sqlalchemy import inspect
 from sqlalchemy import select
 from sqlalchemy import table
 from sqlalchemy.orm import aliased
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AccountingNativeSourceClaim
 from snapper.data.models import Execution
+from snapper.data.models import FinancialPublicationDelivery
+from snapper.data.models import FinancialPublicationIntent
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import Tick
@@ -50,6 +54,10 @@ _WALLET = "0000face-0000-7000-8000-00000000c101"
 _SESSION = "00000000-0000-7000-8000-000000000301"
 _INSTRUMENT = "00000000-0000-7000-8000-000000000501"
 _ORDER = "00000000-0000-7000-8000-000000000601"
+
+type _FinancialEvidence = (
+    AccountingNativeSourceClaim | FinancialPublicationIntent | FinancialPublicationDelivery
+)
 
 
 def _make_sync_repo_with_one_execution(tmp_path: Path) -> tuple[DatabaseRepository, int]:
@@ -356,6 +364,73 @@ def test_guard_passes_for_a_non_ledger_model() -> None:
         table that is not a registered ledger.
     """
     _guard_immutable_ledger(Tick, "unused")
+
+
+@pytest.mark.parametrize(
+    "model", (AccountingNativeSourceClaim, FinancialPublicationIntent, FinancialPublicationDelivery)
+)
+def test_financial_source_and_publication_evidence_refuses_every_physical_spelling(
+    model: type[_FinancialEvidence],
+) -> None:
+    """Generic mutation guards cannot be bypassed by another spelling of immutable evidence.
+
+    Given: A native owner or financial publication model with immutable physical history,
+    When: Its class, alias, mapper, instance, table or physical-name spelling is presented,
+    Then: The central guard rejects every spelling without requiring a database mutation.
+    """
+    for target in (
+        model,
+        aliased(model),
+        inspect(model),
+        model(),
+        model.__table__,
+        model.__tablename__,
+        table(model.__tablename__, column("id")),
+    ):
+        with pytest.raises(
+            ExecutionPhysicalMutationError, match="financial evidence mutation refused"
+        ):
+            _guard_immutable_ledger(target, "financial evidence mutation refused")
+
+
+@pytest.mark.parametrize(
+    "model", (AccountingNativeSourceClaim, FinancialPublicationIntent, FinancialPublicationDelivery)
+)
+def test_sync_temporal_supersede_refuses_financial_evidence_before_any_query(
+    tmp_path: Path, model: type[_FinancialEvidence]
+) -> None:
+    """An actual sync session cannot revise immutable source ownership or publication history.
+
+    Given: A genuine session whose database has no financial evidence tables,
+    When: The generic temporal writer is called with a registered financial model,
+    Then: Its physical guard refuses before querying or creating any financial row.
+    """
+    repository, _row_id = _make_sync_repo_with_one_execution(tmp_path)
+    try:
+        with (
+            repository.get_session() as session,
+            pytest.raises(ExecutionPhysicalMutationError, match="supersede is refused"),
+        ):
+            close_and_insert_sync(session, model, [], {}, _NOW)
+    finally:
+        repository.dispose()
+
+
+@pytest.mark.parametrize(
+    "model", (AccountingNativeSourceClaim, FinancialPublicationIntent, FinancialPublicationDelivery)
+)
+async def test_async_temporal_supersede_refuses_financial_evidence_before_any_query(
+    async_repo: SQLAlchemyRepository, model: type[_FinancialEvidence]
+) -> None:
+    """An actual async session cannot revise an immutable claim or publication fact.
+
+    Given: A genuine isolated repository with no financial evidence tables,
+    When: The generic asynchronous temporal writer is called with a financial model,
+    Then: The physical guard refuses before any missing-table query or financial mutation.
+    """
+    async with async_repo.session() as session:
+        with pytest.raises(ExecutionPhysicalMutationError, match="supersede is refused"):
+            await close_and_insert(session, model, [], {}, _NOW)
 
 
 def test_delete_rows_by_id_refuses_aliased_execution(tmp_path: Path) -> None:

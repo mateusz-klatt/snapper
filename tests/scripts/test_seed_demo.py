@@ -618,16 +618,32 @@ def _seed_other_desk_underlying_grant(
 WALLET_SCOPED_SCHEMA_TABLES = frozenset(
     {
         "accrual_ledger",
+        "accounting_hold_resolutions",
+        "accounting_native_source_claims",
+        "accounting_raw_receipts",
+        "accounting_scope_holds",
         "ai_reviews",
         "alert_deliveries",
         "alert_events",
         "backtest_comparisons",
         "backtest_runs",
+        "contract_accounting_anchors",
+        "contract_accounting_events",
         "device_alert_prefs",
         "execution_annulment_visibility",
         "execution_annulments",
         "execution_plans",
+        "execution_route_authorities",
+        "execution_unit_snapshots",
         "executions",
+        "financial_publication_deliveries",
+        "financial_publication_intents",
+        "futures_product_read_attempts",
+        "futures_product_read_outcomes",
+        "native_account_read_attempts",
+        "native_account_read_outcomes",
+        "native_account_identity_proofs",
+        "native_account_authorities",
         "orders",
         "paired_execution_groups",
         "paired_execution_halts",
@@ -640,8 +656,10 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "portfolio_spot_reconciliation_anchors",
         "position_cycles",
         "positions",
+        "private_source_ownership_receipts",
         "process_runs",
         "signals",
+        "submission_unit_admissions",
         "trade_commands",
         "trade_projection_checkpoints",
         "venue_account_observations",
@@ -710,6 +728,19 @@ gives its viewer wallet visibility through the operator plane, so a read grant
 would add a second, redundant route to the same wallet and blur which plane a
 demo visibility result came from. The read plane's own tests cover the grant
 surface and its spelling.
+
+Route/admission witnesses, raw accounting receipts, scope holds/resolutions,
+contract anchors/events, financial publication evidence and native source
+claims are deliberately EXCLUDED from the populated demo subset. Their rows
+are proof of actual source observations or financial ownership; a screenshot
+seed must neither manufacture them nor normalize the wallet spelling of an
+existing immutable witness.
+
+``private_source_ownership_receipts``, ``futures_product_read_attempts`` and
+``futures_product_read_outcomes`` are also deliberately EXCLUDED from the
+populated subset. They retain authenticated source ownership and product READ
+evidence; the demo must neither invent those observations nor rewrite their
+certified wallet identity.
 """
 
 
@@ -1045,8 +1076,8 @@ class TestImmutableLedgerExclusion:
         Given: the migrated schema,
         When: :func:`seed_demo._immutable_ledger_table_names` is compared
             against the physical schema,
-        Then: it names exactly ``executions``, ``venue_events`` and the
-            spot reconciliation anchor, and all carry a
+        Then: it names all centrally registered ledgers plus ``venue_events``
+            and the spot reconciliation anchor, and all carry a
             ``wallet_public_id`` column — so absent the skip the
             introspection loop WOULD rewrite them. Deriving the set from
             mapped models binds the guard to the physical table, not a
@@ -1055,8 +1086,28 @@ class TestImmutableLedgerExclusion:
         engine, _ = migrated_db
         excluded = seed_demo._immutable_ledger_table_names()
         assert excluded == {
+            "accounting_hold_resolutions",
+            "accounting_native_source_claims",
+            "accounting_raw_receipts",
+            "accounting_scope_holds",
+            "contract_accounting_anchors",
+            "contract_accounting_events",
+            "execution_annulment_visibility",
+            "execution_annulments",
+            "execution_route_authorities",
+            "execution_unit_snapshots",
             "executions",
+            "financial_publication_deliveries",
+            "financial_publication_intents",
+            "futures_product_read_attempts",
+            "futures_product_read_outcomes",
+            "native_account_read_attempts",
+            "native_account_read_outcomes",
+            "native_account_identity_proofs",
+            "native_account_authorities",
             "portfolio_spot_reconciliation_anchors",
+            "private_source_ownership_receipts",
+            "submission_unit_admissions",
             "venue_events",
         }
         with engine.connect() as conn:
@@ -1065,6 +1116,54 @@ class TestImmutableLedgerExclusion:
             "the excluded ledgers must actually carry wallet_public_id — otherwise "
             "the exclusion is vacuous and proves nothing"
         )
+
+    @pytest.mark.parametrize(
+        "table_name",
+        (
+            "accounting_native_source_claims",
+            "financial_publication_intents",
+            "financial_publication_deliveries",
+            "private_source_ownership_receipts",
+            "futures_product_read_attempts",
+            "futures_product_read_outcomes",
+        ),
+    )
+    def test_normalization_preserves_sealed_financial_evidence_without_attempting_update(
+        self, tmp_path: Path, table_name: str
+    ) -> None:
+        """Wallet alias normalization must skip new immutable physical table names.
+
+        Given: A genuine SQLite root wallet and a sealed financial table with its alias,
+        When: The actual normalizer canonicalizes the root wallet spelling,
+        Then: Its root changes while financial evidence stays byte-identical without a trigger error.
+        """
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'sealed-financial.db'}")
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("CREATE TABLE wallets (public_id TEXT PRIMARY KEY)")
+                connection.exec_driver_sql(
+                    f"CREATE TABLE {table_name} (id INTEGER PRIMARY KEY, wallet_public_id TEXT)"
+                )
+                connection.execute(
+                    text("INSERT INTO wallets VALUES (:wallet)"), {"wallet": ALIAS_WALLET}
+                )
+                connection.execute(
+                    text(f"INSERT INTO {table_name} VALUES (1, :wallet)"),
+                    {"wallet": ALIAS_WALLET},
+                )
+                connection.exec_driver_sql(
+                    f"CREATE TRIGGER {table_name}_reject_test_update BEFORE UPDATE ON {table_name} "
+                    "BEGIN SELECT RAISE(ABORT, 'sealed financial evidence update forbidden'); END"
+                )
+                seed_demo._normalize_wallet_identity(connection, ALIAS_WALLET, CANONICAL_WALLET)
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT public_id FROM wallets")) == CANONICAL_WALLET
+                assert (
+                    connection.scalar(text(f"SELECT wallet_public_id FROM {table_name}"))
+                    == ALIAS_WALLET
+                )
+        finally:
+            engine.dispose()
 
     def test_sealed_ledgers_survive_seeding_byte_identical(
         self,

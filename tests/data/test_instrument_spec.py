@@ -93,8 +93,9 @@ def _certified_row(observed_at: datetime | None, stored: bool = True) -> Instrum
         status="active",
         contract_size=Decimal("3"),
         quantity_unit="contract_count",
+        native_order_quantity_unit="contract_count",
         spec_source="kraken_futures:rest.get_instruments",
-        spec_version="s2a-v1:test",
+        spec_version="s2a-v3:test",
         spec_observed_at=observed_at,
         unit_certified=stored,
         expiry_at=None,
@@ -1080,12 +1081,67 @@ class TestInstrumentMetadataRevision:
 class TestEffectiveUnitCertification:
     """Twelve-hour read-time unit evidence freshness contract."""
 
-    def test_fresh_certification_is_effective(self) -> None:
-        """A stored certification just below twelve hours remains effective."""
+    @pytest.mark.parametrize("version", ["s2a-v3:test", "s2a-v4:test"])
+    def test_fresh_certification_is_effective(self, version: str) -> None:
+        """Keep both supported quantity interpretations valid within their freshness window.
+
+        Given: Complete v3 or v4 unit evidence observed less than twelve hours ago.
+        When: Reconciliation evaluates the stored source interpretation.
+        Then: The unchanged quantity convention remains certified for both versions.
+        """
         observed_at = _ts()
-        assert is_effective_unit_certified(
-            _certified_row(observed_at), observed_at + timedelta(hours=12, microseconds=-1)
-        )
+        row = _certified_row(observed_at)
+        row["spec_version"] = version
+        assert is_effective_unit_certified(row, observed_at + timedelta(hours=12, microseconds=-1))
+
+    @pytest.mark.parametrize("version", [None, "s2a-v1:old", "s2a-v2:old"])
+    def test_superseded_futures_units_are_not_certified(self, version: str | None) -> None:
+        """Old interpretation versions cannot retain an incorrect quantity step.
+
+        Given: fresh persisted Kraken Futures evidence from a superseded ETL.
+        When: quantity certification is evaluated without refreshing the catalog.
+        Then: it is refused even though the stored certification bit is true.
+        """
+        row = _certified_row(_ts())
+        row["spec_version"] = version
+        assert is_effective_unit_certified(row, _ts()) is False
+
+    def test_other_quantity_sources_keep_their_own_version_contract(self) -> None:
+        """Do not apply Kraken's ETL namespace to independent venue evidence.
+
+        Given: fresh unit evidence from a separate authoritative source.
+        When: read-time certification is evaluated.
+        Then: that source's version does not need a Kraken-specific prefix.
+        """
+        row = _certified_row(_ts())
+        row["spec_source"] = "other_venue:catalog"
+        row["spec_version"] = "other-v1"
+        assert is_effective_unit_certified(row, _ts()) is True
+
+    @pytest.mark.parametrize(
+        "native_unit,multiplier,expected",
+        [
+            (None, Decimal(1), False),
+            ("unknown", Decimal(1), False),
+            ("base_asset", Decimal(1), True),
+            ("base_asset", Decimal(2), False),
+            ("base_asset", None, False),
+            ("contract_count", Decimal(2), True),
+        ],
+    )
+    def test_native_units_must_support_internal_quantity_interpretation(
+        self, native_unit: str | None, multiplier: Decimal | None, expected: bool
+    ) -> None:
+        """Do not certify unknown or dimensionally incompatible native quantities.
+
+        Given: fresh current-version evidence with different native unit profiles.
+        When: the stored unit claim is evaluated for reconciliation.
+        Then: only explicit contract quantities or unit-sized native base profiles pass.
+        """
+        row = _certified_row(_ts())
+        row["native_order_quantity_unit"] = native_unit
+        row["contract_size"] = multiplier
+        assert is_effective_unit_certified(row, _ts()) is expected
 
     @pytest.mark.parametrize(
         ("row", "evaluated_at"),

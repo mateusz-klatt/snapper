@@ -6,7 +6,10 @@ including support for tokenized assets.
 """
 
 import asyncio
+import hashlib
 import inspect
+import json
+import math
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -18,6 +21,7 @@ from typing import cast
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session as SyncSession
 
 from snapper.application.portfolio.spot_precision_certification import KRAKEN_INSTRUMENT_SPEC_SOURCE
 from snapper.application.portfolio.spot_precision_certification import (
@@ -30,6 +34,7 @@ from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
@@ -37,11 +42,22 @@ from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import FundingRate
+from snapper.data.models import InstrumentOrderCapability
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
+from snapper.data.repository import close_and_insert_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_MAX_DECIMALS
+from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_ETL_VERSION
+from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_SOURCE
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
 _SEQ_KEY_CAPABILITIES = "capabilities"
 _SEQ_KEY_FUNDING = "funding_rates"
+_TOKENIZED_NOT_READY_REASON = "Tokenized asset requires online status and complete order metadata"
+_TOKENIZED_ACCOUNTING_REASON = (
+    "Tokenized asset unit and corporate-action rebase accounting is not integrated"
+)
 
 _SPOT_ROLLOVER_RATE_LONG = 0.00025
 _SPOT_ROLLOVER_RATE_SHORT = 0.00010
@@ -65,6 +81,8 @@ class _KrakenPairInfo(TypedDict, total=False):
     asset_class: str
     margin: str
     metadata: InstrumentMetadataInput
+    min_notional: float | None
+    wsname: str | None
 
 
 class _KrakenExtractedPair(_KrakenPairInfo):
@@ -157,7 +175,134 @@ def _spot_metadata(market: dict[str, Any], observed_at: datetime) -> InstrumentM
         spec_version=version,
         spec_observed_at=observed_at,
         unit_certified=False,
+        native_order_quantity_unit="base_asset",
     )
+
+
+def _rest_decimal_places(value: object) -> int | None:
+    """Accept only bounded integer precision reported by the REST catalog."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= TOKENIZED_MAX_DECIMALS
+    ):
+        return None
+    return value
+
+
+def _rest_quantum(value: object) -> Decimal | None:
+    """Convert an authoritative decimal-place count into its exact increment."""
+    precision = _rest_decimal_places(value)
+    return Decimal(1).scaleb(-precision) if precision is not None else None
+
+
+def _rest_positive_number(value: object) -> float | None:
+    """Retain only positive catalog values representable in persisted float fields."""
+    parsed = _positive_decimal(value)
+    if parsed is None:
+        return None
+    result = float(parsed)
+    return result if math.isfinite(result) and result > 0 else None
+
+
+def _tokenized_metadata(
+    pair_data: dict[str, Any], observed_at: datetime
+) -> InstrumentMetadataInput:
+    """Preserve direct tokenized REST precision without granting unit certification."""
+    tick = _rest_positive_number(pair_data.get("tick_size"))
+    if "tick_size" not in pair_data:
+        tick = _rest_positive_number(_rest_quantum(pair_data.get("pair_decimals")))
+    lot = _rest_quantum(pair_data.get("lot_decimals"))
+    minimum = _rest_positive_number(pair_data.get("ordermin"))
+    cost_decimals = _rest_decimal_places(pair_data.get("cost_decimals"))
+    qty_decimals = _rest_decimal_places(pair_data.get("lot_decimals"))
+    status = pair_data.get("status")
+    status = status if isinstance(status, str) else None
+    version_payload = {
+        "tick_size": tick,
+        "lot_size": str(lot) if lot is not None else None,
+        "ordermin": minimum,
+        "costmin": _rest_positive_number(pair_data.get("costmin")),
+        "cost_decimals": cost_decimals,
+        "lot_decimals": qty_decimals,
+        "status": status,
+    }
+    content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
+    return InstrumentMetadataInput(
+        tick_size=tick,
+        lot_size=float(lot) if lot is not None else None,
+        min_order_size=minimum,
+        max_order_size=None,
+        cost_decimals=cost_decimals,
+        qty_decimals=qty_decimals,
+        margin_initial=None,
+        position_limit_long=None,
+        position_limit_short=None,
+        status=status,
+        contract_size=None,
+        quantity_unit="base_asset",
+        spec_source=TOKENIZED_SPEC_SOURCE,
+        spec_version=f"{TOKENIZED_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}",
+        spec_observed_at=observed_at,
+        unit_certified=False,
+        native_order_quantity_unit=None,
+    )
+
+
+def _tokenized_precision_complete(record: KrakenSymbolRecord) -> bool:
+    """Validate preview precision without certifying token units or rebase accounting."""
+    metadata = record.get("metadata")
+    if metadata is None or metadata.status != "online":
+        return False
+    if metadata.spec_source != TOKENIZED_SPEC_SOURCE or metadata.spec_observed_at is None:
+        return False
+    return all(
+        _rest_positive_number(value) is not None
+        for value in (
+            metadata.tick_size,
+            metadata.lot_size,
+            metadata.min_order_size,
+            record.get("min_notional"),
+        )
+    ) and all(
+        _rest_decimal_places(value) is not None
+        for value in (metadata.cost_decimals, metadata.qty_decimals)
+    )
+
+
+def _tokenized_capability_reason(record: KrakenSymbolRecord) -> str | None:
+    """Keep token execution frozen until its immutable unit and rebase ledger exists."""
+    if record.get("asset_class") != "tokenized_asset":
+        return None
+    if not _tokenized_precision_complete(record):
+        return _TOKENIZED_NOT_READY_REASON
+    return _TOKENIZED_ACCOUNTING_REASON
+
+
+def _rest_catalog_priority(pair: tuple[str, _KrakenPairInfo]) -> tuple[bool, str]:
+    """Prefer authoritative direct token metadata, then deterministic REST alias order."""
+    metadata = pair[1].get("metadata")
+    return metadata is not None and metadata.spec_source == TOKENIZED_SPEC_SOURCE, pair[0]
+
+
+def _tokenized_websocket_symbol(
+    pair_info: _KrakenPairInfo, fallback: str, quote: str
+) -> str | None:
+    """Use an exact catalog WS alias while refusing malformed or contradictory quotes."""
+    if "wsname" not in pair_info:
+        return fallback
+    wsname = pair_info["wsname"]
+    if (
+        not isinstance(wsname, str)
+        or not wsname.isascii()
+        or not wsname.isprintable()
+        or any(character.isspace() for character in wsname)
+    ):
+        return None
+    parts = wsname.split("/")
+    if len(parts) != 2 or not parts[0] or parts[1] != quote:
+        return None
+    return wsname
 
 
 @register_process(
@@ -263,12 +408,15 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         }
 
     @staticmethod
-    def _extract_tokenized_pair(pair_name: str, pair_data: Any) -> _KrakenPairInfo | None:
+    def _extract_tokenized_pair(
+        pair_name: str, pair_data: Any, observed_at: datetime | None = None
+    ) -> _KrakenPairInfo | None:
         """Extract base/quote from a tokenized asset pair entry.
 
         Args:
             pair_name: Kraken REST pair name.
             pair_data: Pair data dictionary from Kraken API.
+            observed_at: Shared UTC catalog observation instant.
 
         Returns:
             Pair info dict, or None if data is invalid.
@@ -279,12 +427,18 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         token_quote: str = pair_data.get("quote", "")
         if not token_base or not token_quote:
             return None
-        return {
+        pair: _KrakenPairInfo = {
             "base": token_base,
             "quote": token_quote,
             "ccxt_symbol": None,
             "asset_class": "tokenized_asset",
+            "metadata": _tokenized_metadata(pair_data, observed_at or datetime.now(UTC)),
+            "min_notional": _rest_positive_number(pair_data.get("costmin")),
         }
+        if "wsname" in pair_data:
+            wsname = pair_data["wsname"]
+            pair["wsname"] = wsname if isinstance(wsname, str) else None
+        return pair
 
     def _collect_ccxt_pairs(
         self,
@@ -328,8 +482,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             Dict mapping pair name to pair info.
         """
         pairs: dict[str, _KrakenPairInfo] = {}
+        observed_at = datetime.now(UTC)
         for pair_name, pair_data in tokenized_result.items():
-            token_info = self._extract_tokenized_pair(pair_name, pair_data)
+            token_info = self._extract_tokenized_pair(pair_name, pair_data, observed_at)
             if token_info is not None:
                 pairs[pair_name] = token_info
         return pairs
@@ -653,7 +808,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return discoveries
 
     def _resolve_tokenized_asset(
-        self, kraken_rest_symbol: str, base: str, quote: str
+        self, kraken_rest_symbol: str, base: str, quote: str, catalog_token: bool = False
     ) -> tuple[str, str, str, str] | None:
         """Resolve tokenized asset pair into mapping components.
 
@@ -661,12 +816,13 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             kraken_rest_symbol: Kraken REST pair name.
             base: Raw base currency from exchange.
             quote: Raw quote currency from exchange.
+            catalog_token: Whether the direct tokenized catalog attests the product class.
 
         Returns:
             Tuple of (native_symbol, ws_symbol, base_currency, quote_currency)
             or None if the pair should be skipped.
         """
-        if not base.endswith("x"):
+        if not base.endswith("x") and not catalog_token:
             logger.warning(
                 f"Tokenized asset {kraken_rest_symbol} base '{base}' "
                 f"does not end with 'x' - skipping"
@@ -679,8 +835,15 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 f"unexpected quote '{quote_currency}' - skipping"
             )
             return None
-        canonical_base = base[:-1].upper()
-        return canonical_base, f"{base}/{quote_currency}", canonical_base, quote_currency
+        canonical_base = base.removesuffix("x").upper()
+        if quote_currency == "USD":
+            return canonical_base, f"{base}/{quote_currency}", canonical_base, quote_currency
+        return (
+            make_native_symbol(base, quote_currency),
+            f"{base}/{quote_currency}",
+            base,
+            quote_currency,
+        )
 
     def _resolve_standard_pair(self, base: str, quote: str) -> tuple[str, str, str, str]:
         """Resolve standard currency pair into mapping components.
@@ -717,7 +880,21 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             return None
         asset_class = pair_info.get("asset_class", "currency")
         if asset_class == "tokenized_asset":
-            return self._resolve_tokenized_asset(kraken_rest_symbol, base, quote)
+            metadata = pair_info.get("metadata")
+            catalog_token = metadata is not None and metadata.spec_source == TOKENIZED_SPEC_SOURCE
+            resolved = self._resolve_tokenized_asset(kraken_rest_symbol, base, quote, catalog_token)
+            if resolved is None:
+                return None
+            ws_symbol = _tokenized_websocket_symbol(pair_info, resolved[1], resolved[3])
+            if ws_symbol is None:
+                logger.warning(
+                    "Skipping tokenized pair {}: invalid WS alias {!r} for quote {}",
+                    kraken_rest_symbol,
+                    pair_info.get("wsname"),
+                    resolved[3],
+                )
+                return None
+            return resolved[0], ws_symbol, resolved[2], resolved[3]
         return self._resolve_standard_pair(base, quote)
 
     def _build_mappings_from_rest(
@@ -732,8 +909,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             Tuple of (mappings dict keyed by native_symbol, ws_symbols_to_verify set).
         """
         mappings: dict[str, KrakenSymbolRecord] = {}
+        native_by_ws: dict[str, str] = {}
         ws_symbols_to_verify: set[str] = set()
-        for kraken_rest_symbol, pair_info in kraken_rest_symbols.items():
+        for kraken_rest_symbol, pair_info in sorted(
+            kraken_rest_symbols.items(), key=_rest_catalog_priority
+        ):
             resolved = self._resolve_pair(kraken_rest_symbol, pair_info)
             if resolved is None:
                 continue
@@ -752,6 +932,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             metadata = pair_info.get("metadata")
             if metadata is not None:
                 record["metadata"] = metadata
+            if "min_notional" in pair_info:
+                record["min_notional"] = pair_info["min_notional"]
+            mappings.pop(native_by_ws.get(ws_symbol, ""), None)
+            native_by_ws[ws_symbol] = native_symbol
             mappings[native_symbol] = record
         return mappings, ws_symbols_to_verify
 
@@ -1056,6 +1240,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         created = 0
         updated = 0
         sid = self._tracker.session_id
+        reason = _tokenized_capability_reason(symbol_data)
         alias_mappings: tuple[tuple[str, AliasChannelEnum, str], ...] = (
             (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "kraken_websocket_symbol"),
             (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_symbol"),
@@ -1084,9 +1269,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             symbol_public_id,
             ExchangeEnum.KRAKEN,
             True,
-            True,
+            reason is None,
             "kraken_updater",
-            None,
+            reason,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
@@ -1099,6 +1284,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
+        self._persist_tokenized_order_capability(session, symbol_data, instrument_public_id, now)
         is_margin = symbol_data.get("margin") == "true"
         self._revise_instrument_spec(
             session,
@@ -1120,6 +1306,137 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         else:
             self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
         return created, updated
+
+    def _persist_tokenized_order_capability(
+        self,
+        session: SyncSession,
+        record: KrakenSymbolRecord,
+        instrument_public_id: str,
+        now: datetime,
+    ) -> None:
+        """Store client-supported token order features and the reported quote minimum.
+
+        Unsupported margin and short features describe this conservative cash
+        execution path, not account eligibility or the venue's complete offer.
+        """
+        if record.get("asset_class") != "tokenized_asset":
+            return
+        filters = [
+            InstrumentOrderCapability.instrument_public_id == instrument_public_id,
+            InstrumentOrderCapability.exchange == ExchangeEnum.KRAKEN,
+        ]
+        existing = session.execute(
+            select(InstrumentOrderCapability).where(
+                *filters,
+                InstrumentOrderCapability.timestamp <= now,
+                InstrumentOrderCapability.known_to > now,
+            )
+        ).scalar_one_or_none()
+        values: JsonObject = {
+            "instrument_public_id": instrument_public_id,
+            "exchange": ExchangeEnum.KRAKEN,
+            "supported_order_types": ["market", "limit", "stop", "stop_limit"],
+            "supports_post_only": True,
+            "supports_reduce_only": False,
+            "supports_amend_in_place": False,
+            "supports_native_stop_loss": True,
+            "supports_native_take_profit": False,
+            "supports_trailing_stop_client_side": True,
+            "supports_market_making": False,
+            "supports_short_selling": False,
+            "supports_leverage": False,
+            "max_leverage_long": 1.0,
+            "max_leverage_short": 0.0,
+            "min_notional": record.get("min_notional"),
+            "max_order_size": None,
+            "top_of_book_quality": "unknown",
+        }
+        if existing is not None and all(
+            getattr(existing, key) == value for key, value in values.items()
+        ):
+            return
+        close_and_insert_sync(
+            session,
+            InstrumentOrderCapability,
+            filters,
+            {
+                **values,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence("order_capabilities"),
+            },
+            now,
+        )
+
+    @staticmethod
+    def _preserve_tokenized_alias_owner(
+        session: SyncSession, record: KrakenSymbolRecord, now: datetime
+    ) -> KrakenSymbolRecord:
+        """Keep one existing token product identity and refuse contradictory owners.
+
+        Earlier WS-only products can already own the canonical alias. Adding a
+        REST route must retain their public identity. A pre-existing ordinary
+        underlying ticker without these aliases is never relabeled as a token.
+        """
+        if record.get("asset_class") != "tokenized_asset" or record.get("ws_only") == "true":
+            return record
+        raw_base = record["kraken_websocket_symbol"].partition("/")[0]
+        aliases = [record["kraken_websocket_symbol"], record["kraken_rest_symbol"]]
+        owners = list(
+            session.scalars(
+                select(Symbol)
+                .join(SymbolAlias, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .where(
+                    SymbolAlias.exchange == ExchangeEnum.KRAKEN,
+                    SymbolAlias.channel.in_((AliasChannelEnum.WS, AliasChannelEnum.REST)),
+                    SymbolAlias.exchange_symbol.in_(aliases),
+                    SymbolAlias.timestamp <= now,
+                    SymbolAlias.known_to > now,
+                    Symbol.timestamp <= now,
+                    Symbol.known_to > now,
+                )
+            ).unique()
+        )
+        if len(owners) > 1:
+            raise ValueError(f"Conflicting tokenized alias owners for {record['native_symbol']}")
+        if owners:
+            owner = owners[0]
+            if owner.quote != record["quote_currency"]:
+                raise ValueError(
+                    f"Conflicting tokenized quote identity for {record['native_symbol']}"
+                )
+            if owner.base.upper() not in (
+                raw_base.upper(),
+                raw_base.removesuffix("x").upper(),
+                record["base_currency"].upper(),
+            ):
+                raise ValueError(
+                    f"Conflicting tokenized base identity for {record['native_symbol']}"
+                )
+            return {**record, "native_symbol": owner.native_symbol, "base_currency": owner.base}
+        existing = session.scalar(
+            select(Symbol).where(
+                Symbol.native_symbol == record["native_symbol"],
+                Symbol.timestamp <= now,
+                Symbol.known_to > now,
+            )
+        )
+        if existing is None:
+            return record
+        canonical = make_native_symbol(raw_base, record["quote_currency"])
+        occupied = session.scalar(
+            select(Symbol).where(
+                Symbol.native_symbol == canonical,
+                Symbol.timestamp <= now,
+                Symbol.known_to > now,
+            )
+        )
+        if occupied is not None:
+            raise ValueError(f"Conflicting tokenized canonical identity for {canonical}")
+        return {
+            **record,
+            "native_symbol": canonical,
+            "base_currency": raw_base,
+        }
 
     @staticmethod
     def _deactivate_spot_rollover_rates(
@@ -1245,7 +1562,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
-                for symbol_data in records:
+                for raw_symbol_data in records:
+                    symbol_data = self._preserve_tokenized_alias_owner(
+                        session, raw_symbol_data, now
+                    )
                     native_symbol = symbol_data["native_symbol"]
                     asset_type = self._classify_spot_record(symbol_data)
                     symbol_public_id = self._upsert_symbol(

@@ -26,7 +26,9 @@ import math
 import threading
 import time
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
@@ -63,19 +65,61 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import ExecutionApiRoute
+from snapper.infrastructure.exchanges.contracts import ExecutionObservationContext
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
+from snapper.infrastructure.exchanges.contracts import NativeBalanceObservation
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import PrivateExecutionObservation
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
+from snapper.infrastructure.exchanges.execution_observation_capture import (
+    build_private_execution_observation,
+)
+from snapper.infrastructure.exchanges.execution_wire_receipts import (
+    install_private_execution_wire_capture,
+)
+from snapper.infrastructure.exchanges.execution_wire_receipts import is_execution_control_message
+from snapper.infrastructure.exchanges.execution_wire_receipts import private_message_wire_bytes
+from snapper.infrastructure.exchanges.kraken_execution_routes import futures_execution_route
+from snapper.infrastructure.exchanges.kraken_futures_authenticated_socket import (
+    authenticated_private_close_resolved,
+)
+from snapper.infrastructure.exchanges.kraken_futures_authenticated_socket import (
+    authenticated_private_frame_ticket,
+)
+from snapper.infrastructure.exchanges.kraken_futures_authenticated_socket import (
+    bind_authenticated_private_client,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_epoch import (
+    active_futures_connection_epoch,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_epoch import (
+    install_futures_balance_epoch_capture,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_epoch import (
+    private_futures_message_epoch,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_stream import (
+    CapturedNativeBalanceFrame,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_stream import (
+    KrakenFuturesBalanceStream,
+)
+from snapper.infrastructure.exchanges.kraken_futures_balance_stream import futures_balance_channel
+from snapper.infrastructure.exchanges.kraken_futures_private_receive import (
+    bind_owned_futures_private_callback,
+)
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
 from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
@@ -83,15 +127,25 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import futures_sdk_prox
 from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
+from snapper.infrastructure.exchanges.native_balance_source import NativeBalanceProfileObservation
+from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyToken
+from snapper.infrastructure.exchanges.private_socket_authentication import PrivateRuntimeSelection
 from snapper.infrastructure.symbols.functions import is_market_data_channel_available
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
+type _PrivateObservationCapture = Callable[[PrivateExecutionObservation], Awaitable[str | None]]
+type _PrivateFrameSinkFactory = Callable[[object | None, bytes | None], _PrivateObservationCapture]
+
 apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
-_STOP_ORDER_TYPES = frozenset(
-    {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
+_TRIGGER_ORDER_TYPES = frozenset(
+    {
+        ExchangeOrderTypeEnum.STOP_LOSS,
+        ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        ExchangeOrderTypeEnum.TAKE_PROFIT,
+    }
 )
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
@@ -275,17 +329,17 @@ def _map_kraken_status(raw: str) -> ExchangeOrderStatusEnum:
 
 
 def _require_futures_submit_identity(
-    result: dict[str, Any], request: ExchangeOrderRequest
+    result: object, request: ExchangeOrderRequest
 ) -> tuple[str, str]:
-    """Return identity only when the response explicitly proves placement."""
-    send_status = result.get("sendStatus")
+    """Require explicit placement evidence without copying unclassified provider fields to errors."""
+    send_status = result.get("sendStatus") if isinstance(result, dict) else None
     if not isinstance(send_status, dict):
         raise AmbiguousOrderSubmitError(
             client_order_id=request.client_order_id,
             instrument=request.symbol,
             message=(
                 "Kraken Futures answered create_order without a usable sendStatus "
-                f"(order may exist): {result}"
+                "(order may exist)"
             ),
             venue_answered=True,
         )
@@ -297,7 +351,7 @@ def _require_futures_submit_identity(
             instrument=request.symbol,
             message=(
                 "Kraken Futures answered create_order without a usable order id "
-                f"(order may exist): {result}"
+                "(order may exist)"
             ),
             venue_answered=True,
         )
@@ -307,7 +361,7 @@ def _require_futures_submit_identity(
             instrument=request.symbol,
             message=(
                 "Kraken Futures answered create_order without a usable placement status "
-                f"(order may exist): {result}"
+                "(order may exist)"
             ),
             venue_answered=True,
         )
@@ -320,7 +374,7 @@ def _require_futures_submit_identity(
         instrument=request.symbol,
         message=(
             "Kraken Futures answered create_order with an unclassified placement status "
-            f"(order may exist): {result}"
+            "(order may exist)"
         ),
         venue_answered=True,
     )
@@ -360,6 +414,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         supports_websocket_executions: True when API credentials are provided.
     """
 
+    _prepared_private_source_token: PreparedKeyToken | None = None
+    _private_frame_sink_factory: _PrivateFrameSinkFactory | None = None
     supports_websocket_executions: bool = False
     balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
     position_observation_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
@@ -387,6 +443,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             api_secret: Kraken Futures API secret (required for order operations).
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_FUTURES)
+        install_private_execution_wire_capture()
+        install_futures_balance_epoch_capture()
+        self._native_balance_stream = KrakenFuturesBalanceStream()
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker(
             dark_recovery_channels=frozenset({"ticker", "trade"})
         )
@@ -394,6 +453,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._api_key = api_key
         self._api_secret = api_secret
         self._ccxt_client = cast(Any, ccxt.krakenfutures)({"sandbox": sandbox, "timeout": 30000})
+        self._ccxt_client.set_sandbox_mode(sandbox)
         self._market_client: Market | None = None
         self._trade_client: Trade | None = None
         self._user_client: User | None = None
@@ -422,6 +482,18 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             self.supports_websocket_executions = True
             self._trade_client = Trade(key=api_key, secret=api_secret, sandbox=sandbox)
             self._user_client = User(key=api_key, secret=api_secret, sandbox=sandbox)
+
+    def execution_api_route(self) -> ExecutionApiRoute | None:
+        """Prove actual SDK/CCXT and constructed public/private WebSocket environment agreement.
+
+        Returns:
+            The supported actual production or demo route without relying on the sandbox flag.
+        """
+        return futures_execution_route(
+            self._ccxt_client,
+            (self._trade_client, self._user_client, self._market_client),
+            (self._ws_client, self._private_ws_client),
+        )
 
     def _require_authenticated(self) -> None:
         """Raise RuntimeError if API credentials are missing.
@@ -515,6 +587,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         without it the session leaked on every executor fresh-instance
         restart).
         """
+        self._native_balance_stream.clear()
         try:
             client = self._ws_client
             if client and await self._bounded_ws_close(client, "WS"):
@@ -526,6 +599,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     self._private_ws_client = None
             self._close_ccxt_session()
         finally:
+            self._clear_prepared_private_owner()
             self._shutdown_rest_pool()
         logger.info("Kraken Futures connections closed")
 
@@ -541,8 +615,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             label: Human label for the log line (e.g. ``"private WS"``).
 
         Returns:
-            True always — the caller compare-and-clears its own slot, which
-            must NOT happen for a slot a concurrent reconnect already replaced.
+            Whether actual owned receive cleanup is resolved. An unresolved
+            private owner keeps its slot occupied and refuses a replacement.
         """
         try:
             async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
@@ -553,7 +627,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.warning(f"Error closing Kraken Futures {label}: {e}")
             await force_close_ws_client(client)
-        return True
+        return authenticated_private_close_resolved(client)
 
     def _close_ccxt_session(self) -> None:
         """Close the ccxt REST session if present (spot-client parity).
@@ -763,48 +837,155 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             return
         logger.warning("Kraken Futures unattributed subscription alert: {}", message)
 
-    async def _on_execution_message(self, message: dict[str, Any]) -> None:
-        """Route private WS fill messages to the execution queue.
+    async def _on_execution_message(self, message: Mapping[str, Any]) -> None:
+        """Persist private evidence before parsing, suppression or fill publication.
 
-        Only processes the live ``fills`` feed. The ``open_orders`` feed is
-        intentionally excluded: it carries cumulative order-state snapshots
-        (not incremental fills) and feeding it through the executor's fill
-        pipeline would emit bogus zero-size executions or double-count real
-        fills. The ``fills_snapshot`` feed is dropped for the same
-        double-count reason: it replays historical fills the executor
-        already accounts for elsewhere — startup gaps are healed by
-        watermark-anchored recovery correctives and row republish in
-        ``_recover_pending_orders``, and the recon loop heals gaps
-        steady-state — while the executor pipeline is delta-based for
-        Futures (fills carry no ``cum_qty``), so a replayed snapshot
-        would race those correctives and inflate the cumulative above
-        venue truth (delta-only frames bypass the cum gate; the
-        pre-warmed exec-id LRU and this source suppression are the
-        guards). The
-        venue re-sends the snapshot on every subscribe, including each SDK
-        in-budget reconnect, so dropping it at the source also makes
-        supervised resubscribes idempotent by construction.
+        Snapshot fills retain independent receipt records while remaining outside
+        the old incremental queue. Account logs retain evidence without pretending
+        their position and balance legs are interchangeable cash movements.
 
         Args:
             message: Raw WebSocket message dictionary.
         """
         await asyncio.sleep(0)
-        if "event" in message:
+        if is_execution_control_message(message):
             return
         feed = message.get("feed", "")
-        if feed == "fills_snapshot":
-            logger.debug(
-                f"Dropping fills_snapshot replay of "
-                f"{len(message.get('fills', []))} fills - REST recovery owns startup state"
-            )
+        if feed in ("balances", "balances_snapshot"):
+            await self._capture_native_balance_frame(message)
             return
-        if feed == "fills":
-            for fill in message.get("fills", []):
-                try:
-                    update = parse_kraken_futures_fill(fill, kraken_futures_ws_to_native)
-                    _enqueue_or_drop_oldest(self._execution_queue, update, "Fill")
-                except (ValueError, KeyError) as exc:
-                    logger.debug(f"Skipping unparseable fill WS message: {exc}")
+        if feed in ("fills", "fills_snapshot") and "fills" in message:
+            captured = [
+                record async for record in self._observed_private_records(message, feed, "fills")
+            ]
+            for raw, observation, public_id in captured:
+                if feed == "fills":
+                    await self._queue_observed_private_fill(raw, observation, public_id)
+            return
+        if feed in ("account_log", "account_log_snapshot"):
+            field = "new_entry" if feed == "account_log" else "logs"
+            async for _ in self._observed_private_records(message, feed, field):
+                pass
+            return
+        if feed == "heartbeat":
+            return
+        context = ExecutionObservationContext(
+            kind="unknown", channel="kraken_futures.ws.unknown", observed_at=datetime.now(UTC)
+        )
+        await self._capture_private_execution_observation(
+            build_private_execution_observation(message, context)
+        )
+
+    async def _capture_native_balance_frame(self, message: Mapping[str, Any]) -> None:
+        """Retain a whole native frame before interpreting its physically owned source profile."""
+        feed: Literal["balances", "balances_snapshot"] = (
+            "balances_snapshot" if message.get("feed") == "balances_snapshot" else "balances"
+        )
+        epoch = private_futures_message_epoch(message)
+        selection = self.execution_client_selection()
+        account = message.get("account")
+        context = ExecutionObservationContext(
+            kind="account_cash",
+            channel=(
+                futures_balance_channel(feed, epoch)
+                if epoch is not None
+                else f"kraken_futures.ws.{feed}.unbound.v1"
+            ),
+            observed_at=datetime.now(UTC),
+            venue_account_id=account if isinstance(account, str) and account.strip() else None,
+        )
+        observation = build_private_execution_observation(message, context)
+        public_id = await self._capture_private_execution_observation(observation)
+        if epoch is None or selection is None or public_id is None:
+            self._native_balance_stream.clear()
+            return
+        if (
+            selection != self.execution_client_selection()
+            or epoch != active_futures_connection_epoch(self._private_ws_client)
+        ):
+            self._current_native_balance_profiles()
+            return
+        try:
+            self._native_balance_stream.observe(
+                CapturedNativeBalanceFrame(observation, public_id, selection, epoch)
+            )
+        except ValueError as error:
+            logger.debug(
+                "Retained unproven Futures native balance source: {}", type(error).__name__
+            )
+
+    def _current_native_balance_profiles(self) -> tuple[NativeBalanceProfileObservation, ...]:
+        """Expose only this selected client's currently open physical source epoch."""
+        profiles = self._native_balance_stream.profiles()
+        if not profiles:
+            return ()
+        proof = profiles[0].source_proof
+        if (
+            proof.client_selection != self.execution_client_selection()
+            or proof.connection_epoch_public_id
+            != active_futures_connection_epoch(self._private_ws_client)
+        ):
+            self._native_balance_stream.clear()
+            return ()
+        return profiles
+
+    async def _observed_private_records(
+        self, message: Mapping[str, Any], feed: str, field_name: str
+    ) -> AsyncIterator[tuple[object, PrivateExecutionObservation, str | None]]:
+        """Commit a separate receipt and selector for every private financial record."""
+        capture = self._bind_private_frame_observation_capture(message)
+        raw_records = message.get(field_name)
+        if field_name == "new_entry" and field_name in message:
+            raw_records = [raw_records]
+        account = message.get("account")
+        venue_account = account if isinstance(account, str) and account.strip() else None
+        observed_at = datetime.now(UTC)
+        if not isinstance(raw_records, list) or not raw_records:
+            context = ExecutionObservationContext(
+                kind="unknown",
+                channel=f"kraken_futures.ws.{feed}",
+                observed_at=observed_at,
+                target_json_pointer=f"/{field_name}" if field_name in message else None,
+                venue_account_id=venue_account,
+            )
+            await capture(build_private_execution_observation(message, context))
+            return
+        for index, raw in enumerate(raw_records):
+            identity = (
+                raw.get("fill_id" if field_name == "fills" else "booking_uid")
+                if isinstance(raw, dict)
+                else None
+            )
+            context = ExecutionObservationContext(
+                kind="execution" if field_name == "fills" else "unknown",
+                channel=f"kraken_futures.ws.{feed}",
+                observed_at=observed_at,
+                target_json_pointer=(
+                    f"/{field_name}" if field_name == "new_entry" else f"/{field_name}/{index}"
+                ),
+                source_identity=(
+                    identity if isinstance(identity, str) and identity.strip() else None
+                ),
+                venue_account_id=venue_account,
+            )
+            observation = build_private_execution_observation(message, context)
+            public_id = await capture(observation)
+            yield raw, observation, public_id
+
+    async def _queue_observed_private_fill(
+        self, raw: object, observation: PrivateExecutionObservation, public_id: str | None
+    ) -> None:
+        """Queue a parsed fill only after its raw receipt committed, without dropping older fills."""
+        if not isinstance(raw, dict):
+            return
+        try:
+            update = parse_kraken_futures_fill(raw, kraken_futures_ws_to_native)
+        except (ValueError, KeyError) as exc:
+            logger.debug(f"Retained an unparseable Futures fill observation: {type(exc).__name__}")
+            return
+        update.source_observation = observation
+        update.observation_public_id = public_id
+        await self._execution_queue.put(update)
 
     async def _ensure_ws_connected(self) -> None:
         """Connect the FuturesWSClient if not already connected.
@@ -1019,6 +1200,78 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             "trade",
         )
 
+    def set_private_frame_observation_sink(self, factory: _PrivateFrameSinkFactory) -> None:
+        """Attach one actual frame-binding factory before any private source socket can start.
+
+        Args:
+            factory: Synchronous original ticket/wire binder returning a frozen child writer.
+
+        Raises:
+            RuntimeError: If a private SDK is already constructed or a different writer is installed.
+        """
+        if self._private_ws_client is not None:
+            raise RuntimeError("Private frame capture must be installed before socket startup")
+        if (
+            self._private_frame_sink_factory is not None
+            and self._private_frame_sink_factory != factory
+        ):
+            raise RuntimeError("Private frame capture already belongs to another writer")
+        self._private_frame_sink_factory = factory
+
+    def _bind_private_frame_observation_capture(
+        self, message: Mapping[str, object]
+    ) -> _PrivateObservationCapture:
+        """Freeze exactly one original receive ticket, wire and child writer before the first await."""
+        factory = self._private_frame_sink_factory
+        if factory is None:
+            return self._capture_private_execution_observation
+        return factory(
+            authenticated_private_frame_ticket(message), private_message_wire_bytes(message)
+        )
+
+    def bind_prepared_private_owner(self, token: PreparedKeyToken) -> None:
+        """Transfer one actual same-operation key owner before any private socket is started.
+
+        Args:
+            token: Actual issued committed key/account-read capability; no public context can replace it.
+
+        Raises:
+            RuntimeError: If an active private client or missing original selected User makes binding unsafe.
+        """
+        user = self._user_client
+        selected = self.execution_client_selection()
+        if self._private_ws_client is not None or user is None or selected is None:
+            raise RuntimeError("Prepared private ownership requires the original fresh client")
+        token.assert_prepared_key(user, selected, self._api_key, datetime.now(UTC))
+        if self._prepared_private_source_token is not token:
+            self._clear_prepared_private_owner()
+            self._prepared_private_source_token = token
+
+    def _clear_prepared_private_owner(self) -> None:
+        """Close only this instance's pending/active token after socket teardown, preserving old tickets."""
+        token = self._prepared_private_source_token
+        self._prepared_private_source_token = None
+        if token is not None:
+            token.close()
+
+    def _current_private_runtime_selection(self) -> PrivateRuntimeSelection:
+        """Rebind the actual current User/private SDK/public selection at every physical auth boundary."""
+        user = self._user_client
+        private = self._private_ws_client
+        selected = self.execution_client_selection()
+        if user is None or private is None or selected is None:
+            raise RuntimeError("Actual private source runtime is unavailable")
+        return PrivateRuntimeSelection(user, private, selected)
+
+    def _bind_prepared_private_client(self, client: FuturesWSClient) -> None:
+        """Install actual key/socket/ACK ownership only for explicitly prepared fresh private clients."""
+        token = self._prepared_private_source_token
+        if token is not None:
+            bind_authenticated_private_client(
+                client, token, self._current_private_runtime_selection
+            )
+            self._prepared_private_source_token = None
+
     async def _ensure_private_ws_connected(self) -> None:
         """Connect the authenticated FuturesWSClient if not already connected.
 
@@ -1050,10 +1303,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 except Exception as exc:
                     logger.warning(f"Error closing poisoned Kraken Futures private WS: {exc!r}")
                     await force_close_ws_client(poisoned)
+                if not authenticated_private_close_resolved(poisoned):
+                    raise RuntimeError("Private source ownership close remains unresolved")
                 if self._private_ws_client is poisoned:
                     self._private_ws_client = None
             if self._private_ws_client is not None:
                 return
+            self._native_balance_stream.clear()
             client = FuturesWSClient(
                 key=self._api_key or "",
                 secret=self._api_secret or "",
@@ -1062,6 +1318,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             )
             self._private_ws_client = client
             try:
+                bind_owned_futures_private_callback(client, self._on_execution_message)
+                self._bind_prepared_private_client(client)
                 async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
                     await client.start()
                 logger.info("Kraken Futures private WebSocket connected")
@@ -1074,7 +1332,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 except Exception as exc:
                     logger.warning(f"Error closing partial Kraken Futures private WS: {exc!r}")
                     await force_close_ws_client(client)
-                if self._private_ws_client is client:
+                if self._private_ws_client is client and authenticated_private_close_resolved(
+                    client
+                ):
                     self._private_ws_client = None
                 raise
 
@@ -1146,7 +1406,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         send-order endpoint takes ``stopPrice`` (trigger) and
         ``limitPrice`` independently — with a limit price the triggered
         order is a limit order (stop-loss-limit), without it the stop
-        executes at market (#156).
+        executes at market (#156). Take-profit orders also require a
+        trigger and retain the independently optional limit leg. Native
+        trailing stops are unavailable until the request models their
+        required deviation value and unit explicitly.
 
         ``cliOrdId`` is set UNCONDITIONALLY. The request contract
         guarantees a non-empty correlation id, and omitting it left the
@@ -1164,7 +1427,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If API credentials are missing.
             ValueError: If the order type or symbol is unsupported, a
-                stop-typed request carries no ``stop_price``, or a
+                stop or take-profit request carries no ``stop_price``, or a
                 stop-loss-limit request carries no ``price``
                 (raised before any network send — safe to reject).
             AmbiguousOrderSubmitError: If the HTTP transport failed in a
@@ -1178,7 +1441,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 fire mid-body), and a false-ambiguous merely parks the
                 order with an alert while a false-definitive can
                 double a position.
-            Exception: If order creation fails.
+            Exception: If order creation fails before dispatch. Once SDK dispatch
+                begins, unclassified HTTP/decoder failures are ambiguous because
+                the SDK can raise plain Exception or ValueError after physical send.
+                Their original provider bytes are not included in the public error.
         """
         self._require_authenticated()
         kraken_symbol = native_to_kraken_futures_ws(request.symbol)
@@ -1188,14 +1454,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ExchangeOrderTypeEnum.STOP_LOSS: "stp",
             ExchangeOrderTypeEnum.STOP_LOSS_LIMIT: "stp",
             ExchangeOrderTypeEnum.TAKE_PROFIT: "take_profit",
-            ExchangeOrderTypeEnum.TRAILING_STOP: "trailing_stop",
         }
         if request.type not in supported_order_types:
             raise ValueError(
                 f"Unsupported order type for Kraken Futures: {request.type.value}. "
                 f"Supported: {', '.join(t.value for t in supported_order_types)}"
             )
-        if request.type in _STOP_ORDER_TYPES and request.stop_price is None:
+        if request.type in _TRIGGER_ORDER_TYPES and request.stop_price is None:
             raise ValueError(f"{request.type.value} order requires stop_price")
         if request.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT and request.price is None:
             raise ValueError("stop-loss-limit order requires price (the limit leg)")
@@ -1216,20 +1481,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if request.reduce_only:
             kwargs["reduceOnly"] = True
         self._record_rest_call()
-        try:
-            trade_client = cast(Trade, self._trade_client)
-            result = await self._dispatch_routed_rest(
-                operation="create_order",
-                kind="private_mutation",
-                target=futures_sdk_proxy_target(trade_client),
-                sync_call=lambda: trade_client.create_order(**kwargs),
-            )
-        except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
-            raise AmbiguousOrderSubmitError(
-                client_order_id=request.client_order_id,
-                instrument=request.symbol,
-                message=f"Kraken Futures create_order transport failure (order may exist): {e}",
-            ) from e
+        result = await self._dispatch_futures_create(request, kwargs)
         order_id, status_str = _require_futures_submit_identity(result, request)
         order = ExchangeOrderSnapshot(
             id=order_id,
@@ -1249,6 +1501,41 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             order.db_order_id = db_result[0]
             order.db_order_public_id = db_result[1]
         return order
+
+    async def _dispatch_futures_create(
+        self, request: ExchangeOrderRequest, kwargs: dict[str, Any]
+    ) -> object:
+        """Preserve uncertainty after entering SDK dispatch, including plain decoder/HTTP failures.
+
+        Args:
+            request: Original request identity used for conservative unresolved-outcome reporting.
+            kwargs: Existing SDK boundary parameters frozen before the routed dispatch wait.
+
+        Returns:
+            Actual SDK-decoded response, still requiring explicit usable placement evidence.
+        """
+        try:
+            trade_client = cast(Trade, self._trade_client)
+            return await self._dispatch_routed_rest(
+                operation="create_order",
+                kind="private_mutation",
+                target=futures_sdk_proxy_target(trade_client),
+                sync_call=lambda: trade_client.create_order(**kwargs),
+            )
+        except CircuitBreakerOpenError:
+            raise
+        except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message=f"Kraken Futures create_order transport failure (order may exist): {e}",
+            ) from e
+        except Exception:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id,
+                instrument=request.symbol,
+                message="Kraken Futures SDK could not establish the CREATE outcome (order may exist)",
+            ) from None
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Cancel an existing order on Kraken Futures.
@@ -1836,6 +2123,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             total=balance_value,
             free=None,
             used=None,
+        )
+
+    async def read_native_balance_observation(self) -> NativeBalanceObservation:
+        """Read legacy entries with independent current-connection WS source candidates.
+
+        The profile proof retains its original callback clock and never
+        certifies the separately read flattened legacy values or supplies an
+        inferred margin account. Durable replay and admission remain separate.
+
+        Returns:
+            Existing native reader output and independently retained source profiles, without a route.
+        """
+        entries = await self.read_native_balances()
+        return NativeBalanceObservation(
+            entries, source_profiles=self._current_native_balance_profiles()
         )
 
     async def read_native_balances(self) -> list[NativeBalanceEntry]:
@@ -2543,7 +2845,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise RuntimeError("Private WebSocket client not connected")
         async with asyncio.timeout(_SDK_SEND_TIMEOUT_S):
             await subscribed_client.subscribe(feed="fills")
-        logger.info("Subscribed to Kraken Futures private feed: fills")
+            await subscribed_client.subscribe(feed="account_log")
+        logger.info("Subscribed to Kraken Futures private feeds: fills and account_log")
         try:
             while True:
                 if self._private_ws_client and getattr(
@@ -2563,6 +2866,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 try:
                     async with asyncio.timeout(_SDK_SEND_TIMEOUT_S):
                         await current.unsubscribe(feed="fills")
+                        await current.unsubscribe(feed="account_log")
                 except Exception:
                     logger.debug("Failed to unsubscribe from private feeds on cleanup")
                 if getattr(current, "exception_occur", False) and (

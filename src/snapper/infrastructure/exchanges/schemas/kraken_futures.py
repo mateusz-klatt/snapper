@@ -47,7 +47,9 @@ class KrakenFuturesInstrumentSchema(ExchangeResponse):
         underlying: Reference rate symbol (e.g., ``rr_xbtusd``).
         tick_size: Minimum price increment.
         contract_size: Contract multiplier.
-        tradeable: Whether the product is currently tradeable.
+        tradeable: Whether the product is or has ever been a market.
+        is_expired: Actual expiry flag, unknown when the source omits it.
+        suspended: Actual order suspension flag, unknown when absent.
         base: Base currency (e.g., ``BTC``).
         quote: Quote currency (e.g., ``USD``).
         pair: Currency pair string (e.g., ``BTC:USD``).
@@ -57,7 +59,7 @@ class KrakenFuturesInstrumentSchema(ExchangeResponse):
         funding_rate_coefficient: Funding period multiplier (perpetuals only).
         max_relative_funding_rate: Max funding rate cap (perpetuals only).
         isin: ISIN identifier.
-        post_only: Whether only post-only orders are accepted.
+        post_only: Actual post-only restriction, unknown when absent.
         category: Product category tag.
         tradfi: Whether this is a TradFi futures product.
         tags: Product classification tags.
@@ -69,6 +71,8 @@ class KrakenFuturesInstrumentSchema(ExchangeResponse):
     tick_size: float = Field(alias="tickSize")
     contract_size: float = Field(alias="contractSize")
     tradeable: bool
+    is_expired: bool | None = Field(default=None, alias="isExpired")
+    suspended: bool | None = None
     base: str | None = None
     quote: str | None = None
     pair: str | None = None
@@ -85,12 +89,28 @@ class KrakenFuturesInstrumentSchema(ExchangeResponse):
     contract_value_trade_precision: int | None = Field(
         default=None, alias="contractValueTradePrecision"
     )
-    post_only: bool = Field(default=False, alias="postOnly")
+    post_only: bool | None = Field(default=None, alias="postOnly")
     fee_schedule_uid: str | None = Field(default=None, alias="feeScheduleUid")
     mtf: bool | None = None
     category: str | None = None
     tradfi: bool = False
     tags: list[str] = Field(default=[])
+
+    @property
+    def market_status(self) -> Literal["active", "inactive", "post_only", "unknown"]:
+        """Keep public market status separate from account-specific order permission.
+
+        Missing source flags preserve an incomplete metadata observation without
+        manufacturing permission or discarding its historical economic dimensions.
+
+        Returns:
+            Restrictive status unless all current market flags are explicitly known.
+        """
+        if not self.tradeable or self.is_expired is True or self.suspended is True:
+            return "inactive"
+        if any(value is None for value in (self.is_expired, self.suspended, self.post_only)):
+            return "unknown"
+        return "post_only" if self.post_only else "active"
 
 
 class KrakenFuturesTickerSchema(ExchangeResponse):

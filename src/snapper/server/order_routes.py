@@ -48,6 +48,8 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.execution_modifiers import modifier_refusal
 from snapper.application.trade.execution_venue import ExecutionVenueError
 from snapper.application.trade.execution_venue import resolve_execution_venue
+from snapper.application.trade.order_terms import ManualOrderTerms
+from snapper.application.trade.order_terms import manual_order_execution_refusal
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -465,6 +467,81 @@ def _refuse_unsupported_modifiers(body: CreateOrderBody, execution_exchange: str
         )
 
 
+async def _create_order_command_price(
+    repo: Repository,
+    body: CreateOrderBody,
+    execution_exchange: str,
+    instrument_public_id: str,
+    as_of: datetime,
+) -> float | None:
+    """Resolve the price used to persist a live or paper manual order.
+
+    Args:
+        repo: Repository supplying paper market reference prices.
+        body: Validated manual-order payload.
+        execution_exchange: Actual venue selected by wallet routing.
+        instrument_public_id: Exact source market identity.
+        as_of: Reference-price evaluation time.
+
+    Returns:
+        The supplied price, or a fresh reference price for paper market orders.
+    """
+    if execution_exchange == ExchangeEnum.PAPER.value and body.order_type == "market":
+        return await _resolve_paper_reference_price(
+            repo=repo,
+            body=body,
+            source_instrument_public_id=instrument_public_id,
+            as_of=as_of,
+        )
+    return body.price
+
+
+async def _refuse_unsupported_order_terms(
+    repo: Repository,
+    body: CreateOrderBody,
+    execution_exchange: str,
+    instrument_public_id: str,
+    as_of: datetime,
+) -> None:
+    """Apply the same product and catalog admission rules as MCP.
+
+    Args:
+        repo: Repository supplying exact instrument sizing evidence.
+        body: Validated manual-order request.
+        execution_exchange: Actual venue after resolving the selected wallet.
+        instrument_public_id: UUID resolved from the native symbol and venue.
+        as_of: Shared catalog evaluation time.
+
+    Raises:
+        HTTPException: When product accounting or order terms are unsupported.
+    """
+    refusal = await manual_order_execution_refusal(
+        repo,
+        ManualOrderTerms(
+            exchange=execution_exchange,
+            instrument=body.instrument,
+            instrument_public_id=instrument_public_id,
+            order_type=body.order_type,
+            quantity=Decimal(str(body.quantity)),
+            price=Decimal(str(body.price)) if body.price is not None else None,
+            stop_price=Decimal(str(body.stop_price)) if body.stop_price is not None else None,
+            leverage=body.leverage,
+            reduce_only=body.reduce_only,
+            source_exchange=body.exchange,
+        ),
+        as_of,
+    )
+    if refusal is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": refusal.error_code,
+                "reason": refusal.message,
+                **refusal.details,
+            },
+        )
+
+
 def _build_create_order_plan_params(
     *,
     body: CreateOrderBody,
@@ -606,14 +683,13 @@ async def create_order(
         as_of=now,
     )
 
-    command_price = body.price
-    if execution_exchange == ExchangeEnum.PAPER.value and body.order_type == "market":
-        command_price = await _resolve_paper_reference_price(
-            repo=repo,
-            body=body,
-            source_instrument_public_id=resolved_instrument_public_id,
-            as_of=now,
-        )
+    await _refuse_unsupported_order_terms(
+        repo, body, execution_exchange, resolved_instrument_public_id, now
+    )
+
+    command_price = await _create_order_command_price(
+        repo, body, execution_exchange, resolved_instrument_public_id, now
+    )
 
     await _validate_create_order_ai_review_citation(
         repo=repo,

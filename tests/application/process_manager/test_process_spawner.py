@@ -4,8 +4,11 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,12 +21,23 @@ from snapper.application.process_manager.spawner import ProcessSpawnerService
 class CrashingProcess:
     """Test process that crashes in configurable ways."""
 
-    def __init__(self, crash_type: str) -> None:
-        """Initialize the instance."""
+    def __init__(
+        self, crash_type: str, ready_path: str | None = None, release_path: str | None = None
+    ) -> None:
+        """Initialize crash behavior and an optional target-entry barrier.
+
+        Args:
+            crash_type: Actual failure performed by the child target.
+            ready_path: Per-test marker written once the real target starts.
+            release_path: Per-test marker allowing the target to proceed.
+        """
         self.crash_type = crash_type
+        self.ready_path = ready_path
+        self.release_path = release_path
 
     def start(self) -> None:
         """Start process and crash according to configured type."""
+        _await_target_release(self.ready_path, self.release_path)
         time.sleep(0.1)
         if self.crash_type == "exception":
             raise RuntimeError("Intentional crash!")
@@ -44,6 +58,65 @@ class InfiniteProcess:
         """Run infinite loop until terminated."""
         while True:
             time.sleep(1)
+
+
+def _await_target_release(ready_path: str | None, release_path: str | None) -> None:
+    """Separate real target execution from interpreter import latency.
+
+    Args:
+        ready_path: Target-entry marker, or None for immediate execution.
+        release_path: Parent-owned release marker, or None for immediate execution.
+    """
+    if ready_path is None or release_path is None:
+        return
+    Path(ready_path).touch()
+    release = Path(release_path)
+    while not release.exists():
+        time.sleep(0.01)
+
+
+def _release_ready_targets(
+    spawner: ProcessSpawnerService, ready_paths: dict[str, Path], release_path: Path
+) -> None:
+    """Release real children only after every target enters its method.
+
+    The existing overall pytest timeout still bounds startup. The unchanged
+    post-release termination deadlines measure target behavior rather than
+    cold interpreter imports. Each test owns fresh temporary marker paths.
+
+    Args:
+        spawner: Real spawner whose child statuses are observed.
+        ready_paths: Per-child target-entry markers.
+        release_path: Shared release marker for this test's targets.
+    """
+    while not all(path.exists() for path in ready_paths.values()):
+        for name, path in ready_paths.items():
+            status = spawner.get_status(name)
+            assert (
+                path.exists() or status.running
+            ), f"Process {name} exited before target entry: {status.exit_code}"
+        time.sleep(0.01)
+    release_path.touch()
+
+
+@pytest.fixture
+def controlled_spawner(tmp_path: Path) -> Iterator[ProcessSpawnerService]:
+    """Yield a real spawner and reap its children even after assertion failure.
+
+    Args:
+        tmp_path: Fresh test directory containing the common release marker.
+
+    Yields:
+        The production spawner with its real launch, signal and wait behavior.
+    """
+    spawner = ProcessSpawnerService()
+    try:
+        yield spawner
+    finally:
+        (tmp_path / "release").touch()
+        with ExitStack() as cleanup:
+            for name in tuple(spawner.processes):
+                cleanup.callback(spawner.terminate, name, timeout=0.1)
 
 
 def _no_sleep(seconds: float) -> None:
@@ -121,23 +194,32 @@ def test_infinite_process_start_interrupt(monkeypatch: pytest.MonkeyPatch) -> No
 class TestProcessIsolation:
     """Test cases for process isolation and parent survival."""
 
-    def test_parent_survives_child_exception(self) -> None:
+    def test_parent_survives_child_exception(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify parent process survives child exception crash.
 
         Given: Child process that raises RuntimeError,
         When: Process crashes,
         Then: Parent continues running with original PID.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
+        ready_path = tmp_path / "ready"
+        release_path = tmp_path / "release"
         info = spawner.spawn(
             name="crash_exception",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            parameters={"crash_type": "exception"},
+            parameters={
+                "crash_type": "exception",
+                "ready_path": str(ready_path),
+                "release_path": str(release_path),
+            },
         )
         assert info.pid > 0
         parent_pid = os.getpid()
         assert info.pid != parent_pid
+        _release_ready_targets(spawner, {"crash_exception": ready_path}, release_path)
         max_wait = 5.0
         wait_time = 0.1
         elapsed = 0.0
@@ -151,22 +233,31 @@ class TestProcessIsolation:
         assert status.exit_code != 0
         assert os.getpid() == parent_pid
 
-    def test_parent_survives_child_exit(self) -> None:
+    def test_parent_survives_child_exit(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify parent process survives child exit(42) call.
 
         Given: Child process that calls exit(42),
         When: Process exits,
         Then: Parent continues and exit code 42 is captured.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
+        ready_path = tmp_path / "ready"
+        release_path = tmp_path / "release"
         info = spawner.spawn(
             name="crash_exit",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            parameters={"crash_type": "exit"},
+            parameters={
+                "crash_type": "exit",
+                "ready_path": str(ready_path),
+                "release_path": str(release_path),
+            },
         )
         assert info.pid > 0
         parent_pid = os.getpid()
+        _release_ready_targets(spawner, {"crash_exit": ready_path}, release_path)
         max_wait = 5.0
         wait_time = 0.1
         elapsed = 0.0
@@ -180,22 +271,31 @@ class TestProcessIsolation:
         assert status.exit_code == 42
         assert os.getpid() == parent_pid
 
-    def test_parent_survives_child_signal(self) -> None:
+    def test_parent_survives_child_signal(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify parent process survives child SIGTERM.
 
         Given: Child process that sends SIGTERM to itself,
         When: Process terminates,
         Then: Parent continues and SIGTERM exit code is captured.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
+        ready_path = tmp_path / "ready"
+        release_path = tmp_path / "release"
         info = spawner.spawn(
             name="crash_signal",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            parameters={"crash_type": "sigterm"},
+            parameters={
+                "crash_type": "sigterm",
+                "ready_path": str(ready_path),
+                "release_path": str(release_path),
+            },
         )
         assert info.pid > 0
         parent_pid = os.getpid()
+        _release_ready_targets(spawner, {"crash_signal": ready_path}, release_path)
         max_wait = 5.0
         wait_time = 0.1
         elapsed = 0.0
@@ -241,23 +341,32 @@ class TestProcessIsolation:
         assert status.running is False, f"Process still running after {elapsed:.1f}s"
         assert os.getpid() > 0
 
-    def test_multiple_child_crashes_dont_affect_parent(self) -> None:
+    def test_multiple_child_crashes_dont_affect_parent(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify parent survives multiple concurrent child crashes.
 
         Given: Five child processes that all crash,
         When: All processes fail,
         Then: Parent continues with original PID.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
         parent_pid = os.getpid()
+        release_path = tmp_path / "release"
+        ready_paths = {f"crash_{i}": tmp_path / f"ready-{i}" for i in range(5)}
         for i in range(5):
             info = spawner.spawn(
                 name=f"crash_{i}",
                 class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
                 method="start",
-                parameters={"crash_type": "exception"},
+                parameters={
+                    "crash_type": "exception",
+                    "ready_path": str(ready_paths[f"crash_{i}"]),
+                    "release_path": str(release_path),
+                },
             )
             assert info.pid > 0
+        _release_ready_targets(spawner, ready_paths, release_path)
         max_wait = 10.0
         wait_time = 0.1
         elapsed = 0.0
@@ -277,12 +386,23 @@ class TestProcessIsolation:
 class DummyProcess:
     """Simple test process that sleeps for specified duration."""
 
-    def __init__(self, duration: float = 0.5) -> None:
-        """Initialize the instance."""
+    def __init__(
+        self, duration: float = 0.5, ready_path: str | None = None, release_path: str | None = None
+    ) -> None:
+        """Initialize target duration and an optional target-entry barrier.
+
+        Args:
+            duration: Actual target sleep after the parent's release.
+            ready_path: Per-test marker written once the real target starts.
+            release_path: Per-test marker allowing the target to proceed.
+        """
         self.duration = duration
+        self.ready_path = ready_path
+        self.release_path = release_path
 
     def start(self) -> None:
         """Sleep for configured duration."""
+        _await_target_release(self.ready_path, self.release_path)
         time.sleep(self.duration)
 
 
@@ -322,23 +442,32 @@ class TestProcessSpawner:
         assert status.pid == process_info.pid
         spawner.terminate("test_process")
 
-    def test_process_status_tracking(self) -> None:
+    def test_process_status_tracking(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify process status tracking reports correct state.
 
         Given: Running spawned process,
         When: get_status called,
         Then: Correct running status and exit code returned.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
+        ready_path = tmp_path / "ready"
+        release_path = tmp_path / "release"
         spawner.spawn(
             name="status_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            parameters={"duration": 1.0},
+            parameters={
+                "duration": 1.0,
+                "ready_path": str(ready_path),
+                "release_path": str(release_path),
+            },
         )
         status = spawner.get_status("status_test")
         assert status.running is True
         assert status.exit_code is None
+        _release_ready_targets(spawner, {"status_test": ready_path}, release_path)
         status = _wait_until_not_running(spawner, "status_test", timeout=5.0)
         assert status.running is False
         assert status.exit_code == 0
@@ -472,20 +601,29 @@ class TestProcessSpawner:
             status = spawner.get_status(f"zombie_test_{i}")
             assert status.running is False
 
-    def test_process_exit_code_captured(self) -> None:
+    def test_process_exit_code_captured(
+        self, controlled_spawner: ProcessSpawnerService, tmp_path: Path
+    ) -> None:
         """Verify exit code captured after process completion.
 
         Given: Completed process,
         When: get_status called,
         Then: Correct exit code returned.
         """
-        spawner = ProcessSpawnerService()
+        spawner = controlled_spawner
+        ready_path = tmp_path / "ready"
+        release_path = tmp_path / "release"
         spawner.spawn(
             name="exitcode_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            parameters={"duration": 0.2},
+            parameters={
+                "duration": 0.2,
+                "ready_path": str(ready_path),
+                "release_path": str(release_path),
+            },
         )
+        _release_ready_targets(spawner, {"exitcode_test": ready_path}, release_path)
         status = _wait_until_not_running(spawner, "exitcode_test", timeout=5.0)
         assert status.running is False
         assert status.exit_code == 0
