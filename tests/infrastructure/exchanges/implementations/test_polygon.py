@@ -860,6 +860,7 @@ async def test_subscribe_instruments_downloads_all(
             composite_figi="comp",
             share_class_figi="scf",
             source_feed="feed",
+            last_updated_utc="2026-10-20T12:30:00Z",
         )
         for _ in range(1000)
     ]
@@ -883,6 +884,10 @@ async def test_subscribe_instruments_downloads_all(
     async for s in client.subscribe_instruments():
         yielded.append(s)
     assert len(yielded) == 1000
+    assert yielded[0]["last_updated_utc"] == "2026-10-20T12:30:00Z"
+    assert saved[0][0]["last_updated_utc"] == "2026-10-20T12:30:00Z"
+    assert yielded[0]["market"] == "crypto"
+    assert yielded[0]["type"] == "crypto"
     assert sleeps, "should sleep after page"
     assert saved
     assert len(saved[0]) == 1000

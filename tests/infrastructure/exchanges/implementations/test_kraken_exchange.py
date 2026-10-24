@@ -3073,7 +3073,7 @@ class TestKrakenCoverageImprovement:
         mock_native_to_ccxt.return_value = "AAPL/USD"
         mock_native_to_rest.return_value = "AAPLx/USD"
         order_request = ExchangeOrderRequest(
-            symbol="AAPL-USD",
+            symbol="AAPL",
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=float("1"),
@@ -3105,7 +3105,7 @@ class TestKrakenCoverageImprovement:
             "asset_class": "tokenized_asset",
         }
         assert result.id == "ORDER123"
-        assert result.symbol == "AAPL-USD"
+        assert result.symbol == "AAPL"
         assert result.db_order_id == 42
         assert result.db_order_public_id == "pub-42"
 
@@ -3773,8 +3773,8 @@ class TestOnMessageDataRouting:
     ) -> None:
         """Verify on message routes execution list."""
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_execution_list",
-            return_value=[MagicMock()],
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_execution",
+            return_value=MagicMock(),
         ):
             await kraken_client._on_message({"channel": "executions", "data": [{}]})
         assert kraken_client._execution_queue.qsize() == 1
@@ -5325,7 +5325,7 @@ async def test_on_message_execution_parse_error() -> None:
     client = KrakenExchangeClient("key", "secret")
     client._execution_queue = asyncio.Queue()
     with patch(
-        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_execution_list",
+        "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_execution",
         side_effect=ValueError("bad execution"),
     ):
         await client._on_message({"channel": "executions", "data": [{"order_id": "123"}]})
@@ -5894,12 +5894,14 @@ class TestKrakenAdditionalCoverage:
                 }
             ],
         }
-        with patch.object(kraken_client, "_execution_queue") as mock_queue:
-            await kraken_client._on_message(execution_message)
-            mock_queue.put_nowait.assert_called_once()
-            execution_data = mock_queue.put_nowait.call_args[0][0]
-            assert isinstance(execution_data, ExecutionUpdate)
-            assert execution_data.order_id == "ORDER123"
+        kraken_client._execution_queue = asyncio.Queue(maxsize=1)
+        await kraken_client._on_message(execution_message)
+        assert kraken_client._execution_queue.qsize() == 1
+        execution_data = kraken_client._execution_queue.get_nowait()
+        assert isinstance(execution_data, ExecutionUpdate)
+        assert execution_data.order_id == "ORDER123"
+        assert execution_data.source_observation is not None
+        assert execution_data.source_observation.representation == "parsed_fields_json"
 
     async def test_on_message_exception_handling(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify on message exception handling."""
@@ -6101,6 +6103,10 @@ class TestKrakenAdditionalCoverage:
                 return_value="FOOBAR/USD",
             ),
             patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_asset_class",
+                return_value="currency",
+            ),
+            patch(
                 "snapper.infrastructure.exchanges.implementations.kraken.Trade"
             ) as mock_trade_class,
         ):
@@ -6250,7 +6256,7 @@ class TestKrakenFallbackToNativeAPI:
                 "descr": {"order": "buy 10 AAPLx/USD @ limit 150.0"},
             }
             order_request = ExchangeOrderRequest(
-                symbol="AAPLx-USD",
+                symbol="AAPL",
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("10"),
@@ -6269,7 +6275,7 @@ class TestKrakenFallbackToNativeAPI:
             assert call_kwargs["extra_params"]["cl_ord_id"] == "CLIENT123"
             assert call_kwargs["extra_params"]["asset_class"] == "tokenized_asset"
             assert result.id == "ORDER123"
-            assert result.symbol == "AAPLx-USD"
+            assert result.symbol == "AAPL"
             assert result.side == OrderSideEnum.BUY
             assert result.type == ExchangeOrderTypeEnum.LIMIT
             assert result.amount == float("10")
@@ -6382,7 +6388,7 @@ class TestKrakenFallbackToNativeAPI:
             mock_trade_class.return_value = mock_trade_client
             mock_trade_client.create_order.side_effect = Exception("Native API error")
             order_request = ExchangeOrderRequest(
-                symbol="AAPLx-USD",
+                symbol="AAPL",
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("10"),
@@ -6429,25 +6435,14 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         assert not client.sandbox
 
     def test_init_sandbox_mode(self) -> None:
-        """Verify init sandbox mode raises when Kraken lacks a sandbox URL.
+        """Reject an unsupported Spot demo preference before constructing a live HTTP client.
 
-        Kraken Spot has no public sandbox endpoint, so initialising
-        with ``sandbox=True`` MUST raise. Older ccxt versions
-        produced a ``NotSupported`` with the explicit
-        ``"does not have a sandbox URL"`` message; newer ccxt
-        releases (4.5+) raise a bare ``TypeError`` because the
-        ``urls['test']`` lookup yields ``None`` and downstream
-        ``self.extend(None)`` fails. We accept either as proof that
-        the sandbox flag does not silently fall through to a live
-        URL.
+        Given: A requested Spot sandbox without a supported actual demo endpoint,
+        When: The client is constructed,
+        Then: It refuses explicitly rather than selecting production routing.
         """
-        try:
+        with pytest.raises(ValueError, match="Spot demo routing is not supported"):
             KrakenExchangeClient(api_key="key", api_secret="secret", sandbox=True)
-        except Exception as exc:
-            message = str(exc)
-            assert "does not have a sandbox URL" in message or "NoneType" in message
-        else:
-            raise AssertionError("Expected sandbox initialisation to raise")
 
     @pytest.mark.asyncio
     async def test_disconnect_without_connection(self, client: KrakenExchangeClient) -> None:
@@ -6780,7 +6775,7 @@ class TestNativeOrderLeverageAndPostOnly:
                 "descr": {"order": "buy 10 AAPLx/USD @ limit 150.0"},
             }
             request = ExchangeOrderRequest(
-                symbol="AAPLx-USD",
+                symbol="AAPL",
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
@@ -6821,7 +6816,7 @@ class TestNativeOrderLeverageAndPostOnly:
                 "descr": {"order": "buy 10 AAPLx/USD @ limit 150.0"},
             }
             request = ExchangeOrderRequest(
-                symbol="AAPLx-USD",
+                symbol="AAPL",
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
@@ -6872,7 +6867,7 @@ class TestNativeOrderLeverageAndPostOnly:
                 "descr": {"order": "sell 10 AAPLx/USD @ limit 150.0"},
             }
             request = ExchangeOrderRequest(
-                symbol="AAPLx-USD",
+                symbol="AAPL",
                 side=OrderSideEnum.SELL,
                 type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
@@ -9529,8 +9524,11 @@ async def test_trade_built_candle_aggregator_survives_tick_failure(
     Given: A builder whose ``pop_completed`` raises on the first tick (mirroring
         the 2026-06-23 serviceless-settings RuntimeError) then succeeds,
     When: ``_trade_built_candle_aggregator`` runs across ticks,
-    Then: The failure does not kill the unsupervised task; the next tick's candle
-        is still enqueued, proving Spot candle production is not silently stalled.
+    Then: The failure is logged exactly once and the next tick's candle is still
+        enqueued, proving Spot candle production is not silently stalled.
+
+    The logger call is captured so the recovery deadline does not depend on
+    traceback formatting or output sinks. Real loop sleeps remain unchanged.
 
     Returns:
         None.
@@ -9538,6 +9536,8 @@ async def test_trade_built_candle_aggregator_survives_tick_failure(
     client = _client()
     candle = _trade_built_candle()
     calls = {"n": 0}
+    log_exception = MagicMock()
+    monkeypatch.setattr(kr.logger, "exception", log_exception)
 
     def _pop_completed(now_utc: datetime) -> list[CandleUpdate]:
         """Raise on the first tick, then return one completed candle.
@@ -9566,6 +9566,11 @@ async def test_trade_built_candle_aggregator_survives_tick_failure(
             await task
     assert got is candle
     assert calls["n"] >= 2
+
+    log_exception.assert_called_once_with(
+        "trade-built candle aggregator tick failed; continuing so a "
+        "transient fault does not silently stall Spot candle production"
+    )
 
 
 @pytest.mark.asyncio

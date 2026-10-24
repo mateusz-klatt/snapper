@@ -68,6 +68,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
+from snapper.core.financial_account_owner import FINANCIAL_OWNER_SETTING_KEY
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -436,6 +437,11 @@ async def remove_setting(
     Raises:
         HTTPException: If setting not found.
     """
+    if key == FINANCIAL_OWNER_SETTING_KEY:
+        raise HTTPException(
+            status_code=409,
+            detail="Set an explicit empty financial owner policy to revoke assignments",
+        )
     settings = get_settings()
     repository = get_repository(settings.db_url)
     async with repository.session() as session:

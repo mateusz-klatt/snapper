@@ -42,7 +42,6 @@ import shutil
 import socket
 import sqlite3
 import sys
-import tracemalloc
 import types
 import weakref
 from collections import Counter
@@ -366,6 +365,7 @@ def _mock_load_cache_if_needed(self: Any, fail_fast: bool = False) -> None:
     """Populate symbol mapper cache with test mappings and capabilities."""
     if self._cache_loaded:
         return
+    self.kraken_asset_classes = {}
     seen_caps: set[tuple[str, str]] = set()
     for native, exchange_symbols in _TEST_SYMBOL_MAPPINGS.items():
         for idx, (fwd_attr, rev_attr, exchange, channel) in enumerate(_EXCHANGE_MAP_ATTRS):
@@ -376,6 +376,10 @@ def _mock_load_cache_if_needed(self: Any, fail_fast: bool = False) -> None:
                 key = (exchange, channel)
                 self.forward.setdefault(key, {})[native] = exchange_symbol
                 self.reverse.setdefault(key, {})[exchange_symbol] = native
+                if exchange == "kraken" and channel == "rest":
+                    self.kraken_asset_classes[native] = (
+                        "tokenized_asset" if native == "AAPL" else "currency"
+                    )
                 cap_key = (native, exchange)
                 if cap_key not in seen_caps:
                     seen_caps.add(cap_key)
@@ -716,16 +720,22 @@ def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Create a WAL-mode template SQLite DB with full schema once per worker.
 
     Subsequent create_all() calls on SQLAlchemyRepository/DatabaseRepository
-    copy this template (~1ms) instead of running metadata.create_all (~3-4s).
+    copy this template instead of repeating complete model schema construction.
     Persisting WAL mode before those copies preserves the connection-level
     initialization that the create_all replacement otherwise bypasses.
+    The new private directory guarantees an empty target, so table-existence
+    queries are unnecessary. All model DDL and after-create hooks still run.
+    Explicit SQLite BEGIN groups those statements before one commit because
+    SQLAlchemy autobegin alone does not begin legacy-driver DDL transactions.
     """
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     template_dir = tmp_path_factory.mktemp(f"db-template-{worker_id}")
     template_path = template_dir / "template.db"
 
     engine = create_engine(f"sqlite:///{template_path}")
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection, checkfirst=False)
     with engine.connect() as connection:
         journal_mode: str = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     engine.dispose()
@@ -843,8 +853,7 @@ def cleanup_session_resources() -> Generator[None]:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Configure pytest: start tracemalloc and set event loop policy."""
-    tracemalloc.start()
+    """Configure resource tracking and the platform's event loop policy."""
     TestClient.__del__ = _close_test_client_on_gc
     _install_zmq_context_tracking()
     _install_sqlite_connection_tracking()

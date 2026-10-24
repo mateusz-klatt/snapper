@@ -1692,8 +1692,11 @@ BacktestComparison) all with TemporalMixin.
 
 Kraken's FCM platform hosts index-futures, energy, metals, and yield
 contracts (collective name: "TradFi" in this project). Unlike crypto
-spot + perpetuals, FCM has **no public order API** — Snapper treats
-these instruments as observation-only.
+spot + perpetuals, the FCM feed has no implemented Snapper order route. Reviewed
+public API references do not establish an order API for this feed; Kraken's US
+Perps API is a separate product. These instruments remain observation-only.
+See [execution support](order-execution.md) for the distinction between this
+feed, tokenized assets and Kraken Futures, and the remaining accounting work.
 
 ### Data sources
 
@@ -1757,7 +1760,9 @@ only`, and disables the submit button. Submit failures branch on
 Strategies may subscribe TradFi candles via the normal
 `market.kraken_equities.{symbol}.candles.{timeframe}` topic and emit
 signals whose `instrument` targets a `can_trade=True` execution
-instrument (crypto spot, xStocks). See
+instrument such as ordinary crypto spot. xStocks creation remains unavailable
+until its unit and accounting integration is complete; see
+[order execution support](order-execution.md). See
 `src/snapper/strategies/examples/tradfi_observe_crypto_execute.py`
 for an illustrative EMA-crossover implementation + activation
 instructions in the module docstring. The backtest engines process

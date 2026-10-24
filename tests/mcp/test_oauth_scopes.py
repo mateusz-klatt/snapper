@@ -11,12 +11,12 @@ from snapper.mcp.oauth.scopes import permissions_for_oauth_scopes
 from snapper.mcp.tool_catalog import MCP_TOOL_VISIBILITY_POLICY
 
 
-def test_oauth_scope_policy_covers_catalog_with_nine_base_read_tools() -> None:
+def test_oauth_scope_policy_covers_catalog_with_ten_base_read_tools() -> None:
     """Verify every MCP tool has one explicit OAuth scope contract.
 
     Given the authoritative internal tool visibility catalog,
     When OAuth scope mappings are compared and read-only entries counted,
-    Then all 14 tools are covered and exactly nine require only snapper.read.
+    Then all 15 tools are covered and exactly ten require only snapper.read.
     """
     assert set(TOOL_OAUTH_SCOPES) == set(MCP_TOOL_VISIBILITY_POLICY)
     read_tools = {
@@ -24,7 +24,7 @@ def test_oauth_scope_policy_covers_catalog_with_nine_base_read_tools() -> None:
         for tool_name, required_scopes in TOOL_OAUTH_SCOPES.items()
         if required_scopes == {SNAPPER_READ}
     }
-    assert len(read_tools) == 9
+    assert len(read_tools) == 10
     assert {
         "submit_manual_order",
         "cancel_order",

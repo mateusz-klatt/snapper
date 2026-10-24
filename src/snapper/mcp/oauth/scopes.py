@@ -24,6 +24,7 @@ VALID_OAUTH_SCOPES = frozenset(
 
 TOOL_OAUTH_SCOPES: dict[str, frozenset[str]] = {
     "list_instruments": frozenset({SNAPPER_READ}),
+    "get_order_instrument": frozenset({SNAPPER_READ}),
     "get_latest_research": frozenset({SNAPPER_READ}),
     "list_orders": frozenset({SNAPPER_READ}),
     "get_order_status": frozenset({SNAPPER_READ}),

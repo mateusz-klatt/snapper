@@ -15,9 +15,11 @@ import pytest
 from loguru import logger
 
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderEventEnum
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandRow
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -956,6 +958,91 @@ def _make_cmd_row(
     }
 
 
+def _submit_command() -> TradeCommandRow:
+    """Return the fixed durable intent authored before the submit frame.
+
+    Returns:
+        Complete request material for this fixture's logical command and scope.
+    """
+    now = datetime.now(UTC)
+    return {
+        "public_id": "cmd-1",
+        "timestamp": now,
+        "session_id": "s1",
+        "sequence_id": 4,
+        "command_type": "create",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "strat-1",
+        "client_order_id": "cid-1",
+        "venue_client_id": "cid-1",
+        "idempotency_key": None,
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 1.0,
+        "price": 100.0,
+        "stop_price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "post_only": False,
+        "status": "dispatched",
+        "attempt_count": 1,
+        "last_error": None,
+        "created_at": now,
+        "dispatched_at": now,
+        "acked_at": None,
+        "terminal_at": None,
+        "exchange_order_id": None,
+        "supersedes_command_id": None,
+        "correlation_id": "corr-1",
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": None,
+        "user_public_id": None,
+        "source_surface": "strategy",
+        "plan_public_id": None,
+    }
+
+
+def _given_command_material(repository: MagicMock, command: TradeCommandRow) -> None:
+    """Bind one explicitly authored intent through the keyed fixture proof contract.
+
+    Args:
+        repository: Repository contract double receiving lineage and history proof.
+        command: Fixed Given intent authored independently of any processing frame.
+    """
+    _given_command_materials(repository, (command,))
+
+
+def _given_command_materials(repository: MagicMock, commands: tuple[TradeCommandRow, ...]) -> None:
+    """Bind only the explicitly authored logical identities and execution scopes.
+
+    Args:
+        repository: Repository contract double receiving lineage and history proof.
+        commands: Fixed Given intents, never derived from incoming execution frames.
+    """
+    by_identity = {command["public_id"]: command.copy() for command in commands}
+    by_client = {
+        (command["client_order_id"], command["exchange"]): command.copy() for command in commands
+    }
+
+    async def _lookup(cid: str, exchange: str) -> TradeCommandRow | None:
+        """Resolve only a previously authored client and venue identity."""
+        command = by_client.get((cid, exchange))
+        return command.copy() if command is not None else None
+
+    async def _proof(public_id: str) -> TradeCommandRow:
+        """Prove only one of the actual logical identities authored by this Given."""
+        command = by_identity.get(public_id)
+        if command is None:
+            raise TradeCommandMaterialUnavailableError(public_id, "fixture_intent_missing")
+        return command.copy()
+
+    repository.get_active_create_command_by_client_order_id = AsyncMock(side_effect=_lookup)
+    repository.require_consistent_trade_command_material = AsyncMock(side_effect=_proof)
+
+
 def _make_sweep_executor() -> Any:
     """Build an executor wired for Phase E sweep tests."""
     ex = _make_executor()
@@ -1189,11 +1276,17 @@ class TestDispatchedVerification:
         Then: the absence counter is 1 and nothing publishes.
         """
         ex = _make_sweep_executor()
-        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         await ex._verify_unresolved_dispatched(set())
         assert ex._dispatched_absence_counts["cid-1"] == 1
         ex._publish_order_status.assert_not_awaited()
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_double_absence_rejects_publish_first(self) -> None:
@@ -1205,7 +1298,9 @@ class TestDispatchedVerification:
             and the counter clears.
         """
         ex = _make_sweep_executor()
-        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         ex._dispatched_absence_counts["cid-1"] = 1
         await ex._verify_unresolved_dispatched(set())
@@ -1213,6 +1308,10 @@ class TestDispatchedVerification:
         event = ex._record_venue_event.await_args.args[0]
         assert event["event_type"] == "order_rejected"
         assert "cid-1" not in ex._dispatched_absence_counts
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_failed_publish_writes_no_terminal_event(self) -> None:
@@ -1225,13 +1324,19 @@ class TestDispatchedVerification:
             row would strand the engine guard forever).
         """
         ex = _make_sweep_executor()
-        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         ex._publish_order_status = AsyncMock(return_value=False)
         ex._dispatched_absence_counts["cid-1"] = 1
         await ex._verify_unresolved_dispatched(set())
         ex._record_venue_event.assert_not_awaited()
         assert ex._dispatched_absence_counts["cid-1"] == 2
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_old_command_gets_warn_only(self) -> None:
@@ -1242,13 +1347,19 @@ class TestDispatchedVerification:
         Then: no publish and no terminal event — operator escalation only.
         """
         ex = _make_sweep_executor()
-        old_cmd = _make_cmd_row(created_at=datetime.now(UTC) - timedelta(seconds=7200))
+        old_cmd = _submit_command()
+        old_cmd["created_at"] = datetime.now(UTC) - timedelta(seconds=7200)
+        _given_command_material(ex.repository, old_cmd)
         ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[old_cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         ex._dispatched_absence_counts["cid-1"] = 1
         await ex._verify_unresolved_dispatched(set())
         ex._publish_order_status.assert_not_awaited()
         ex._record_venue_event.assert_not_awaited()
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            old_cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_record_failure_keeps_state_for_retry(self) -> None:
@@ -1261,12 +1372,18 @@ class TestDispatchedVerification:
             REJECTED publishes are engine-idempotent).
         """
         ex = _make_sweep_executor()
-        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
         ex._dispatched_absence_counts["cid-1"] = 1
         await ex._verify_unresolved_dispatched(set())
         assert ex._dispatched_absence_counts["cid-1"] == 2
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_unsupported_venue_logs_once_and_skips(self) -> None:
@@ -1310,12 +1427,19 @@ class TestDispatchedVerification:
         Then: exactly three lookups happen and the rotation offset moves.
         """
         ex = _make_sweep_executor()
-        cmds = [_make_cmd_row(f"cid-{i}", public_id=f"cmd-{i}") for i in range(4)]
+        cmds = tuple(_submit_command() for _ in range(4))
+        for index, command in enumerate(cmds):
+            command["public_id"] = f"cmd-{index}"
+            command["client_order_id"] = f"cid-{index}"
+            command["venue_client_id"] = f"cid-{index}"
+        _given_command_materials(ex.repository, cmds)
         ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=cmds)
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         await ex._verify_unresolved_dispatched(set())
         assert ex.exchange_client.find_order_by_client_id.await_count == 3
         assert ex._dispatched_rotation_offset == 3
+
+        assert ex.repository.require_consistent_trade_command_material.await_count == 3
 
     @pytest.mark.asyncio
     async def test_resolved_cids_drop_stale_counters(self) -> None:
@@ -1541,7 +1665,8 @@ class TestGhostAdoptionHardening:
             fire right after the order was observed live.
         """
         ex = _make_sweep_executor()
-        cmd = _make_cmd_row()
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
         ex._dispatched_absence_counts["cid-1"] = 1
         ex.repository.get_fill_venue_events_for_order = AsyncMock(
             side_effect=RuntimeError("db down")
@@ -1552,6 +1677,10 @@ class TestGhostAdoptionHardening:
         await ex._verify_one_dispatched_command(cmd)
         assert ex._dispatched_absence_counts["cid-1"] == 1
         ex._publish_order_status.assert_not_awaited()
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_restore_failure_queues_and_recon_retries(self) -> None:
@@ -1653,12 +1782,18 @@ class TestSweepTtlGating:
         """
         ex = _make_sweep_executor()
         ex.settings.trade_command_dispatch_ttl_s = 0.0
-        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        cmd = _submit_command()
+        _given_command_material(ex.repository, cmd)
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         ex._dispatched_absence_counts["cid-1"] = 1
         await ex._verify_unresolved_dispatched(set())
         ex._publish_order_status.assert_not_awaited()
         ex._record_venue_event.assert_not_awaited()
+
+        ex.repository.require_consistent_trade_command_material.assert_awaited_once_with(
+            cmd["public_id"]
+        )
 
     @pytest.mark.asyncio
     async def test_cutoff_scales_with_configured_ttl(self) -> None:
@@ -2150,9 +2285,7 @@ class TestBreakerOpenDisposition:
         _enable_live_trading(ex)
         ex.repository.has_order_submit_evidence = AsyncMock(return_value=False)
         ex.repository.has_venue_event = AsyncMock(return_value=False)
-        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
-            return_value=_make_cmd_row()
-        )
+        _given_command_material(ex.repository, _submit_command())
         ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
         ex._execute_live_order = AsyncMock(side_effect=CircuitBreakerOpenError("open"))
         ex.settings.trade_command_dispatch_ttl_s = 0.0
@@ -2274,14 +2407,18 @@ class TestBreakerOpenDisposition:
         """No durable command row means nothing to terminalize.
 
         Given: the strict lookup returning None (manual/paper flow),
-        When: _process_order hits breaker-open,
+        When: the breaker disposition helper runs directly,
         Then: the disposition completes without any CAS.
         """
         ex = self._order_executor(monkeypatch)
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
         order = order_request_from_command(_make_cmd_row())
-        await ex._process_order(order)
+        await ex._handle_breaker_open_submit(order)
         ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        ex._record_venue_event.assert_awaited_once()
+        ex._publish_order_status.assert_awaited_once_with(
+            order, OrderEventEnum.REJECTED, reason="circuit_breaker_open"
+        )
         assert "cid-1" not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -2343,13 +2480,17 @@ class TestBreakerOpenDisposition:
         """Without a SQL repository the CAS step is a pass-through.
 
         Given: a paper/test executor with a plain MagicMock repository,
-        When: _process_order hits breaker-open,
+        When: the breaker disposition helper runs directly,
         Then: the disposition still completes (publish + pop).
         """
         ex = self._order_executor(monkeypatch)
         ex.repository = MagicMock()
         order = order_request_from_command(_make_cmd_row())
-        await ex._process_order(order)
+        await ex._handle_breaker_open_submit(order)
+        ex._record_venue_event.assert_awaited_once()
+        ex._publish_order_status.assert_awaited_once_with(
+            order, OrderEventEnum.REJECTED, reason="circuit_breaker_open"
+        )
         assert "cid-1" not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -2367,6 +2508,45 @@ class TestBreakerOpenDisposition:
         order = order_request_from_command(_make_cmd_row())
         await ex._process_order(order)
         assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "proof_failure", ["missing", "read_failure", "history_failure", "plain"]
+    )
+    async def test_unproven_intent_stops_before_disposition(
+        self, monkeypatch: pytest.MonkeyPatch, proof_failure: str
+    ) -> None:
+        """Unavailable durable intent cannot reach CREATE or a terminal disposition.
+
+        Given: Previously authored intent cannot be resolved by the actual repository,
+        When: The full submit boundary processes its independently constructed frame,
+        Then: No CREATE, order status, venue event or lifecycle mutation occurs.
+        """
+        ex = self._order_executor(monkeypatch)
+        original_repository = ex.repository
+        if proof_failure == "missing":
+            ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+                return_value=None
+            )
+        elif proof_failure == "read_failure":
+            ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+                side_effect=RuntimeError("durable lookup unavailable")
+            )
+        elif proof_failure == "history_failure":
+            ex.repository.require_consistent_trade_command_material = AsyncMock(
+                side_effect=TradeCommandMaterialUnavailableError("cmd-1", "history unavailable")
+            )
+        else:
+            ex.repository = MagicMock()
+        execute = AsyncMock(side_effect=AssertionError("Unproven intent cannot CREATE"))
+        monkeypatch.setattr(ex, "_execute_live_order", execute)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        execute.assert_not_awaited()
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+        original_repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
 
 
 class TestBreakerOpenEdges:
@@ -2470,9 +2650,7 @@ class TestInterlockBlockedDisposition:
         ex._settings_service = SimpleNamespace(get_setting_fresh=AsyncMock(return_value="halted"))
         ex.repository.has_order_submit_evidence = AsyncMock(return_value=False)
         ex.repository.has_venue_event = AsyncMock(return_value=False)
-        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
-            return_value=_make_cmd_row()
-        )
+        _given_command_material(ex.repository, _submit_command())
         ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
         ex.settings.trade_command_dispatch_ttl_s = 0.0
         monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
@@ -2618,14 +2796,18 @@ class TestInterlockBlockedDisposition:
         """No durable command row means nothing to terminalize.
 
         Given: the strict lookup returning None (manual/paper flow),
-        When: _process_order hits the interlock,
+        When: the interlock disposition helper runs directly,
         Then: the disposition completes without any CAS.
         """
         ex = self._order_executor(monkeypatch)
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
         order = order_request_from_command(_make_cmd_row())
-        await ex._process_order(order)
+        await ex._handle_interlock_blocked_submit(order, "live_trading_halted")
         ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        ex._record_venue_event.assert_awaited_once()
+        ex._publish_order_status.assert_awaited_once_with(
+            order, OrderEventEnum.REJECTED, reason="live_trading_halted"
+        )
         assert "cid-1" not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -2687,13 +2869,17 @@ class TestInterlockBlockedDisposition:
         """Without a SQL repository the CAS step is a pass-through.
 
         Given: a paper/test executor with a plain MagicMock repository,
-        When: _process_order hits the interlock,
+        When: the interlock disposition helper runs directly,
         Then: the disposition still completes (publish + pop).
         """
         ex = self._order_executor(monkeypatch)
         ex.repository = MagicMock()
         order = order_request_from_command(_make_cmd_row())
-        await ex._process_order(order)
+        await ex._handle_interlock_blocked_submit(order, "live_trading_halted")
+        ex._record_venue_event.assert_awaited_once()
+        ex._publish_order_status.assert_awaited_once_with(
+            order, OrderEventEnum.REJECTED, reason="live_trading_halted"
+        )
         assert "cid-1" not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -2711,6 +2897,45 @@ class TestInterlockBlockedDisposition:
         order = order_request_from_command(_make_cmd_row())
         await ex._process_order(order)
         assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "proof_failure", ["missing", "read_failure", "history_failure", "plain"]
+    )
+    async def test_unproven_intent_stops_before_disposition(
+        self, monkeypatch: pytest.MonkeyPatch, proof_failure: str
+    ) -> None:
+        """Unavailable durable intent cannot reach CREATE or a terminal disposition.
+
+        Given: Previously authored intent cannot be resolved by the actual repository,
+        When: The full submit boundary processes its independently constructed frame,
+        Then: No CREATE, order status, venue event or lifecycle mutation occurs.
+        """
+        ex = self._order_executor(monkeypatch)
+        original_repository = ex.repository
+        if proof_failure == "missing":
+            ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+                return_value=None
+            )
+        elif proof_failure == "read_failure":
+            ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+                side_effect=RuntimeError("durable lookup unavailable")
+            )
+        elif proof_failure == "history_failure":
+            ex.repository.require_consistent_trade_command_material = AsyncMock(
+                side_effect=TradeCommandMaterialUnavailableError("cmd-1", "history unavailable")
+            )
+        else:
+            ex.repository = MagicMock()
+        execute = AsyncMock(side_effect=AssertionError("Unproven intent cannot CREATE"))
+        monkeypatch.setattr(ex, "_execute_live_order", execute)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        execute.assert_not_awaited()
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+        original_repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
 
 
 class TestInterlockBlockedEdges:

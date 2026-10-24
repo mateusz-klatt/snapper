@@ -24,6 +24,7 @@ def _is_ai_review_decision_visible(claims: TokenClaims) -> bool:
 
 MCP_TOOL_VISIBILITY_POLICY: dict[str, ToolVisibilityRule] = {
     "list_instruments": Permission.READ_MARKET_DATA,
+    "get_order_instrument": Permission.READ_MARKET_DATA,
     "submit_manual_order": Permission.CREATE_ORDERS,
     "submit_ai_review_decision": _is_ai_review_decision_visible,
     "submit_market_view": Permission.SUBMIT_MARKET_VIEW,

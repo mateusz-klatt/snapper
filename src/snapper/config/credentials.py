@@ -31,6 +31,7 @@ Errors:
 """
 
 import json
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 
@@ -59,11 +60,28 @@ class CredentialNotFoundError(Exception):
         self.wallet_public_id = wallet_public_id
 
 
+@dataclass(frozen=True)
+class CredentialVersion:
+    """Public identity of the exact successfully decrypted credential revision.
+
+    Secret envelope contents are deliberately absent. Consumers can bind the
+    actual selected client to this revision without rereading a possibly rotated
+    credential or putting a secret into an admission/accounting witness.
+    """
+
+    public_id: str
+    wallet_public_id: str
+    exchange: str
+    credential_type: str
+    timestamp: datetime
+
+
 class CredentialResolver:
     """Resolve per-wallet credentials at executor process startup.
 
-    The resolver is intentionally stateless — it pulls a fresh row from
-    the repository on every call and never caches the decrypted payload.
+    The resolver pulls a fresh row from the repository on every call and
+    never caches the decrypted payload. It retains only the public revision
+    metadata of its last successful selection, clearing it before every lookup.
     Executor processes call ``get_credentials`` exactly once during
     ``start()`` and pass the resulting dict into the exchange client
     constructor. Rotation = restart.
@@ -90,6 +108,17 @@ class CredentialResolver:
         """
         self._repository = repository
         self._encryption = encryption_service or get_encryption_service()
+        self._selected_version: CredentialVersion | None = None
+
+    @property
+    def selected_version(self) -> CredentialVersion | None:
+        """Return public revision evidence from the last successful resolution.
+
+        Returns:
+            Exact selected database revision, absent before resolution or after
+            any failed lookup, decoding or decryption attempt.
+        """
+        return self._selected_version
 
     async def get_credentials(
         self,
@@ -120,6 +149,7 @@ class CredentialResolver:
             CredentialNotFoundError: No active credential row matches.
             ValueError: The wallet identity is not a parseable UUID.
         """
+        self._selected_version = None
         bus_time = as_of or datetime.now(UTC)
         normalized_exchange = exchange.lower()
         row = await self._repository.get_active_credential(
@@ -133,4 +163,12 @@ class CredentialResolver:
             )
         plaintext = self._encryption.decrypt(row["encrypted_payload"])
         envelope: JsonObject = json.loads(plaintext)
-        return {key: str(value) for key, value in envelope.items()}
+        credentials = {key: str(value) for key, value in envelope.items()}
+        self._selected_version = CredentialVersion(
+            public_id=row["public_id"],
+            wallet_public_id=row["wallet_public_id"],
+            exchange=row["exchange"],
+            credential_type=row["credential_type"],
+            timestamp=row["timestamp"],
+        )
+        return credentials

@@ -5,14 +5,17 @@ shared across all exchange implementations.
 """
 
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from enum import StrEnum
 from typing import Literal
 
+from snapper.core.execution_route_authority import ExecutionRouteSelection
 from snapper.core.types import FillStatus
 from snapper.core.types import FillStatusEnum
+from snapper.infrastructure.exchanges.native_balance_source import NativeBalanceProfileObservation
 
 
 class OrderSideEnum(Enum):
@@ -647,6 +650,34 @@ class VenueOrderFillLegs:
     buy_sell: str
 
 
+@dataclass(frozen=True)
+class ExecutionObservationContext:
+    """Actual channel and selected record inside one provider message payload."""
+
+    kind: Literal["execution", "account_cash", "unknown"]
+    channel: str
+    observed_at: datetime
+    target_json_pointer: str | None = None
+    source_identity: str | None = None
+    venue_account_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PrivateExecutionObservation:
+    """Original or explicitly qualified provider evidence before economic parsing.
+
+    The material never appears in the ordinary dataclass representation. A
+    pointer selects one event while keeping the full original message, allowing
+    separate durable holds for several events delivered in the same payload.
+    """
+
+    context: ExecutionObservationContext
+    representation: Literal[
+        "wire_bytes_base64", "decoded_json_text", "parsed_fields_json", "opaque_text"
+    ]
+    material: str = field(repr=False)
+
+
 @dataclass
 class ExecutionUpdate:
     """Real-time execution update for an order."""
@@ -689,6 +720,8 @@ class ExecutionUpdate:
     average_price_decimal: str | None = None
     cum_fee_decimal: str | None = None
     counter_amount_decimal: str | None = None
+    observation_public_id: str | None = None
+    source_observation: PrivateExecutionObservation | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize the instance after initialization."""
@@ -759,3 +792,29 @@ class OpenPositionSnapshot:
     unrealized_pnl: float
     unrealized_funding: float
     timestamp: datetime
+
+
+@dataclass(frozen=True)
+class NativeBalanceObservation:
+    """One legacy balance read and explicitly independent native source profile candidates.
+
+    Adapters must preserve account labels and actual read/write endpoint and
+    environment agreement before supplying a route. A legacy unscoped reader
+    returns no route. A current configuration value or a mutable last-response
+    property does not establish identity for this response. Optional source
+    profiles retain their own raw receipts and original observation clocks;
+    they never certify the flattened legacy entries or grant margin-account
+    authority merely by being present.
+    """
+
+    entries: list[NativeBalanceEntry]
+    route: ExecutionRouteSelection | None = None
+    source_profiles: tuple[NativeBalanceProfileObservation, ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True)
+class ExecutionApiRoute:
+    """Public environment and origin derived from the actual selected SDK endpoints."""
+
+    environment: Literal["production", "demo", "paper"]
+    public_api_origin: str | None

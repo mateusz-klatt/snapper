@@ -54,13 +54,28 @@ from snapper.application.portfolio.walutomat_history_certificate import HistoryR
 from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.command_material import require_consistent_execution_command
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.application.trade.execution_observation_ingestion import (
+    DurableExecutionObservationSink,
+)
+from snapper.application.trade.execution_products import product_execution_refusal
+from snapper.application.trade.native_execution_source_installation import (
+    prepare_native_execution_observation_capture,
+)
 from snapper.application.trade.trade_service import TradeService
+from snapper.application.trade.unit_snapshot_route import CapturedExecutionRoute
+from snapper.application.trade.unit_snapshot_route import capture_observed_execution_route
 from snapper.config.credentials import CredentialResolver
+from snapper.config.credentials import CredentialVersion
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.command_material import TradeCommandMaterialUnavailableError
+from snapper.core.execution_route_authority import ExecutionEvidenceIdentity
+from snapper.core.execution_route_authority import ExecutionRouteSelection
+from snapper.core.execution_route_authority import client_selection_from_authority
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import CancelEventType
@@ -718,6 +733,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.settings = get_settings()
         self.wallet_public_id: str = wallet_public_id
         self._credentials: dict[str, str] | None = None
+        self._credential_version: CredentialVersion | None = None
+        self._execution_route: CapturedExecutionRoute | None = None
         self.context: zmq.asyncio.Context | None = None
         self.subscriber: ValidatedSubscriber | None = None
         self.publisher: ValidatedPublisher | None = None
@@ -756,6 +773,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._verify_unsupported_logged: bool = False
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._initialize_account_reconciliation_state()
+
+    def _initialize_account_reconciliation_state(self) -> None:
+        """Initialize owned account observation, precision and reconciliation task state."""
         self._portfolio_reconciliation_tasks: dict[
             _PortfolioReconciliationKey, asyncio.Task[None]
         ] = {}
@@ -827,6 +848,32 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             raise TypeError("SQLAlchemyRepository required")
         return repository
 
+    def _install_execution_observation_capture(self) -> None:
+        """Attach source persistence to the actual client before any private subscription."""
+        client = self._require_exchange_client()
+        if not isinstance(client, ExchangeClientBase):
+            return
+        client.bind_execution_identity(self.wallet_public_id, self._credential_version)
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return
+        client.set_execution_observation_sink(
+            DurableExecutionObservationSink(
+                repository,
+                client.execution_client_selection,
+                self._current_execution_route,
+                self._tracker,
+            )
+        )
+
+    def _current_execution_route(self) -> CapturedExecutionRoute | None:
+        """Return this executor's latest actual account-response authority, if available.
+
+        Returns:
+            Historical source authority; new admission must separately check freshness.
+        """
+        return self._execution_route
+
     @abstractmethod
     def _create_exchange_client(self) -> T:
         """Create and return the exchange client instance.
@@ -879,6 +926,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exists for the wallet/exchange pair. Propagated so the
                 executor process fails fast at startup.
         """
+        self._credential_version = None
         if not self.wallet_public_id:
             return
         if self.repository is None:
@@ -891,6 +939,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange=exchange_name,
             wallet_public_id=self.wallet_public_id,
         )
+        self._credential_version = resolver.selected_version
         logger.info(
             f"ExchangeExecutorService[{exchange_name}]: Resolved credentials "
             f"for wallet={self.wallet_public_id}"
@@ -1531,6 +1580,41 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         await self._process_execution(update)
 
+    async def _prepare_connected_execution_source(self, exchange_name: OrderExchange) -> None:
+        """Prepare actual native ownership before recovery, private subscriptions or order tasks.
+
+        Args:
+            exchange_name: Established venue used in the existing lifecycle log context.
+        """
+        await prepare_native_execution_observation_capture(
+            self.repository,
+            self._require_exchange_client(),
+            self._current_execution_route,
+            self._tracker,
+        )
+        logger.info(
+            f"ExchangeExecutorService[{exchange_name}]: "
+            f"Exchange client initialized with WebSocket"
+        )
+
+    async def _initialize_execution_client(self, exchange_name: OrderExchange) -> bool:
+        """Prepare the actual client and durable source sink before entering its lifecycle.
+
+        Args:
+            exchange_name: Established executor venue used by credential and socket setup.
+
+        Returns:
+            Whether the actual created client supports a private execution stream.
+        """
+        await self._initialize_settings()
+        await self._resolve_credentials(exchange_name)
+        self._client_context_active = False
+        self.exchange_client = self._create_exchange_client()
+        self.exchange_client.set_tracker(self._tracker)
+        self._install_execution_observation_capture()
+        self._setup_zmq_sockets(exchange_name)
+        return self.exchange_client.supports_websocket_executions
+
     async def start(self) -> None:
         """Start the execution service and subscribe to order topics.
 
@@ -1546,13 +1630,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning(f"{exchange_name} execution service already running")
             return
         self._portfolio_reconciliation_dispatch_open = False
-        await self._initialize_settings()
-        await self._resolve_credentials(exchange_name)
-        self._client_context_active = False
-        self.exchange_client = self._create_exchange_client()
-        self.exchange_client.set_tracker(self._tracker)
-        self._setup_zmq_sockets(exchange_name)
-        supports_ws = self.exchange_client.supports_websocket_executions
+        supports_ws = await self._initialize_execution_client(exchange_name)
+        exchange_client = self._require_exchange_client()
         self._client_context_active = True
         try:
             with egress_identity(
@@ -1561,11 +1640,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 owner="executor",
                 operation="client_lifecycle",
             ):
-                async with self.exchange_client:
-                    logger.info(
-                        f"ExchangeExecutorService[{exchange_name}]: "
-                        f"Exchange client initialized with WebSocket"
-                    )
+                async with exchange_client:
+                    await self._prepare_connected_execution_source(exchange_name)
                     self.running = True
                     self._task_last_pass["reconciliation"] = time.monotonic()
                     await self._recover_pending_orders(exchange_name)
@@ -2172,7 +2248,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order: Order request data containing order details.
         """
         exchange_name = self._get_exchange_name()
-        if await self._is_duplicate_submit(order):
+        if await self._hold_duplicate_or_inconsistent_submit(order):
             return
         if await self._reject_if_replay_origin(order):
             return
@@ -2192,6 +2268,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self.pending_orders[order.client_order_id] = PendingOrderState(request=order)
             await self._publish_order_status(order, OrderEventEnum.SUBMITTED)
             exchange_order_id = await self._execute_live_order(order)
+        except TradeCommandMaterialUnavailableError as exc:
+            self.pending_orders.pop(order.client_order_id, None)
+            logger.critical(
+                "[{}] CREATE refused because durable request material is unproven: {}. "
+                "No venue rejection or retry CREATE is inferred.",
+                exchange_name,
+                exc,
+            )
+            return
         except AmbiguousOrderSubmitError as e:
             await self._handle_ambiguous_submit(order, e)
             return
@@ -2729,10 +2814,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
           already-terminal snapshot is additionally routed through
           ``_reconcile_disappeared_order`` so its fills and terminal
           event project normally.
-        - TWO consecutive authoritative not-found answers: the venue
-          never saw the id — now a SAFE definitive rejection. One
-          answer is not enough: closed-order listings can lag the
-          submit by seconds.
+        - TWO consecutive authoritative not-found answers with consistent
+          durable request material: the venue never saw the id — now a SAFE
+          definitive rejection. One answer is not enough: closed-order
+          listings can lag the submit by seconds. Missing material proof
+          leaves the entry parked without declaring a venue rejection.
         - Anything else (lookup unsupported, venue unreachable, mixed
           answers): unresolved — the caller parks the order UNKNOWN.
 
@@ -2815,33 +2901,51 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 return True
             not_found_streak += 1
             if not_found_streak >= 2:
-                logger.warning(
-                    f"[{exchange_name}] Order {order.client_order_id} verified ABSENT "
-                    f"on venue (2 consecutive authoritative answers) — safe to reject"
-                )
-                if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
-                    logger.warning(
-                        f"[{exchange_name}] REJECTED publish for "
-                        f"{order.client_order_id} failed - entry stays parked for "
-                        f"the next cycle (the engine holds its UNKNOWN guard until "
-                        f"it actually receives the rejection; popping now would "
-                        f"strand that guard forever)"
-                    )
-                    return False
-                await self._record_venue_event(
-                    {
-                        "event_type": "order_rejected",
-                        "exchange_name": exchange_name,
-                        "instrument": order.instrument,
-                        "client_order_id": order.client_order_id,
-                        "side": order.side,
-                        "error": self._ambiguous_rejection_reason(error),
-                        "strategy_tag": order.strategy_tag,
-                    }
-                )
-                self.pending_orders.pop(order.client_order_id, None)
-                return True
+                return await self._reject_verified_absent_order(order, error)
         return False
+
+    async def _reject_verified_absent_order(
+        self, order: OrderRequestData, error: AmbiguousOrderSubmitError | None
+    ) -> bool:
+        """Require durable material before terminalizing two authoritative absences.
+
+        Args:
+            order: Original request retained by the parked ambiguous entry.
+            error: Original submit failure, or None during later reconciliation.
+
+        Returns:
+            True after terminal publication, durable recording and pending removal;
+            False when material is unavailable or the terminal publish fails.
+        """
+        if await self._refuse_inconsistent_command_material(order):
+            return False
+        exchange_name = self._get_exchange_name()
+        logger.warning(
+            f"[{exchange_name}] Order {order.client_order_id} verified ABSENT "
+            f"on venue (2 consecutive authoritative answers) — safe to reject"
+        )
+        if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
+            logger.warning(
+                f"[{exchange_name}] REJECTED publish for "
+                f"{order.client_order_id} failed - entry stays parked for "
+                f"the next cycle (the engine holds its UNKNOWN guard until "
+                f"it actually receives the rejection; popping now would "
+                f"strand that guard forever)"
+            )
+            return False
+        await self._record_venue_event(
+            {
+                "event_type": "order_rejected",
+                "exchange_name": exchange_name,
+                "instrument": order.instrument,
+                "client_order_id": order.client_order_id,
+                "side": order.side,
+                "error": self._ambiguous_rejection_reason(error),
+                "strategy_tag": order.strategy_tag,
+            }
+        )
+        self.pending_orders.pop(order.client_order_id, None)
+        return True
 
     @staticmethod
     def _ambiguous_verify_delays(
@@ -3306,6 +3410,37 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing replace event: {e}")
 
+    async def _hold_duplicate_or_inconsistent_submit(self, order: OrderRequestData) -> bool:
+        """Honor existing venue evidence before requiring proof for a new CREATE."""
+        if await self._is_duplicate_submit(order):
+            return True
+        return await self._refuse_inconsistent_command_material(order)
+
+    async def _require_consistent_command_material(self, order: OrderRequestData) -> None:
+        """Require durable intent proof for every execution venue and storage backend."""
+        try:
+            repository = self._require_repository()
+        except Exception as exc:
+            raise TradeCommandMaterialUnavailableError(
+                None, "durable_execution_repository_unavailable"
+            ) from exc
+        await require_consistent_execution_command(
+            repository, order, self.wallet_public_id, self._get_exchange_name()
+        )
+
+    async def _refuse_inconsistent_command_material(self, order: OrderRequestData) -> bool:
+        """Consume an unproven request before any staleness, status or CREATE side effect."""
+        try:
+            await self._require_consistent_command_material(order)
+        except TradeCommandMaterialUnavailableError as exc:
+            logger.critical(
+                "[{}] CREATE held before dispatch because durable request material is unproven: {}",
+                self._get_exchange_name(),
+                exc,
+            )
+            return True
+        return False
+
     async def _execute_live_order(self, order: OrderRequestData) -> str:
         """Execute an order on the exchange and return the exchange order ID.
 
@@ -3324,11 +3459,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             Exchange order ID if accepted.
 
         Raises:
+            ValueError: If Snapper has not integrated this product's accounting.
+            TradeCommandMaterialUnavailableError: If immutable intent proof is unavailable.
             AmbiguousOrderSubmitError: If the venue call failed in a way
                 where the order MAY exist on the venue.
             Exception: Any other submit failure (definitive reject).
         """
         exchange_name = self._get_exchange_name()
+        refusal = product_execution_refusal(order.instrument, exchange_name)
+        if refusal is not None:
+            raise ValueError(f"{refusal.error_code}: {refusal.message}")
+        await self._require_consistent_command_material(order)
         order_request = _exchange_order_request_from_core(order, self.wallet_public_id)
         exchange_client = self._require_exchange_client()
         result = await exchange_client.create_order(order_request)
@@ -3445,6 +3586,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "trade_id": params.get("trade_id"),
                     "error": params.get("error"),
                     "venue_timestamp": params.get("venue_timestamp"),
+                    "payload_json": params.get("payload_json"),
                     "liquidity_role": params.get("liquidity_role") or "unknown",
                 }
             )
@@ -4529,12 +4671,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             capture_before = await self._capture_spot_execution_watermark(
                 repository, exchange_name, mode
             )
+        self._execution_route = None
         request_started_at = datetime.now(UTC)
         (
             balance_status,
             balances_json,
             balance_observed_at,
             balance_error,
+            balance_route,
         ) = await self._read_account_balances(client, now)
         request_completed_at = datetime.now(UTC)
         (
@@ -4585,6 +4729,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             "bus_time": now,
         }
         state_id = await repository.record_venue_account_snapshot(attempt)
+        await self._capture_actual_balance_route(repository, state_id, balance_route)
         self._schedule_walutomat_balance_precision(repository, attempt)
         history_capture: SpotHistoryRangeCapture | None = None
         if history_tip is not None and boundary is not None:
@@ -4611,6 +4756,74 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             mode=cast(ExecutionMode, attempt["mode"]),
             kind="snapshot",
         )
+
+    async def _capture_actual_balance_route(
+        self,
+        repository: SQLAlchemyRepository,
+        state_id: int,
+        selection: ExecutionRouteSelection | None,
+    ) -> None:
+        """Capture authority only for this successful response and selected client.
+
+        Args:
+            repository: Actual observer persistence and wallet fence provider.
+            state_id: State identity returned by the same observer cycle.
+            selection: Public route returned with that exact native balance read.
+        """
+        self._execution_route = None
+        if selection is None:
+            return
+        try:
+            self._require_selected_balance_route(selection)
+            topic = f"execution-route.{self._get_exchange_name()}.{self.wallet_public_id}"
+            identity = ExecutionEvidenceIdentity(
+                public_id=str(uuid7()),
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(topic),
+            )
+            self._execution_route = await capture_observed_execution_route(
+                repository, selection, state_id, identity
+            )
+        except Exception as error:
+            logger.warning(
+                "Actual balance route unavailable; execution admission held ({})",
+                type(error).__name__,
+            )
+
+    def _require_selected_balance_route(self, selection: ExecutionRouteSelection) -> None:
+        """Match actual response scope with the exact credential selected at startup.
+
+        Args:
+            selection: Validated public proof returned by the actual client read.
+
+        Raises:
+            ValueError: If response scope or selected credential identity differs.
+        """
+        scope = selection.scope
+        if (scope.wallet_public_id, scope.exchange, scope.mode) != (
+            self.wallet_public_id,
+            self._get_exchange_name(),
+            self._account_mode(),
+        ):
+            raise ValueError("actual_balance_route_executor_mismatch")
+        actual = self._require_exchange_client().execution_client_selection()
+        if actual is None or actual != client_selection_from_authority(selection):
+            raise ValueError("actual_balance_route_client_mismatch")
+        if scope.environment == "paper":
+            return
+        selected = self._credential_version
+        if selected is None or (
+            selected.public_id,
+            selected.timestamp,
+            selected.wallet_public_id,
+            selected.exchange,
+        ) != (
+            selection.credential_public_id,
+            selection.credential_timestamp,
+            scope.wallet_public_id,
+            scope.exchange,
+        ):
+            raise ValueError("actual_balance_route_selected_credential_mismatch")
 
     def _account_mode(self) -> str:
         """Return the account-truth mode for this executor (paper venue → paper)."""
@@ -4703,10 +4916,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     async def _read_account_balances(
         self, client: ExchangeClientBase, now: datetime
-    ) -> tuple[str, str | None, datetime | None, str | None]:
+    ) -> tuple[str, str | None, datetime | None, str | None, ExecutionRouteSelection | None]:
         """Read native balances, mapping capability/outcome to a fail-closed status.
 
-        Returns ``(balance_status, balances_json, balance_observed_at, error)``.
+        Returns status, material, observed clock, error and optional same-read route.
         An ``unsupported`` venue never calls the reader; a structural
         ``NotImplementedError`` is ``unsupported``; any other failure (incl.
         timeout) is ``error`` with the payload/timestamp left NULL so the
@@ -4723,21 +4936,33 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         capability = client.balance_capability
         if capability is CapabilityStatus.UNSUPPORTED:
-            return "unsupported", None, None, None
+            return "unsupported", None, None, None, None
         try:
             async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
-                entries = await client.read_native_balances()
+                observation = await client.read_native_balance_observation()
         except NotImplementedError:
-            return "unsupported", None, None, None
+            return "unsupported", None, None, None, None
         except Exception as exc:
             logger.warning(f"[{self._get_exchange_name()}] native balance read failed: {exc}")
             error = str(exc) or exc.__class__.__name__
-            return "error", None, None, error[:512]
+            return "error", None, None, error[:512], None
         if capability is CapabilityStatus.SUPPORTED:
-            return "observed", self._serialize_native_balances(entries), now, None
+            return (
+                "observed",
+                self._serialize_native_balances(observation.entries),
+                now,
+                None,
+                observation.route,
+            )
         if capability is CapabilityStatus.SIMULATED:
-            return "simulated", self._serialize_native_balances(entries), now, None
-        return "error", None, None, _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG
+            return (
+                "simulated",
+                self._serialize_native_balances(observation.entries),
+                now,
+                None,
+                observation.route,
+            )
+        return "error", None, None, _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG, None
 
     async def _read_account_positions(
         self, client: ExchangeClientBase, now: datetime
@@ -5525,6 +5750,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         if snapshot is not None:
             await self._adopt_dispatched_snapshot(cmd, order, snapshot, cid, exchange_name)
+            return
+        if await self._refuse_inconsistent_command_material(order):
             return
         await self._handle_absent_dispatched_command(
             cmd, order, cid, allow_reject=allow_reject, exchange_name=exchange_name

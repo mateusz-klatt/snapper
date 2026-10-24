@@ -10,6 +10,7 @@ drops the column cleanly and remains re-runnable. The PostgreSQL branch is
 exercised by ``db-init`` against the live scratch database.
 """
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,51 @@ def _config(db_url: str) -> Config:
     return config
 
 
+@pytest.fixture(scope="module")
+def pre_checkpoint_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build and close one genuinely migrated worker-local 0032 checkpoint.
+
+    Args:
+        tmp_path_factory: Factory for module-owned temporary template storage.
+
+    Returns:
+        Path to the closed database containing the real schema before migration 0033.
+    """
+    db_path = tmp_path_factory.mktemp("chain-checkpoint-template") / "template.db"
+    db_url = f"sqlite:///{db_path}"
+    command.upgrade(_config(db_url), "0032")
+    engine = sa.create_engine(db_url)
+    try:
+        with engine.connect() as connection:
+            busy, frames, checkpointed = connection.exec_driver_sql(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).one()
+            if busy or frames != checkpointed:
+                raise RuntimeError("Chain checkpoint template has uncheckpointed SQLite writes")
+    finally:
+        engine.dispose()
+    wal_path = Path(f"{db_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size:
+        raise RuntimeError("Chain checkpoint template retains a nonempty SQLite WAL")
+    return db_path
+
+
+@pytest.fixture
+def pre_checkpoint_db(tmp_path: Path, pre_checkpoint_template: Path) -> str:
+    """Give each case a private copy of the real pre-0033 checkpoint.
+
+    Args:
+        tmp_path: Pytest-provided per-case temporary directory.
+        pre_checkpoint_template: Closed worker-local schema built by real migrations.
+
+    Returns:
+        SQLAlchemy URL of this case's independent SQLite checkpoint copy.
+    """
+    db_path = tmp_path / "chain-checkpoint.db"
+    shutil.copyfile(pre_checkpoint_template, db_path)
+    return f"sqlite:///{db_path}"
+
+
 def _insert(engine: sa.Engine, table: str, values: dict[str, object]) -> None:
     """Insert one row with the exact given columns."""
     columns = ", ".join(values)
@@ -85,7 +131,7 @@ def _has_chain_tip_column(engine: sa.Engine, table: str) -> bool:
 
 
 def test_0033_upgrade_adds_and_rerunnable_downgrade_drops_both_columns(
-    tmp_path: Path,
+    pre_checkpoint_db: str,
 ) -> None:
     """The chain-tip column round-trips cleanly on both planes, repeatably.
 
@@ -94,7 +140,7 @@ def test_0033_upgrade_adds_and_rerunnable_downgrade_drops_both_columns(
     Then: Both planes carry the column exactly after each upgrade and shed it
         exactly after each downgrade.
     """
-    db_url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
+    db_url = pre_checkpoint_db
     config = _config(db_url)
     command.upgrade(config, "0032")
     engine = sa.create_engine(db_url)
@@ -122,7 +168,7 @@ def test_0033_upgrade_adds_and_rerunnable_downgrade_drops_both_columns(
 @pytest.mark.parametrize("table", [_OBSERVATIONS, _STATES])
 @pytest.mark.parametrize("tip", [None, _TIP])
 def test_0033_accepts_a_null_and_a_canonical_chain_tip(
-    tmp_path: Path,
+    pre_checkpoint_db: str,
     table: str,
     tip: str | None,
 ) -> None:
@@ -133,11 +179,11 @@ def test_0033_accepts_a_null_and_a_canonical_chain_tip(
     Then: The insert succeeds and one row is present.
 
     Args:
-        tmp_path: Pytest temporary directory.
+        pre_checkpoint_db: Private database at the real pre-0033 checkpoint.
         table: Reconciliation plane under test.
         tip: Chain-tip value under test.
     """
-    db_url = f"sqlite:///{tmp_path / 'accept.db'}"
+    db_url = pre_checkpoint_db
     config = _config(db_url)
     command.upgrade(config, "0033")
     engine = sa.create_engine(db_url)
@@ -158,7 +204,7 @@ def test_0033_accepts_a_null_and_a_canonical_chain_tip(
     ],
 )
 def test_0033_rejects_a_degraded_chain_tip(
-    tmp_path: Path,
+    pre_checkpoint_db: str,
     table: str,
     tip: str,
 ) -> None:
@@ -170,11 +216,11 @@ def test_0033_rejects_a_degraded_chain_tip(
     Then: The insert is refused with an integrity error.
 
     Args:
-        tmp_path: Pytest temporary directory.
+        pre_checkpoint_db: Private database at the real pre-0033 checkpoint.
         table: Reconciliation plane under test.
         tip: Degraded chain-tip value under test.
     """
-    db_url = f"sqlite:///{tmp_path / 'refuse.db'}"
+    db_url = pre_checkpoint_db
     config = _config(db_url)
     command.upgrade(config, "0033")
     engine = sa.create_engine(db_url)

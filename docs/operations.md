@@ -369,6 +369,10 @@ Verified on 2026-04-18 against docker-compose-v2.29.7
 
 # Kraken Equities (TradFi) market data
 
+For current creation boundaries, catalog quantity evidence and accounting
+refusals, see [order execution support](order-execution.md). A client adapter or
+public price does not establish account eligibility or enable live trading.
+
 TradFi index futures (Kraken FCM: MNQ/ES/YM/RTY/NKD/M2K) are shipped
 in market-data-only mode. The symbol updater remains disabled by
 default at code level, while the publisher is registered as an enabled
@@ -601,10 +605,12 @@ cancel for an unrelated live order. The two-consecutive-absence rule
 is identical on both schedules. A found
 order finalizes as accepted (an already-terminal one additionally
 projects its fills through the disappeared-order reconciler); two
-consecutive authoritative not-found answers make the rejection
-venue-truth-based and safe. Only when verification cannot resolve —
-venue unreachable or lookup unsupported
-— does the executor park the order, record a non-terminal
+consecutive authoritative not-found answers permit rejection only when the
+durable original command material and executor scope are also proven. A material
+conflict or unavailable proof holds that inference; it does not manufacture a
+venue rejection. When verification or durable request/scope proof cannot establish
+a safe terminal outcome — including an unreachable venue, unsupported lookup,
+unavailable proof, or conflicting material — the executor parks the order, records a non-terminal
 `order_submit_unknown` venue event, and publish a single
 `orders.events.*.unknown` message:
 
@@ -712,7 +718,10 @@ venue boundary, where the request is translated immediately before the
 exchange call — never on the bus or in `trade_commands`. Older
 execution plans may still carry the legacy `venue_order_type` wire
 value in their params; readers normalize it back to the core
-vocabulary. Venue support:
+vocabulary. The following describes adapter order-type support. The separate
+[product creation boundary](order-execution.md) still refuses tokenized and
+derivative creation, including Kraken Futures, until accounting is integrated.
+Adapter support alone does not authorize a submit. Venue support:
 
 - **Kraken Spot** and **Kraken Futures** accept `stop` and
   `stop_limit`: the trigger comes from `stop_price`; once triggered,
@@ -792,8 +801,9 @@ venue side: each unresolved DISPATCHED command gets a client-id lookup
 — a found order is adopted under its original request (this also
 recovers parked-UNKNOWN entries lost to an executor restart; the
 DISPATCHED row is the durable record of the send intent), and only two
-consecutive authoritative absences on a command younger than an hour
-auto-REJECT to release engine intent. Absence never auto-rejects when
+consecutive authoritative absences on a command younger than an hour, with
+proven unchanged command material and executor scope, auto-REJECT to release
+engine intent. Absence never auto-rejects when
 the dispatch TTL is disabled (nothing expires frames, so one may
 legitimately still be in flight at any age) or past the hour bound
 (venue closed-order lookback makes absence non-authoritative) — those
@@ -1295,7 +1305,9 @@ contracts (`MNQU6-CME` = Sep 26, etc.) and must be rotated before the
   rows across two consecutive runs, fire a monitoring alert.
 - **Submit returns `422 instrument_market_data_only`**: expected.
   TradFi is observation-only. Point the strategy at a
-  `can_trade=True` instrument (crypto/xStocks) for execution.
+  supported `can_trade=True` instrument such as ordinary crypto spot for execution.
+  xStocks creation remains unavailable until its unit and accounting integration
+  is complete; see [order execution support](order-execution.md).
 - **Fragmented Kraken Equities 1m candles** (a settled minute holding
   more than one historical candle version, written from partial trade
   sets): the live-synthesis builder fix (`065463de`, live since

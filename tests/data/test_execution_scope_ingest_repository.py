@@ -49,6 +49,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.repository import ExecutionScopeResolutionError
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ExecutionInsertRow
 
 _NOW = datetime(2026, 7, 17, 8, 0, tzinfo=UTC)
 _WALLET = "0000face-0000-7000-8000-00000000c101"
@@ -173,6 +174,84 @@ async def _insert_fill(
         session_id=_SESSION,
         sequence_id=sequence_id,
     )
+
+
+def _transaction_fill() -> ExecutionInsertRow:
+    """Provide the actual source operands for caller-owned atomic persistence."""
+    return {
+        "order_public_id": _LIVE_ORDER,
+        "wallet_public_id": _WALLET.upper(),
+        "timestamp": _NOW,
+        "executed_at": _NOW - timedelta(seconds=2),
+        "side": "buy",
+        "status": "filled",
+        "price": 4.25,
+        "size": 100.0,
+        "fee": 0.5,
+        "fee_asset": "PLN",
+        "session_id": _SESSION,
+        "sequence_id": 900,
+        "price_decimal": "4.2500",
+        "size_decimal": "100.000",
+        "fee_decimal": "0.500",
+        "numeric_provenance": "venue_raw",
+    }
+
+
+async def test_financial_caller_can_rollback_a_flushed_execution_and_its_counter(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Given a later financial failure, when the caller rolls back, then no partial fill survives."""
+    await _seed_lineage(repository)
+    async with repository.session() as session:
+        await repository._begin_execution_insert_transaction(session)
+        execution = await repository.insert_execution_in_transaction(session, _transaction_fill())
+        assert execution.public_id
+        assert execution.scope_sequence == 1
+        assert execution.wallet_public_id == _WALLET
+        assert execution.price_decimal == "4.2500"
+        assert execution.timestamp == _NOW
+        assert execution.executed_at == _NOW - timedelta(seconds=2)
+        await session.rollback()
+    assert await _stored_scopes(repository) == []
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 901)
+    assert await _stored_scopes(repository) == [(_WALLET, "walutomat", "live", 1)]
+
+
+async def test_caller_commits_several_actual_fills_as_one_contiguous_transaction(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Given two source fills, when one transaction commits, then both keep exact scope ordering."""
+    await _seed_lineage(repository)
+    async with repository.session() as session:
+        await repository._begin_execution_insert_transaction(session)
+        first = await repository.insert_execution_in_transaction(session, _transaction_fill())
+        second_row: ExecutionInsertRow = {**_transaction_fill(), "sequence_id": 901}
+        second = await repository.insert_execution_in_transaction(session, second_row)
+        assert (first.scope_sequence, second.scope_sequence) == (1, 2)
+        await session.commit()
+    assert await _stored_scopes(repository) == [
+        (_WALLET, "walutomat", "live", 1),
+        (_WALLET, "walutomat", "live", 2),
+    ]
+
+
+@pytest.mark.parametrize("bad_wallet", (True, False))
+async def test_transactional_fill_rejects_missing_opener_or_invalid_wallet(
+    repository: SQLAlchemyRepository, bad_wallet: bool
+) -> None:
+    """Given missing transaction preconditions, when called, then no implicit insert starts."""
+    row = _transaction_fill()
+    if bad_wallet:
+        row["wallet_public_id"] = "invalid-wallet"
+    async with repository.session() as session:
+        if bad_wallet:
+            with pytest.raises(ExecutionScopeResolutionError, match="invalid_execution_wallet"):
+                await repository.insert_execution_in_transaction(session, row)
+        else:
+            with pytest.raises(RuntimeError, match="requires_caller_transaction"):
+                await repository.insert_execution_in_transaction(session, row)
+        assert not session.in_transaction()
 
 
 async def _stored_scopes(

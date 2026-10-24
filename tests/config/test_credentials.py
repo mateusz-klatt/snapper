@@ -22,6 +22,7 @@ import pytest
 
 from snapper.config.credentials import CredentialNotFoundError
 from snapper.config.credentials import CredentialResolver
+from snapper.config.credentials import CredentialVersion
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import WalletCredential
 from snapper.data.repository import SQLAlchemyRepository
@@ -407,3 +408,109 @@ class TestListActiveWalletCredentials:
         rows = await repo.list_active_wallet_credentials(as_of=datetime.now(UTC))
         assert len(rows) == 1
         assert rows[0]["wallet_public_id"] == "00000000-0000-7000-8000-0000000000d1"
+
+
+class TestCredentialSelectionEvidence:
+    """Bind public route evidence to the same successfully decrypted database row."""
+
+    @pytest.mark.asyncio
+    async def test_selected_revision_matches_actual_decrypted_row(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """Retain the actual selected revision without retaining secret material.
+
+        Given: An encrypted wallet credential and a resolver with no prior selection,
+        When: That credential is resolved through an uppercase exchange alias,
+        Then: Its public identity and exact database timestamp accompany the returned values.
+        """
+        public_id = await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            payload={"api_key": "test-key", "api_secret": "test-secret"},
+        )
+        resolver = CredentialResolver(repo, encryption_service=encryption)
+        assert resolver.selected_version is None
+
+        values = await resolver.get_credentials(
+            exchange="KRAKEN", wallet_public_id=_CANONICAL_WALLET
+        )
+        row = await repo.get_active_credential(
+            exchange="kraken", wallet_public_id=_CANONICAL_WALLET, as_of=datetime.now(UTC)
+        )
+
+        assert row is not None
+        assert values == {"api_key": "test-key", "api_secret": "test-secret"}
+        assert resolver.selected_version == CredentialVersion(
+            public_id=public_id,
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            timestamp=row["timestamp"],
+        )
+        assert "test-key" not in repr(resolver.selected_version)
+        assert "test-secret" not in repr(resolver.selected_version)
+
+    @pytest.mark.asyncio
+    async def test_missing_lookup_clears_previous_selection(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """Prevent old route evidence surviving a failed subsequent lookup.
+
+        Given: A resolver that successfully selected a Kraken wallet credential,
+        When: It then requests an absent Futures credential for the same wallet,
+        Then: Missing credentials raise and the previous public revision is unavailable.
+        """
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            payload={"api_key": "test-key", "api_secret": "test-secret"},
+        )
+        resolver = CredentialResolver(repo, encryption_service=encryption)
+        await resolver.get_credentials(exchange="kraken", wallet_public_id=_CANONICAL_WALLET)
+        assert resolver.selected_version is not None
+
+        with pytest.raises(CredentialNotFoundError):
+            await resolver.get_credentials(
+                exchange="kraken_futures", wallet_public_id=_CANONICAL_WALLET
+            )
+
+        assert resolver.selected_version is None
+
+    @pytest.mark.asyncio
+    async def test_decryption_failure_clears_previous_selection(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """Do not attest a credential revision whose fresh decryption failed.
+
+        Given: A successful earlier selection and a later decryption refusal,
+        When: The resolver tries to load the credential again,
+        Then: The error propagates and no previous route revision remains authoritative.
+        """
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            payload={"api_key": "test-key", "api_secret": "test-secret"},
+        )
+        resolver = CredentialResolver(repo, encryption_service=encryption)
+        await resolver.get_credentials(exchange="kraken", wallet_public_id=_CANONICAL_WALLET)
+        assert resolver.selected_version is not None
+
+        with (
+            patch.object(encryption, "decrypt", side_effect=ValueError("test decryption refusal")),
+            pytest.raises(ValueError, match="test decryption refusal"),
+        ):
+            await resolver.get_credentials(exchange="kraken", wallet_public_id=_CANONICAL_WALLET)
+
+        assert resolver.selected_version is None

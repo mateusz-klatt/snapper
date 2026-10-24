@@ -54,9 +54,9 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
-from snapper.data.models import Execution
 from snapper.data.models import PortfolioSpotReconciliationAnchor
 from snapper.data.models import VenueEvent
+from snapper.data.repository import IMMUTABLE_LEDGER_TABLE_NAMES
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 KNOWN_TO_MAX_STR = "9999-12-31 23:59:59.000000"
@@ -311,32 +311,21 @@ def _acquire_execution_fence(conn: Connection) -> None:
 def _immutable_ledger_table_names() -> frozenset[str]:
     """Return the PHYSICAL table names the seeder must never rewrite.
 
-    ``executions``, ``venue_events`` and
-    ``portfolio_spot_reconciliation_anchors`` are append-only ledgers:
-    an execution row's
-    ``(wallet_public_id, exchange, mode, scope_sequence)`` tuple and an
-    event's shard key are one fused certification identity; an anchor
-    row's certified inventory is another theorem input to the
-    authoritative reconciliation verdict. Re-keying any of them by a
-    screenshot tool would either split a counter scope, detach a durable
-    witness from its shard, or restate sealed inventory — the exact
-    false-authoritative failure this program exists to prevent.
-    Execution-scope alias normalization is migration 0029's job
-    exclusively (``_normalize_wallet_aliases``), taken under the
-    migration write fence; the seeder must not duplicate it.
+    The central registry covers execution history, immutable source evidence,
+    financial publications and native source ownership. Venue events and spot
+    reconciliation anchors are additional seeder exclusions. Re-keying any
+    retained witness would change its certified scope or provenance, even if
+    physical SQL guards would reject the attempted rewrite afterward.
 
-    The names are read from the mapped models' ``__tablename__`` rather
-    than hard-coded, so the exclusion binds the PHYSICAL table the ORM
-    maps regardless of how the ledger is expressed — a future
-    ``__tablename__`` rename moves the guard with it. The caller compares
-    these against the physical names ``inspect(conn).get_table_names()``
-    returns from the live schema, which is the same physical identity, so
-    no alias, mapper, or Table-object spelling can slip a ledger table
-    past the skip.
+    The normalizer compares physical names before considering wallet columns,
+    so every centrally registered immutable table stays outside its rewrite.
+    Execution-scope alias repair remains migration 0029's responsibility.
+
+    Returns:
+        Central immutable ledgers and the existing event/inventory exclusions.
     """
-    return frozenset(
+    return IMMUTABLE_LEDGER_TABLE_NAMES | frozenset(
         {
-            Execution.__tablename__,
             PortfolioSpotReconciliationAnchor.__tablename__,
             VenueEvent.__tablename__,
         }

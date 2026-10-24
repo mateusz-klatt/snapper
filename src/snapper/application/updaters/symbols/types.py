@@ -14,7 +14,15 @@ from typing import TypedDict
 
 @dataclass(frozen=True)
 class InstrumentMetadataInput:
-    """Atomic venue-sourced precision, limit, status, and unit metadata."""
+    """Atomic venue precision, quantity evidence, and monetary interpretation.
+
+    The optional payoff and currency tuple describes contract P&L denomination
+    before account-level profit payout conversion. Missing fields never imply
+    a linear payoff or a default settlement currency.
+
+    Native order quantity units describe the venue's order-entry operand and
+    remain separate from internal position and reconciliation quantity units.
+    """
 
     tick_size: float | None
     lot_size: float | None
@@ -32,6 +40,10 @@ class InstrumentMetadataInput:
     spec_version: str | None
     spec_observed_at: datetime | None
     unit_certified: bool
+    contract_payoff_model: Literal["linear", "inverse"] | None = None
+    contract_value_currency: str | None = None
+    settlement_currency: str | None = None
+    native_order_quantity_unit: Literal["base_asset", "contract_count"] | None = None
 
 
 class _WalutomatSymbolRequired(TypedDict):
@@ -55,11 +67,15 @@ class _PolygonSymbolRequired(TypedDict):
 
 
 class PolygonSymbolRecord(_PolygonSymbolRequired, total=False):
-    """Polygon symbol record with optional currency metadata."""
+    """Polygon source record with optional currency and raw provider classification."""
 
     base_currency_symbol: str
     currency_symbol: str
     currency_name: str
+    market: str
+    type: str
+    active: bool
+    last_updated_utc: str
 
 
 class _KrakenSymbolRequired(TypedDict):
@@ -80,9 +96,10 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
     is_btnl is the "true" marker for Kraken Bitnomial spot
     discoveries (BTC/USD:BTNL etc.) routed through the BTNL persist
     path with ``can_trade=False`` and an instrument_kind override.
-    metadata is present only for authoritative CCXT catalog records;
-    WS-only, BTNL, and direct tokenized REST records omit it so they
-    cannot refresh or replace venue precision provenance.
+    metadata is present for authoritative CCXT and direct tokenized REST
+    catalog records. Each source retains its own provenance. WS-only and
+    BTNL discoveries omit it so they cannot refresh venue precision.
+    min_notional preserves the tokenized REST catalog's costmin value.
     """
 
     asset_class: str
@@ -93,3 +110,4 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
     kraken_rest_symbol: str
     ccxt_symbol: str | None
     metadata: InstrumentMetadataInput
+    min_notional: float | None

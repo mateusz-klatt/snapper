@@ -35,6 +35,7 @@ from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
+from snapper.infrastructure.exchanges.contracts import NativeBalanceObservation
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
@@ -115,6 +116,12 @@ def _make_client(
     client.balance_capability = balance_capability
     client.position_capability = position_capability
     client.position_observation_capability = position_capability
+
+    async def observe() -> NativeBalanceObservation:
+        """Exercise the actual default response wrapper over the configured native reader."""
+        return await base_module.ExchangeClientBase.read_native_balance_observation(client)
+
+    client.read_native_balance_observation = AsyncMock(side_effect=observe)
     return client
 
 
@@ -329,7 +336,7 @@ class TestReadAccountBalances:
 
         Given: a client whose balance_capability is UNSUPPORTED,
         When: _read_account_balances runs,
-        Then: it returns ('unsupported', None, None, None) without ever
+        Then: it returns ('unsupported', None, None, None, None) without ever
             awaiting read_native_balances.
         """
         ex = _make_executor()
@@ -337,7 +344,7 @@ class TestReadAccountBalances:
         client = _make_client(CapabilityStatus.UNSUPPORTED, CapabilityStatus.UNSUPPORTED)
         client.read_native_balances = AsyncMock()
         result = await ex._read_account_balances(client, now)
-        assert result == ("unsupported", None, None, None)
+        assert result == ("unsupported", None, None, None, None)
         client.read_native_balances.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -347,14 +354,14 @@ class TestReadAccountBalances:
         Given: a supported-capability client whose reader raises
             NotImplementedError (structural, not a runtime fault),
         When: _read_account_balances runs,
-        Then: it returns ('unsupported', None, None, None).
+        Then: it returns ('unsupported', None, None, None, None).
         """
         ex = _make_executor()
         now = datetime.now(UTC)
         client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.UNSUPPORTED)
         client.read_native_balances = AsyncMock(side_effect=NotImplementedError())
         result = await ex._read_account_balances(client, now)
-        assert result == ("unsupported", None, None, None)
+        assert result == ("unsupported", None, None, None, None)
 
     @pytest.mark.asyncio
     async def test_generic_exception_maps_to_error_with_message(self) -> None:
@@ -370,7 +377,8 @@ class TestReadAccountBalances:
         now = datetime.now(UTC)
         client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.UNSUPPORTED)
         client.read_native_balances = AsyncMock(side_effect=RuntimeError("kaboom"))
-        status, payload, observed_at, error = await ex._read_account_balances(client, now)
+        status, payload, observed_at, error, route = await ex._read_account_balances(client, now)
+        assert route is None
         assert status == "error"
         assert payload is None
         assert observed_at is None
@@ -390,7 +398,8 @@ class TestReadAccountBalances:
         now = datetime.now(UTC)
         client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.UNSUPPORTED)
         client.read_native_balances = AsyncMock(side_effect=TimeoutError("slow venue"))
-        status, payload, observed_at, error = await ex._read_account_balances(client, now)
+        status, payload, observed_at, error, route = await ex._read_account_balances(client, now)
+        assert route is None
         assert status == "error"
         assert payload is None
         assert observed_at is None
@@ -410,7 +419,8 @@ class TestReadAccountBalances:
         client.read_native_balances = AsyncMock(
             return_value=[NativeBalanceEntry(currency="USD", total=100.0, free=60.0, used=40.0)]
         )
-        status, payload, observed_at, error = await ex._read_account_balances(client, now)
+        status, payload, observed_at, error, route = await ex._read_account_balances(client, now)
+        assert route is None
         assert status == "observed"
         assert observed_at == now
         assert error is None
@@ -431,7 +441,8 @@ class TestReadAccountBalances:
         now = datetime.now(UTC)
         client = _make_client(CapabilityStatus.SIMULATED, CapabilityStatus.NOT_APPLICABLE)
         client.read_native_balances = AsyncMock(return_value=[])
-        status, payload, observed_at, error = await ex._read_account_balances(client, now)
+        status, payload, observed_at, error, route = await ex._read_account_balances(client, now)
+        assert route is None
         assert status == "simulated"
         assert payload == "[]"
         assert observed_at == now
@@ -455,7 +466,7 @@ class TestReadAccountBalances:
             return_value=[NativeBalanceEntry(currency="USD", total=1.0, free=1.0, used=0.0)]
         )
         result = await ex._read_account_balances(client, now)
-        assert result == ("error", None, None, _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG)
+        assert result == ("error", None, None, _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG, None)
 
 
 class TestReadAccountPositions:

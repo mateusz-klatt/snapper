@@ -96,7 +96,9 @@ from typing import NoReturn
 from typing import Protocol
 from typing import Unpack
 from typing import cast
+from uuid import NAMESPACE_URL
 from uuid import UUID
+from uuid import uuid5
 from uuid import uuid7
 
 from loguru import logger
@@ -175,6 +177,10 @@ from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.core.command_material import COMMAND_MATERIAL_CONFLICT_EVENT
+from snapper.core.command_material import TRADE_COMMAND_LIFECYCLE_FIELDS
+from snapper.core.command_material import TradeCommandMaterialChangedError
+from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.paired_execution import compute_paired_group_key
@@ -226,6 +232,7 @@ from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
 from snapper.data.models import ExecutionPlanDecisionOutbox
+from snapper.data.models import ExecutionUnitSnapshot
 from snapper.data.models import FundingRate
 from snapper.data.models import FxConversionElection
 from snapper.data.models import FxConversionProof
@@ -360,6 +367,7 @@ from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import InstrumentSymbolRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
+from snapper.data.repository_types import InstrumentValuationMetadataRow
 from snapper.data.repository_types import MarketDataCoverageRow
 from snapper.data.repository_types import MarketDataFreshnessRow
 from snapper.data.repository_types import MarketSnapshotRow
@@ -457,6 +465,8 @@ from snapper.data.trade_integrity import TradeIntegrityPassRequest
 from snapper.data.trade_integrity import (
     run_trade_integrity_monitor as run_trade_integrity_monitor_pass,
 )
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_QUANTITY_ETL_VERSIONS
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 __all__ = [
     "Repository",
@@ -2836,8 +2846,26 @@ def execution_annulment_knowledge_filters(
 IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
     {
         Execution.__tablename__,
+        ExecutionUnitSnapshot.__tablename__,
         ExecutionAnnulment.__tablename__,
         ExecutionAnnulmentVisibility.__tablename__,
+        "execution_route_authorities",
+        "submission_unit_admissions",
+        "accounting_raw_receipts",
+        "accounting_scope_holds",
+        "accounting_hold_resolutions",
+        "contract_accounting_anchors",
+        "contract_accounting_events",
+        "financial_publication_intents",
+        "financial_publication_deliveries",
+        "accounting_native_source_claims",
+        "native_account_read_attempts",
+        "native_account_read_outcomes",
+        "native_account_identity_proofs",
+        "native_account_authorities",
+        "futures_product_read_attempts",
+        "futures_product_read_outcomes",
+        "private_source_ownership_receipts",
     }
 )
 """Physical table names that are append-only immutable ledgers.
@@ -2850,6 +2878,12 @@ the raw table-name string. An identity guard (``model is Execution``) is
 bypassable — ``aliased(Execution)`` is not ``Execution`` and
 ``Execution.__table__`` is not ``Execution`` — so it is not a theorem;
 resolution to the physical table name is.
+
+The route/admission witnesses, raw accounting receipts, scope holds and their
+resolutions, account anchors, separate accounting legs, publication evidence
+and native source ownership claims share this protection.
+Generic temporal replacement or deletion must never erase source proof or make
+an unresolved financial scope available by hiding its refusal history.
 
 The registry holds ``executions``, the per-scope ``scope_sequence``
 counter invariant table; ``execution_annulments``, the append-only
@@ -3117,6 +3151,13 @@ class InstrumentSpecInput:
     The contract and spec-provenance fields form the persisted venue
     metadata evidence block. Writers must carry or replace that block
     atomically; ``unit_certified`` remains subject to read-time freshness.
+
+    The nullable payoff and currency tuple records economic contract P&L
+    denomination before optional account payout conversion. Its absence never
+    implies a linear model or a default settlement currency.
+
+    Native order quantity units describe the external venue operand separately
+    from the internal quantity convention used by positions and reconciliation.
     """
 
     tick_size: float | None = None
@@ -3131,6 +3172,10 @@ class InstrumentSpecInput:
     status: str | None = None
     contract_size: Decimal | None = None
     quantity_unit: str | None = None
+    native_order_quantity_unit: str | None = None
+    contract_payoff_model: str | None = None
+    contract_value_currency: str | None = None
+    settlement_currency: str | None = None
     spec_source: str | None = None
     spec_version: str | None = None
     spec_observed_at: datetime | None = None
@@ -3144,6 +3189,27 @@ class InstrumentSpecInput:
     max_funding_rate: float | None = None
 
 
+def _current_futures_quantity_interpretation(spec: InstrumentSpecRow) -> bool:
+    """Require supported quantity interpretations and evidenced native-to-position units.
+
+    Args:
+        spec: A specification produced by the Kraken Futures catalog source.
+
+    Returns:
+        Whether the native quantity can use the internal contract representation.
+    """
+    if not (spec["spec_version"] or "").startswith(
+        tuple(f"{version}:" for version in FUTURES_QUANTITY_ETL_VERSIONS)
+    ):
+        return False
+    if spec["quantity_unit"] != "contract_count":
+        return False
+    native_unit = spec.get("native_order_quantity_unit")
+    return native_unit == "contract_count" or (
+        native_unit == "base_asset" and spec["contract_size"] == Decimal(1)
+    )
+
+
 def is_effective_unit_certified(
     spec: InstrumentSpecRow,
     evaluated_at: datetime,
@@ -3151,9 +3217,13 @@ def is_effective_unit_certified(
     """Return whether stored unit evidence is valid at the evaluation instant.
 
     Certification fails closed for missing, naive, future-dated, or twelve-hour-old
-    observations. Callers must evaluate this predicate every time rather than treating
-    the stored evidence flag as permanent.
+    observations and superseded Kraken Futures interpretations. Callers must evaluate
+    this predicate every time rather than treating the stored flag as permanent.
     """
+    if spec["spec_source"] == FUTURES_SPEC_SOURCE and not _current_futures_quantity_interpretation(
+        spec
+    ):
+        return False
     observed_at = spec["spec_observed_at"]
     if not spec["unit_certified"] or observed_at is None:
         return False
@@ -3523,6 +3593,20 @@ class Repository(ABC):
         Returns:
             The quote currency code, or ``None`` when no active
             instrument/symbol pair exists.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_instrument_valuation_metadata(
+        self, instrument_public_id: str
+    ) -> InstrumentValuationMetadataRow | None:
+        """Read active venue identity and payoff evidence without a caller-clock cutoff.
+
+        Args:
+            instrument_public_id: Exact venue-specific instrument identity.
+
+        Returns:
+            The current identity with an optional current specification, or null.
         """
         ...
 
@@ -6503,6 +6587,45 @@ class Repository(ABC):
             ValueError: If the wallet is absent, not a string, or blank.
         """
         ...
+
+    async def get_active_create_command_by_client_order_id(
+        self, client_order_id: str, exchange: str
+    ) -> TradeCommandRow | None:
+        """Resolve durable CREATE lineage or fail closed for unsupported storage.
+
+        Args:
+            client_order_id: Actual execution client identifier.
+            exchange: Actual executor venue.
+
+        Returns:
+            Matching active create/submit intent, or explicit absence.
+
+        Raises:
+            TradeCommandMaterialUnavailableError: If this repository lacks lineage proof.
+        """
+        raise TradeCommandMaterialUnavailableError(None, "repository_lineage_proof_unsupported")
+
+    async def require_consistent_trade_command_material(
+        self, command_public_id: str
+    ) -> TradeCommandRow:
+        """Require complete immutable history proof before an execution CREATE.
+
+        Implementations must return a proven current row, or raise the dedicated
+        unavailable error. A successfully committed local conflict barrier raises
+        its Changed subclass. Unsupported repositories never grant permission.
+
+        Args:
+            command_public_id: Actual durable logical command UUID.
+
+        Returns:
+            Proven current command material without changing intent or lifecycle.
+
+        Raises:
+            TradeCommandMaterialUnavailableError: If this repository lacks history proof.
+        """
+        raise TradeCommandMaterialUnavailableError(
+            command_public_id, "repository_material_proof_unsupported"
+        )
 
     @abstractmethod
     async def get_user_trading_caps(self, user_public_id: str) -> UserTradingCapsRow | None:
@@ -10394,6 +10517,47 @@ class SQLAlchemyRepository(Repository):
             )
             return result.scalar_one_or_none()
 
+    async def get_active_instrument_valuation_metadata(
+        self, instrument_public_id: str
+    ) -> InstrumentValuationMetadataRow | None:
+        """Read one current instrument and its current specification atomically.
+
+        Args:
+            instrument_public_id: Exact venue-specific instrument identity.
+
+        Returns:
+            Current venue, base, quote and specification, or null when unresolved.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(Instrument.exchange, Symbol.base, Symbol.quote, InstrumentSpec)
+                .select_from(Instrument)
+                .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+                .outerjoin(
+                    InstrumentSpec,
+                    (InstrumentSpec.instrument_public_id == Instrument.public_id)
+                    & (InstrumentSpec.known_to == KNOWN_TO_MAX),
+                )
+                .where(
+                    Instrument.public_id == instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                    Symbol.known_to == KNOWN_TO_MAX,
+                )
+            )
+            row = result.one_or_none()
+            if row is None:
+                return None
+            exchange, base, quote, spec = row
+            if not base or not quote:
+                return None
+            metadata: InstrumentValuationMetadataRow = {
+                "exchange": exchange,
+                "base": base,
+                "quote": quote,
+                "spec": self._instrument_spec_row(spec) if spec is not None else None,
+            }
+            return metadata
+
     async def get_active_market_snapshot_price(
         self, instrument_public_id: str
     ) -> tuple[float | None, datetime] | None:
@@ -10557,6 +10721,10 @@ class SQLAlchemyRepository(Repository):
                 status=row.status,
                 contract_size=row.contract_size,
                 quantity_unit=row.quantity_unit,
+                native_order_quantity_unit=row.native_order_quantity_unit,
+                contract_payoff_model=row.contract_payoff_model,
+                contract_value_currency=row.contract_value_currency,
+                settlement_currency=row.settlement_currency,
                 spec_source=row.spec_source,
                 spec_version=row.spec_version,
                 spec_observed_at=row.spec_observed_at,
@@ -11848,61 +12016,76 @@ class SQLAlchemyRepository(Repository):
             wallet_public_id = str(UUID(execution_row["wallet_public_id"]))
         except ValueError as exc:
             raise ExecutionScopeResolutionError("invalid_execution_wallet_identity") from exc
-        operator_public_id = execution_row.get("operator_public_id")
-        exec_id = execution_row.get("exec_id")
-        trade_id = execution_row.get("trade_id")
-        liquidity_role = execution_row.get("liquidity_role", "unknown")
-        price_decimal = execution_row.get("price_decimal")
-        size_decimal = execution_row.get("size_decimal")
-        fee_decimal = execution_row.get("fee_decimal")
-        counter_amount_decimal = execution_row.get("counter_amount_decimal")
-        numeric_provenance = execution_row.get("numeric_provenance", "legacy_float")
-        async with self.session() as s:
-            await self._begin_execution_insert_transaction(s)
-            scope_exchange, scope_mode = await self._resolve_execution_scope(
-                s,
-                execution_row["order_public_id"],
-                wallet_public_id,
-            )
-            await self._acquire_execution_fence_lock(s, wallet_public_id)
-            next_scope_sequence = (
-                await s.execute(
-                    select(func.coalesce(func.max(Execution.scope_sequence), 0) + 1).where(
-                        Execution.wallet_public_id == wallet_public_id,
-                        Execution.exchange == scope_exchange,
-                        Execution.mode == scope_mode,
-                    )
-                )
-            ).scalar_one()
-            execution = Execution(
-                order_public_id=execution_row["order_public_id"],
-                wallet_public_id=wallet_public_id,
-                operator_public_id=operator_public_id,
-                exchange=scope_exchange,
-                mode=scope_mode,
-                scope_sequence=int(next_scope_sequence),
-                exec_id=exec_id,
-                trade_id=trade_id,
-                timestamp=execution_row["timestamp"],
-                side=execution_row["side"],
-                status=execution_row["status"],
-                price=execution_row["price"],
-                size=execution_row["size"],
-                fee=execution_row["fee"],
-                fee_asset=execution_row["fee_asset"],
-                price_decimal=price_decimal,
-                size_decimal=size_decimal,
-                fee_decimal=fee_decimal,
-                counter_amount_decimal=counter_amount_decimal,
-                numeric_provenance=numeric_provenance,
-                session_id=execution_row["session_id"],
-                sequence_id=execution_row["sequence_id"],
-                liquidity_role=liquidity_role,
-            )
-            s.add(execution)
-            await s.commit()
-            await s.refresh(execution)
+        canonical_row: ExecutionInsertRow = {**execution_row, "wallet_public_id": wallet_public_id}
+        async with self.session() as session:
+            await self._begin_execution_insert_transaction(session)
+            execution = await self._append_execution_in_transaction(session, canonical_row)
+            await session.commit()
+            await session.refresh(execution)
             return execution.id
+
+    async def insert_execution_in_transaction(
+        self, session: AsyncSession, row: ExecutionInsertRow
+    ) -> Execution:
+        """Append a real execution without committing its surrounding financial transaction.
+
+        The caller first invokes ``_begin_execution_insert_transaction`` before
+        any query in the session. This method shares the established wallet
+        fence and committed-prefix allocator with ordinary execution ingestion.
+        Unit witnesses, accounting and publication intent can then commit with
+        the execution; failure of any later write rolls back its counter too.
+
+        Args:
+            session: Caller-owned transaction using the explicit execution isolation opener.
+            row: Actual source execution fields and durable order lineage.
+
+        Returns:
+            Flushed execution including its real UUID and scoped ledger sequence.
+
+        Raises:
+            ExecutionScopeResolutionError: If wallet or order lineage cannot be established.
+            RuntimeError: If no transaction was opened by the caller.
+        """
+        try:
+            wallet_public_id = str(UUID(row["wallet_public_id"]))
+        except ValueError as error:
+            raise ExecutionScopeResolutionError("invalid_execution_wallet_identity") from error
+        if not session.in_transaction():
+            raise RuntimeError("execution_insert_requires_caller_transaction")
+        canonical_row: ExecutionInsertRow = {**row, "wallet_public_id": wallet_public_id}
+        return await self._append_execution_in_transaction(session, canonical_row)
+
+    async def _append_execution_in_transaction(
+        self, session: AsyncSession, row: ExecutionInsertRow
+    ) -> Execution:
+        """Allocate and flush one canonical-wallet execution under the established fence."""
+        wallet_public_id = row["wallet_public_id"]
+        scope_exchange, scope_mode = await self._resolve_execution_scope(
+            session, row["order_public_id"], wallet_public_id
+        )
+        await self._acquire_execution_fence_lock(session, wallet_public_id)
+        next_scope_sequence = (
+            await session.execute(
+                select(func.coalesce(func.max(Execution.scope_sequence), 0) + 1).where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Execution.exchange == scope_exchange,
+                    Execution.mode == scope_mode,
+                )
+            )
+        ).scalar_one()
+        execution = Execution(
+            **{
+                "numeric_provenance": "legacy_float",
+                "liquidity_role": "unknown",
+                **row,
+                "exchange": scope_exchange,
+                "mode": scope_mode,
+                "scope_sequence": int(next_scope_sequence),
+            }
+        )
+        session.add(execution)
+        await session.flush()
+        return execution
 
     async def _resolve_active_instrument(
         self,
@@ -20755,6 +20938,10 @@ class SQLAlchemyRepository(Repository):
             status=spec.status,
             contract_size=spec.contract_size,
             quantity_unit=spec.quantity_unit,
+            native_order_quantity_unit=spec.native_order_quantity_unit,
+            contract_payoff_model=spec.contract_payoff_model,
+            contract_value_currency=spec.contract_value_currency,
+            settlement_currency=spec.settlement_currency,
             spec_source=spec.spec_source,
             spec_version=spec.spec_version,
             spec_observed_at=spec.spec_observed_at,
@@ -22041,8 +22228,26 @@ class SQLAlchemyRepository(Repository):
         ``now`` tick (see ``application/plans/service.py``) so ties on
         ``created_at`` are realistic. Without the ``id`` tie-breaker
         ``OFFSET`` pagination could skip or duplicate rows across pages
-        → double-dispatch.
+        → double-dispatch. Exact command material barriers are excluded before
+        pagination regardless of their event watermark or temporal close.
+
+        Args:
+            as_of: Temporal visibility cutoff for the command itself.
+            limit: Maximum number of eligible rows.
+            offset: Number of eligible rows skipped before selection.
+
+        Returns:
+            Dispatch candidates excluding every exact-scope material barrier.
         """
+        material_barrier = exists(
+            select(VenueEvent.id).where(
+                VenueEvent.event_type == COMMAND_MATERIAL_CONFLICT_EVENT,
+                VenueEvent.command_public_id == TradeCommand.public_id,
+                VenueEvent.wallet_public_id == TradeCommand.wallet_public_id,
+                VenueEvent.exchange == TradeCommand.exchange,
+                VenueEvent.mode == TradeCommand.mode,
+            )
+        )
         dispatchable_paired_gate = or_(
             TradeCommand.supersedes_command_id.isnot(None),
             ~exists(
@@ -22073,6 +22278,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.status == "created",
                     *where_active(TradeCommand, as_of),
                     dispatchable_paired_gate,
+                    ~material_barrier,
                 )
                 .order_by(TradeCommand.created_at, TradeCommand.id)
                 .offset(offset)
@@ -22221,6 +22427,7 @@ class SQLAlchemyRepository(Repository):
             "stop_price": existing.stop_price,
             "leverage": existing.leverage,
             "reduce_only": existing.reduce_only,
+            "post_only": existing.post_only,
             "created_at": existing.created_at,
             "supersedes_command_id": existing.supersedes_command_id,
             "correlation_id": existing.correlation_id,
@@ -22281,6 +22488,139 @@ class SQLAlchemyRepository(Repository):
                     f"to adopt ambiguously"
                 )
             return self._trade_command_to_row(rows[0])
+
+    _TRADE_COMMAND_LIFECYCLE_FIELDS: frozenset[str] = TRADE_COMMAND_LIFECYCLE_FIELDS
+
+    @classmethod
+    def _trade_command_changed_material(cls, versions: Sequence[TradeCommand]) -> tuple[str, ...]:
+        """Compare every non-lifecycle ORM column against the first logical intent.
+
+        Unknown future columns are immutable by default. This prevents another
+        omitted successor field from silently inheriting CREATE permission.
+        """
+        first = versions[0]
+        return tuple(
+            column.key
+            for column in TradeCommand.__table__.columns
+            if column.key not in cls._TRADE_COMMAND_LIFECYCLE_FIELDS
+            and any(
+                getattr(version, column.key) != getattr(first, column.key)
+                for version in versions[1:]
+            )
+        )
+
+    @staticmethod
+    async def _has_command_material_barrier(session: AsyncSession, command: TradeCommand) -> bool:
+        """Read the exact logical command and scope barrier without a watermark filter."""
+        return (
+            await session.scalar(
+                select(VenueEvent.id)
+                .where(
+                    VenueEvent.event_type == COMMAND_MATERIAL_CONFLICT_EVENT,
+                    VenueEvent.command_public_id == command.public_id,
+                    VenueEvent.wallet_public_id == command.wallet_public_id,
+                    VenueEvent.exchange == command.exchange,
+                    VenueEvent.mode == command.mode,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    @staticmethod
+    async def _append_command_material_barrier(
+        session: AsyncSession,
+        command: TradeCommand,
+        changed_fields: tuple[str, ...],
+    ) -> None:
+        """Commit a local dispatch barrier while preserving every command lifecycle row."""
+        now = datetime.now(UTC)
+        scope = [command.public_id, command.wallet_public_id, command.exchange, command.mode]
+        identity = json.dumps(scope, separators=(",", ":"))
+        session.add(
+            VenueEvent(
+                public_id=str(
+                    uuid5(NAMESPACE_URL, f"snapper:command-material-conflict:v1:{identity}")
+                ),
+                event_type=COMMAND_MATERIAL_CONFLICT_EVENT,
+                command_public_id=command.public_id,
+                shard_key=command.shard_key,
+                wallet_public_id=command.wallet_public_id,
+                exchange=command.exchange,
+                instrument=command.instrument,
+                mode=command.mode,
+                client_order_id=command.client_order_id,
+                received_at=now,
+                timestamp=now,
+                session_id=command.session_id,
+                sequence_id=command.sequence_id,
+                error="trade_command_material_conflict",
+                payload_json=json.dumps(
+                    {
+                        "schema": "snapper.command_material_conflict.v1",
+                        "command_public_id": command.public_id,
+                        "scope": scope[1:],
+                        "changed_fields": changed_fields,
+                        "observation_kind": "local_intent_history_conflict",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await session.commit()
+
+    async def require_consistent_trade_command_material(
+        self, command_public_id: str
+    ) -> TradeCommandRow:
+        """Require one logical intent's entire stored request material to agree.
+
+        Status-only SCD2 revisions are legal. A detected immutable-field change
+        commits a local dispatch barrier and raises, without rewriting history
+        or declaring any venue order rejected. Barrier persistence failure raises
+        the distinct unavailable error so dispatch cannot enter generic retry
+        status writes. Adoption and cancellation getters remain available.
+
+        Args:
+            command_public_id: Actual logical UUID shared by all retained intent versions.
+
+        Returns:
+            Current durable row whose full immutable history agrees.
+
+        Raises:
+            TradeCommandMaterialChangedError: If a committed scope barrier blocks CREATE.
+            TradeCommandMaterialUnavailableError: If proof or marker persistence is unavailable.
+        """
+        try:
+            async with self.session() as session:
+                versions = list(
+                    (
+                        await session.scalars(
+                            select(TradeCommand)
+                            .where(TradeCommand.public_id == command_public_id)
+                            .order_by(TradeCommand.id)
+                        )
+                    ).all()
+                )
+                active = [version for version in versions if version.known_to == KNOWN_TO_MAX]
+                if len(active) != 1:
+                    raise TradeCommandMaterialUnavailableError(
+                        command_public_id, "active_command_version_unavailable"
+                    )
+                current = active[0]
+                changed = self._trade_command_changed_material(versions)
+                barrier = await self._has_command_material_barrier(session, current)
+                if changed and not barrier:
+                    await self._append_command_material_barrier(session, current, changed)
+                if changed or barrier:
+                    raise TradeCommandMaterialChangedError(command_public_id, changed)
+                return self._trade_command_to_row(current)
+        except TradeCommandMaterialUnavailableError:
+            raise
+        except Exception as exc:
+            raise TradeCommandMaterialUnavailableError(
+                command_public_id, "history_or_dispatch_barrier_unavailable"
+            ) from exc
 
     async def get_unresolved_dispatched_commands(
         self, exchange: str, wallet_public_id: str, older_than: datetime
@@ -22437,6 +22777,30 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(ve)
             return ve.id
+
+    async def insert_venue_event_in_transaction(
+        self, session: AsyncSession, row: VenueEventInsertRow
+    ) -> VenueEvent:
+        """Flush source evidence inside the caller's atomic execution/accounting transaction.
+
+        Args:
+            session: Open caller-owned financial transaction.
+            row: Actual durable source event, including its explicit wallet identity.
+
+        Returns:
+            The flushed source event with an immutable public identity for its unit witness.
+
+        Raises:
+            RuntimeError: If the caller has not opened a transaction.
+            ValueError: If no valid wallet identity is supplied.
+        """
+        if not session.in_transaction():
+            raise RuntimeError("venue_event_requires_caller_transaction")
+        wallet_public_id = str(UUID(row.get("wallet_public_id", "")))
+        event = VenueEvent(**{**row, "wallet_public_id": wallet_public_id})
+        session.add(event)
+        await session.flush()
+        return event
 
     _PEG_UPDATABLE_FIELDS: frozenset[str] = frozenset({"failure_reason", "halted_at"})
     _PEL_UPDATABLE_FIELDS: frozenset[str] = frozenset(
@@ -24532,6 +24896,7 @@ class SQLAlchemyRepository(Repository):
             "error": ve.error,
             "venue_timestamp": ve.venue_timestamp,
             "received_at": ve.received_at,
+            "payload_json": ve.payload_json,
             "liquidity_role": getattr(ve, "liquidity_role", "unknown"),
             "paired_group_id": ve.paired_group_id,
         }

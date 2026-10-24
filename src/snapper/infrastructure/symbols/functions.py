@@ -45,6 +45,7 @@ __all__ = [
     "native_to_kraken_websocket",
     "kraken_websocket_to_native",
     "native_to_kraken_rest",
+    "native_to_kraken_asset_class",
     "kraken_rest_to_native",
     "native_to_walutomat_ws",
     "walutomat_ws_to_native",
@@ -183,6 +184,28 @@ def native_to_kraken_rest(native_symbol: str) -> str:
         return mapper.native_to_kraken_rest[native_symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
+
+
+def native_to_kraken_asset_class(native_symbol: str) -> str:
+    """Return the active Kraken Spot catalog's order asset class.
+
+    Unclassified symbols fail before a native submit, because defaulting a
+    tokenized order to currency could route it through the wrong asset class.
+
+    Args:
+        native_symbol: Native identity of an active Kraken Spot REST product.
+
+    Returns:
+        The catalog-derived currency or tokenized-asset class.
+
+    Raises:
+        ValueError: If the catalog has no active Spot REST identity for the symbol.
+    """
+    mapper = _get_db_mapper()
+    try:
+        return mapper.kraken_asset_classes[native_symbol]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Kraken order asset class: {native_symbol}") from exc
 
 
 def native_to_ccxt(native_symbol: str) -> str:

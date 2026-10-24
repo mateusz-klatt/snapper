@@ -22,6 +22,7 @@ from datetime import datetime
 from decimal import Decimal
 from decimal import InvalidOperation
 from typing import Any
+from typing import Literal
 
 from loguru import logger
 from sqlalchemy import select
@@ -42,6 +43,8 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_instrument
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -53,10 +56,17 @@ _RUNTIME_CHANNEL_SOURCE = "kraken_futures_publisher_runtime"
 _INVERSE_TYPES = frozenset({"futures_inverse"})
 _RR_PREFIX = "rr_"
 _IN_PREFIX = "in_"
-_FUTURES_SPEC_SOURCE = "kraken_futures:rest.get_instruments"
-_SPEC_ETL_VERSION = "s2a-v1"
 
 _XBT_TO_BTC = {"XBT": "BTC"}
+
+_CATEGORY_ASSET_TYPES: dict[str, AssetTypeEnum] = {
+    "xstocks": AssetTypeEnum.EQUITY,
+    "equities": AssetTypeEnum.EQUITY,
+    "pre-ipo": AssetTypeEnum.EQUITY,
+    "commodities": AssetTypeEnum.COMMODITY,
+    "forex": AssetTypeEnum.FOREX,
+    "indices": AssetTypeEnum.INDEX,
+}
 
 
 @register_process(
@@ -406,25 +416,61 @@ def _optional_decimal_float(value: Decimal | None) -> float | None:
 
 def _futures_order_steps(
     schema: KrakenFuturesInstrumentSchema,
-    contract_decimal: Decimal | None,
-) -> tuple[Decimal | None, Decimal | None]:
-    """Resolve parsed order steps with the established contract-size fallback."""
+) -> tuple[Decimal | None, Decimal | None, int | None]:
+    """Resolve verified quantity steps and decimals without a multiplier fallback."""
     try:
         descriptor = parse_kraken_futures_instrument(schema.model_dump(by_alias=True))
         return (
             _positive_decimal(descriptor.qty_increment),
             _positive_decimal(descriptor.qty_min),
+            descriptor.qty_precision,
         )
     except InvalidOperation, ValueError:
-        return contract_decimal, contract_decimal
+        return None, None, None
 
 
-def _quantity_decimals(schema: KrakenFuturesInstrumentSchema) -> int | None:
-    """Return the non-negative venue contract precision."""
-    precision = schema.contract_value_trade_precision
-    if precision is None or precision < 0:
-        return None
-    return precision
+def _contract_payoff_fields(
+    schema: KrakenFuturesInstrumentSchema,
+) -> tuple[Literal["linear", "inverse"] | None, str | None, str | None]:
+    """Resolve contract P&L denomination from explicit venue fields only.
+
+    Flexible futures are quoted in base-asset quantities and currently publish
+    a unit multiplier. A different flexible multiplier has no validated unit
+    interpretation here, so monetary evidence remains unknown in that case.
+    The settlement denomination precedes any account-level profit payout conversion.
+    """
+    if (
+        schema.type not in {"futures_vanilla", "futures_inverse", "flexible_futures"}
+        or schema.base is None
+        or schema.quote is None
+    ):
+        return None, None, None
+    if schema.type == "flexible_futures" and _positive_decimal(schema.contract_size) != Decimal(1):
+        return None, None, None
+    base = _normalize_currency(schema.base.strip())
+    quote = _normalize_currency(schema.quote.strip())
+    if not base or not quote:
+        return None, None, None
+    if schema.type == "futures_inverse":
+        return "inverse", quote, base
+    return "linear", base, quote
+
+
+def _native_order_quantity_unit(
+    schema: KrakenFuturesInstrumentSchema,
+) -> Literal["base_asset", "contract_count"] | None:
+    """Resolve native order units from verified source types without renaming internal units.
+
+    Flexible futures order quantity is denominated in the base asset. Only the
+    currently documented unit multiplier is supported. Explicit vanilla and
+    inverse definitions use contract quantities; an unknown source type never
+    acquires a quantity interpretation from its symbol spelling.
+    """
+    if schema.type in {"futures_vanilla", "futures_inverse"}:
+        return "contract_count"
+    if schema.type == "flexible_futures" and _positive_decimal(schema.contract_size) == Decimal(1):
+        return "base_asset"
+    return None
 
 
 def _instrument_metadata(
@@ -434,13 +480,14 @@ def _instrument_metadata(
     """Build one atomic metadata observation from a validated futures definition."""
     tick_decimal = _positive_decimal(schema.tick_size)
     contract_decimal = _positive_decimal(schema.contract_size)
-    lot_decimal, min_order_decimal = _futures_order_steps(schema, contract_decimal)
-    qty_decimals = _quantity_decimals(schema)
+    lot_decimal, min_order_decimal, qty_decimals = _futures_order_steps(schema)
     margin_decimal = None
     if schema.margin_levels:
         margin_decimal = _positive_decimal(schema.margin_levels[0].initial_margin)
     position_limit = _integral_position_limit(schema.max_position_size)
-    status = "active" if schema.tradeable else "inactive"
+    status = schema.market_status
+    payoff_model, contract_currency, settlement_currency = _contract_payoff_fields(schema)
+    native_quantity_unit = _native_order_quantity_unit(schema)
     is_reference = schema.symbol.lower().startswith((_RR_PREFIX, _IN_PREFIX))
     complete = all(
         value is not None
@@ -450,6 +497,7 @@ def _instrument_metadata(
             lot_decimal,
             min_order_decimal,
             qty_decimals,
+            native_quantity_unit,
         )
     )
     version_payload = {
@@ -459,13 +507,21 @@ def _instrument_metadata(
         "lot_size": _optional_decimal_string(lot_decimal),
         "min_order_size": _optional_decimal_string(min_order_decimal),
         "contract_size": _optional_decimal_string(contract_decimal),
+        "contract_payoff_model": payoff_model,
+        "contract_value_currency": contract_currency,
+        "settlement_currency": settlement_currency,
+        "native_order_quantity_unit": native_quantity_unit,
         "qty_decimals": qty_decimals,
         "margin_initial": _optional_decimal_string(margin_decimal),
         "position_limit": position_limit,
         "status": status,
+        "tradeable": schema.tradeable,
+        "is_expired": schema.is_expired,
+        "suspended": schema.suspended,
+        "post_only": schema.post_only,
     }
     content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
-    version = f"{_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
+    version = f"{FUTURES_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
     return InstrumentMetadataInput(
         tick_size=_optional_decimal_float(tick_decimal),
         lot_size=_optional_decimal_float(lot_decimal),
@@ -479,10 +535,14 @@ def _instrument_metadata(
         status=status,
         contract_size=contract_decimal,
         quantity_unit="contract_count",
-        spec_source=_FUTURES_SPEC_SOURCE,
+        native_order_quantity_unit=native_quantity_unit,
+        spec_source=FUTURES_SPEC_SOURCE,
         spec_version=version,
         spec_observed_at=observed_at,
         unit_certified=schema.tradeable and not is_reference and complete,
+        contract_payoff_model=payoff_model,
+        contract_value_currency=contract_currency,
+        settlement_currency=settlement_currency,
     )
 
 
@@ -582,24 +642,27 @@ def _extract_expiry(schema: KrakenFuturesInstrumentSchema) -> str | None:
 
 
 def _classify_asset_type(schema: KrakenFuturesInstrumentSchema) -> AssetTypeEnum:
-    """Classify the asset type from instrument metadata.
+    """Classify published product categories while preserving legacy feed semantics.
 
-    Reference rates (rr_*) and indices (in_*) are classified as INDEX
-    regardless of the tradfi flag. TradFi products (CME contracts) are
-    also INDEX. Everything else is CRYPTO.
+    Reference-rate and index feeds remain INDEX before product-category mapping.
+    Recognized categories override the broad tradfi flag. Missing or unknown
+    categories retain the legacy flag-based fallback; no class is inferred from
+    an ordinary product ticker, contract type or token suffix. Classification
+    establishes neither execution readiness nor legal ownership of an underlying.
 
     Args:
-        schema: Validated instrument schema.
+        schema: Validated instrument schema with the venue's category metadata.
 
     Returns:
-        AssetTypeEnum based on product classification.
+        The mapped catalog asset class or its compatible legacy fallback.
     """
-    if schema.tradfi:
-        return AssetTypeEnum.INDEX
     symbol_lower = schema.symbol.lower()
     if symbol_lower.startswith(_RR_PREFIX) or symbol_lower.startswith(_IN_PREFIX):
         return AssetTypeEnum.INDEX
-    return AssetTypeEnum.CRYPTO
+    category = (schema.category or "").strip().casefold()
+    if mapped := _CATEGORY_ASSET_TYPES.get(category):
+        return mapped
+    return AssetTypeEnum.INDEX if schema.tradfi else AssetTypeEnum.CRYPTO
 
 
 def _build_ccxt_symbol(schema: KrakenFuturesInstrumentSchema) -> str | None:

@@ -16,9 +16,13 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 
 import pytest
+from sqlalchemy import select
 
+from snapper.application.trade.command_request import order_request_from_command
+from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandInsertRow
 
@@ -401,3 +405,119 @@ async def test_origin_defaults_to_live_when_omitted(tmp_path: Path) -> None:
     assert read["origin"] == "live"
     assert read["replay_window_start"] is None
     assert read["replay_window_end"] is None
+
+
+async def _advance_modifier_command(
+    repo: SQLAlchemyRepository,
+    public_id: str,
+    transition: Literal["status", "cas", "bulk"],
+    at: datetime,
+) -> None:
+    """Apply each real SCD2 successor path used by dispatch or lifecycle processing."""
+    if transition == "status":
+        assert (
+            await repo.update_trade_command_status(
+                public_id=public_id,
+                new_status="dispatched",
+                bus_time=at,
+                session_id="s2",
+                sequence_id=2,
+            )
+            is not None
+        )
+    elif transition == "cas":
+        assert await repo.advance_trade_command_lifecycle(
+            public_id=public_id,
+            expected_status="created",
+            new_status="dispatched",
+            bus_time=at,
+            session_id="s2",
+            sequence_id=2,
+        )
+    else:
+        assert (
+            await repo.bulk_dispatch_trade_commands(
+                [
+                    {
+                        "public_id": public_id,
+                        "bus_time": at,
+                        "session_id": "s2",
+                        "sequence_id": 2,
+                        "dispatched_at": at,
+                        "attempt_count": 1,
+                    }
+                ]
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ("status", "cas", "bulk"))
+@pytest.mark.parametrize("post_only", (False, True))
+@pytest.mark.parametrize("command_type", ("create", "submit"))
+async def test_all_successors_and_recovery_preserve_exact_order_intent_modifiers(
+    tmp_path: Path,
+    transition: Literal["status", "cas", "bulk"],
+    post_only: bool,
+    command_type: str,
+) -> None:
+    """A post-only request retains its maker-only intent through dispatch and recovery.
+
+    Given: A real create/submit intent with explicit modifiers, prices and client identity,
+    When: Any SCD2 successor path runs and recovery rebuilds the request repeatedly,
+    Then: Every economic field remains exact and recovery creates no additional command.
+    """
+    repo = await _fresh_repo(tmp_path, f"modifiers_{transition}_{post_only}_{command_type}.db")
+    try:
+        now = datetime.now(UTC)
+        intent = _lineage_row(now)
+        intent["command_type"] = command_type
+        intent["post_only"] = post_only
+        intent["reduce_only"] = True
+        intent["leverage"] = 3
+        intent["order_type"] = "stop_limit"
+        intent["quantity"] = 0.375
+        intent["price"] = 65000.0
+        intent["stop_price"] = 64000.0
+        _, public_id = await repo.insert_trade_command(intent)
+        await _advance_modifier_command(repo, public_id, transition, now + timedelta(seconds=1))
+        for _ in range(2):
+            recovered = await repo.get_active_create_command_by_client_order_id(
+                intent["client_order_id"], intent["exchange"]
+            )
+            assert recovered is not None
+            assert recovered["public_id"] == public_id
+            request = order_request_from_command(recovered)
+            assert (request.post_only, request.reduce_only, request.leverage) == (
+                post_only,
+                True,
+                3,
+            )
+            assert (request.quantity, request.price, request.stop_price) == (
+                0.375,
+                65000.0,
+                64000.0,
+            )
+            assert request.client_order_id == intent["client_order_id"]
+            assert request.order_type == "stop_limit"
+        async with repo.session() as session:
+            versions = list(
+                (
+                    await session.scalars(
+                        select(TradeCommand).where(TradeCommand.public_id == public_id)
+                    )
+                ).all()
+            )
+        assert len(versions) == 2
+        assert all(
+            row.post_only is post_only and row.reduce_only is True and row.leverage == 3
+            for row in versions
+        )
+        assert all(
+            (row.quantity, row.price, row.stop_price, row.client_order_id, row.venue_client_id)
+            == (0.375, 65000.0, 64000.0, intent["client_order_id"], intent["venue_client_id"])
+            for row in versions
+        )
+    finally:
+        await repo.engine.dispose()

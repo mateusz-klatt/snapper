@@ -32,6 +32,7 @@ from sqlalchemy.exc import ProgrammingError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
@@ -250,6 +251,7 @@ class SymbolMapperService:
         self.reverse: dict[tuple[str, str], dict[str, str]] = {}
         self.native_to_kraken_ws: dict[str, str] = {}
         self.native_to_kraken_rest: dict[str, str] = {}
+        self.kraken_asset_classes: dict[str, str] = {}
         self.native_to_kraken_futures_ws: dict[str, str] = {}
         self.native_to_kraken_equities_ws: dict[str, str] = {}
         self.native_to_ccxt: dict[str, str] = {}
@@ -357,6 +359,60 @@ class SymbolMapperService:
                 ccxt_rev.update(mapping)
         self.native_to_ccxt = ccxt_fwd
         self.ccxt_to_native = ccxt_rev
+
+    def load_kraken_asset_classes_from_db(
+        self, aliases: list[tuple[str, str, str, str]] | None = None
+    ) -> dict[str, str]:
+        """Classify active Kraken Spot REST products from their catalog identities.
+
+        A Kraken Spot equity is a tokenized product. Equities available solely
+        on the separate FCM market-data venue have no Spot REST alias and are
+        excluded, regardless of matching underlying tickers.
+
+        Args:
+            aliases: Optional exact alias observation for this cache load. A
+                mismatched REST alias loses classification instead of mixing generations.
+
+        Returns:
+            Native product identities mapped to their order asset classes.
+
+        Raises:
+            OperationalError: If a database error is unrelated to missing bootstrap tables.
+        """
+        expected = (
+            None
+            if aliases is None
+            else {
+                native: wire
+                for native, exchange, channel, wire in aliases
+                if exchange == ExchangeEnum.KRAKEN and channel == AliasChannelEnum.REST
+            }
+        )
+        try:
+            with self.repository.get_session() as session:
+                now = datetime.now(UTC)
+                rows = session.execute(
+                    select(Symbol.native_symbol, Symbol.asset_type, SymbolAlias.exchange_symbol)
+                    .join(SymbolAlias, Symbol.public_id == SymbolAlias.symbol_public_id)
+                    .where(
+                        SymbolAlias.exchange == ExchangeEnum.KRAKEN,
+                        SymbolAlias.channel == AliasChannelEnum.REST,
+                        SymbolAlias.timestamp <= now,
+                        SymbolAlias.known_to > now,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
+                    )
+                ).all()
+                return {
+                    row[0]: "tokenized_asset" if row[1] == AssetTypeEnum.EQUITY else "currency"
+                    for row in rows
+                    if expected is None or expected.get(row[0]) == row[2]
+                }
+        except OperationalError as exc:
+            message = str(exc).lower()
+            if "no such table" in message and ("symbol_aliases" in message or "symbols" in message):
+                return {}
+            raise
 
     def load_capabilities_from_db(
         self,
@@ -555,7 +611,9 @@ class SymbolMapperService:
             return
         try:
             aliases = self.load_mappings_from_db()
+            asset_classes = self.load_kraken_asset_classes_from_db(aliases)
             self._populate_maps_from_aliases(aliases)
+            self.kraken_asset_classes = asset_classes
             capabilities = self.load_capabilities_from_db()
             self._populate_capabilities_from_rows(capabilities)
             channel_capabilities = self.load_channel_capabilities_from_db()

@@ -5,6 +5,7 @@ conservative backlog classification marks ONLY still-pending paper
 strategy submits as replay, and that downgrade removes everything.
 """
 
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -95,20 +96,52 @@ def _origin_of(engine: sa.Engine, public_id: str) -> str:
     return str(value)
 
 
+@pytest.fixture(scope="module")
+def pre_provenance_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build and close one genuinely migrated worker-local 0018 checkpoint.
+
+    Args:
+        tmp_path_factory: Factory for module-owned temporary template storage.
+
+    Returns:
+        Path to the closed database containing the real schema before migration 0019.
+    """
+    db_path = tmp_path_factory.mktemp("replay-provenance-template") / "template.db"
+    db_url = f"sqlite:///{db_path}"
+    command.upgrade(_make_alembic_config(db_url), "0018")
+    engine = sa.create_engine(db_url, future=True)
+    try:
+        with engine.connect() as connection:
+            busy, frames, checkpointed = connection.exec_driver_sql(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).one()
+            if busy or frames != checkpointed:
+                raise RuntimeError("Replay provenance template has uncheckpointed SQLite writes")
+    finally:
+        engine.dispose()
+    wal_path = Path(f"{db_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size:
+        raise RuntimeError("Replay provenance template retains a nonempty SQLite WAL")
+    return db_path
+
+
 @pytest.fixture
-def pre_provenance_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
-    """Provide a SQLite database migrated to 0018 (pre-provenance).
+def pre_provenance_db(
+    tmp_path: Path, pre_provenance_template: Path
+) -> Iterator[tuple[sa.Engine, Config]]:
+    """Provide one private copy of the real pre-provenance checkpoint.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
+        pre_provenance_template: Closed worker-local schema built by real migrations.
 
     Yields:
         Tuple of engine bound to the database and the config.
     """
     db_path = tmp_path / "replay_provenance.db"
+    shutil.copyfile(pre_provenance_template, db_path)
     db_url = f"sqlite:///{db_path}"
     cfg = _make_alembic_config(db_url)
-    command.upgrade(cfg, "0018")
     engine = sa.create_engine(db_url, future=True)
     try:
         yield engine, cfg

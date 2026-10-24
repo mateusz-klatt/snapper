@@ -14,12 +14,15 @@ from types import SimpleNamespace
 from types import TracebackType
 from typing import Any
 from typing import Literal
+from typing import TypedDict
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import call
 from unittest.mock import patch
 from unittest.mock import patch as mock_patch
+from uuid import NAMESPACE_URL
+from uuid import uuid5
 
 import ccxt
 import pytest
@@ -27,9 +30,11 @@ import zmq
 
 import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
+from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.types import FillStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -43,6 +48,7 @@ from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchan
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
+from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -54,6 +60,7 @@ from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.topics.builders import order_commands_prefix
 
 TEST_DB_URL = "sqlite:///:memory:"
+_INTENT_WALLET = "00000000-0000-4000-8000-000000000241"
 
 
 def zmq_socket_stub(
@@ -305,6 +312,130 @@ def _enable_live_trading(executor: Any) -> None:
     )
 
 
+class _IntentMaterial(TypedDict, total=False):
+    """Explicit request material authored before an executor test frame."""
+
+    strategy_id: str
+    exchange: str
+    instrument: str
+    mode: str
+    side: str
+    order_type: str
+    quantity: float
+    price: float | None
+    stop_price: float | None
+    origin: str
+
+
+def _durable_command(
+    client_order_id: str = "c1", *, material: _IntentMaterial | None = None
+) -> TradeCommandRow:
+    """Author fixed durable intent independently of an incoming request frame.
+
+    Args:
+        client_order_id: Fixed client identity chosen by the test author.
+        material: Explicit request properties that differ from the fixture defaults.
+
+    Returns:
+        A complete typed command with an independent logical identity and scope.
+    """
+    authored = material or _IntentMaterial()
+    now = datetime.now(UTC)
+    exchange = authored.get("exchange", "kraken")
+    instrument = authored.get("instrument", "BTC-USD")
+    mode = authored.get("mode", "live")
+    return {
+        "public_id": str(uuid5(NAMESPACE_URL, f"snapper-test-intent:{client_order_id}")),
+        "timestamp": now,
+        "session_id": "fixture-session",
+        "sequence_id": 1,
+        "command_type": "create",
+        "shard_key": f"{exchange}.{instrument}.{mode}",
+        "exchange": exchange,
+        "instrument": instrument,
+        "mode": mode,
+        "strategy_id": authored.get("strategy_id", "s1"),
+        "client_order_id": client_order_id,
+        "venue_client_id": client_order_id,
+        "idempotency_key": None,
+        "side": authored.get("side", "buy"),
+        "order_type": authored.get("order_type", "limit"),
+        "quantity": authored.get("quantity", 1.0),
+        "price": authored.get("price", 1.0),
+        "stop_price": authored.get("stop_price"),
+        "leverage": None,
+        "reduce_only": False,
+        "post_only": False,
+        "status": "dispatched",
+        "attempt_count": 1,
+        "last_error": None,
+        "created_at": now,
+        "dispatched_at": now,
+        "acked_at": None,
+        "terminal_at": None,
+        "exchange_order_id": None,
+        "supersedes_command_id": None,
+        "correlation_id": "fixture-correlation",
+        "wallet_public_id": _INTENT_WALLET,
+        "operator_public_id": None,
+        "user_public_id": None,
+        "source_surface": "strategy",
+        "origin": authored.get("origin", "live"),
+    }
+
+
+def _given_durable_intent[ClientT: ExchangeClientBase](
+    executor: ExchangeExecutorService[ClientT],
+    command: TradeCommandRow,
+    repository: MagicMock | None = None,
+) -> None:
+    """Configure keyed lineage and historical proof for previously authored intent.
+
+    Args:
+        executor: Actual executor whose scope must agree with the fixed intent.
+        command: Complete previously authored command, never a processing frame.
+        repository: Optional existing contract double with separately configured evidence.
+    """
+    original = command.copy()
+    if repository is None:
+        repository = MagicMock(spec=Repository)
+
+    async def _lookup(cid: str, exchange: str) -> TradeCommandRow | None:
+        """Resolve the fixed client and actual venue identity.
+
+        Args:
+            cid: Requested client order identity.
+            exchange: Actual executor venue.
+
+        Returns:
+            A fresh fixed row for the authored identity, otherwise None.
+        """
+        if cid != original["client_order_id"] or exchange != original["exchange"]:
+            return None
+        return original.copy()
+
+    async def _proof(public_id: str) -> TradeCommandRow:
+        """Resolve only the logical identity of the previously authored command.
+
+        Args:
+            public_id: Logical command identity whose history proof is required.
+
+        Returns:
+            A copy of the fixed matching durable intent.
+
+        Raises:
+            TradeCommandMaterialUnavailableError: If the logical identity is unknown.
+        """
+        if public_id != original["public_id"]:
+            raise TradeCommandMaterialUnavailableError(public_id, "fixture_intent_missing")
+        return original.copy()
+
+    repository.get_active_create_command_by_client_order_id = AsyncMock(side_effect=_lookup)
+    repository.require_consistent_trade_command_material = AsyncMock(side_effect=_proof)
+    executor.repository = cast(Repository, repository)
+    executor.wallet_public_id = _INTENT_WALLET
+
+
 def make_order(**overrides: Any) -> OrderRequestData:
     """Create an OrderRequestData with optional overrides."""
     return OrderRequestData(
@@ -313,7 +444,7 @@ def make_order(**overrides: Any) -> OrderRequestData:
         public_id="test-public-id",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         type="order_request",
-        exchange="paper",
+        exchange=overrides.get("exchange", "paper"),
         instrument=overrides.get("instrument", "BTC-USD"),
         side=overrides.get("side", "buy"),
         order_type=overrides.get("order_type", "limit"),
@@ -325,6 +456,7 @@ def make_order(**overrides: Any) -> OrderRequestData:
         signaled_at=overrides.get("signaled_at", datetime.now(tz=UTC)),
         leverage=overrides.get("leverage"),
         reduce_only=overrides.get("reduce_only", False),
+        wallet_public_id=overrides.get("wallet_public_id", ""),
     )
 
 
@@ -342,12 +474,19 @@ async def test_process_order_rejects_non_tradeable(monkeypatch: pytest.MonkeyPat
     ex._publish_order_status = AsyncMock()
     ex._execute_live_order = AsyncMock()
     monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: False)
-    order = make_order(instrument="NONTRADEABLE-USD")
+    _given_durable_intent(ex, _durable_command("c1", material={"instrument": "NONTRADEABLE-USD"}))
+    order = make_order(
+        instrument="NONTRADEABLE-USD",
+        wallet_public_id=_INTENT_WALLET,
+        exchange="kraken",
+        mode="live",
+    )
     await ex._process_order(order)
     ex._execute_live_order.assert_not_awaited()
     ex._publish_order_status.assert_awaited_once()
     rejected_call = ex._publish_order_status.call_args
     assert rejected_call[0][1] == "rejected"
+    cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -365,10 +504,13 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
     ex._publish_order_status = AsyncMock()
     ex._execute_live_order = AsyncMock(side_effect=RuntimeError("fail"))
     monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
-    order = make_order()
+    _given_durable_intent(ex, _durable_command("c1"))
+    _enable_live_trading(ex)
+    order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
     await ex._process_order(order)
     ex._publish_execution.assert_not_awaited()
     ex._publish_order_status.assert_awaited()
+    cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -381,12 +523,14 @@ async def test_execute_live_order_tracks_pending(monkeypatch: pytest.MonkeyPatch
     """
     ex: Any = MergedDummyExecutor()
     ex.exchange_client = MergedDummyClient()
-    order = make_order()
+    _given_durable_intent(ex, _durable_command("c1"))
+    order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
     ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     order_id = await ex._execute_live_order(order)
     assert order_id == "ex123"
     pending = ex.pending_orders[order.client_order_id]
     assert pending.exchange_order_id == "ex123"
+    cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -1535,9 +1679,24 @@ class TestExecuteLiveOrderErrors:
         mock_exchange_client = AsyncMock()
         mock_exchange_client.create_order = AsyncMock(side_effect=Exception("API error"))
         service_any.exchange_client = mock_exchange_client
-        order = self._create_order()
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(wallet_public_id=_INTENT_WALLET)
         with pytest.raises(Exception, match="API error"):
             await service_any._execute_live_order(order)
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1555,10 +1714,25 @@ class TestExecuteLiveOrderErrors:
         mock_exchange_client = AsyncMock()
         mock_exchange_client.create_order = AsyncMock(return_value=None)
         service_any.exchange_client = mock_exchange_client
-        order = self._create_order()
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(wallet_public_id=_INTENT_WALLET)
         with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
             await service_any._execute_live_order(order)
         assert exc_info.value.venue_answered is True
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
 
 class TestProcessOrder:
@@ -1622,9 +1796,24 @@ class TestProcessOrder:
         service_any._publish_execution = track_publish_execution
         service_any._publish_order_status = track_publish_order_status
         service_any._execute_live_order = AsyncMock(side_effect=Exception("Order execution failed"))
-        order = self._create_order()
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(wallet_public_id=_INTENT_WALLET)
         await service_any._process_order(order)
         assert any(status == "rejected" for _, status in published_statuses)
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
 
 class TestProcessExecution:
@@ -2983,11 +3172,25 @@ class TestExecutorCoverage:
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
-        service = KrakenOrderExecutor()
+        service = PaperOrderExecutor()
         service_any = cast(Any, service)
         mock_exchange_client = AsyncMock()
         service_any.exchange_client = mock_exchange_client
-        order = self._create_order(mode="paper")
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                    "exchange": "paper",
+                    "mode": "paper",
+                },
+            ),
+        )
+        order = self._create_order(mode="paper", wallet_public_id=_INTENT_WALLET, exchange="paper")
         exchange_order = ExchangeOrderSnapshot(
             id="exchange_123",
             client_order_id="test_order_123",
@@ -3005,6 +3208,43 @@ class TestExecutorCoverage:
         result = await service_any._execute_live_order(order)
         mock_exchange_client.create_order.assert_awaited_once()
         assert result == "exchange_123"
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_kraken_executor_holds_paper_mode_before_sdk(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Caller-supplied Paper mode cannot authorize a real Kraken CREATE.
+
+        Given: Fixed Kraken live intent and a queued frame claiming Paper mode,
+        When: The actual Kraken CREATE boundary is called,
+        Then: Dedicated scope refusal precedes any SDK CREATE.
+        """
+        mock_get_settings.return_value = self._create_mock_settings()
+        service = KrakenOrderExecutor()
+        client = MagicMock(spec=ExchangeClientBase)
+        client.create_order = AsyncMock()
+        service.exchange_client = cast(KrakenExchangeClient, client)
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(mode="paper", wallet_public_id=_INTENT_WALLET)
+        with pytest.raises(TradeCommandMaterialUnavailableError) as refused:
+            await service._execute_live_order(order)
+        assert refused.value.reason == "execution_scope_mismatch"
+        client.create_order.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3213,7 +3453,19 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         mock_exchange_client = AsyncMock()
         service_any.exchange_client = mock_exchange_client
-        order = self._create_order(mode="live")
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(mode="live", wallet_public_id=_INTENT_WALLET)
         mock_order_result = MagicMock()
         mock_order_result.id = "abc123"
         mock_order_result.db_order_id = 42
@@ -3228,6 +3480,9 @@ class TestExecutorCoverage:
         assert pending.exchange_order_id == "abc123"
         assert pending.db_order_id == 42
         assert pending.order_public_id == "pub-42"
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3245,10 +3500,25 @@ class TestExecutorCoverage:
         service_any = cast(Any, service)
         mock_exchange_client = MagicMock()
         service_any.exchange_client = mock_exchange_client
-        order = self._create_order(mode="live")
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(mode="live", wallet_public_id=_INTENT_WALLET)
         mock_exchange_client.create_order = AsyncMock(side_effect=RuntimeError("boom"))
         with pytest.raises(RuntimeError, match="boom"):
             await service_any._execute_live_order(order)
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3268,13 +3538,28 @@ class TestExecutorCoverage:
         service_any._publish_order_status = AsyncMock()
         service_any._publish_execution = AsyncMock()
         service_any._execute_live_order = AsyncMock(return_value="abc123")
-        order = self._create_order(mode="live")
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._create_order(mode="live", wallet_public_id=_INTENT_WALLET)
         await service_any._process_order(order)
         service_any._publish_order_status.assert_any_await(order, "submitted")
         service_any._publish_order_status.assert_any_await(order, "accepted", "abc123", reason=None)
         assert service_any._publish_order_status.await_count == 2
         service_any._publish_execution.assert_not_awaited()
         service_any._execute_live_order.assert_awaited_once_with(order)
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3287,17 +3572,36 @@ class TestExecutorCoverage:
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
-        service = KrakenOrderExecutor()
+        service = PaperOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
         _enable_live_trading(service_any)
         service_any._publish_order_status = AsyncMock()
         service_any._publish_execution = AsyncMock()
-        service_any._execute_paper_order = AsyncMock(return_value=None)
-        order = self._create_order()
+        service_any._execute_live_order = AsyncMock(
+            side_effect=RuntimeError("paper simulation rejected order")
+        )
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "test_order_123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                    "exchange": "paper",
+                    "mode": "paper",
+                },
+            ),
+        )
+        order = self._create_order(wallet_public_id=_INTENT_WALLET, mode="paper", exchange="paper")
         await service_any._process_order(order)
         service_any._publish_order_status.assert_any_await(order, "submitted")
         service_any._publish_order_status.assert_any_await(order, "rejected")
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4066,6 +4370,18 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test-order-123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
@@ -4079,6 +4395,7 @@ class TestExecutorWebSocketExecutions:
             quantity=0.1,
             client_order_id="test-order-123",
             exchange="kraken",
+            wallet_public_id=_INTENT_WALLET,
         )
         mock_order_result = type(
             "ExchangeOrderSnapshot",
@@ -4092,6 +4409,9 @@ class TestExecutorWebSocketExecutions:
         assert result == "KRAKEN-ORDER-ABC123"
         pending = service.pending_orders[order.client_order_id]
         assert pending.exchange_order_id == "KRAKEN-ORDER-ABC123"
+        cast(
+            MagicMock, service.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4111,6 +4431,18 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test-limit-123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "limit",
+                    "quantity": 0.5,
+                    "price": 44000.0,
+                },
+            ),
+        )
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
@@ -4125,6 +4457,7 @@ class TestExecutorWebSocketExecutions:
             price=44000.0,
             client_order_id="test-limit-123",
             exchange="kraken",
+            wallet_public_id=_INTENT_WALLET,
         )
         mock_order_result = type(
             "ExchangeOrderSnapshot",
@@ -4137,6 +4470,9 @@ class TestExecutorWebSocketExecutions:
         )
         result = await service._execute_live_order(order)
         assert result == "KRAKEN-LIMIT-XYZ"
+        cast(
+            MagicMock, service.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4157,6 +4493,18 @@ class TestExecutorWebSocketExecutions:
         mock_exchange_client = MagicMock()
         service_any = cast(Any, service)
         service_any.exchange_client = mock_exchange_client
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test-error-123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
@@ -4170,11 +4518,15 @@ class TestExecutorWebSocketExecutions:
             quantity=0.1,
             client_order_id="test-error-123",
             exchange="kraken",
+            wallet_public_id=_INTENT_WALLET,
         )
         mock_exchange_client.create_order = AsyncMock(side_effect=Exception("Insufficient balance"))
         with pytest.raises(Exception, match="Insufficient balance"):
             await service._execute_live_order(order)
         assert "test-error-123" not in service.pending_orders
+        cast(
+            MagicMock, service.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4393,6 +4745,18 @@ class TestExecutorWebSocketExecutions:
         service.running = True
         _enable_live_trading(service)
         service.publisher = AsyncMock()
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test-live-123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
@@ -4406,6 +4770,7 @@ class TestExecutorWebSocketExecutions:
             quantity=0.1,
             client_order_id="test-live-123",
             exchange="kraken",
+            wallet_public_id=_INTENT_WALLET,
         )
         with (
             patch.object(
@@ -4425,6 +4790,9 @@ class TestExecutorWebSocketExecutions:
             mock_execute_live.assert_called_once_with(order)
             assert mock_publish_status.call_args_list[0] == call(order, "submitted")
             mock_publish_execution.assert_not_called()
+        cast(
+            MagicMock, service.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4444,6 +4812,18 @@ class TestExecutorWebSocketExecutions:
         service.running = True
         _enable_live_trading(service)
         service.publisher = AsyncMock()
+        _given_durable_intent(
+            service,
+            _durable_command(
+                "test-rejected-123",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "market",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
         order = OrderRequestData(
             session_id="",
             sequence_id=0,
@@ -4457,6 +4837,7 @@ class TestExecutorWebSocketExecutions:
             quantity=0.1,
             client_order_id="test-rejected-123",
             exchange="kraken",
+            wallet_public_id=_INTENT_WALLET,
         )
         with (
             patch.object(
@@ -4475,6 +4856,9 @@ class TestExecutorWebSocketExecutions:
             await service._process_order(order)
             mock_publish_execution.assert_not_called()
             assert mock_publish_status.call_args_list[1] == call(order, "rejected")
+        cast(
+            MagicMock, service.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -6729,7 +7113,8 @@ class TestAmbiguousSubmitHandling:
                 client_order_id="c1", instrument="BTC-USD", message="timeout after send"
             )
         )
-        order = make_order()
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "unknown"]
@@ -6738,6 +7123,7 @@ class TestAmbiguousSubmitHandling:
         pending = ex.pending_orders[order.client_order_id]
         assert pending.submit_ambiguous is True
         assert pending.unknown_published is True
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_unknown_published_only_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6797,7 +7183,8 @@ class TestAmbiguousSubmitHandling:
         ex = self._executor(monkeypatch)
         ex._execute_live_order = AsyncMock(return_value="ex-live-9")
         ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
-        order = make_order()
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
@@ -6805,6 +7192,7 @@ class TestAmbiguousSubmitHandling:
         assert pending.accept_event_pending is True
         assert order.client_order_id in ex._unhealed_accept_events
         assert ex.client_by_exchange["ex-live-9"] == order.client_order_id
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_falsy_id_submit_parks_instead_of_rejecting(
@@ -6825,13 +7213,15 @@ class TestAmbiguousSubmitHandling:
                 venue_answered=True,
             )
         )
-        order = make_order()
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "unknown"]
         assert order.client_order_id in ex.pending_orders
         event_types = [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
         assert event_types == ["order_submit_unknown"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_accept_db_failure_without_pending_entry_still_accepts(
@@ -6917,12 +7307,14 @@ class TestAmbiguousSubmitHandling:
         ex = self._executor(monkeypatch)
         ex._publish_order_status = AsyncMock(return_value=False)
         ex._execute_live_order = AsyncMock(return_value="ex-live-11")
-        order = make_order()
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
         assert ex.client_by_exchange["ex-live-11"] == order.client_order_id
         assert order.client_order_id in ex.pending_orders
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 class TestAmbiguousVerification:
@@ -7001,14 +7393,15 @@ class TestAmbiguousVerification:
     ) -> None:
         """Two authoritative absences make the rejection venue-truth-based.
 
-        Given: The venue answering authoritative-absent twice,
+        Given: A proven durable intent and the venue answering authoritative-absent twice,
         When: _handle_ambiguous_submit runs,
         Then: REJECTED is published, the order_rejected venue event
             carries the verified-absent error, and the entry is gone.
         """
         ex = self._executor(monkeypatch)
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
-        order = make_order()
+        _given_durable_intent(ex, _durable_command())
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._handle_ambiguous_submit(order, self._ambiguous(order))
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["rejected"]
@@ -7279,7 +7672,7 @@ class TestDuplicateSubmitGuard:
             survives untouched.
         """
         ex = self._executor(monkeypatch)
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         original = base_module.PendingOrderState(request=order)
         original.submit_ambiguous = True
         original.last_seen_cum_qty = 0.7
@@ -7304,7 +7697,7 @@ class TestDuplicateSubmitGuard:
         Then: The command is dropped silently.
         """
         ex = self._executor(monkeypatch)
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         ex._unhealed_accept_events[order.client_order_id] = {"event_type": "order_accepted"}
         await ex._process_order(order)
         ex._publish_order_status.assert_not_awaited()
@@ -7326,7 +7719,7 @@ class TestDuplicateSubmitGuard:
         repo.has_order_submit_evidence = AsyncMock(return_value=True)
         repo.has_venue_event = AsyncMock(return_value=False)
         ex.repository = repo
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         repo.has_order_submit_evidence.assert_awaited_once_with(order.client_order_id)
         ex._publish_order_status.assert_not_awaited()
@@ -7354,7 +7747,7 @@ class TestDuplicateSubmitGuard:
         repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
         ex.repository = repo
         ex._record_venue_event = AsyncMock()
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         ex._record_venue_event.assert_not_awaited()
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
@@ -7388,7 +7781,7 @@ class TestDuplicateSubmitGuard:
         repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
         ex.repository = repo
         ex._record_venue_event = AsyncMock()
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         ex._record_venue_event.assert_not_awaited()
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
@@ -7409,29 +7802,32 @@ class TestDuplicateSubmitGuard:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.has_order_submit_evidence = AsyncMock(return_value=False)
         ex.repository = repo
-        order = make_order()
+        _given_durable_intent(ex, _durable_command("c1"), repository=ex.repository)
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
         ex._execute_live_order.assert_awaited_once()
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_non_sqlalchemy_repository_skips_durable_check(
+    async def test_non_sqlalchemy_repository_requires_matching_material(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without a SQLAlchemy repository the durable check is skipped.
+        """A non-SQL backend still supplies explicit durable material proof.
 
-        Given: A plain mock repository (not SQLAlchemyRepository),
+        Given: A Repository contract double with fixed matching intent proof,
         When: The dispatch arrives,
-        Then: The submit proceeds (same exposure model as the durable
-            venue-event writes).
+        Then: The submit proceeds after the same material proof boundary.
         """
         ex = self._executor(monkeypatch)
-        ex.repository = MagicMock()
-        order = make_order()
+        ex.repository = MagicMock(spec=Repository)
+        _given_durable_intent(ex, _durable_command("c1"), repository=ex.repository)
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_evidence_check_failure_drops_fail_closed(
@@ -7449,7 +7845,7 @@ class TestDuplicateSubmitGuard:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.has_order_submit_evidence = AsyncMock(side_effect=RuntimeError("db down"))
         ex.repository = repo
-        order = make_order()
+        order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
         await ex._process_order(order)
         ex._publish_order_status.assert_not_awaited()
         ex._execute_live_order.assert_not_awaited()
@@ -7487,7 +7883,13 @@ class TestStaleCommandGate:
             create_order is never reached; no pending entry appears.
         """
         ex = self._executor(monkeypatch)
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["rejected"]
@@ -7496,6 +7898,7 @@ class TestStaleCommandGate:
         assert "stale command" in event["error"]
         ex._execute_live_order.assert_not_awaited()
         assert order.client_order_id not in ex.pending_orders
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_reject_publish_failure_writes_no_terminal_event(
@@ -7513,38 +7916,63 @@ class TestStaleCommandGate:
         """
         ex = self._executor(monkeypatch)
         ex._publish_order_status = AsyncMock(return_value=False)
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         ex._record_venue_event.assert_not_awaited()
         ex._execute_live_order.assert_not_awaited()
         assert order.client_order_id not in ex.pending_orders
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_fresh_frame_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A frame inside the TTL submits normally."""
         ex = self._executor(monkeypatch)
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=1))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_frame_without_age_anchor_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Legacy frames without signaled_at skip the gate."""
         ex = self._executor(monkeypatch)
-        order = make_order(signaled_at=None)
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=None, wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live"
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_disabled_ttl_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """TTL <= 0 disables the gate entirely."""
         ex = self._executor(monkeypatch, ttl=0.0)
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9_000))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9000),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_unparseable_settings_disable_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7557,16 +7985,31 @@ class TestStaleCommandGate:
         """
         ex = self._executor(monkeypatch)
         ex.settings = SimpleNamespace()
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9_000))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9000),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
         ex._publish_order_status.reset_mock()
         ex.settings = SimpleNamespace(trade_command_dispatch_ttl_s="not-a-number")
         ex.pending_orders.clear()
-        await ex._process_order(make_order(client_order_id="c-unparse-2"))
+        _given_durable_intent(ex, _durable_command("c-unparse-2"))
+        await ex._process_order(
+            make_order(
+                client_order_id="c-unparse-2",
+                wallet_public_id=_INTENT_WALLET,
+                exchange="kraken",
+                mode="live",
+            )
+        )
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_duplicate_drops_silently_not_rejected(
@@ -7583,11 +8026,20 @@ class TestStaleCommandGate:
             to prevent).
         """
         ex = self._executor(monkeypatch)
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         await ex._process_order(order)
         ex._publish_order_status.assert_not_awaited()
         ex._record_venue_event.assert_not_awaited()
+        cast(
+            MagicMock, ex.repository
+        ).require_consistent_trade_command_material.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_replay_of_placed_order_is_adopted(
@@ -7608,7 +8060,13 @@ class TestStaleCommandGate:
                 id="ex-stale-live", status=base_module.ExchangeOrderStatusEnum.OPEN
             )
         )
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["accepted"]
@@ -7616,6 +8074,7 @@ class TestStaleCommandGate:
         assert accepted_kwargs.get("reason") == "adopted"
         assert ex.client_by_exchange["ex-stale-live"] == order.client_order_id
         ex._execute_live_order.assert_not_awaited()
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_unverifiable_drops_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7632,11 +8091,18 @@ class TestStaleCommandGate:
         ex.exchange_client.find_order_by_client_id = AsyncMock(
             side_effect=NotImplementedError("no lookup")
         )
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         ex._publish_order_status.assert_not_awaited()
         ex._record_venue_event.assert_not_awaited()
         ex._execute_live_order.assert_not_awaited()
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_without_exchange_client_drops_silently(
@@ -7645,10 +8111,17 @@ class TestStaleCommandGate:
         """A stale frame with no venue client to ask drops silently."""
         ex = self._executor(monkeypatch)
         ex.exchange_client = None
-        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        _given_durable_intent(ex, _durable_command("c1"))
+        order = make_order(
+            signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         ex._publish_order_status.assert_not_awaited()
         ex._record_venue_event.assert_not_awaited()
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 class TestSupervisedExecutionStream:
@@ -9995,7 +10468,13 @@ class TestTerminalSectionsCancelSafety:
         ex.running = True
         ex.exchange_client = AsyncMock()
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
-        order = make_order(client_order_id="amb-cut")
+        _given_durable_intent(ex, _durable_command("amb-cut"))
+        order = make_order(
+            client_order_id="amb-cut",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
         ex.pending_orders["amb-cut"] = pending
         ex._publish_order_status = AsyncMock(return_value=True)
@@ -10023,7 +10502,13 @@ class TestTerminalSectionsCancelSafety:
         ex.running = True
         ex.exchange_client = AsyncMock()
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
-        order = make_order(client_order_id="amb-pubfail")
+        _given_durable_intent(ex, _durable_command("amb-pubfail"))
+        order = make_order(
+            client_order_id="amb-pubfail",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
         ex.pending_orders["amb-pubfail"] = pending
         ex._publish_order_status = AsyncMock(return_value=False)
@@ -10481,7 +10966,25 @@ class TestCoreToWireOrderRequest:
         result.db_order_public_id = None
         mock_exchange_client.create_order = AsyncMock(return_value=result)
         service_any.exchange_client = mock_exchange_client
-        order = self._order(order_type="stop_limit", price=47900.0, stop_price=48000.0)
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "cid-stop-1",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "stop_limit",
+                    "quantity": 0.1,
+                    "price": 47900.0,
+                    "stop_price": 48000.0,
+                },
+            ),
+        )
+        order = self._order(
+            order_type="stop_limit",
+            price=47900.0,
+            stop_price=48000.0,
+            wallet_public_id=_INTENT_WALLET,
+        )
         returned = await service_any._execute_live_order(order)
         assert returned == "OID-1"
         sent = mock_exchange_client.create_order.call_args[0][0]
@@ -10489,6 +10992,9 @@ class TestCoreToWireOrderRequest:
         assert sent.stop_price == 48000.0
         assert sent.price == 47900.0
         assert sent.client_order_id == "cid-stop-1"
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -10530,7 +11036,19 @@ class TestCoreToWireOrderRequest:
 
         service_any._publish_order_status = track_status
         service_any._record_venue_event = track_event
-        order = self._order(order_type="stop")
+        _given_durable_intent(
+            service_any,
+            _durable_command(
+                "cid-stop-1",
+                material={
+                    "strategy_id": "test_strategy",
+                    "order_type": "stop",
+                    "quantity": 0.1,
+                    "price": None,
+                },
+            ),
+        )
+        order = self._order(order_type="stop", wallet_public_id=_INTENT_WALLET)
         await service_any._process_order(order)
         mock_exchange_client.create_order.assert_not_called()
         assert "rejected" in statuses
@@ -10538,6 +11056,9 @@ class TestCoreToWireOrderRequest:
         assert recorded[0]["event_type"] == "order_rejected"
         assert "without stop_price" in recorded[0]["error"]
         assert order.client_order_id not in service_any.pending_orders
+        cast(
+            MagicMock, service_any.repository
+        ).require_consistent_trade_command_material.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -11267,12 +11788,19 @@ class TestReplayOriginGuard:
         ex._publish_order_status = AsyncMock(return_value=True)
         ex._record_venue_event = AsyncMock()
         ex._execute_live_order = AsyncMock()
-        order = make_order(client_order_id="replay-3")
+        _given_durable_intent(ex, _durable_command("replay-3", material={"origin": "replay"}))
+        order = make_order(
+            client_order_id="replay-3",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         replayed = order.model_copy(update={"origin": "replay"})
         await ex._process_order(replayed)
         ex._reject_if_stale.assert_not_awaited()
         ex._execute_live_order.assert_not_awaited()
         assert "replay-3" not in ex.pending_orders
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
 class TestVenueDuplicateIdRejectionDisposition:
@@ -11391,7 +11919,13 @@ class TestVenueDuplicateIdRejectionDisposition:
                 id="ex-dup-1", status=base_module.ExchangeOrderStatusEnum.OPEN
             )
         )
-        order = make_order(client_order_id="dup-cl-ord-id")
+        _given_durable_intent(ex, _durable_command("dup-cl-ord-id"))
+        order = make_order(
+            client_order_id="dup-cl-ord-id",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
@@ -11403,6 +11937,7 @@ class TestVenueDuplicateIdRejectionDisposition:
         assert pending.exchange_order_id == "ex-dup-1"
         assert self._slept_delays(ex) == [0.0]
         assert ex.exchange_client.find_order_by_client_id.await_count == 1
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_lost_response_still_waits_before_its_first_lookup(
@@ -11430,10 +11965,17 @@ class TestVenueDuplicateIdRejectionDisposition:
                 id="ex-lost-1", status=base_module.ExchangeOrderStatusEnum.OPEN
             )
         )
-        order = make_order(client_order_id="lost-cl-ord-id")
+        _given_durable_intent(ex, _durable_command("lost-cl-ord-id"))
+        order = make_order(
+            client_order_id="lost-cl-ord-id",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         assert self._slept_delays(ex) == [2.0]
         assert ex.pending_orders["lost-cl-ord-id"].exchange_order_id == "ex-lost-1"
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_bare_venue_error_rejects_only_after_two_absences(
@@ -11469,7 +12011,13 @@ class TestVenueDuplicateIdRejectionDisposition:
         """
         ex = self._executor(monkeypatch, self._bare_venue_error())
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
-        order = make_order(client_order_id="dup-cl-ord-id")
+        _given_durable_intent(ex, _durable_command("dup-cl-ord-id"))
+        order = make_order(
+            client_order_id="dup-cl-ord-id",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "rejected"]
@@ -11482,6 +12030,7 @@ class TestVenueDuplicateIdRejectionDisposition:
         assert "EOrder:Order already exists" in event["error"]
         assert len(event["error"]) <= 512
         assert "dup-cl-ord-id" not in ex.pending_orders
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_bare_venue_error_with_unresolvable_lookup_parks_unknown(
@@ -11504,12 +12053,19 @@ class TestVenueDuplicateIdRejectionDisposition:
         ex.exchange_client.find_order_by_client_id = AsyncMock(
             side_effect=ccxt.NetworkError("venue unreachable")
         )
-        order = make_order(client_order_id="dup-cl-ord-id")
+        _given_durable_intent(ex, _durable_command("dup-cl-ord-id"))
+        order = make_order(
+            client_order_id="dup-cl-ord-id",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "unknown"]
         assert self._recorded_event_types(ex) == ["order_submit_unknown"]
         assert ex.pending_orders["dup-cl-ord-id"].submit_ambiguous is True
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -11537,7 +12093,13 @@ class TestVenueDuplicateIdRejectionDisposition:
         rejection with a blocking verification round.
         """
         ex = self._executor(monkeypatch, definitive_error)
-        order = make_order(client_order_id="dup-cl-ord-id")
+        _given_durable_intent(ex, _durable_command("dup-cl-ord-id"))
+        order = make_order(
+            client_order_id="dup-cl-ord-id",
+            wallet_public_id=_INTENT_WALLET,
+            exchange="kraken",
+            mode="live",
+        )
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "rejected"]
@@ -11547,3 +12109,4 @@ class TestVenueDuplicateIdRejectionDisposition:
         assert str(definitive_error) in event["error"]
         assert "dup-cl-ord-id" not in ex.pending_orders
         ex.exchange_client.find_order_by_client_id.assert_not_awaited()
+        cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()

@@ -950,6 +950,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         "composite_figi",
         "share_class_figi",
         "source_feed",
+        "last_updated_utc",
     )
 
     @staticmethod

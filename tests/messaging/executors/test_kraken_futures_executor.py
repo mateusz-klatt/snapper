@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -74,6 +75,7 @@ def test_create_exchange_client_uses_injected_credentials(
         "api_key": wallet_credential_envelope.api_key_value,
         "api_secret": wallet_credential_envelope.api_secret_value,
         "repository": None,
+        "sandbox": False,
     }
 
 
@@ -165,4 +167,94 @@ def test_create_exchange_client_uses_credential_dict_when_wallet_set(
         "api_key": wallet_credential_envelope.api_key_value,
         "api_secret": wallet_credential_envelope.api_secret_value,
         "repository": None,
+        "sandbox": False,
     }
+
+
+@pytest.mark.parametrize(("environment", "sandbox"), (("production", False), ("demo", True)))
+async def test_credential_environment_drives_actual_sdk_and_ccxt_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+    environment: str,
+    sandbox: bool,
+) -> None:
+    """Explicit per-version environment selects real endpoint configuration without network IO.
+
+    Given: A resolved wallet credential envelope with an exact production or demo label,
+    When: The actual executor factory constructs its actual client,
+    Then: SDK and CCXT routing agree with the selected environment rather than a detached flag.
+    """
+    monkeypatch.setattr(
+        "snapper.messaging.executors.kraken_futures.get_repository", MagicMock(return_value=None)
+    )
+    executor = KrakenFuturesOrderExecutor()
+    executor._credentials = {
+        "api_key": "synthetic-local-only",
+        "api_secret": "c3ludGhldGlj",
+        "environment": environment,
+    }
+    client = executor._create_exchange_client()
+    try:
+        assert client.sandbox is sandbox
+        route = client.execution_api_route()
+        assert route is not None
+        assert route.environment == environment
+        assert route.public_api_origin == (
+            "https://demo-futures.kraken.com" if sandbox else "https://futures.kraken.com"
+        )
+    finally:
+        await client.disconnect()
+
+
+class _CoercedEnvironment(str):
+    """Represent an untrusted already-coerced label at the internal factory boundary."""
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        "",
+        " ",
+        "Production",
+        "DEMO",
+        " production",
+        "demo ",
+        "paper",
+        None,
+        True,
+        1,
+        ["demo"],
+        {"value": "demo"},
+        _CoercedEnvironment("demo"),
+    ),
+)
+def test_unproven_environment_refuses_before_repository_or_client_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+    environment: object,
+) -> None:
+    """A malformed or coerced route label cannot silently choose production or demo.
+
+    Given: An invalid injected credential-environment value,
+    When: The executor validates actual client selection,
+    Then: It refuses with a fixed message before either repository or SDK construction.
+    """
+    constructor = MagicMock()
+    repository = MagicMock()
+    monkeypatch.setattr(
+        "snapper.messaging.executors.kraken_futures.KrakenFuturesExchangeClient", constructor
+    )
+    monkeypatch.setattr("snapper.messaging.executors.kraken_futures.get_repository", repository)
+    executor = KrakenFuturesOrderExecutor()
+    executor._credentials = cast(
+        dict[str, str],
+        {
+            "api_key": "synthetic-local-only",
+            "api_secret": "synthetic-local-only",
+            "environment": environment,
+        },
+    )
+    with pytest.raises(ValueError, match="environment must be production or demo"):
+        executor._create_exchange_client()
+    constructor.assert_not_called()
+    repository.assert_not_called()

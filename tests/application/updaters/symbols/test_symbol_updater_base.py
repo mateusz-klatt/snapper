@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.models import Symbol as _Sym
@@ -2290,3 +2292,101 @@ def test_reconcile_aliases_does_not_touch_other_exchange(
     assert closed == 1
     assert _open_aliases_count(updater, eth_spid, "kraken") == 1
     assert _open_aliases_count(updater, eth_spid, "kraken_futures") == 0
+
+
+def test_alias_rename_keeps_the_previous_observation_and_logical_identity(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Retain the real previous alias when the venue changes its spelling.
+
+    Given: A persisted symbol and its original exchange alias.
+    When: A later observation changes that alias through the actual updater.
+    Then: One logical alias retains both exact spellings and contiguous history.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    original_at = datetime(2026, 10, 23, 1, tzinfo=UTC)
+    changed_at = original_at + timedelta(hours=1)
+    symbol_id = _seed_catalog(updater, "BTC-USD", original_at)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        assert (
+            SymbolUpdaterService._upsert_alias(
+                session, symbol_id, "kraken", "ws", "XBT/USD", original_at, "test-session", 1
+            )
+            == "created"
+        )
+        session.commit()
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        assert (
+            SymbolUpdaterService._upsert_alias(
+                session, symbol_id, "kraken", "ws", "BTC/USD", changed_at, "test-session", 2
+            )
+            == "updated"
+        )
+        session.commit()
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        rows = session.scalars(
+            select(SymbolAlias)
+            .where(SymbolAlias.symbol_public_id == symbol_id)
+            .order_by(SymbolAlias.timestamp)
+        ).all()
+        assert len(rows) == 2
+        assert rows[0].public_id == rows[1].public_id
+        assert [row.exchange_symbol for row in rows] == ["XBT/USD", "BTC/USD"]
+        assert rows[0].timestamp == original_at
+        assert rows[0].known_to == rows[1].timestamp == changed_at
+        assert rows[1].known_to == KNOWN_TO_MAX
+
+
+def test_nonowning_refresh_preserves_stored_base_asset_units_and_source_clock(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Keep existing spot units without deriving contract dimensions or renewed provenance.
+
+    Given: An inactive persisted instrument has explicit base-asset quantity units.
+    When: A nonowning updater projects the existing atomic metadata block.
+    Then: Its units, inactive status and original source clock remain unchanged.
+    """
+    updater = updater_factory(3, False)
+    assert updater.repository is not None
+    observed_at = datetime(2026, 10, 23, 1, tzinfo=UTC)
+    symbol_id = _seed_catalog(updater, "BTC-USD", observed_at)
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        instrument = Instrument(
+            symbol_public_id=symbol_id,
+            exchange="kraken",
+            timestamp=observed_at,
+            session_id="test-session",
+            sequence_id=2,
+        )
+        session.add(instrument)
+        session.flush()
+        spec = InstrumentSpec(
+            instrument_public_id=instrument.public_id,
+            timestamp=observed_at,
+            session_id="test-session",
+            sequence_id=3,
+            status="inactive",
+            quantity_unit="base_asset",
+            native_order_quantity_unit="base_asset",
+            spec_source="kraken:rest.AssetPairs",
+            spec_version="original-unit-source-v1",
+            spec_observed_at=observed_at,
+            unit_certified=False,
+        )
+        session.add(spec)
+        session.commit()
+        stored = session.scalars(select(InstrumentSpec)).one()
+        metadata = SymbolUpdaterService._preserved_instrument_metadata(stored)
+        assert metadata.quantity_unit == metadata.native_order_quantity_unit == "base_asset"
+        assert metadata.status == "inactive"
+        assert metadata.spec_source == stored.spec_source
+        assert metadata.spec_version == "original-unit-source-v1"
+        assert metadata.spec_observed_at == observed_at
+        assert metadata.contract_size is None
+        assert metadata.contract_payoff_model is None
+        assert metadata.unit_certified is False

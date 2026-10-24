@@ -17,10 +17,16 @@ Configuration
 Requires a ``wallet_credentials`` row with
 ``exchange="kraken_futures"``, ``credential_type="api_key_secret"``,
 and a Fernet-encrypted envelope ``{"api_key": "...", "api_secret":
-"..."}``. Loaded at executor startup via ``CredentialResolver``.
+"...", "environment": "production"}``. The optional environment is
+strictly ``production`` or ``demo``; an absent field preserves legacy
+production routing. Loaded at executor startup via ``CredentialResolver``.
 ``wallet_credentials`` is the single source of truth for Kraken
 Futures API credentials.
 """
+
+from collections.abc import Mapping
+from typing import Literal
+from typing import cast
 
 from snapper.application.process_manager.registry import register_process
 from snapper.core.types import ExchangeEnum
@@ -32,6 +38,14 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.messaging.executors.base import ExchangeExecutorService
+
+
+def _credential_environment(credentials: Mapping[str, object]) -> Literal["production", "demo"]:
+    """Read explicit routing without trimming, case folding or coercing credential values."""
+    environment = credentials.get("environment", "production")
+    if type(environment) is not str or environment not in {"production", "demo"}:
+        raise ValueError("Kraken Futures credential environment must be production or demo")
+    return cast(Literal["production", "demo"], environment)
 
 
 @register_process(
@@ -79,7 +93,6 @@ class KrakenFuturesOrderExecutor(ExchangeExecutorService[KrakenFuturesExchangeCl
         Returns:
             KrakenFuturesExchangeClient with API credentials.
         """
-        repository = get_repository(self.settings.db_url)
         if self._credentials is None:
             raise RuntimeError(
                 "KrakenFuturesOrderExecutor: credentials not resolved. "
@@ -87,10 +100,13 @@ class KrakenFuturesOrderExecutor(ExchangeExecutorService[KrakenFuturesExchangeCl
                 "contains a row for exchange='kraken_futures', or inject "
                 "self._credentials directly in tests before calling start()."
             )
+        environment = _credential_environment(self._credentials)
+        repository = get_repository(self.settings.db_url)
         return KrakenFuturesExchangeClient(
             api_key=self._credentials["api_key"],
             api_secret=self._credentials["api_secret"],
             repository=repository,
+            sandbox=environment == "demo",
         )
 
     def _get_exchange_name(self) -> OrderExchange:

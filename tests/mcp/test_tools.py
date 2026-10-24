@@ -46,6 +46,8 @@ from snapper.data.models import Symbol
 from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import InstrumentSourceResolution
+from snapper.data.repository_types import InstrumentValuationMetadataRow
 from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
@@ -122,6 +124,31 @@ def _allow_execution_venue(
     repo.list_active_wallet_credentials = AsyncMock(
         return_value=[{"wallet_public_id": wallet_public_id, "exchange": exchange}]
     )
+
+
+def _allow_kraken_btc_paper_source(repo: AsyncMock, paper_public_id: str) -> None:
+    """Supply exact source evidence only for an explicitly selected ordinary BTC mirror.
+
+    Args:
+        repo: Repository double belonging to an ordinary BTC paper-positive test.
+        paper_public_id: Exact paper UUID already used by that test's order request.
+    """
+    source_public_id = f"{paper_public_id}-kraken-btc"
+    resolution: InstrumentSourceResolution = {
+        "valuation_public_id": source_public_id,
+        "is_paper": True,
+        "mapped": True,
+    }
+    metadata: InstrumentValuationMetadataRow = {
+        "exchange": "kraken",
+        "base": "BTC",
+        "quote": "USD",
+        "spec": None,
+    }
+    source_mappings = {paper_public_id: resolution}
+    source_rows = {source_public_id: metadata}
+    repo.resolve_source_instrument_public_id = AsyncMock(side_effect=source_mappings.get)
+    repo.get_active_instrument_valuation_metadata = AsyncMock(side_effect=source_rows.get)
 
 
 def _build_server(
@@ -424,7 +451,12 @@ class TestSubmitManualOrderTool:
 
     @pytest.mark.asyncio
     async def test_paper_exchange_writes_paper_mode_rows_and_shard(self) -> None:
-        """Paper MCP submits persist a consistent paper command-plane scope."""
+        """Persist ordinary Spot paper scope after authoritative source admission.
+
+        Given: A BTC paper UUID mapped to an exact positively classified Kraken source.
+        When: The registered MCP tool submits an ordinary cash limit order.
+        Then: Plan and command preserve paper scope after the source profile is verified.
+        """
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-paper"))
         repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-paper"))
@@ -439,6 +471,7 @@ class TestSubmitManualOrderTool:
             return_value=[{"wallet_public_id": "paper-wallet", "exchange": "paper"}]
         )
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="paper-inst")
+        _allow_kraken_btc_paper_source(repo, "paper-inst")
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -467,6 +500,10 @@ class TestSubmitManualOrderTool:
         assert command_row["exchange"] == "paper"
         assert command_row["mode"] == "paper"
         assert command_row["shard_key"] == "paper.BTC-USD.paper.wpaperwallet"
+        repo.resolve_source_instrument_public_id.assert_awaited_once_with("paper-inst")
+        repo.get_active_instrument_valuation_metadata.assert_awaited_once_with(
+            "paper-inst-kraken-btc"
+        )
 
     @pytest.mark.asyncio
     async def test_explicit_paper_wallet_on_live_venue_is_refused_before_writes(self) -> None:
@@ -1020,7 +1057,8 @@ class TestSubmitManualOrderTool:
         """Dispatch a baseline limit submit plus optional execution modifiers.
 
         Keeps the modifier tests focused on persisted destinations by
-        holding every other tool argument fixed across them.
+        holding every other tool argument fixed across them. The paper case
+        explicitly binds the baseline BTC mirror to its known Kraken cash source.
 
         Args:
             modifiers: Extra tool arguments merged over the baseline
@@ -1050,6 +1088,8 @@ class TestSubmitManualOrderTool:
         repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
         _allow_wallet(repo)
         _allow_execution_venue(repo, "wallet-1", exchange=exchange, is_paper=paper_wallet)
+        if exchange == "paper":
+            _allow_kraken_btc_paper_source(repo, "inst-1")
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         server = _build_server(
             repository=repo,
@@ -1162,7 +1202,8 @@ class TestSubmitManualOrderTool:
     async def test_reduce_only_reaches_command_column_only(self) -> None:
         """Reduce-only follows REST into the command column, not the plan params.
 
-        Given: a submit carrying ``reduce_only=True``,
+        Given: a Kraken spot margin submit carrying ``reduce_only=True``
+            and ``leverage=2``,
         When: ``submit_manual_order`` runs,
         Then: the command row's ``reduce_only`` column is set while
             the plan params stay free of the key. The ``manual_once``
@@ -1170,18 +1211,19 @@ class TestSubmitManualOrderTool:
             but REST never writes it there and this tool mirrors the
             route rather than the docstring.
 
-        Submitted against ``kraken_futures`` because that is the only
-        venue whose client forwards the flag; see the spot refusal test
-        below for why the other venues cannot be used here.
+        Kraken spot forwards the clamp for margin orders. Futures CREATE
+        remains behind its accounting admission barrier, so it cannot serve
+        as the positive persistence fixture for this independent modifier rule.
         """
-        repo, _ = await self._dispatch_manual_order_with_modifiers(
-            {"reduce_only": True}, exchange="kraken_futures"
+        repo, result = await self._dispatch_manual_order_with_modifiers(
+            {"reduce_only": True, "leverage": 2}, exchange="kraken"
         )
+        assert result["command_public_id"] == "cmd-pid"
         plan_row = repo.insert_execution_plan.await_args.args[0]
         cmd_row = repo.insert_trade_command.await_args.args[0]
         assert cmd_row["reduce_only"] is True
         assert "reduce_only" not in plan_row["params"]
-        assert cmd_row["leverage"] is None
+        assert cmd_row["leverage"] == 2
 
     @pytest.mark.asyncio
     async def test_reduce_only_is_refused_where_snapper_does_not_send_it(self) -> None:
@@ -1220,32 +1262,35 @@ class TestSubmitManualOrderTool:
         repo.insert_trade_command.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_bare_reduce_only_is_accepted_on_futures(self) -> None:
-        """Futures take reduce-only with no leverage, and must not be caught by the spot rule.
+    async def test_bare_reduce_only_preserves_futures_capability_refusal(self) -> None:
+        """A valid Futures modifier cannot enable a market-data-only instrument.
 
         Given: a submit carrying ``reduce_only=True`` and no leverage against
             ``kraken_futures``,
         When: ``submit_manual_order`` runs,
-        Then: the order is accepted and the command row carries the flag.
+        Then: The instrument's market-data-only capability refusal is returned before any
+            plan or command is persisted, without applying the spot margin rule.
 
-        This pins a deadlock that an earlier design would have shipped. Spot
-        binds the reduce-only clamp to a margin position, so spot refuses the
-        flag without leverage. Applying that rule venue-wide would refuse the
-        bare futures call — and refusing WITH leverage too, since futures take
-        no per-order leverage. Both directions closed, and the single most
-        legitimate use of the flag in the whole system — de-risking an open
-        futures position — becomes unreachable.
-
-        ``kraken_futures.py`` sets ``reduceOnly`` on any order type with no
-        leverage precondition whatsoever, so the acceptance here is what the
-        venue actually does.
+        The venue adapter supports bare reduce-only. That modifier capability
+        does not grant catalog execution capability. This request is refused at
+        the earlier capability boundary before product accounting admission.
         """
-        repo, _ = await self._dispatch_manual_order_with_modifiers(
+        repo, result = await self._dispatch_manual_order_with_modifiers(
             {"reduce_only": True}, exchange="kraken_futures"
         )
-        cmd_row = repo.insert_trade_command.await_args.args[0]
-        assert cmd_row["reduce_only"] is True
-        assert cmd_row["leverage"] is None
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "instrument_market_data_only"
+        assert envelope["details"] == {
+            "symbol": "BTC-USD",
+            "exchange": "kraken_futures",
+            "reason": (
+                "SymbolExchangeCapability.can_trade is False for this "
+                "(symbol, exchange); use an execution-capable instrument"
+            ),
+        }
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_spot_reduce_only_without_leverage_is_refused(self) -> None:
@@ -1321,20 +1366,14 @@ class TestSubmitManualOrderTool:
 
     @pytest.mark.asyncio
     async def test_paper_accepts_reduce_only_and_discloses_that_it_is_inert(self) -> None:
-        """Paper takes the order and says the flag does nothing, rather than refusing.
+        """Disclose inert reduce-only for an explicitly proven ordinary cash paper profile.
 
-        Given: a submit carrying ``reduce_only=True`` against ``paper``,
-        When: ``submit_manual_order`` runs,
-        Then: it returns the accepted envelope, persists plan and command,
-            and names ``reduce_only`` in ``inert_flags``.
+        Given: A known BTC paper mirror and a submit carrying reduce_only=True.
+        When: submit_manual_order checks its authoritative Kraken cash source.
+        Then: It persists the paper order and names reduce_only in inert_flags.
 
-        Paper ignores the flag exactly as spot does, but the consequence
-        is not the same. There is no real position to overshoot and no
-        real money, so the only cost is rehearsal fidelity — refusing
-        here would block the default practice venue for a workflow that
-        becomes legitimate the moment it moves to Kraken Futures.
-        Disclosing is the honest middle: the caller is not stopped, and
-        is not left believing a clamp was applied.
+        This disclosure describes cash-only rehearsal. Derivative and token
+        source-profile barriers remain independent and are not bypassed by the flag.
         """
         repo, result = await self._dispatch_manual_order_with_modifiers(
             {"reduce_only": True}, exchange="paper", paper_wallet=True
@@ -1342,6 +1381,8 @@ class TestSubmitManualOrderTool:
         assert result["inert_flags"] == ["reduce_only"]
         repo.insert_execution_plan.assert_awaited()
         assert repo.insert_trade_command.await_args.args[0]["reduce_only"] is True
+        repo.resolve_source_instrument_public_id.assert_awaited_once_with("inst-1")
+        repo.get_active_instrument_valuation_metadata.assert_awaited_once_with("inst-1-kraken-btc")
 
     @pytest.mark.asyncio
     async def test_post_only_is_not_disclosed_as_inert_where_the_venue_honours_it(

@@ -22,8 +22,15 @@ import zmq.asyncio
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.core.financial_account_owner import FINANCIAL_OWNER_SETTING_KEY
+from snapper.core.financial_account_owner import FinancialAccountOwnerUnavailableError
+from snapper.core.financial_account_owner import canonical_financial_account_owner_policy
+from snapper.core.financial_account_owner import parse_financial_account_owner_policy
 from snapper.core.json_types import JsonValue
+from snapper.data.financial_account_owner_policy_writer import FinancialOwnerPolicyChange
+from snapper.data.financial_account_owner_policy_writer import write_financial_owner_policy
 from snapper.data.models import Setting
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -305,7 +312,9 @@ class SettingsService:
         updated_by: str | None,
         now: datetime,
     ) -> None:
-        """Close active setting and insert new version (SCD Type 2)."""
+        """Close active generic settings while requiring the dedicated reserved policy producer."""
+        if key == FINANCIAL_OWNER_SETTING_KEY:
+            raise FinancialAccountOwnerUnavailableError("financial_owner_reserved_writer_required")
         repository = get_repository(self.db_url)
         async with repository.session() as session:
             await close_and_insert(
@@ -325,6 +334,30 @@ class SettingsService:
                 bus_time=now,
             )
             await session.commit()
+
+    async def _update_financial_owner_policy(self, value: str, updated_by: str | None) -> None:
+        """Use the actual post-lock policy revision for cache and broadcast after its commit."""
+        if updated_by is None:
+            raise FinancialAccountOwnerUnavailableError("financial_owner_policy_updater_required")
+        policy = parse_financial_account_owner_policy(value)
+        change = FinancialOwnerPolicyChange(policy=policy, updated_by=updated_by)
+        repository = get_repository(self.db_url)
+        if not isinstance(repository, SQLAlchemyRepository):
+            raise FinancialAccountOwnerUnavailableError(
+                "financial_owner_sqlalchemy_writer_required"
+            )
+        result = await write_financial_owner_policy(repository, change, self._tracker)
+        canonical = canonical_financial_account_owner_policy(policy)
+        self._cache[FINANCIAL_OWNER_SETTING_KEY] = self._parse_value(canonical)
+        if result.changed:
+            await self._broadcast_change(
+                FINANCIAL_OWNER_SETTING_KEY,
+                canonical,
+                "financial_owner",
+                updated_by,
+                now=result.reference.timestamp,
+            )
+        logger.info("Explicit financial owner policy configuration retained")
 
     async def update_setting(
         self,
@@ -348,6 +381,9 @@ class SettingsService:
             force_encrypt_cleartext: Whether to encrypt sensitive values.
         """
         str_value = self._serialize_value(value)
+        if key == FINANCIAL_OWNER_SETTING_KEY:
+            await self._update_financial_owner_policy(str_value, updated_by)
+            return
         if force_encrypt_cleartext:
             encrypted_value, is_encrypted = force_encrypt_if_cleartext(key, str_value)
         else:

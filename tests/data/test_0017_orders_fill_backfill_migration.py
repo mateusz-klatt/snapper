@@ -7,6 +7,7 @@ is derived only on a sum match, evidence-less orders stay untouched,
 and closed historical versions are never rewritten.
 """
 
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -212,20 +213,52 @@ def _fill_columns(engine: sa.Engine, public_id: str, known_to: str = _ACTIVE) ->
         ).one()
 
 
+@pytest.fixture(scope="module")
+def pre_backfill_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Migrate one worker-local template to 0016 and close its checkpointed storage.
+
+    Args:
+        tmp_path_factory: Factory for module-owned temporary template storage.
+
+    Returns:
+        Path to the closed, checkpointed database containing the real pre-backfill schema.
+    """
+    db_path = tmp_path_factory.mktemp("fill-backfill-template") / "template.db"
+    db_url = f"sqlite:///{db_path}"
+    command.upgrade(_make_alembic_config(db_url), "0016")
+    engine = sa.create_engine(db_url, future=True)
+    try:
+        with engine.connect() as connection:
+            busy, frames, checkpointed = connection.exec_driver_sql(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).one()
+            if busy or frames != checkpointed:
+                raise RuntimeError("Pre-backfill template has uncheckpointed SQLite writes")
+    finally:
+        engine.dispose()
+    wal_path = Path(f"{db_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size:
+        raise RuntimeError("Pre-backfill template retains a nonempty SQLite WAL")
+    return db_path
+
+
 @pytest.fixture
-def pre_backfill_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
-    """Provide a SQLite database migrated to 0016 (pre-backfill).
+def pre_backfill_db(
+    tmp_path: Path, pre_backfill_template: Path
+) -> Iterator[tuple[sa.Engine, Config]]:
+    """Provide a private copy of the genuinely migrated 0016 database.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
+        pre_backfill_template: Closed worker-local schema template built by real migrations.
 
     Yields:
         Tuple of engine bound to the database and the config.
     """
     db_path = tmp_path / "fill_backfill.db"
+    shutil.copyfile(pre_backfill_template, db_path)
     db_url = f"sqlite:///{db_path}"
     cfg = _make_alembic_config(db_url)
-    command.upgrade(cfg, "0016")
     engine = sa.create_engine(db_url, future=True)
     try:
         yield engine, cfg

@@ -208,7 +208,7 @@ async def test_tokenized_fiat_named_equity_takes_precedence(catalog: FiatCatalog
     (symbol,) = catalog.history()
     assert symbol.asset_type == AssetTypeEnum.EQUITY
     assert symbol.native_symbol == "EUR"
-    _assert_aliases_and_capability(catalog, {("ws", "EURx/USD"), ("rest", "EURxUSD")}, True)
+    _assert_aliases_and_capability(catalog, {("ws", "EURx/USD"), ("rest", "EURxUSD")}, False)
 
 
 @pytest.mark.parametrize(

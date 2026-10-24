@@ -40,6 +40,9 @@ def _make_schema(**overrides: object) -> KrakenFuturesInstrumentSchema:
         "tickSize": 0.5,
         "contractSize": 1,
         "tradeable": True,
+        "isExpired": False,
+        "suspended": False,
+        "postOnly": False,
         "base": "XBT",
         "quote": "USD",
     }
@@ -657,7 +660,7 @@ class TestInstrumentMetadata:
         last_trading_time: str | None,
         expected_kind: str,
     ) -> None:
-        """Linear, inverse, and dated instruments use the same unscaled contract unit."""
+        """Linear, inverse, and dated instruments separate quantity step and multiplier."""
         observed_at = datetime(2026, 7, 14, tzinfo=UTC)
         schema = _make_schema(
             symbol=symbol,
@@ -673,8 +676,8 @@ class TestInstrumentMetadata:
         metadata = fields[5]
         assert fields[1] == expected_kind
         assert metadata.tick_size == 0.25
-        assert metadata.lot_size == 3.5
-        assert metadata.min_order_size == 3.5
+        assert metadata.lot_size == 0.1
+        assert metadata.min_order_size == 0.1
         assert metadata.contract_size == Decimal("3.5")
         assert metadata.quantity_unit == "contract_count"
         assert metadata.qty_decimals == 1
@@ -722,6 +725,70 @@ class TestInstrumentMetadata:
         assert metadata.max_order_size is None
         assert metadata.cost_decimals is None
 
+    @pytest.mark.parametrize(
+        ("precision", "expected_step", "expected_decimals"),
+        ((4, 0.0001, 4), (0, 1.0, 0), (-1, 10.0, 0), (-3, 1000.0, 0)),
+    )
+    def test_signed_precision_certifies_quantity_step_separately_from_multiplier(
+        self,
+        precision: int,
+        expected_step: float,
+        expected_decimals: int,
+    ) -> None:
+        """Persist the signed venue increment independently of its contract multiplier.
+
+        Given: Complete catalog metadata with a multiplier of 2.5,
+        When: The updater derives the atomic instrument specification,
+        Then: The signed quantity increment is certified without scaling the multiplier.
+        """
+        schema = _make_schema(contractSize=2.5, contractValueTradePrecision=precision)
+
+        metadata = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(schema)[5]
+
+        assert metadata.lot_size == expected_step
+        assert metadata.min_order_size == expected_step
+        assert metadata.qty_decimals == expected_decimals
+        assert metadata.contract_size == Decimal("2.5")
+        assert metadata.unit_certified is True
+        assert metadata.spec_version is not None
+        assert metadata.spec_version.startswith("s2a-v4:")
+
+    @pytest.mark.parametrize("precision", (None, 309, -309, 10**1000))
+    def test_unverified_quantity_precision_has_no_multiplier_fallback(
+        self,
+        precision: int | None,
+    ) -> None:
+        """Keep invalid or missing quantity precision incomplete and uncertified.
+
+        Given: A positive contract multiplier without usable quantity precision,
+        When: The updater builds metadata,
+        Then: Quantity steps and decimals remain absent and certification is refused.
+        """
+        schema = _make_schema(contractSize=2.5, contractValueTradePrecision=precision)
+
+        metadata = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(schema)[5]
+
+        assert metadata.lot_size is None
+        assert metadata.min_order_size is None
+        assert metadata.qty_decimals is None
+        assert metadata.contract_size == Decimal("2.5")
+        assert metadata.unit_certified is False
+
+    def test_quantity_precision_change_revises_metadata_version(self) -> None:
+        """Distinguish observations with different venue quantity steps.
+
+        Given: Two catalog definitions with the same contract multiplier,
+        When: Their quantity precision changes from hundredths to thousandths,
+        Then: The specification versions differ so reconciliation sees the revision.
+        """
+        before = _make_schema(contractSize=1, contractValueTradePrecision=2)
+        after = _make_schema(contractSize=1, contractValueTradePrecision=3)
+
+        before_metadata = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(before)[5]
+        after_metadata = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(after)[5]
+
+        assert before_metadata.spec_version != after_metadata.spec_version
+
     def test_persist_instrument_schema_writes_atomic_metadata_block(self) -> None:
         """The updater wiring persists the complete metadata observation through SCD2."""
         engine = create_engine("sqlite:///:memory:", future=True)
@@ -738,14 +805,16 @@ class TestInstrumentMetadata:
             symbol_public_id = updater._persist_instrument_schema(session, schema, observed_at)
             session.commit()
             spec = session.execute(select(InstrumentSpec)).scalar_one()
+            capability = session.execute(select(SymbolExchangeCapability)).scalar_one()
         assert symbol_public_id is not None
         assert spec.tick_size == 0.25
-        assert spec.lot_size == 2.5
-        assert spec.min_order_size == 2.5
+        assert spec.lot_size == 0.1
+        assert spec.min_order_size == 0.1
         assert spec.contract_size == Decimal("2.5")
         assert spec.quantity_unit == "contract_count"
         assert spec.spec_observed_at == observed_at
         assert spec.unit_certified is True
+        assert capability.can_trade is False
         engine.dispose()
 
 

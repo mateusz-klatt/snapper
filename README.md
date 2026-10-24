@@ -78,6 +78,9 @@ or rotate after first login via
 - **Trade runtime** — Facts-canonical live and paper trading with canonical
     Order and Execution facts, rebuildable Position and cash projections,
     dispatched via a durable outbox
+- **Order-entry metadata** — Exact instrument discovery, venue-aware execution
+    modifiers and explicit contract units; see [execution support](docs/order-execution.md)
+    for current product and accounting boundaries
 - **Strategies** — Framework for creating strategies based on RSI, MACD,
   cointegration, and TA-Lib indicators
 - **ZeroMQ messaging** — Pub/sub architecture for market data and signals
