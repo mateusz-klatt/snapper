@@ -707,6 +707,15 @@ on the venue — no manual terminal injection is needed, and the 60s
 reconciliation loop converges the pending entry independently once
 the venue answers.
 
+Kraken Futures uses a separate [native inventory observation path](order-execution.md#native-inventory-observations).
+Its startup recovery and periodic reconciliation keep durable orders parked
+until their original selected submission context can be established. An observed
+absence is not a terminal order result; unavailable inventory is not an empty
+book. The financial healing and adoption behavior above does not apply to this
+parked Futures path. A warning identifies parked durable orders and inventory
+availability. Do not inject synthetic acceptance, terminal or corrective-fill
+events to resolve it.
+
 ### Stop orders — venue support and pre-send rejects
 
 Order commands speak the core order-type vocabulary end-to-end —

@@ -260,6 +260,12 @@ the command FAILED, and publishes a rejection with reason
 if any step fails, the order is parked and the reconciliation loop
 reruns the disposition.
 
+Kraken Futures uses [qualified native inventory](docs/order-execution.md#native-inventory-observations)
+for startup recovery, periodic reconciliation and account position observation.
+Missing, failed or stale source stays unavailable. Orders without their original
+selected submission context stay parked; inventory does not authorize adoption
+or financial corrections. Migration 0066 must run before the new executor starts.
+
 A durable `live_trading_mode` kill-switch setting gates every
 non-paper submit, read fresh per order by the executor interlock
 (`src/snapper/messaging/executors/base.py`): only `enabled` proceeds,

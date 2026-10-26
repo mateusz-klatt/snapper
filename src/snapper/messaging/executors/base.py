@@ -5,6 +5,7 @@ that handle order placement and fill reporting.
 """
 
 import asyncio
+import base64
 import json
 import math
 import random
@@ -60,6 +61,15 @@ from snapper.application.trade.execution_observation_ingestion import (
     DurableExecutionObservationSink,
 )
 from snapper.application.trade.execution_products import product_execution_refusal
+from snapper.application.trade.futures_inventory_consumer import FuturesInventoryRecoveryObservation
+from snapper.application.trade.futures_inventory_consumer import observe_futures_recovery_order
+from snapper.application.trade.futures_inventory_consumer import (
+    serialize_futures_inventory_positions,
+)
+from snapper.application.trade.futures_inventory_read import CurrentFuturesInventoryRead
+from snapper.application.trade.futures_inventory_read import refresh_current_futures_inventory
+from snapper.application.trade.futures_open_inventory import FuturesOpenOrdersSnapshot
+from snapper.application.trade.futures_open_inventory import FuturesOpenPositionsSnapshot
 from snapper.application.trade.native_execution_source_installation import (
     prepare_native_execution_observation_capture,
 )
@@ -76,6 +86,8 @@ from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.execution_route_authority import ExecutionEvidenceIdentity
 from snapper.core.execution_route_authority import ExecutionRouteSelection
 from snapper.core.execution_route_authority import client_selection_from_authority
+from snapper.core.futures_inventory_read import FuturesInventoryReadSource
+from snapper.core.futures_inventory_read import InventoryReadPurpose
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import CancelEventType
@@ -128,6 +140,9 @@ from snapper.infrastructure.exchanges.contracts import order_status_is_terminal
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
+from snapper.infrastructure.exchanges.implementations.kraken_futures import (
+    KrakenFuturesExchangeClient,
+)
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -748,6 +763,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.repository: Repository | None = None
         self._settings_service: SettingsService | None = None
         self.pending_orders: dict[str, PendingOrderState] = {}
+        self._native_inventory_parked: dict[str, FuturesInventoryRecoveryObservation] = {}
         self.client_by_exchange: dict[str, str] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
@@ -1052,6 +1068,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.repository is None:
             logger.warning(f"[{exchange_name}] No repository, skipping recovery")
             return
+        if isinstance(exchange_client, KrakenFuturesExchangeClient):
+            await self._recover_native_inventory_orders(exchange_client, exchange_name)
+            return
         try:
             exchange_open = await exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         except Exception as e:
@@ -1084,6 +1103,60 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"[{exchange_name}] Recovery complete: {recovered} pending orders restored "
             f"from {len(db_active)} DB active / {len(exchange_open)} exchange open"
         )
+
+    async def _current_native_inventory(
+        self, client: KrakenFuturesExchangeClient, purpose: InventoryReadPurpose
+    ) -> CurrentFuturesInventoryRead:
+        """Read qualified inventory without making missing prerequisites a successful empty book."""
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return CurrentFuturesInventoryRead(None, None, "inventory_repository_unavailable")
+        try:
+            return await refresh_current_futures_inventory(
+                self.repository, client, purpose, self._tracker
+            )
+        except Exception:
+            return CurrentFuturesInventoryRead(None, None, "inventory_read_unavailable")
+
+    async def _recover_native_inventory_orders(
+        self, client: KrakenFuturesExchangeClient, exchange_name: OrderExchange
+    ) -> None:
+        """Park actual durable orders while their original selected submission context is unavailable.
+
+        A qualified complete inventory proves only an observation of presence or
+        absence. It cannot reconstruct the original command admission, authorize
+        adoption or prove an absent order terminal. No legacy per-order lookup,
+        synthetic request, fill correction or ACCEPTED publication runs here.
+        """
+        current = await self._current_native_inventory(client, "kraken_futures.open_orders")
+        if self.repository is None:
+            return
+        try:
+            rows = await self.repository.get_active_orders_for_recovery(
+                exchange=exchange_name,
+                as_of=datetime.now(UTC),
+                wallet_public_id=self.wallet_public_id,
+            )
+        except Exception:
+            self._native_inventory_parked = {
+                identity: replace(
+                    observation, presence="unavailable", reason="durable_orders_unavailable"
+                )
+                for identity, observation in self._native_inventory_parked.items()
+            }
+            logger.warning(f"[{exchange_name}] Native recovery durable orders unavailable")
+            return
+        inventory = (
+            current.snapshot if isinstance(current.snapshot, FuturesOpenOrdersSnapshot) else None
+        )
+        reason = "inventory_orders_snapshot_unavailable" if current.available else current.reason
+        self._native_inventory_parked = {
+            row["public_id"]: observe_futures_recovery_order(row, inventory, reason) for row in rows
+        }
+        if rows:
+            logger.warning(
+                f"[{exchange_name}] Native recovery parked {len(rows)} durable orders: "
+                f"original submission context unavailable; inventory={current.reason}"
+            )
 
     async def _recover_single_order(
         self,
@@ -1593,8 +1666,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._tracker,
         )
         logger.info(
-            f"ExchangeExecutorService[{exchange_name}]: "
-            f"Exchange client initialized with WebSocket"
+            f"ExchangeExecutorService[{exchange_name}]: Exchange client initialized with WebSocket"
         )
 
     async def _initialize_execution_client(self, exchange_name: OrderExchange) -> bool:
@@ -4995,6 +5067,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return "not_applicable", None, None, None
         if capability is CapabilityStatus.UNSUPPORTED:
             return "unsupported", None, None, None
+        if isinstance(client, KrakenFuturesExchangeClient):
+            if capability is not CapabilityStatus.SUPPORTED:
+                return "error", None, None, _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG
+            return await self._read_native_inventory_positions(client)
         try:
             async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
                 positions = await client.read_native_positions()
@@ -5007,6 +5083,32 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if capability is CapabilityStatus.SUPPORTED:
             return "observed", self._serialize_open_positions(positions), now, None
         return "error", None, None, _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG
+
+    async def _read_native_inventory_positions(
+        self, client: KrakenFuturesExchangeClient
+    ) -> tuple[str, str | None, datetime | None, str | None]:
+        """Project only qualified original positions, preserving unavailable and original source age."""
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                current = await self._current_native_inventory(
+                    client, "kraken_futures.open_positions"
+                )
+            if not current.available:
+                return "error", None, None, current.reason
+            if not isinstance(current.snapshot, FuturesOpenPositionsSnapshot):
+                raise ValueError("inventory_positions_snapshot_required")
+            outcome = current.outcome
+            if outcome is None or not isinstance(outcome.result, FuturesInventoryReadSource):
+                raise ValueError("inventory_positions_original_source_required")
+            source = outcome.result
+            payload = serialize_futures_inventory_positions(
+                current.snapshot,
+                base64.b64decode(source.body, validate=True),
+                source.observed_at,
+            )
+        except Exception:
+            return "error", None, None, "inventory_positions_presentation_unavailable"
+        return "observed", payload, source.observed_at, None
 
     @staticmethod
     def _serialize_native_balances(entries: list[NativeBalanceEntry]) -> str:
@@ -5108,6 +5210,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.exchange_client is None:
             return
         exchange_name = self._get_exchange_name()
+
+        if isinstance(self.exchange_client, KrakenFuturesExchangeClient):
+            await self._recover_native_inventory_orders(self.exchange_client, exchange_name)
+            return
 
         await self._retry_pending_reconciliation_work()
 

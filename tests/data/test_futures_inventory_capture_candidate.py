@@ -1,9 +1,8 @@
-"""Unexecuted helper tests for actual HTTP capture and exact inventory persistence projections.
+"""Exercise actual HTTP capture and exact inventory persistence projections.
 
-The genuine guarded HTTP fixture is supplied by the separate unpromoted wire
-candidate after WSL composition. Its proof binding is synthetic. Loader-boundary
-unit doubles below prove comparison behavior, not real SQL/root persistence.
-No runtime, migration or integrated acceptance is claimed by this source.
+The guarded loopback HTTP fixture binds an actual transport token to synthetic
+public proof shape. Loader-boundary unit doubles verify comparison behavior,
+without claiming real SQL/root persistence or migration acceptance.
 """
 
 import base64
@@ -49,8 +48,8 @@ from snapper.infrastructure.exchanges.futures_inventory_wire import GuardedFutur
 from snapper.infrastructure.exchanges.futures_inventory_wire import (
     require_guarded_inventory_receipt,
 )
-from tests.infrastructure.exchanges.test_futures_inventory_wire import _Scenario
 from tests.infrastructure.exchanges.test_futures_inventory_wire import _body
+from tests.infrastructure.exchanges.test_futures_inventory_wire import _Scenario
 from tests.infrastructure.exchanges.test_futures_inventory_wire import _scenario
 from tests.infrastructure.exchanges.test_futures_inventory_wire import _selection
 from tests.infrastructure.exchanges.test_futures_inventory_wire import _uuid
@@ -115,7 +114,8 @@ def test_new_source_requires_actual_http_and_retains_exact_entity_and_indexed_co
         assert base64.b64decode(result.body, validate=True) == _body(purpose)
         assert result.parser_policy == _POLICIES[purpose]
         assert (result.request_started_at, result.observed_at) == (
-            original.request_started_at, original.observed_at
+            original.request_started_at,
+            original.observed_at,
         )
         outcome = _outcome(attempt, result)
         scope = inventory_read_scope_projection(attempt)
@@ -193,8 +193,13 @@ def test_actual_semantically_invalid_inventory_never_encodes_a_retained_source(
 @pytest.mark.parametrize(
     "field_name",
     (
-        "public_id", "content_digest", "read_attempt_public_id", "account_uid",
-        "key_owner_root_public_id", "key_owner_root_content_digest", "observed_at",
+        "public_id",
+        "content_digest",
+        "read_attempt_public_id",
+        "account_uid",
+        "key_owner_root_public_id",
+        "key_owner_root_content_digest",
+        "observed_at",
     ),
 )
 def test_actual_source_cannot_use_another_proof_or_owner_root(field_name: str) -> None:
@@ -301,9 +306,12 @@ def test_stored_source_retry_requires_original_purpose_clocks_and_full_semantics
             original.model_dump(mode="python") | changes
         )
         if fault == "unchanged":
-            assert inventory_result_for_storage(
-                candidate, _uuid(30), attempt, allow_stored_source=True
-            ) == original
+            assert (
+                inventory_result_for_storage(
+                    candidate, _uuid(30), attempt, allow_stored_source=True
+                )
+                == original
+            )
         else:
             with pytest.raises(FuturesInventoryBindingError, match="stored_source_invalid"):
                 inventory_result_for_storage(
@@ -346,7 +354,8 @@ def _proof(*, explicit_root: bool = False) -> BoundNativeAccountIdentityProof:
         NativeAccountIdentityRootReference(
             public_id=_uuid(91), content_digest="d" * 64, account_uid=_uuid(90)
         )
-        if explicit_root else None
+        if explicit_root
+        else None
     )
     return BoundNativeAccountIdentityProof(
         _uuid(92),
@@ -416,3 +425,41 @@ async def test_key_loader_rebinds_native_history_before_comparing_retained_refer
     with pytest.raises(FuturesInventoryBindingError, match="actual_key_proof_mismatch"):
         await get_bound_inventory_read_key(session, changed)
     assert calls == [proof.public_id, proof.public_id]
+
+
+@pytest.mark.parametrize("fault", ("missing", "different_owner"))
+async def test_native_proof_unavailability_or_actual_owner_conflict_refuses_inventory_reference(
+    monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """Preserve the historical native loader's refusal and honestly contradictory owner evidence.
+
+    Given: A unit reference names one original proof and its independently retained account owner.
+    When: The native loader refuses that proof or returns a valid shape observing another owner.
+    Then: Inventory rebinding refuses safely without rewriting the root or accepting a shape as SQL proof.
+    """
+    proof = _proof(explicit_root=True)
+    reference = inventory_read_key_reference(proof)
+    root = proof.payload.owner_root
+    assert root is not None
+    conflicting = NativeAccountIdentityProofPayload.model_validate(
+        proof.payload.model_dump(mode="python")
+        | {"owner_root": root.model_dump(mode="python") | {"account_uid": _uuid(89)}}
+    )
+    assert not conflicting.matches_owner
+    session = cast(AsyncSession, object())
+
+    async def unavailable_native_proof(
+        actual_session: AsyncSession, public_id: str
+    ) -> BoundNativeAccountIdentityProof:
+        """Expose actual loader failure semantics without emulating database or owner-root checks."""
+        assert actual_session is session and public_id == proof.public_id
+        if fault == "missing":
+            raise ValueError("Synthetic unavailable native source")
+        return BoundNativeAccountIdentityProof(proof.public_id, conflicting)
+
+    monkeypatch.setattr(key_binding, "get_bound_native_account_identity", unavailable_native_proof)
+    with pytest.raises(
+        FuturesInventoryBindingError, match="actual_key_proof_unavailable"
+    ) as caught:
+        await get_bound_inventory_read_key(session, reference)
+    assert caught.value.__cause__ is None

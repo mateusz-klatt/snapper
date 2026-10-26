@@ -8,6 +8,7 @@ installation creates no financial source interpretation or order permission.
 
 from collections.abc import Callable
 
+from snapper.application.trade.futures_inventory_read import capture_prepared_futures_inventory
 from snapper.application.trade.native_private_owner_preparation import prepare_native_private_owner
 from snapper.application.trade.private_source_observation_ingestion import (
     AuthenticatedPrivateObservationSink,
@@ -50,6 +51,7 @@ async def prepare_native_execution_observation_capture(
     prepared = await prepare_native_private_owner(repository, client, tracker)
     try:
         token = prepared.require_token()
+        await capture_prepared_futures_inventory(repository, client, prepared, tracker)
         client.set_private_frame_observation_sink(sink.bind_frame)
         client.bind_prepared_private_owner(token)
     except BaseException:

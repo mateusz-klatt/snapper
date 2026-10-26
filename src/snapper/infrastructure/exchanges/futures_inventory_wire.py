@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import TypeAdapter
+from pydantic import ValidationError
 from pydantic import model_validator
 from requests import PreparedRequest
 
@@ -85,9 +86,18 @@ class FuturesInventoryWireError(ValueError):
     """Expose only a fixed source disposition without a body, header or credential digest."""
 
     def __init__(self, reason: InventoryWireFailureReason) -> None:
-        """Retain the safe enum needed by a future durable failed-outcome producer."""
+        """Retain the safe enum used by the durable failed-outcome producer."""
         super().__init__(f"futures_inventory_wire_{reason}")
-        self.reason = reason
+        self._failure_reason = reason
+
+    @property
+    def reason(self) -> InventoryWireFailureReason:
+        """Return the original safe disposition without exposing a public mutable field.
+
+        Returns:
+            Fixed transport, HTTP, invalid-source or unsafe-source failure metadata.
+        """
+        return self._failure_reason
 
 
 class FuturesInventoryWireReceipt(BaseModel):
@@ -175,9 +185,7 @@ def _private_member(name: str, value: object) -> bool:
     if label in _PRIVATE_NAMES or label == "method" and isinstance(value, str):
         return True
     return (
-        label == "event"
-        and isinstance(value, str)
-        and value.strip().casefold() in _CONTROL_EVENTS
+        label == "event" and isinstance(value, str) and value.strip().casefold() in _CONTROL_EVENTS
     )
 
 
@@ -230,7 +238,9 @@ def _inspect_inventory_tree(document: dict[str, object], known_auth: tuple[str, 
         if visited > _MAX_NODES or depth > _MAX_DEPTH:
             raise FuturesInventoryWireError("source_invalid")
         if isinstance(value, dict):
-            pending.extend((part, depth + 1) for pair in value.items() for part in pair)
+            for name, child in value.items():
+                _require_safe_text(name, known_auth)
+                pending.append((child, depth + 1))
         elif isinstance(value, list):
             pending.extend((child, depth + 1) for child in value)
         elif isinstance(value, str):
@@ -268,7 +278,7 @@ def _require_inventory_privacy(
         raise FuturesInventoryWireError("source_invalid")
 
 
-def _known_auth_values(headers: Mapping[str, str], secret: object) -> tuple[str, ...]:
+def _known_auth_values(headers: Mapping[str, object], secret: object) -> tuple[str, ...]:
     """Keep signing material transient and refuse incomplete same-operation privacy inputs."""
     values = headers.get("APIKey"), headers.get("Authent"), headers.get("Nonce"), secret
     if not all(isinstance(value, str) and value for value in values):
@@ -391,6 +401,8 @@ def read_futures_inventory_wire(
         )
     except FuturesInventoryWireError as failure:
         reason = failure.reason
+    except ValidationError:
+        reason = "source_invalid"
     except Exception:
         reason = "transport_error"
     raise FuturesInventoryWireError(reason) from None
