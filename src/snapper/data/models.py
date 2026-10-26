@@ -46,6 +46,9 @@ from snapper.data.execution_unit_snapshot_triggers import install_execution_unit
 from snapper.data.financial_publication_schema import financial_delivery_constraints
 from snapper.data.financial_publication_schema import financial_intent_constraints
 from snapper.data.financial_publication_triggers import install_financial_publication_triggers
+from snapper.data.futures_inventory_read_schema import futures_inventory_read_attempt_constraints
+from snapper.data.futures_inventory_read_schema import futures_inventory_read_outcome_constraints
+from snapper.data.futures_inventory_read_triggers import install_futures_inventory_read_triggers
 from snapper.data.futures_product_read_schema import futures_product_read_attempt_constraints
 from snapper.data.futures_product_read_schema import futures_product_read_outcome_constraints
 from snapper.data.futures_product_read_triggers import install_futures_product_read_triggers
@@ -6753,3 +6756,62 @@ def _install_futures_product_read_immutability(
 ) -> None:
     """Apply identical physical lifecycle guards to model-created and migrated databases."""
     install_futures_product_read_triggers(connection, str(getattr(target, "name", "")))
+
+
+class FuturesInventoryReadAttempt(TemporalMixin, Base):
+    """An actual read committed before HTTP, ordered across margin labels and credentials."""
+
+    __tablename__ = "futures_inventory_read_attempts"
+    __table_args__ = (
+        *futures_inventory_read_attempt_constraints(),
+        Index("ix_futures_inventory_attempt_family", "scope_digest", "purpose", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    purpose: Mapped[str] = mapped_column(String(40))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    client_selection_digest: Mapped[str] = mapped_column(String(64))
+    key_proof_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    key_proof_content_digest: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(TZDateTime())
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+class FuturesInventoryReadOutcome(TemporalMixin, Base):
+    """A historical attempt-bound result whose arrival cannot supersede a newer request."""
+
+    __tablename__ = "futures_inventory_read_outcomes"
+    __table_args__ = (
+        *futures_inventory_read_outcome_constraints(),
+        Index("ix_futures_inventory_outcome_family", "scope_digest", "purpose", "family_sequence"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    environment: Mapped[str] = mapped_column(String(16))
+    margin_account: Mapped[str | None] = mapped_column(String(128))
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    purpose: Mapped[str] = mapped_column(String(40))
+    family_sequence: Mapped[int] = mapped_column(BigInteger())
+    attempt_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    attempt_content_digest: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    result_kind: Mapped[str] = mapped_column(String(16))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    canonical_payload: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(FuturesInventoryReadAttempt.__table__, "after_create")
+@event.listens_for(FuturesInventoryReadOutcome.__table__, "after_create")
+def _install_futures_inventory_read_immutability(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Apply identical physical lifecycle guards to model-created and migrated databases."""
+    install_futures_inventory_read_triggers(connection, str(getattr(target, "name", "")))

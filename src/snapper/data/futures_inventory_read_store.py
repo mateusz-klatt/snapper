@@ -1,7 +1,7 @@
 """Retain independent inventory reads without profile selection or financial authority.
 
-This unpromoted source requires the future additive inventory models, schema,
-key binder, capture boundary and projections. No migration is allocated here.
+Standalone attempts and outcomes use the additive 0066 inventory schema,
+original native key binding, guarded capture boundary and exact projections.
 Newest request ordering survives pending failures, credential changes and late
 completion. Original source bytes are fully interpreted before retained-body
 digest verification; independent endpoints never imply an atomic account book.

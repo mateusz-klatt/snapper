@@ -1,6 +1,7 @@
 """Exercise real executor startup through native signed source preparation and client cleanup."""
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from sqlalchemy import select
@@ -8,6 +9,8 @@ from sqlalchemy import select
 from snapper.config.credentials import CredentialVersion
 from snapper.core.json_types import JsonObject
 from snapper.core.types import OrderExchange
+from snapper.data.models import FuturesInventoryReadAttempt
+from snapper.data.models import FuturesInventoryReadOutcome
 from snapper.data.models import NativeAccountIdentityProof
 from snapper.data.models import NativeAccountReadOutcome
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -88,9 +91,24 @@ class _SourceStartupExecutor(ExchangeExecutorService[KrakenFuturesExchangeClient
         async with self.scenario.repository.session() as session:
             identities = (await session.scalars(select(NativeAccountIdentityProof))).all()
             outcomes = (await session.scalars(select(NativeAccountReadOutcome))).all()
+            inventory_attempts = (
+                await session.scalars(
+                    select(FuturesInventoryReadAttempt).order_by(
+                        FuturesInventoryReadAttempt.purpose
+                    )
+                )
+            ).all()
+            inventory_outcomes = (await session.scalars(select(FuturesInventoryReadOutcome))).all()
         assert len(identities) == len(outcomes) == 1
         assert identities[0].public_id == proof.public_id
         assert outcomes[0].result_kind == "captured"
+        assert [(row.purpose, row.key_proof_public_id) for row in inventory_attempts] == [
+            ("kraken_futures.open_orders", proof.public_id),
+            ("kraken_futures.open_positions", proof.public_id),
+        ]
+        assert {
+            (row.purpose, row.attempt_public_id, row.result_kind) for row in inventory_outcomes
+        } == {(row.purpose, row.public_id, "captured") for row in inventory_attempts}
         raise _ReachedRecoveryError("Actual recovery boundary reached")
 
 
@@ -123,7 +141,12 @@ async def test_actual_start_commits_owner_before_recovery_and_closes_on_unwind(
             with pytest.raises(_ReachedRecoveryError, match="Actual recovery boundary reached"):
                 await executor.start()
             assert executor.recovery_reached
-            assert len(scenario.adapter.calls) == 2
+            assert [urlsplit(request.url or "").path for request in scenario.adapter.calls] == [
+                "/api/auth/v1/api-keys/v3/check",
+                "/derivatives/api/v3/accounts",
+                "/derivatives/api/v3/openorders",
+                "/derivatives/api/v3/openpositions",
+            ]
             assert scenario.adapter.proofs_at_accounts_send == [1]
             assert scenario.client._private_ws_client is None
             assert scenario.client._prepared_private_source_token is None
@@ -161,6 +184,10 @@ async def test_actual_start_failed_accounts_never_reaches_recovery_or_private_ta
             assert scenario.client._private_ws_client is None
             assert scenario.client._prepared_private_source_token is None
             assert len(scenario.adapter.calls) == 2
+            assert [urlsplit(request.url or "").path for request in scenario.adapter.calls] == [
+                "/api/auth/v1/api-keys/v3/check",
+                "/derivatives/api/v3/accounts",
+            ]
             async with scenario.repository.session() as session:
                 identities = (await session.scalars(select(NativeAccountIdentityProof))).all()
                 outcomes = (await session.scalars(select(NativeAccountReadOutcome))).all()

@@ -2863,6 +2863,8 @@ IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset(
         "native_account_read_outcomes",
         "native_account_identity_proofs",
         "native_account_authorities",
+        "futures_inventory_read_attempts",
+        "futures_inventory_read_outcomes",
         "futures_product_read_attempts",
         "futures_product_read_outcomes",
         "private_source_ownership_receipts",

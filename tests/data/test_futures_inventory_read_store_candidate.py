@@ -1,10 +1,9 @@
-"""Unexecuted isolated inventory persistence tests for a future additive schema.
+"""Exercise isolated inventory persistence with actual SDK requests and real SQLite.
 
-The inventory models, guarded wire leaf and persistence modules are unapplied
-composition dependencies. These sources have not been imported or run. Real
-SQLite fixtures and original SDK Requests calls are used when eventually run;
-the local adapter supplies controlled HTTP entities without contacting a venue.
-This does not certify migrated PostgreSQL, a producer, recovery or order access.
+The local adapter supplies controlled original HTTP entities and independently
+observes committed requests without contacting a venue. Separate migrated
+SQLite/PostgreSQL tests cover the physical migration chain. These observations
+grant no financial authority, recovery capability or order access.
 """
 
 import base64
@@ -29,8 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 from urllib3.response import HTTPResponse
 
+import snapper.application.trade.current_futures_inventory as current_reader
 import snapper.data.futures_inventory_read_store as store
 import snapper.infrastructure.exchanges.futures_inventory_wire as wire
+from snapper.application.trade.current_futures_inventory import CurrentFuturesInventoryRead
+from snapper.application.trade.current_futures_inventory import FuturesInventoryFreshnessPolicy
+from snapper.application.trade.current_futures_inventory import read_current_futures_inventory
 from snapper.application.trade.native_private_owner_preparation import PreparedPrivateOwnerRead
 from snapper.application.trade.native_private_owner_preparation import prepare_native_private_owner
 from snapper.core.execution_route_authority import ExecutionEvidenceIdentity
@@ -158,9 +161,7 @@ class _Scenario:
 
 
 @asynccontextmanager
-async def _scenario(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[_Scenario]:
+async def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Scenario]:
     """Prepare genuine key/accounts evidence before exercising the future inventory store."""
     async with native_authority_scenario(tmp_path, monkeypatch) as native:
         adapter = _InventoryAdapter(native.adapter.path, native.clock)
@@ -255,9 +256,12 @@ async def test_endpoint_ordinals_are_independent_and_http_sees_committed_source(
     """
     async with _scenario(tmp_path, monkeypatch) as scenario:
         async with scenario.native.repository.session() as session:
-            assert await get_latest_futures_inventory_read(
-                session, scenario.native.selection, _ORDERS, scenario.native.clock.current
-            ) is None
+            assert (
+                await get_latest_futures_inventory_read(
+                    session, scenario.native.selection, _ORDERS, scenario.native.clock.current
+                )
+                is None
+            )
         orders, _ = await _capture(scenario, _ORDERS, 100)
         positions, _ = await _capture(scenario, _POSITIONS, 110)
         later = await _begin(scenario, _ORDERS, 120)
@@ -274,6 +278,66 @@ async def test_endpoint_ordinals_are_independent_and_http_sees_committed_source(
                 )
             scopes = {row.purpose: row.scope_digest for row in rows}
             assert scopes[_ORDERS] != scopes[_POSITIONS]
+
+
+async def test_unknown_endpoint_cannot_allocate_or_query_an_inventory_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse unsupported public endpoint coordinates before retaining a request or selecting a book.
+
+    Given: Genuine READ_ONLY owner preparation exists without any inventory attempt.
+    When: A caller requests another endpoint through the begin or latest-read boundary.
+    Then: Both operations refuse the purpose and no request or inventory HTTP is created.
+    """
+    async with _scenario(tmp_path, monkeypatch) as scenario:
+        invalid = cast(InventoryReadPurpose, "kraken_futures.accounts")
+        with pytest.raises(FuturesInventoryBindingError, match="purpose_invalid"):
+            await _begin(scenario, invalid, 100)
+        async with scenario.native.repository.session() as session:
+            with pytest.raises(FuturesInventoryBindingError, match="purpose_invalid"):
+                await get_latest_futures_inventory_read(
+                    session, scenario.native.selection, invalid, scenario.native.clock.current
+                )
+            assert await session.scalar(select(func.count()).select_from(AttemptRow)) == 0
+        assert not scenario.adapter.inventory_calls
+
+
+@pytest.mark.parametrize("kind", ("attempt", "outcome"))
+@pytest.mark.parametrize("field", ("session_id", "sequence_id"))
+async def test_loaded_inventory_insertion_provenance_cannot_bypass_strict_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, field: str
+) -> None:
+    """Refuse corrupted loaded provenance without changing immutable SQL or weakening its guards.
+
+    Given: Actual SDK HTTP and real isolated SQL retained one original request and outcome.
+    When: A caller replaces a loaded session UUID or positive sequence with an invalid value.
+    Then: Historical loading refuses that copy and both independently loaded original rows stay valid.
+    """
+    async with _scenario(tmp_path, monkeypatch) as scenario:
+        attempt, outcome = await _capture(scenario, _ORDERS, 100)
+        async with scenario.native.repository.session() as session:
+            row: AttemptRow | OutcomeRow | None
+            if kind == "attempt":
+                row = await session.scalar(select(AttemptRow))
+            else:
+                row = await session.scalar(select(OutcomeRow))
+            assert row is not None
+            original = getattr(row, field)
+            set_committed_value(row, field, "invalid-session" if field == "session_id" else 0)
+            try:
+                with pytest.raises(
+                    FuturesInventoryBindingError, match="insertion_identity_invalid"
+                ):
+                    if kind == "attempt":
+                        await get_bound_futures_inventory_attempt(session, attempt.public_id)
+                    else:
+                        await get_bound_futures_inventory_outcome(session, attempt.public_id)
+            finally:
+                set_committed_value(row, field, original)
+            assert not session.dirty
+        async with scenario.native.repository.session() as session:
+            assert await get_bound_futures_inventory_attempt(session, attempt.public_id) == attempt
+            assert await get_bound_futures_inventory_outcome(session, attempt.public_id) == outcome
 
 
 async def test_exact_retries_keep_original_clocks_provenance_and_http_count(
@@ -429,7 +493,9 @@ async def test_credential_rotation_does_not_restart_or_hide_endpoint_ordering(
                     session, scenario.native.selection, _ORDERS, scenario.native.clock.current
                 )
         native = scenario.native
-        prepared = await prepare_native_private_owner(native.repository, native.client, native.tracker)
+        prepared = await prepare_native_private_owner(
+            native.repository, native.client, native.tracker
+        )
         try:
             async with native.repository.session() as session:
                 proof = await find_native_account_identity(
@@ -546,7 +612,9 @@ async def test_historical_success_is_semantically_parsed_before_its_hash_project
         def unexpected_projection(value: FuturesInventoryReadOutcome) -> dict[str, object]:
             """Observe ordering without replacing the actual semantic source parser or immutable rows."""
             called.append(True)
-            raise AssertionError("Historical outcome hashing preceded strict original-source parsing")
+            raise AssertionError(
+                "Historical outcome hashing preceded strict original-source parsing"
+            )
 
         monkeypatch.setattr(store, "inventory_read_outcome_projection", unexpected_projection)
         async with scenario.native.repository.session() as session:
@@ -659,12 +727,62 @@ async def test_lost_commit_acknowledgement_preserves_one_original_attempt_on_ret
         with pytest.raises(ConnectionError, match="lost acknowledgement"):
             await _begin(scenario, _ORDERS, 100)
         async with scenario.native.repository.session() as session:
-            original = await get_bound_futures_inventory_attempt(
-                session, _identity(100).public_id
-            )
+            original = await get_bound_futures_inventory_attempt(session, _identity(100).public_id)
         scenario.native.clock.current += timedelta(seconds=2)
         retried = await _begin(scenario, _ORDERS, 100)
         assert retried == original and retried.payload.family_sequence == 1
         async with scenario.native.repository.session() as session:
             assert await session.scalar(select(func.count()).select_from(AttemptRow)) == 1
         assert not scenario.adapter.inventory_calls
+
+
+async def _current_inventory(
+    scenario: _Scenario, purpose: InventoryReadPurpose
+) -> CurrentFuturesInventoryRead:
+    """Read genuine current evidence under its actual repository transaction and wallet fence."""
+    return await read_current_futures_inventory(
+        scenario.native.repository,
+        scenario.native.selection,
+        purpose,
+        FuturesInventoryFreshnessPolicy(
+            maximum_source_age=timedelta(seconds=30),
+            maximum_server_clock_skew=timedelta(seconds=5),
+        ),
+    )
+
+
+@pytest.mark.parametrize("purpose", (_ORDERS, _POSITIONS))
+async def test_real_current_reader_preserves_endpoint_barriers_and_original_source_age(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, purpose: InventoryReadPurpose
+) -> None:
+    """Compose genuine SDK capture, committed SQL and the current observational reader.
+
+    Given: Both endpoints have actual signed empty responses and independently committed outcomes.
+    When: One endpoint gains a pending then failed request and the other source reaches expiry.
+    Then: Only genuine fresh success supplies a snapshot; endpoint barriers and original age remain.
+    """
+    async with _scenario(tmp_path, monkeypatch) as scenario:
+        monkeypatch.setattr(current_reader, "datetime", scenario.native.clock)
+        absent = await _current_inventory(scenario, purpose)
+        assert absent.reason == "not_read" and absent.snapshot is None
+        await _capture(scenario, _ORDERS, 100)
+        await _capture(scenario, _POSITIONS, 110)
+        available = await _current_inventory(scenario, purpose)
+        assert available.status == "available" and available.snapshot is not None
+        assert available.attempt is not None and available.outcome is not None
+        pending = await _begin(scenario, purpose, 120)
+        unavailable = await _current_inventory(scenario, purpose)
+        assert unavailable.reason == "pending" and unavailable.snapshot is None
+        assert unavailable.attempt == pending and unavailable.outcome is None
+        failure = await _append(
+            scenario, pending, FuturesInventoryReadFailure(reason="source_invalid"), _identity(121)
+        )
+        failed = await _current_inventory(scenario, purpose)
+        assert failed.reason == "failed" and failed.snapshot is None and failed.outcome == failure
+        other = _POSITIONS if purpose == _ORDERS else _ORDERS
+        independent = await _current_inventory(scenario, other)
+        assert independent.status == "available" and independent.snapshot is not None
+        scenario.native.clock.current += timedelta(seconds=30)
+        stale = await _current_inventory(scenario, other)
+        assert stale.reason == "stale" and stale.snapshot is None
+        assert len(scenario.adapter.inventory_calls) == 2

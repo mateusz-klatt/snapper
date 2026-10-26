@@ -93,17 +93,14 @@ def _parse_source(
 
 
 def _source_disposition(
-    latest: LatestFuturesInventoryRead,
+    outcome: BoundFuturesInventoryOutcome,
     source: FuturesInventoryReadSource,
     snapshot: ParsedFuturesInventory,
     known_at: datetime,
     policy: FuturesInventoryFreshnessPolicy,
 ) -> InventoryUnavailableReason | None:
     """Verify the ordered original window after its earliest actual key GET passed the age bound."""
-    attempt = latest.attempt.payload
-    outcome = latest.outcome
-    if outcome is None:
-        return "unverifiable"
+    attempt = outcome.payload.attempt
     key = attempt.key_proof
     if not (
         key.observed_at
@@ -115,10 +112,7 @@ def _source_disposition(
         <= known_at
     ):
         return "unverifiable"
-    if (
-        abs(snapshot.server_time.instant - source.observed_at)
-        > policy.maximum_server_clock_skew
-    ):
+    if abs(snapshot.server_time.instant - source.observed_at) > policy.maximum_server_clock_skew:
         return "clock_skew"
     return None
 
@@ -149,7 +143,7 @@ async def _read_latest_inventory(
     if known_at - proof.payload.observation.request_started_at >= policy.maximum_source_age:
         return _unavailable(purpose, "stale", latest)
     snapshot = _parse_source(purpose, source)
-    disposition = _source_disposition(latest, source, snapshot, known_at, policy)
+    disposition = _source_disposition(outcome, source, snapshot, known_at, policy)
     if disposition is not None:
         return _unavailable(purpose, disposition, latest)
     return CurrentFuturesInventoryRead(
@@ -188,7 +182,7 @@ async def get_current_futures_inventory_read(
         if latest is None:
             return _unavailable(purpose, "not_read")
         return await _read_latest_inventory(session, latest, purpose, known_at, policy)
-    except ValueError:
+    except (ValueError, ArithmeticError):
         return _unavailable(purpose, "unverifiable")
 
 
@@ -217,5 +211,5 @@ async def read_current_futures_inventory(
             return await get_current_futures_inventory_read(
                 session, selected, purpose, datetime.now(UTC), policy
             )
-    except (ValueError, SQLAlchemyError):
+    except (ValueError, ArithmeticError, SQLAlchemyError):
         return _unavailable(purpose, "unverifiable")

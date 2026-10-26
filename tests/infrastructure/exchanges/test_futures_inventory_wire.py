@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from kraken.futures import User
+from pydantic import ValidationError
 from requests import PreparedRequest
 from requests import Response
 from requests import Session
@@ -39,6 +40,7 @@ from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 
 import snapper.infrastructure.exchanges.futures_inventory_wire as wire
+import snapper.infrastructure.exchanges.kraken_futures_account_receipts as account_receipts
 from snapper.application.trade.futures_open_inventory import parse_futures_open_orders
 from snapper.application.trade.futures_open_inventory import parse_futures_open_positions
 from snapper.core.execution_route_authority import ExecutionClientSelection
@@ -48,6 +50,7 @@ from snapper.core.native_account_identity import NativeAccountPublicIdentity
 from snapper.core.native_account_read import NativeAccountReadAttemptPayload
 from snapper.core.native_account_read import native_account_read_attempt_digest
 from snapper.infrastructure.exchanges.futures_inventory_wire import FuturesInventoryWireError
+from snapper.infrastructure.exchanges.futures_inventory_wire import FuturesInventoryWireReceipt
 from snapper.infrastructure.exchanges.futures_inventory_wire import GuardedFuturesInventoryReceipt
 from snapper.infrastructure.exchanges.futures_inventory_wire import read_futures_inventory_wire
 from snapper.infrastructure.exchanges.futures_inventory_wire import (
@@ -56,6 +59,7 @@ from snapper.infrastructure.exchanges.futures_inventory_wire import (
 from snapper.infrastructure.exchanges.kraken_futures_key_identity import (
     read_futures_prepared_key_identity,
 )
+from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyProofReference
 from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyToken
 from snapper.infrastructure.network.egress_context import egress_identity
 
@@ -153,13 +157,16 @@ def _handler(source: _Source) -> type[BaseHTTPRequestHandler]:
             headers = dict(self.headers.items())
             source.requests.append((self.path, headers))
             if self.path == _KEY_PATH:
-                status, body = 200, json.dumps(
-                    {
-                        "apiKey": _KEY,
-                        "accountUid": _ACCOUNT_UID,
-                        "permissions": {"general": "READ_ONLY", "transfer": "NO_ACCESS"},
-                    }
-                ).encode()
+                status, body = (
+                    200,
+                    json.dumps(
+                        {
+                            "apiKey": _KEY,
+                            "accountUid": _ACCOUNT_UID,
+                            "permissions": {"general": "READ_ONLY", "transfer": "NO_ACCESS"},
+                        }
+                    ).encode(),
+                )
             else:
                 assert self.path in {_ORDERS_PATH, _POSITIONS_PATH}
                 status, body = source.status, source.response_body(headers)
@@ -174,7 +181,7 @@ def _handler(source: _Source) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError):
                 return
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format_string: str, *args: object) -> None:
             """Keep synthetic HTTP access metadata out of ordinary test output."""
 
     return Handler
@@ -338,8 +345,7 @@ def test_actual_read_only_sdk_http_preserves_original_inventory_source(
         assert request.url == cast(str, scenario.selection.public_api_origin) + _PATHS[purpose]
         signed = hashlib.sha256(
             (
-                cast(str, request.headers["Nonce"])
-                + _PATHS[purpose].removeprefix("/derivatives")
+                cast(str, request.headers["Nonce"]) + _PATHS[purpose].removeprefix("/derivatives")
             ).encode()
         ).digest()
         expected = base64.b64encode(
@@ -377,6 +383,7 @@ def test_actual_known_auth_echo_under_innocent_nested_values_never_issues_receip
     Then: The complete response is closed and only source_unsafe failure metadata leaves the leaf.
     """
     with _scenario(purpose) as scenario:
+
         def echoed_body(headers: Mapping[str, str]) -> bytes:
             """Use the actual request signature without guessing a fixture signature value."""
             value = {
@@ -408,30 +415,39 @@ def test_actual_known_auth_echo_under_innocent_nested_values_never_issues_receip
         (b"<html>not inventory</html>", "source_invalid"),
         (b"\xff", "source_invalid"),
         (b"[]", "source_invalid"),
+        (
+            b'{"result":"success","serverTime":"x","openOrders":[],"safe":"\\u0000"}',
+            "source_invalid",
+        ),
         (b'{"result":"success","serverTime":"x","openOrders":[],"n":NaN}', "source_invalid"),
         (
             b'{"result":"success","serverTime":"x","openOrders":[],"safe":1,"safe":2}',
             "source_invalid",
         ),
         (
-            b'{"result":"success","serverTime":"x","openOrders":[],'
-            b'"nested":{"x":1,"x":2}}',
+            (b'{"result":"success","serverTime":"x","openOrders":[],"nested":{"x":1,"x":2}}'),
             "source_invalid",
         ),
         (b'{"result":"success","serverTime":"x","openPositions":[]}', "source_invalid"),
         (
-            b'{"result":"success","serverTime":"x","openOrders":[],'
-            b'"nested":{"aPi\\u004bey":"x"}}',
+            (
+                b'{"result":"success","serverTime":"x","openOrders":[],'
+                b'"nested":{"aPi\\u004bey":"x"}}'
+            ),
             "source_unsafe",
         ),
         (
-            b'{"result":"success","serverTime":"x","openOrders":[],'
-            b'"nested":{"method":"subscribe"}}',
+            (
+                b'{"result":"success","serverTime":"x","openOrders":[],'
+                b'"nested":{"method":"subscribe"}}'
+            ),
             "source_unsafe",
         ),
         (
-            b'{"result":"success","serverTime":"x","openOrders":[],'
-            b'"nested":{"safe":"\\ud800"}}',
+            (
+                b'{"result":"success","serverTime":"x","openOrders":[],'
+                b'"nested":{"safe":"\\ud800"}}'
+            ),
             "source_invalid",
         ),
     ),
@@ -496,15 +512,15 @@ def test_http_errors_or_redirects_never_issue_original_inventory_success(status:
 
 @pytest.mark.parametrize(
     ("index", "replacement"),
-    ((0, "POST"), (1, "https://different.invalid/x"), (3, "body=x"), (4, "query=x")),
+    ((0, "POST"), (1, "https://different.invalid/x"), (2, {}), (3, "body=x"), (4, "query=x")),
 )
 def test_sdk_signer_changes_refuse_before_inventory_http(
-    monkeypatch: pytest.MonkeyPatch, index: int, replacement: str
+    monkeypatch: pytest.MonkeyPatch, index: int, replacement: str | dict[str, str]
 ) -> None:
     """Do not widen the fixed transport when the original SDK returns changed request coordinates.
 
     Given: Genuine same-key preparation already issued the original owner token.
-    When: SDK signing changes the inventory method, path/origin, payload or query.
+    When: SDK signing changes the method, path/origin, authentication inputs, payload or query.
     Then: The actual HTTP adapter receives no inventory request.
     """
     with _scenario("kraken_futures.open_orders") as scenario:
@@ -575,14 +591,15 @@ def test_final_requests_authentication_cannot_change_the_guarded_inventory_reque
 class _SwapSession(AuthBase):
     """Replace the SDK Session while Requests still prepares the original inventory request."""
 
-    def __init__(self, user: User, replacement: Session) -> None:
+    def __init__(self, user: User, replacement: Session, monkeypatch: pytest.MonkeyPatch) -> None:
         """Retain fixture-owned runtime objects only for the exact pre-send mutation seam."""
         self.user = user
         self.replacement = replacement
+        self.monkeypatch = monkeypatch
 
     def __call__(self, request: PreparedRequest) -> PreparedRequest:
         """Leave encoded key unchanged while moving the mutable SDK Session pointer."""
-        setattr(self.user, "_FuturesClient__session", self.replacement)
+        self.monkeypatch.setattr(self.user, "_FuturesClient__session", self.replacement)
         return request
 
 
@@ -596,7 +613,9 @@ def test_original_session_is_required_immediately_before_physical_send(
     Then: The original HTTP adapter receives no inventory request.
     """
     with _scenario("kraken_futures.open_orders") as scenario, Session() as replacement:
-        monkeypatch.setattr(scenario.session, "auth", _SwapSession(scenario.user, replacement))
+        monkeypatch.setattr(
+            scenario.session, "auth", _SwapSession(scenario.user, replacement, monkeypatch)
+        )
         with pytest.raises(FuturesInventoryWireError) as caught:
             scenario.read()
         assert caught.value.reason == "transport_error"
@@ -617,6 +636,7 @@ def test_response_completion_rechecks_original_route_session_and_token(
     Then: The actual response closes and fixed failure metadata replaces receipt success.
     """
     with _scenario("kraken_futures.open_orders") as scenario, Session() as replacement:
+
         def change_after_response(request: PreparedRequest, response: Response) -> None:
             """Mutate the actual synchronous response boundary without replacing its HTTP bytes."""
             if fault == "response_url":
@@ -736,7 +756,10 @@ def test_only_the_unchanged_exact_issued_object_exposes_inventory_source() -> No
         actual = scenario.read()
         view = require_guarded_inventory_receipt(actual)
         for forged in (
-            object(), view, GuardedFuturesInventoryReceipt(view), _EqualityAlias(actual)
+            object(),
+            view,
+            GuardedFuturesInventoryReceipt(view),
+            _EqualityAlias(actual),
         ):
             with pytest.raises(FuturesInventoryWireError):
                 require_guarded_inventory_receipt(forged)
@@ -773,6 +796,7 @@ def test_actual_nonce_echo_cannot_hide_as_an_innocent_json_key_or_numeric_lexeme
     Then: No public receipt exists and source_unsafe metadata replaces retention.
     """
     with _scenario("kraken_futures.open_orders") as scenario:
+
         def nonce_body(headers: Mapping[str, str]) -> bytes:
             """Use the actual outgoing nonce and preserve a JSON number when requested."""
             nonce = headers["Nonce"]
@@ -782,7 +806,7 @@ def test_actual_nonce_echo_cannot_hide_as_an_innocent_json_key_or_numeric_lexeme
                     _empty_body(scenario.source.purpose) | {"safe": {nonce: None}}
                 ).encode()
             prefix = json.dumps(_empty_body(scenario.source.purpose)).encode()[:-1]
-            return prefix + b',"safe":{"observation":' + nonce.encode() + b'}}'
+            return prefix + b',"safe":{"observation":' + nonce.encode() + b"}}"
 
         scenario.source.body_factory = nonce_body
         with pytest.raises(FuturesInventoryWireError) as caught:
@@ -845,6 +869,7 @@ def test_original_stream_failure_closes_actual_response_and_sanitizes_error(
     Then: Only transport_error metadata escapes and the owned original response closes.
     """
     with _scenario("kraken_futures.open_orders") as scenario:
+
         def fail_stream(chunk_size: int = 1, decode_unicode: bool = False) -> Iterator[bytes]:
             """Raise at the actual Response content boundary after yielding an incomplete entity."""
             yield b'{"result":"success"'
@@ -886,3 +911,120 @@ def test_actually_issued_but_unbound_owner_token_cannot_send_inventory() -> None
             _assert_closed(scenario)
         finally:
             prepared.token.close()
+
+
+def test_actual_response_clock_before_committed_proof_is_a_source_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinguish contradictory response evidence from a failure to perform its actual HTTP.
+
+    Given: The real SDK and guarded Requests session complete one signed inventory GET.
+    When: Its transport clock reports request start before the original proof was recorded.
+    Then: Receipt validation returns source_invalid and closes the genuine response.
+    """
+    actual_request = wire._request_guarded_original_response
+
+    def reversed_clock(
+        session: Session,
+        expected_url: str,
+        sdk_headers: Mapping[str, str],
+        guard: Callable[[PreparedRequest, datetime], PreparedKeyProofReference],
+    ) -> tuple[Response, PreparedKeyProofReference, datetime]:
+        """Retain the real response and proof while exposing a contradictory source clock."""
+        response, proof, _ = actual_request(session, expected_url, sdk_headers, guard)
+        return response, proof, proof.recorded_at - timedelta(microseconds=1)
+
+    with _scenario("kraken_futures.open_orders") as scenario:
+        monkeypatch.setattr(wire, "_request_guarded_original_response", reversed_clock)
+        with pytest.raises(FuturesInventoryWireError) as caught:
+            scenario.read()
+        assert caught.value.reason == "source_invalid"
+        assert len(scenario.adapter.inventory_calls) == 1
+        _assert_safe_failure(caught.value)
+        _assert_closed(scenario)
+
+
+def _bounded_inventory_body(boundary: str, extra: int) -> bytes:
+    """Place one original complete inventory at its resource bound, including field-heavy trees."""
+    document = _empty_body("kraken_futures.open_orders")
+    if boundary == "nodes":
+        document["safe"] = [0] * (65531 + extra)
+    elif boundary == "fields":
+        document.update({f"safe_{index}": 0 for index in range(65532 + extra)})
+    elif boundary == "depth":
+        nested: object = "benign"
+        for _ in range(63 + extra):
+            nested = [nested]
+        document["safe"] = nested
+    encoded = json.dumps(document, separators=(",", ":")).encode()
+    if boundary == "body":
+        return encoded + b" " * (8 * 1024 * 1024 + extra - len(encoded))
+    return encoded
+
+
+@pytest.mark.parametrize("boundary", ("nodes", "fields", "depth", "body"))
+@pytest.mark.parametrize("extra", (0, 1))
+def test_complete_http_and_inventory_parser_share_resource_boundaries(
+    boundary: str, extra: int
+) -> None:
+    """Keep privacy inspection and semantic parsing consistent at their actual full limits.
+
+    Given: A complete empty inventory reaches its node, field-heavy tree, depth or byte bound.
+    When: Real signed HTTP delivers that entity or exactly one additional element.
+    Then: Both boundaries accept the exact limit and the transport refuses every oversized source.
+    """
+    body = _bounded_inventory_body(boundary, extra)
+    with _scenario("kraken_futures.open_orders") as scenario:
+        scenario.source.body = body
+        if extra:
+            with pytest.raises(FuturesInventoryWireError) as caught:
+                scenario.read()
+            assert caught.value.reason == "source_invalid"
+        else:
+            receipt = require_guarded_inventory_receipt(scenario.read())
+            assert receipt.entity_bytes == body
+            assert parse_futures_open_orders(body).orders == ()
+        _assert_closed(scenario)
+
+
+def test_public_inventory_view_cannot_rebind_another_selected_credential() -> None:
+    """Validate the public source shape without treating it as a new issued transport capability.
+
+    Given: Real signed HTTP has issued an inventory receipt for the original prepared key proof.
+    When: A caller copies that public view with another selected credential UUID.
+    Then: Shape validation refuses the contradiction and the original issued receipt stays unchanged.
+    """
+    with _scenario("kraken_futures.open_orders") as scenario:
+        issued = scenario.read()
+        original = require_guarded_inventory_receipt(issued)
+        changed = original.client_selection.model_copy(update={"credential_public_id": _uuid(99)})
+        with pytest.raises(ValidationError, match="source_invalid"):
+            FuturesInventoryWireReceipt.model_validate(
+                original.model_dump(mode="python") | {"client_selection": changed}
+            )
+        assert require_guarded_inventory_receipt(issued) == original
+        _assert_closed(scenario)
+
+
+def test_actual_stream_deadline_refuses_without_issuing_a_partial_inventory_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve the actual bounded-stream deadline as a sanitized transport refusal.
+
+    Given: The real SDK request returned its actual loopback streaming response.
+    When: The trusted monotonic clock crosses the read deadline before its first chunk is consumed.
+    Then: The real entity reader refuses, no receipt issues and the response closes.
+    """
+    with _scenario("kraken_futures.open_orders") as scenario:
+
+        def expire_deadline(request: PreparedRequest, response: Response) -> None:
+            """Advance only the original entity reader's trusted clock after genuine HTTP returns."""
+            monkeypatch.setattr(account_receipts, "monotonic", lambda: float("inf"))
+
+        scenario.adapter.after_inventory = expire_deadline
+        with pytest.raises(FuturesInventoryWireError) as caught:
+            scenario.read()
+        assert caught.value.reason == "transport_error"
+        assert len(scenario.adapter.inventory_calls) == 1
+        _assert_safe_failure(caught.value)
+        _assert_closed(scenario)

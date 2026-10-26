@@ -180,6 +180,45 @@ exposure, freeze an engine or prevent a new command after the engine's existing
 60-second in-flight timeout. Durable scope holds, recovery of those holds and
 explicit resolution remain separate work.
 
+## Native inventory observations
+
+Kraken Futures startup captures account-wide open orders and open positions
+through the actual authenticated SDK transport. It reuses the successful
+key/accounts preparation before handing its original runtime token to the
+private socket. Each endpoint commits its own immutable attempt before its GET
+and retains the original privacy-checked response with its outcome. READ_ONLY
+keys can supply these observations; no margin profile or trading permission is
+inferred from them.
+
+Orders and positions have independent ordering across credential rotation. The
+newest pending or failed attempt masks an older success. Current reads verify
+the actual key proof, owner root, selected credential and original clock chain
+under the wallet fence. The observation window is 30 seconds from the original
+key GET start, with at most five seconds of provider clock skew. Delayed
+completion cannot renew the window. A later refresh explicitly prepares and
+closes its own source token; cancellation waits for started transport work.
+
+Futures startup recovery and periodic reconciliation use this qualified order
+inventory. Durable orders without their original selected submission context
+remain parked, whether observed present, absent or unavailable. Inventory alone
+does not authorize adoption, a terminal status, corrective fills or reconstructed
+admission. Those paths do not fall back to unretained SDK order lookups.
+
+The account observer uses the retained position response and original
+observation time. A genuinely observed empty array remains distinct from
+unavailability. The existing display requires a real mark price and funding
+operand; a source that cannot supply them produces an explicit component error
+instead of invented values. Source quantities retain their exact decimal
+interpretation before final display conversion.
+
+Migration 0066 adds the attempt/outcome tables and their SQLite/PostgreSQL
+immutability guards. Existing migrations through 0065 remain unchanged.
+Apply the migration before starting the new executor. A populated inventory
+history prevents a destructive downgrade, including when only a pending attempt
+exists. A host clock regression refuses new attempts until the clock catches up.
+Separate accounts, orders and positions responses are not an atomic funds
+snapshot. Product creation remains subject to the accounting refusals above.
+
 ## Remaining accounting work
 
 An internal Futures recording transaction now joins one actual execution,

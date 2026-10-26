@@ -29,10 +29,13 @@ from requests.adapters import BaseAdapter
 from sqlalchemy import select
 from urllib3.response import HTTPResponse
 
+import snapper.application.trade.current_futures_inventory as inventory_reader
 import snapper.application.trade.native_account_read as producer
+import snapper.data.futures_inventory_read_store as inventory_store
 import snapper.data.native_account_authority_store as authority_store
 import snapper.data.native_account_identity_store as identity_store
 import snapper.data.native_account_read_store as read_store
+import snapper.infrastructure.exchanges.futures_inventory_wire as inventory_transport
 import snapper.infrastructure.exchanges.kraken_futures_account_receipts as accounts_transport
 import snapper.infrastructure.exchanges.kraken_futures_key_identity as key_transport
 import snapper.infrastructure.exchanges.kraken_rest_egress as routing
@@ -206,6 +209,17 @@ class NativeAuthorityHttpAdapter(BaseAdapter):
                     "iiban": NATIVE_AUTHORITY_PRIVATE_MARKER,
                 }
             ).encode()
+        elif (request.url or "").endswith(
+            ("/derivatives/api/v3/openorders", "/derivatives/api/v3/openpositions")
+        ):
+            field = "openOrders" if (request.url or "").endswith("openorders") else "openPositions"
+            body = json.dumps(
+                {
+                    "result": "success",
+                    "serverTime": self.clock.current.isoformat().replace("+00:00", "Z"),
+                    field: [],
+                }
+            ).encode()
         else:
             self.proofs_at_accounts_send.append(proofs)
             assert proofs >= 1
@@ -332,6 +346,9 @@ async def native_authority_scenario(
     )
     for module in (
         producer,
+        inventory_reader,
+        inventory_store,
+        inventory_transport,
         identity_store,
         read_store,
         authority_store,

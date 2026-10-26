@@ -1,6 +1,6 @@
 """Retain native source ownership through cancellation and ambiguous executor enqueue failures.
 
-Only the two existing authenticated source reads use this local ownership rule.
+Authenticated identity, accounts and inventory source reads use this local ownership rule.
 The actual egress dispatcher and SDK call remain unchanged. Cancellation waits
 for a started source callback; socket reads may outlast between-chunk elapsed
 checks, so this module promises ownership rather than a hard duration limit.
@@ -132,7 +132,12 @@ async def _settle_owned_future(
 async def read_owned_native_source[ResultT](
     client: KrakenFuturesExchangeClient,
     user: User,
-    operation: Literal["prepare_native_private_key_identity", "get_native_accounts_source"],
+    operation: Literal[
+        "prepare_native_private_key_identity",
+        "get_native_accounts_source",
+        "get_native_open_orders_source",
+        "get_native_open_positions_source",
+    ],
     read: Callable[[], ResultT],
     dispose_cancelled: Callable[[ResultT], None] | None = None,
 ) -> ResultT:
@@ -141,7 +146,7 @@ async def read_owned_native_source[ResultT](
     Args:
         client: Actual selected Futures client whose existing dispatcher owns the REST executor.
         user: Same original SDK User already validated by the source operation.
-        operation: One of the two existing fixed authenticated source-read operation names.
+        operation: One of the fixed authenticated identity, accounts or inventory source reads.
         read: Exact synchronous SDK source call under the original router and its eligible pre-send
             fallback policy, without any new application retry.
         dispose_cancelled: Nonthrowing synchronous cleanup of an actual late result, including one

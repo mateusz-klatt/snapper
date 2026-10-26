@@ -942,6 +942,14 @@ owned by that coordinator. Executor heartbeat venue-health metadata
 can also halt known real shard keys for an exchange/wallet scope and
 drop new cold-path signals for that scope.
 
+Kraken Futures startup recovery and periodic reconciliation use the independent
+[native inventory lifecycle](order-execution.md#native-inventory-observations).
+The account observer consumes the same retained position source. Its two
+endpoint histories bind original key ownership, fixed purpose and original
+clocks under the wallet fence. Unavailable observations never become an empty
+book. Durable orders remain parked until their original selected submission
+context exists; this read path cannot authorize adoption or financial healing.
+
 Five order-safety layers sit on the dispatch path:
 
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default

@@ -1,8 +1,8 @@
-"""Unexecuted current-reader boundary tests without SQL, HTTP or source-issuance claims.
+"""Exercise current-reader boundaries without SQL, HTTP or source-issuance claims.
 
 Strict fixture payloads exercise the reader through typed store/proof boundary
-doubles. The actual persistence, guarded HTTP and wallet-lock behavior require
-separate WSL integration tests. These tests do not replace that acceptance.
+doubles. Separate integration tests cover actual persistence, guarded HTTP and
+wallet-lock behavior; these unit fixtures do not replace that acceptance.
 """
 
 import base64
@@ -14,6 +14,7 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import InvalidOperation
 from typing import Literal
 from typing import cast
 
@@ -51,7 +52,8 @@ _POLICY = FuturesInventoryFreshnessPolicy(
     maximum_source_age=_AGE, maximum_server_clock_skew=timedelta(seconds=5)
 )
 _PURPOSES: tuple[InventoryReadPurpose, ...] = (
-    "kraken_futures.open_orders", "kraken_futures.open_positions"
+    "kraken_futures.open_orders",
+    "kraken_futures.open_positions",
 )
 
 
@@ -158,9 +160,10 @@ def _latest(
         completed_at=times.completed,
         result=result,
     )
-    return LatestFuturesInventoryRead(
-        bound, BoundFuturesInventoryOutcome(_uuid(31), outcome)
-    ), proof
+    return (
+        LatestFuturesInventoryRead(bound, BoundFuturesInventoryOutcome(_uuid(31), outcome)),
+        proof,
+    )
 
 
 class _SessionState:
@@ -182,6 +185,7 @@ def _patch_boundaries(
     calls: list[str],
 ) -> None:
     """Observe reader-store delegation without granting unit fixtures actual provenance."""
+
     async def latest_loader(
         session: AsyncSession,
         selection: ExecutionClientSelection,
@@ -391,3 +395,133 @@ async def test_repository_wrapper_samples_age_after_its_selected_wallet_fence(
     )
     assert result.status == "available"
     assert calls == ["session", "begin", "fence", "clock", "latest", "original_key"]
+
+
+@pytest.mark.parametrize("boundary", ("store", "transaction"))
+async def test_decimal_boundary_failure_preserves_explicit_unverifiable_inventory(
+    monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """Refuse malformed decimal evidence without allowing an arithmetic failure to escape as inventory.
+
+    Given: An actual reader boundary cannot decode a stored decimal or establish its transaction.
+    When: That boundary reports Decimal InvalidOperation through its normal exception contract.
+    Then: The reader returns unverifiable with no fabricated empty snapshot or source references.
+    """
+    if boundary == "store":
+
+        async def invalid_decimal(
+            session: AsyncSession,
+            selection: ExecutionClientSelection,
+            purpose: InventoryReadPurpose,
+            known_at: datetime,
+        ) -> LatestFuturesInventoryRead | None:
+            """Expose a decimal decoding refusal at the independently loaded evidence boundary."""
+            raise InvalidOperation("Synthetic malformed stored numeric evidence")
+
+        monkeypatch.setattr(reader, "get_latest_futures_inventory_read", invalid_decimal)
+        result = await get_current_futures_inventory_read(
+            cast(AsyncSession, _SessionState()),
+            _selection(),
+            "kraken_futures.open_orders",
+            _NOW,
+            _POLICY,
+        )
+    else:
+        repository = _RepositoryBoundary([])
+
+        async def invalid_transaction(session: AsyncSession) -> None:
+            """Refuse a transaction whose adapter cannot interpret its actual stored numeric state."""
+            raise InvalidOperation("Synthetic invalid transaction numeric state")
+
+        monkeypatch.setattr(repository, "_begin_execution_insert_transaction", invalid_transaction)
+        result = await read_current_futures_inventory(
+            cast(AccountingRepository, repository),
+            _selection(),
+            "kraken_futures.open_orders",
+            _POLICY,
+        )
+    assert result.status == "unavailable" and result.reason == "unverifiable"
+    assert result.snapshot is None and result.attempt is None and result.outcome is None
+
+
+@pytest.mark.parametrize(
+    ("age", "skew"),
+    (
+        (timedelta(0), timedelta(0)),
+        (timedelta(microseconds=-1), timedelta(0)),
+        (timedelta(seconds=1), timedelta(microseconds=-1)),
+    ),
+)
+def test_inventory_policy_refuses_nonpositive_age_or_negative_clock_tolerance(
+    age: timedelta, skew: timedelta
+) -> None:
+    """Reject invalid trusted freshness configuration before it can influence any inventory read.
+
+    Given: A policy has an expired-by-definition age window or negative provider-clock tolerance.
+    When: The caller constructs the trusted reader configuration.
+    Then: It refuses those bounds instead of silently changing or supplying defaults.
+    """
+    with pytest.raises(ValueError, match="freshness bounds"):
+        FuturesInventoryFreshnessPolicy(maximum_source_age=age, maximum_server_clock_skew=skew)
+
+
+@pytest.mark.parametrize("fault", ("wrong_endpoint", "future_completion"))
+async def test_reader_refuses_contradictory_latest_endpoint_or_knowledge_boundary(
+    monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """Keep the public reader defensive when its loader returns contradictory typed evidence.
+
+    Given: A unit loader returns another endpoint or a strictly valid outcome not yet known locally.
+    When: The requested orders reader independently checks endpoint and original knowledge clocks.
+    Then: It reports unverifiable and exposes no empty snapshot or unverified source references.
+    """
+    latest, proof = _latest(
+        (
+            "kraken_futures.open_positions"
+            if fault == "wrong_endpoint"
+            else "kraken_futures.open_orders"
+        ),
+        (
+            replace(_Times(), completed=_NOW + timedelta(microseconds=1))
+            if fault == "future_completion"
+            else _Times()
+        ),
+    )
+    calls: list[str] = []
+
+    async def contradictory_latest(
+        session: AsyncSession,
+        selection: ExecutionClientSelection,
+        purpose: InventoryReadPurpose,
+        known_at: datetime,
+    ) -> LatestFuturesInventoryRead | None:
+        """Return a contradictory boundary result without claiming actual SQL provenance."""
+        assert selection == _selection() and known_at == _NOW
+        assert purpose == "kraken_futures.open_orders"
+        calls.append("latest")
+        return latest
+
+    async def original_key(
+        session: AsyncSession, reference: InventoryReadKeyReference
+    ) -> BoundNativeAccountIdentityProof:
+        """Keep the exact original proof shape while allowing independent current-clock checks."""
+        assert reference == inventory_read_key_reference(proof)
+        calls.append("key")
+        return proof
+
+    monkeypatch.setattr(reader, "get_latest_futures_inventory_read", contradictory_latest)
+    monkeypatch.setattr(reader, "get_bound_inventory_read_key", original_key)
+    result = await get_current_futures_inventory_read(
+        cast(AsyncSession, _SessionState()),
+        _selection(),
+        "kraken_futures.open_orders",
+        _NOW,
+        _POLICY,
+    )
+    assert result.status == "unavailable" and result.reason == "unverifiable"
+    assert result.snapshot is None
+    if fault == "wrong_endpoint":
+        assert result.attempt is None and result.outcome is None and calls == ["latest"]
+    else:
+        assert result.attempt == latest.attempt and result.outcome == latest.outcome
+        assert calls == ["latest", "key"]
