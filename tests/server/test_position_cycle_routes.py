@@ -7,11 +7,13 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -57,7 +59,10 @@ def _make_cycle_row(
     return base
 
 
-def _create_client(mock_repo: Any) -> TestClient:
+def _create_client(
+    mock_repo: AsyncMock,
+    principal: AuthPrincipal | None = None,
+) -> TestClient:
     """Create test client with auth bypassed and mock repo."""
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
@@ -67,7 +72,7 @@ def _create_client(mock_repo: Any) -> TestClient:
         return None
 
     def skip_auth() -> AuthPrincipal:
-        return AuthPrincipal(username="test_admin", role=UserRole.ADMIN)
+        return principal or AuthPrincipal(username="test_admin", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf
     app.dependency_overrides[require_authentication] = skip_auth
@@ -108,6 +113,75 @@ class TestListOpenCycles:
         assert response.status_code == 200
         call_kwargs = repo.get_all_open_position_cycles.call_args
         assert call_kwargs.kwargs.get("opened_before") is not None
+
+
+class TestCycleReadScope:
+    """Keep global cycle observation separate from cycle-content permission."""
+
+    @pytest.mark.parametrize("version", [None, 3, 4])
+    def test_auditor_without_global_scope_never_reads_cycles(self, version: int | None) -> None:
+        """Downscoping global observation rejects the unfiltered administrative read."""
+        repo = AsyncMock()
+        principal = AuthPrincipal(
+            username="auditor",
+            role=UserRole.AUDITOR,
+            permissions=[Permission.READ_POSITION_CYCLES.value],
+            permission_scope_version=version,
+        )
+        response = _create_client(repo, principal).get("/api/position-cycles/open")
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "Global read authority is required to list position cycles"
+        )
+        repo.get_all_open_position_cycles.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            AuthPrincipal(username="auditor", role=UserRole.AUDITOR),
+            AuthPrincipal(
+                username="auditor",
+                role=UserRole.AUDITOR,
+                permissions=[
+                    Permission.READ_POSITION_CYCLES.value,
+                    Permission.READ_ALL_SCOPES.value,
+                ],
+                permission_scope_version=4,
+            ),
+            AuthPrincipal(
+                username="legacy_admin",
+                role=UserRole.ADMIN,
+                permissions=[Permission.MANAGE_USERS.value],
+                permission_scope_version=3,
+            ),
+        ],
+    )
+    def test_global_cycle_readers_retain_administrative_visibility(
+        self, principal: AuthPrincipal
+    ) -> None:
+        """Full auditors and narrow historical administrators can observe all cycles."""
+        repo = AsyncMock()
+        repo.get_all_open_position_cycles = AsyncMock(return_value=[_make_cycle_row()])
+        response = _create_client(repo, principal).get("/api/position-cycles/open")
+
+        assert response.status_code == 200
+        assert response.json()["payload"][0]["wallet_public_id"] == "wallet-1"
+        repo.get_all_open_position_cycles.assert_awaited_once()
+
+    def test_global_scope_without_cycle_permission_never_reads_cycles(self) -> None:
+        """Global observation cannot replace the independent content capability."""
+        repo = AsyncMock()
+        principal = AuthPrincipal(
+            username="auditor",
+            role=UserRole.AUDITOR,
+            permissions=[Permission.READ_ALL_SCOPES.value],
+            permission_scope_version=4,
+        )
+        response = _create_client(repo, principal).get("/api/position-cycles/open")
+
+        assert response.status_code == 403
+        repo.get_all_open_position_cycles.assert_not_awaited()
 
 
 class TestCloseOrphanCycle:

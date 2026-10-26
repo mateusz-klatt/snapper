@@ -105,7 +105,7 @@ async def test_current_profile_projects_effective_scope_and_delegate_state() -> 
         username="delegate",
         role=UserRole.AI_DELEGATE,
         permissions=[Permission.READ_SIGNALS.value],
-        permission_scope_version=3,
+        permission_scope_version=4,
         delegate_public_id="delegate-public-id",
     )
     profile = UserProfile(
@@ -1113,12 +1113,13 @@ class TestBuildAuthPrincipal:
         assert principal.primary_operator_public_id == "op-2"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.AUDITOR])
     async def test_operator_receives_only_explicit_memberships(
-        self, user_service_with_repo: UserService
+        self, user_service_with_repo: UserService, role: UserRole
     ) -> None:
-        """OPERATOR role's operator_public_ids comes only from memberships.
+        """Operator and auditor identities preserve only actual memberships.
 
-        Given: An OPERATOR profile with two membership rows (one primary),
+        Given: A profile with two membership rows (one primary),
         When: ``build_auth_principal`` is invoked,
         Then: ``operator_public_ids`` lists only the membership operators
             (NOT the full active set), and ``primary_operator_public_id``
@@ -1146,12 +1147,10 @@ class TestBuildAuthPrincipal:
             },
         ]
 
-        principal = await user_service_with_repo.build_auth_principal(
-            self._make_profile(UserRole.OPERATOR)
-        )
+        principal = await user_service_with_repo.build_auth_principal(self._make_profile(role))
 
         repo.list_active_operators.assert_not_awaited()
-        assert principal.role == UserRole.OPERATOR
+        assert principal.role == role
         assert principal.operator_public_ids == ["op-77", "op-99"]
         assert principal.operator_membership_public_ids == {
             "op-77": "m-1",
@@ -1160,12 +1159,13 @@ class TestBuildAuthPrincipal:
         assert principal.primary_operator_public_id == "op-99"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.AUDITOR])
     async def test_user_with_no_memberships_yields_empty_primary(
-        self, user_service_with_repo: UserService
+        self, user_service_with_repo: UserService, role: UserRole
     ) -> None:
-        """A VIEWER with no memberships yields empty operator IDs and empty primary.
+        """A viewer or global auditor without memberships has no execution identity.
 
-        Given: A VIEWER profile with zero membership rows,
+        Given: A profile with zero membership rows,
         When: ``build_auth_principal`` is invoked,
         Then: ``operator_public_ids`` is an empty list and
             ``primary_operator_public_id`` is the empty string sentinel.
@@ -1173,14 +1173,13 @@ class TestBuildAuthPrincipal:
         repo = user_service_with_repo.repository
         repo.get_user_operator_memberships.return_value = []
 
-        principal = await user_service_with_repo.build_auth_principal(
-            self._make_profile(UserRole.VIEWER)
-        )
+        principal = await user_service_with_repo.build_auth_principal(self._make_profile(role))
 
         assert principal.operator_public_ids == []
         assert principal.operator_membership_public_ids == {}
         assert principal.primary_operator_public_id == ""
         assert principal.user_public_id == "user-public-id-1"
+        repo.list_active_operators.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_delegate_identity_comes_from_operational_state(

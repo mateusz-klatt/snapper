@@ -17,6 +17,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi import status
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository_types import WalletRow
@@ -37,6 +38,72 @@ def _wallet_row(public_id: str) -> WalletRow:
         session_id="test-sid",
         sequence_id=1,
     )
+
+
+class TestAuditorScope:
+    """Global read authority never becomes global trade authority."""
+
+    @pytest.mark.asyncio
+    async def test_auditor_reads_every_wallet_without_memberships(self) -> None:
+        """An auditor receives global reads while the trade plane stays empty."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators.return_value = []
+        principal = AuthPrincipal(username="audit", role=UserRole.AUDITOR)
+
+        assert await resolve_readable_wallets(principal, repo) is None
+        assert await resolve_readable_wallets(principal, repo, wallet_public_id="foreign") == [
+            "foreign"
+        ]
+        assert await resolve_tradable_wallets(principal, repo) == []
+        with pytest.raises(HTTPException) as error:
+            await resolve_tradable_wallets(principal, repo, wallet_public_id="foreign")
+        assert error.value.status_code == 403
+        repo.list_readable_wallets_for_user.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auditor_operator_filter_narrows_reads_without_impersonation(self) -> None:
+        """Foreign operator selection filters reads and remains invalid for trading."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators.return_value = [_wallet_row("foreign")]
+        principal = AuthPrincipal(username="audit", role=UserRole.AUDITOR)
+
+        assert await resolve_readable_wallets(principal, repo, operator_public_id="other") == [
+            "foreign"
+        ]
+        with pytest.raises(HTTPException) as error:
+            await resolve_tradable_wallets(principal, repo, operator_public_id="other")
+        assert error.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_auditor_global_reads_can_be_downscoped(self) -> None:
+        """Removing READ_ALL_SCOPES leaves ordinary membership and personal reads."""
+        repo = AsyncMock()
+        repo.list_readable_wallets_for_user.return_value = [_wallet_row("own")]
+        principal = AuthPrincipal(
+            username="audit",
+            role=UserRole.AUDITOR,
+            permissions=[Permission.READ_ORDERS.value],
+            permission_scope_version=4,
+        )
+
+        assert await resolve_readable_wallets(principal, repo) == ["own"]
+        with pytest.raises(HTTPException) as error:
+            await resolve_readable_wallets(principal, repo, wallet_public_id="foreign")
+        assert error.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_claim_global_read_permission(self) -> None:
+        """A signed permission list remains bounded by the viewer role ceiling."""
+        repo = AsyncMock()
+        repo.list_readable_wallets_for_user.return_value = []
+        principal = AuthPrincipal(
+            username="viewer",
+            role=UserRole.VIEWER,
+            permissions=[Permission.READ_ALL_SCOPES.value],
+            permission_scope_version=4,
+        )
+
+        assert await resolve_readable_wallets(principal, repo) == []
 
 
 class TestResolveTradableWallets:

@@ -1011,6 +1011,49 @@ class TestAnchorCreationPlane:
     caller still does.
     """
 
+    @pytest.mark.parametrize("timeline", [False, True])
+    @pytest.mark.parametrize("has_membership", [False, True])
+    def test_auditor_reads_without_ever_creating_anchor(
+        self, timeline: bool, has_membership: bool
+    ) -> None:
+        """Global read access never authors an anchor, even with real memberships."""
+        repo = _anchorless_repo()
+        repo.list_accessible_wallets_for_operators.return_value = [
+            {"public_id": _WALLET, "is_paper": False}
+        ]
+        client = _create_client(
+            repo,
+            role=UserRole.AUDITOR,
+            operator_public_ids=["own-operator"] if has_membership else [],
+        )
+        response = client.get(_timeline_url() if timeline else _url())
+
+        assert response.status_code == 200
+        assert response.json()["payload"]["points"] == []
+        repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    def test_auditor_can_read_foreign_operator_without_trade_authority(
+        self, timeline: bool
+    ) -> None:
+        """Selecting another operator narrows the read without entering trade validation."""
+        repo = _anchorless_repo()
+        repo.list_accessible_wallets_for_operators.return_value = [
+            {"public_id": _WALLET, "is_paper": False}
+        ]
+        client = _create_client(repo, role=UserRole.AUDITOR)
+        url = (
+            _timeline_url(operator_public_id="foreign-operator")
+            if timeline
+            else _url(operator_public_id="foreign-operator")
+        )
+        response = client.get(url)
+
+        assert response.status_code == 200
+        repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+
     def test_read_granted_current_truth_never_creates_the_anchor(self) -> None:
         """A read-only caller gets the honest no-anchor result, not a new anchor.
 
@@ -1069,9 +1112,11 @@ class TestAnchorCreationPlane:
         assert points[0]["net_pnl"] == 4.5
         repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
 
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.VIEWER])
     def test_trade_authorized_caller_still_creates_the_anchor(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        role: UserRole,
     ) -> None:
         """An operator holding a scope grant keeps the pre-split behaviour.
 
@@ -1086,7 +1131,7 @@ class TestAnchorCreationPlane:
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=granted)
         build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
         monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", build)
-        client = _create_client(repo, role=UserRole.OPERATOR, operator_public_ids=["op-1"])
+        client = _create_client(repo, role=role, operator_public_ids=["op-1"])
         response = client.get(_url())
         assert response.status_code == 200
         repo.list_accessible_wallets_for_operators.assert_awaited_once()

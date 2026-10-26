@@ -18,7 +18,9 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
@@ -51,7 +53,7 @@ _DESK_MEMBERSHIPS_TOPIC = "desk_memberships"
 
 
 class DeskMembershipAuthorizationError(Exception):
-    """Raised when a caller may not manage the target desk."""
+    """Raised when a caller lacks the requested access to the target desk."""
 
 
 class UserService:
@@ -159,12 +161,73 @@ class UserService:
             Desk-scoped profiles for active human members.
         """
         now = datetime.now(UTC)
-        await self._authorize_desk_membership_management(principal, operator_public_id, now)
+        if has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.READ_DESK_MEMBERSHIPS,
+        ):
+            await self._authorize_desk_membership_read(principal, operator_public_id, now)
+        else:
+            await self._authorize_desk_membership_management(principal, operator_public_id, now)
         rows = await self.repository.list_human_desk_members(
             operator_public_id=operator_public_id,
             as_of=as_of or now,
         )
         return [self._desk_member_to_profile(row) for row in rows]
+
+    async def _live_desk_reader_role(self, principal: AuthPrincipal, as_of: datetime) -> UserRole:
+        """Resolve an active reader's current canonical desk-directory capability."""
+        if not principal.user_public_id:
+            raise DeskMembershipAuthorizationError("Active caller identity is required")
+        async with self.repository.session() as session:
+            live_role_value = await session.scalar(
+                select(User.role).where(
+                    User.public_id == principal.user_public_id,
+                    User.is_active.is_(True),
+                    *where_active(User, as_of),
+                )
+            )
+        if live_role_value is None:
+            raise DeskMembershipAuthorizationError("Active caller identity is required")
+        try:
+            live_role = UserRole(live_role_value)
+        except ValueError as exc:
+            raise DeskMembershipAuthorizationError(
+                "Live user role cannot read desk memberships"
+            ) from exc
+        read_permissions = {Permission.READ_DESK_MEMBERSHIPS, Permission.MANAGE_DESK_MEMBERSHIPS}
+        if get_effective_permissions(live_role).isdisjoint(read_permissions):
+            raise DeskMembershipAuthorizationError("Live user role cannot read desk memberships")
+        return live_role
+
+    async def _authorize_desk_membership_read(
+        self, principal: AuthPrincipal, operator_public_id: str, as_of: datetime
+    ) -> None:
+        """Check live scope after the caller's token granted directory read access.
+
+        Global read authority is required in both the token and live role.
+        Other readers need the target desk in their token and current
+        memberships. This read path never authorizes membership mutations.
+        """
+        live_role = await self._live_desk_reader_role(principal, as_of)
+        if has_global_read_permission(
+            principal.role, principal.permissions, principal.permission_scope_version
+        ) and has_global_read_permission(live_role):
+            return
+        if operator_public_id not in principal.operator_public_ids:
+            raise DeskMembershipAuthorizationError(
+                "Target desk is outside the authenticated token scope"
+            )
+        memberships = await self.repository.get_user_operator_memberships(
+            user_public_id=principal.user_public_id, as_of=as_of
+        )
+        if operator_public_id not in {
+            membership["operator_public_id"] for membership in memberships
+        }:
+            raise DeskMembershipAuthorizationError(
+                "Current membership in the target desk is required"
+            )
 
     async def detach_viewer_from_desk(
         self,

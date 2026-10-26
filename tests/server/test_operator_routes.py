@@ -71,7 +71,8 @@ class TestListOperators:
     """Role-scoped behaviour of ``list_operators``."""
 
     @pytest.mark.asyncio
-    async def test_admin_sees_every_active_operator(self) -> None:
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+    async def test_global_reader_sees_every_active_operator(self, role: UserRole) -> None:
         """ADMIN receives the full catalogue without membership filtering.
 
         Given: An ADMIN principal,
@@ -86,7 +87,7 @@ class TestListOperators:
                 _operator_row("op-3", "gamma"),
             ]
         )
-        principal = AuthPrincipal(username="admin", role=UserRole.ADMIN)
+        principal = AuthPrincipal(username="global-reader", role=role)
 
         result = await list_operators(request=_make_request(), principal=principal, repo=mock_repo)
 

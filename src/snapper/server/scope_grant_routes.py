@@ -3,7 +3,8 @@
 Returns the active ``wallet_operator_scope_grants`` rows on a given
 wallet and accepts create + handover commands.
 Authorization rules
-Principals granted ``IMPERSONATE_OPERATOR`` may query any wallet.
+Read access requires ``READ_SCOPE_GRANTS`` or ``MANAGE_SCOPE_GRANTS``.
+Readers granted global read authority may query any wallet.
 Other principals may query only wallets covered by at least one
   active scope grant from their operator set (read gate). Mutation
   additionally requires the ``MANAGE_SCOPE_GRANTS`` permission,
@@ -37,11 +38,11 @@ from snapper.api.schemas.multi_tenant import RevokeScopeGrantResponse
 from snapper.api.schemas.multi_tenant import ScopeGrantInfo
 from snapper.api.schemas.multi_tenant import ScopeGrantListResponse
 from snapper.api.schemas.multi_tenant import ScopeGrantResponse
-from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -161,7 +162,12 @@ def _validate_scope_xor(body: CreateScopeGrantCommand) -> None:
 @router.get("")
 async def list_scope_grants(
     request: Request,
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(Permission.READ_SCOPE_GRANTS, Permission.MANAGE_SCOPE_GRANTS)
+        ),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     wallet_public_id: Annotated[
         str,
@@ -170,7 +176,8 @@ async def list_scope_grants(
 ) -> ScopeGrantListResponse:
     """List active scope grants on a given wallet.
 
-    Callers without ``IMPERSONATE_OPERATOR`` must have visibility into the target wallet
+    Callers must hold scope-grant read or management permission. Readers
+    without global read authority must have visibility into the target wallet
     through their operator set; otherwise the request is rejected
     with 403 so the existence of the wallet is not leaked through
     an empty payload vs. a 404.
@@ -192,14 +199,14 @@ async def list_scope_grants(
         ``ScopeGrantListResponse`` ordered by ``timestamp`` ascending.
 
     Raises:
-        HTTPException: 403 if the caller cannot see the target wallet.
+        HTTPException: 403 if the caller lacks content permission or cannot
+            see the target wallet.
     """
     now = datetime.now(UTC)
-    if not has_effective_permission(
+    if not has_global_read_permission(
         principal.role,
         principal.permissions,
         principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         accessible = await repo.list_accessible_wallets_for_operators(
             principal.operator_public_ids, now

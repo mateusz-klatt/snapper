@@ -111,6 +111,96 @@ def _make_owner_principal(
     )
 
 
+async def _seed_unbound_audit_delegate(
+    repo: SQLAlchemyRepository, public_id: str, is_active: bool = True
+) -> None:
+    """Persist a delegate with no owner, caps or desk membership for audit reads."""
+    seed_time = datetime(2026, 1, 1, tzinfo=UTC)
+    async with repo.session() as session:
+        session.add(
+            User(
+                public_id=public_id,
+                session_id="audit-seed",
+                sequence_id=1,
+                timestamp=seed_time,
+                known_to=KNOWN_TO_MAX,
+                username=f"ai-audit-{public_id}",
+                email=f"{public_id}@example.com",
+                password_hash=_BCRYPT_FAKE_DIGEST,
+                role=UserRole.AI_DELEGATE.value,
+                is_active=is_active,
+                created_at=seed_time,
+            )
+        )
+        await session.commit()
+
+
+class TestGlobalDelegateRead:
+    """Global audit reads include unbound delegates without weakening mutation ownership."""
+
+    @pytest.mark.asyncio
+    async def test_global_service_reads_unbound_active_delegates(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Membership-less delegates are visible; ordinary users and inactive rows are not."""
+        await _seed_owner(repo, "ordinary", "ordinary")
+        await _seed_unbound_audit_delegate(repo, "unbound-active")
+        await _seed_unbound_audit_delegate(repo, "unbound-inactive", is_active=False)
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+
+        listed = await service.list_all_delegates()
+        detail = await service.get_any_delegate("unbound-active")
+
+        assert [item.public_id for item in listed] == ["unbound-active"]
+        assert detail.public_id == "unbound-active"
+        assert detail.created_by_user_public_id == ""
+        assert await service.list_delegates(operator_public_ids=[]) == []
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_any_delegate("unbound-inactive")
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_delegate("unbound-active", owner_public_id="ordinary")
+
+    @pytest.mark.asyncio
+    async def test_empty_global_service_read(self, repo: SQLAlchemyRepository) -> None:
+        """An empty catalogue remains empty and absent detail reads fail closed."""
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+
+        assert await service.list_all_delegates() == []
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_any_delegate("missing")
+
+    @pytest.mark.asyncio
+    async def test_auditor_routes_use_global_reads_and_honor_downscoping(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An auditor sees unbound delegates until its global read capability is removed."""
+        await _seed_unbound_audit_delegate(repo, "unbound-route")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: service)
+        principal = AuthPrincipal(username="audit", role=UserRole.AUDITOR)
+        request = _make_rest_request()
+
+        listed = await ai_delegate_routes.list_delegates(request, principal, repo)
+        detail = await ai_delegate_routes.get_delegate(request, "unbound-route", principal, repo)
+
+        assert [item.public_id for item in listed.payload] == ["unbound-route"]
+        assert detail.payload.public_id == "unbound-route"
+        narrowed = principal.model_copy(
+            update={
+                "permissions": [Permission.READ_AI_INTEGRATION.value],
+                "permission_scope_version": 4,
+            }
+        )
+        scoped = await ai_delegate_routes.list_delegates(request, narrowed, repo)
+        assert scoped.payload == []
+        with pytest.raises(HTTPException) as error:
+            await ai_delegate_routes.get_delegate(request, "unbound-route", narrowed, repo)
+        assert error.value.status_code == 404
+        with pytest.raises(HTTPException) as missing:
+            await ai_delegate_routes.get_delegate(request, "missing", principal, repo)
+        assert missing.value.status_code == 404
+
+
 class TestCreateDelegate:
     """Atomic create emits User + caps + token rows in one transaction."""
 

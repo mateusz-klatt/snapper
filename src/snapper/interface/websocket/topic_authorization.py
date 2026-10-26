@@ -28,8 +28,7 @@ filters must stay on the operator plane; personal read grants must not widen the
 from collections.abc import Iterable
 from datetime import datetime
 
-from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.interface.websocket.helpers import filter_topics
@@ -60,11 +59,10 @@ def _extract_backtest_wallet_public_id(topic: str) -> str | None:
 
 def _is_backtest_topic_allowed(topic: str, principal: AuthPrincipal) -> bool:
     """Return whether the principal may subscribe to a backtest topic."""
-    if has_effective_permission(
+    if has_global_read_permission(
         principal.role,
         principal.permissions,
         principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         return True
     active_wallet = principal.active_wallet_public_id
@@ -78,7 +76,7 @@ def _enforce_backtest_wallet_scope(
 ) -> tuple[list[str], list[str]]:
     """Split ``backtest.*`` topics into (allowed, denied) by wallet RBAC.
 
-    A caller granted ``IMPERSONATE_OPERATOR`` may subscribe to any
+    A caller granted global read authority may subscribe to any
     backtest topic. Other callers may subscribe only to the topic for
     their active wallet and cannot subscribe to the bare root.
     Wallet segment is extracted from the second dotted segment (the

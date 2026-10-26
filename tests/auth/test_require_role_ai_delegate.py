@@ -43,6 +43,9 @@ def test_ai_delegate_has_canonical_permission_set() -> None:
         READ_SIGNALS — and excludes strategy lifecycle + admin.
     """
     expected: set[Permission] = {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.INITIALIZE_PNL_ANCHORS,
+        Permission.READ_SCOPE_GRANTS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,

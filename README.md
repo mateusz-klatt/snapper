@@ -95,7 +95,7 @@ or rotate after first login via
     live candle charts and related instruments, orders and fills, alerts, desks,
     account settings and system inventories. Manual orders, position actions,
     process controls and delegated AI-review decisions require permission checks
-    and confirmation. Interface language synchronizes with the backend account;
+    and confirmation. Interface language synchronizes with writable backend accounts;
     country formatting and financial colors remain independent. Its README
     tracks the remaining iOS features and partial translations in 45 languages.
 - **CLI** — Full system management via Typer CLI
@@ -119,12 +119,21 @@ backtest comparisons or control runtime diagnostics. Wallet visibility follows
 the union of wallets covered by the viewer's operator scope grants and active
 personal wallet read grants, including when the viewer has no operator
 memberships. Personal read grants authorize visibility only; trading remains
-operator-scoped. This differs from the system-wide scope provided by effective `impersonate:operator`. That
-structural permission is non-downscopable for the `admin` named set so
-historically global admin scope cannot disappear when an admin token is
-narrowed. AI-delegate list and detail are the deliberate scope split: a
-read-only token uses operator memberships, while a token with the management
-permission uses creator ownership.
+operator-scoped. Existing roles retain self-service account management and,
+for position readers with trade-scope access, P&L anchor initialization.
+
+The `auditor` set is a read-only administrator. It exposes the complete
+administrative interface, settings, credential summaries and all wallets through
+`read:all_scopes`, without impersonation or mutation permissions. Forms remain
+inspectable with disabled saves. Password, account-preference and notification-device
+changes are blocked; authentication and local display preferences remain available.
+Auditor reads never initialize P&L anchors, and secret presentation is unchanged.
+
+Global read scope is independently downscopable and never authorizes trading.
+The existing `impersonate:operator` structural permission remains
+non-downscopable for the `admin` named set. AI-delegate list and detail preserve
+creator ownership for management tokens; read-only tokens use operator memberships
+or, with global read access, see all active delegates including unbound ones.
 
 See [Roles and Permissions](docs/api.md#roles-and-permissions) for every named
 set and the token-downscoping rules.

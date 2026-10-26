@@ -40,8 +40,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 
-from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.core.json_types import JsonValue
@@ -88,11 +87,10 @@ def wallet_access_cache_key(principal: AuthPrincipal) -> WalletAccessCacheKey:
         cache key.
     """
     return (
-        has_effective_permission(
+        has_global_read_permission(
             principal.role,
             principal.permissions,
             principal.permission_scope_version,
-            Permission.IMPERSONATE_OPERATOR,
         ),
         principal.user_public_id,
         tuple(principal.operator_public_ids),
@@ -174,7 +172,9 @@ async def enforce_ai_review_scope(
       the ai_reviews family).
     - Missing principal (e.g. WS pre-auth or auth dropped) returns
       ``False`` — no frame leaks to an un-authenticated socket.
-    - Missing ``delegate_public_id`` (non-AI_DELEGATE principal that
+    - Global read authority permits a schema-shaped review event without a
+      delegate identity, matching the administration read surface.
+    - Missing ``delegate_public_id`` on a non-global principal that
       somehow subscribed) returns ``False`` because the scope-grant
       check is delegate-keyed; a non-delegate has no row to evaluate.
     - Malformed payload (missing / non-string ``wallet_public_id`` or
@@ -202,12 +202,18 @@ async def enforce_ai_review_scope(
         return True
     if connection_principal is None:
         return False
-    delegate_public_id = connection_principal.delegate_public_id
-    if delegate_public_id is None:
-        return False
     wallet_public_id = payload.get("wallet_public_id")
     instrument_public_id = payload.get("instrument_public_id")
     if not isinstance(wallet_public_id, str) or not isinstance(instrument_public_id, str):
+        return False
+    if has_global_read_permission(
+        connection_principal.role,
+        connection_principal.permissions,
+        connection_principal.permission_scope_version,
+    ):
+        return True
+    delegate_public_id = connection_principal.delegate_public_id
+    if delegate_public_id is None:
         return False
     wall_clock = as_of if as_of is not None else datetime.now(UTC)
     return await scope_grant_service.has_grant_for_delegate(
@@ -244,7 +250,7 @@ async def enforce_orders_events_scope(
       ``orders.events.*`` family).
     - Missing principal (e.g. WS pre-auth or auth dropped) returns
       ``False`` — no frame leaks to an un-authenticated socket.
-    - ``IMPERSONATE_OPERATOR`` bypass — returns ``True`` without a service call;
+    - global read authority bypass — returns ``True`` without a service call;
       the permission grants every-wallet visibility, matching REST.
     - Missing or non-string ``wallet_public_id`` in the payload
       returns ``False``: the bridge's fail-closed parsing layer should
@@ -298,7 +304,7 @@ async def enforce_account_state_scope(
     REST account page's read plane, exactly as
     :func:`enforce_orders_events_scope`. Every account
     frame is first revalidated against the exact event schema, UUID7 topic,
-    and topic-payload wallet invariant. ``IMPERSONATE_OPERATOR`` then bypasses
+    and topic-payload wallet invariant. Global read authority then bypasses
     only the accessible wallet lookup. The optional cache is frame-local so one ZMQ frame performs
     at most one wallet query per authorization identity while scope changes
     take effect on the next frame.
@@ -396,11 +402,10 @@ async def _enforce_wallet_scope(
         return True
     if connection_principal is None:
         return False
-    if has_effective_permission(
+    if has_global_read_permission(
         connection_principal.role,
         connection_principal.permissions,
         connection_principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         return True
     wallet_public_id = payload.get("wallet_public_id")
@@ -453,7 +458,7 @@ def enforce_alerts_scope(
       family).
     - Missing principal (e.g. WS pre-auth or auth dropped) returns
       ``False`` — no frame leaks to an un-authenticated socket.
-    - ``IMPERSONATE_OPERATOR`` bypass — returns ``True`` without inspecting the
+    - global read authority bypass — returns ``True`` without inspecting the
       payload and matches the REST global-scope contract.
     - Missing or non-string ``user_public_id`` in the payload returns
       ``False``: the bridge's fail-closed parsing layer should already
@@ -476,11 +481,10 @@ def enforce_alerts_scope(
         return True
     if connection_principal is None:
         return False
-    if has_effective_permission(
+    if has_global_read_permission(
         connection_principal.role,
         connection_principal.permissions,
         connection_principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         return True
     payload_user_pid = payload.get("user_public_id")

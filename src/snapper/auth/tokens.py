@@ -567,7 +567,7 @@ but a ten-year default is a liability for tokens that may live in CI
 secret stores or IDE config.
 """
 
-PERMISSION_SCOPE_VERSION: Final[int] = 3
+PERMISSION_SCOPE_VERSION: Final[int] = 4
 """Version marker for refresh tokens carrying an intentional access scope."""
 
 
@@ -1753,7 +1753,9 @@ class TokenManager:
     def refresh_tokens(self, refresh_token: str) -> TokenPair | None:
         """Refresh token pair using refresh token.
 
-        Blacklists the old refresh token and creates new pair.
+        Blacklists the old refresh token and creates a new pair. Explicit
+        permission claims retain their scope even before scope versioning;
+        only an unversioned token without that claim inherits the full role.
 
         Args:
             refresh_token: Valid refresh token.
@@ -1779,7 +1781,7 @@ class TokenManager:
             permissions=token_data.permissions,
         )
         permissions: Iterable[Permission | str] | None = None
-        if token_data.permission_scope_version is not None:
+        if token_data.permission_scope_version is not None or token_data.permissions is not None:
             permissions = get_effective_permissions(
                 token_data.role,
                 token_data.permissions or [],

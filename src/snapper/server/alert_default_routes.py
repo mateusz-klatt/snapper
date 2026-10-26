@@ -36,7 +36,9 @@ from snapper.api.schemas.devices import UserAlertDefaultInfo
 from snapper.api.schemas.devices import UserAlertDefaultListResponse
 from snapper.api.schemas.devices import UserAlertDefaultResponse
 from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserAlertDefaultRow
@@ -122,7 +124,9 @@ async def update_alert_default(
     command: Annotated[
         UpdateUserAlertDefaultCommand, Depends(json_body(UpdateUserAlertDefaultCommand))
     ],
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> UserAlertDefaultResponse:

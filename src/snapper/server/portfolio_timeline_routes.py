@@ -77,6 +77,7 @@ from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PnlTimelineAppliedAnnulment
@@ -235,7 +236,9 @@ async def _validate_timeline_request(
     personal ``wallet_user_read_grants`` row on this wallet may look at its P&L.
 
     Permission to CREATE the activation anchor is derived separately, from the
-    TRADE plane, and only for a current-truth request. The anchor is a durable
+    TRADE plane, and only for a current-truth request whose effective permissions
+    include ``INITIALIZE_PNL_ANCHORS``. A global read-only auditor never reaches
+    the trade lookup, even with real operator memberships. The anchor is a durable
     write that permanently fixes where a scope's P&L history begins, so
     widening who may SEE a scope must never widen who may author it. The trade
     plane is consulted only when ``as_of`` is absent, because a historical read
@@ -324,7 +327,12 @@ async def _validate_timeline_request(
     await _require_matching_wallet_mode(repo, wallet_public_id, mode, effective_as_of)
     current_truth = as_of is None
     allow_anchor_creation = False
-    if current_truth:
+    if current_truth and has_effective_permission(
+        auth.role,
+        auth.permissions,
+        auth.permission_scope_version,
+        Permission.INITIALIZE_PNL_ANCHORS,
+    ):
         tradable = await resolve_tradable_wallets(auth, repo, operator_public_id)
         allow_anchor_creation = tradable is None or wallet_public_id in tradable
     return _ValidatedTimelineRequest(

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
@@ -22,10 +23,107 @@ from snapper.interface.websocket.scope_filter import enforce_account_state_scope
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
 from snapper.interface.websocket.scope_filter import enforce_alerts_scope
 from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
+from snapper.interface.websocket.scope_filter import wallet_access_cache_key
 from snapper.messaging.schemas.data import AccountStateChangedEventData
 
 _ACCOUNT_WALLET_A = "00000000-0000-7000-8000-000000000001"
 _ACCOUNT_WALLET_B = "00000000-0000-7000-8000-000000000002"
+
+
+@pytest.mark.asyncio
+async def test_auditor_receives_foreign_wallet_and_alert_frames() -> None:
+    """Global read scope delivers live account/order/alert data without memberships.
+
+    Given an auditor without a desk membership,
+    When foreign wallet and user events arrive,
+    Then global read authority forwards them without operator-plane queries.
+    """
+    principal = AuthPrincipal(username="audit", role=UserRole.AUDITOR)
+    service = _mock_scope_service(allow=False)
+    service.list_accessible_wallet_public_ids = AsyncMock(return_value=set())
+    event = _account_event()
+
+    assert await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.filled",
+        connection_principal=principal,
+        payload={"wallet_public_id": _ACCOUNT_WALLET_A},
+        scope_grant_service=service,
+    )
+    assert await enforce_account_state_scope(
+        topic=event.topic,
+        connection_principal=principal,
+        payload=event,
+        scope_grant_service=service,
+    )
+    assert enforce_alerts_scope(
+        topic="alerts.other.order_fill_full",
+        connection_principal=principal,
+        payload={"user_public_id": "other"},
+    )
+    service.list_accessible_wallet_public_ids.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+async def test_global_readers_receive_validated_ai_review_frames(role: UserRole) -> None:
+    """Global readers can observe AI review requests without a delegate identity.
+
+    Given a global reader without a delegate row,
+    When valid and malformed AI review frames arrive,
+    Then only the valid frame is forwarded and no delegate grant is queried.
+    """
+    service = _mock_scope_service(allow=False)
+    principal = AuthPrincipal(username="global-reader", role=role)
+
+    assert await enforce_ai_review_scope(
+        topic="ai_reviews.other.strategy.request",
+        connection_principal=principal,
+        payload={"wallet_public_id": "other-wallet", "instrument_public_id": "instrument"},
+        scope_grant_service=service,
+    )
+    assert not await enforce_ai_review_scope(
+        topic="ai_reviews.other.strategy.request",
+        connection_principal=principal,
+        payload={"wallet_public_id": "other-wallet"},
+        scope_grant_service=service,
+    )
+    has_grant_mock: AsyncMock = service.has_grant_for_delegate
+    has_grant_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auditor_frame_scope_and_cache_follow_downscoping() -> None:
+    """A narrowed token cannot reuse the global frame cache or global scope bypass.
+
+    Given an auditor whose token loses global read authority,
+    When its frame scope and cache identity are resolved,
+    Then foreign events are denied and its cache key differs from the global token.
+    """
+    principal = AuthPrincipal(username="audit", role=UserRole.AUDITOR)
+    narrowed = principal.model_copy(
+        update={"permissions": [Permission.READ_ORDERS.value], "permission_scope_version": 4}
+    )
+    service = _mock_scope_service(allow=False)
+    service.list_accessible_wallet_public_ids = AsyncMock(return_value=set())
+
+    assert wallet_access_cache_key(principal) != wallet_access_cache_key(narrowed)
+    assert not await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.filled",
+        connection_principal=narrowed,
+        payload={"wallet_public_id": _ACCOUNT_WALLET_A},
+        scope_grant_service=service,
+    )
+    assert not enforce_alerts_scope(
+        topic="alerts.other.order_fill_full",
+        connection_principal=narrowed,
+        payload={"user_public_id": "other"},
+    )
+    assert not await enforce_ai_review_scope(
+        topic="ai_reviews.other.strategy.request",
+        connection_principal=narrowed,
+        payload={"wallet_public_id": "other-wallet", "instrument_public_id": "instrument"},
+        scope_grant_service=service,
+    )
 
 
 def _account_event(wallet_public_id: str = _ACCOUNT_WALLET_A) -> AccountStateChangedEventData:

@@ -44,6 +44,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
@@ -245,8 +246,9 @@ async def list_delegates(
     """Return delegates in the caller's permission-appropriate scope.
 
     Management-capable callers retain their historical creator-owned view.
-    Read-only callers see delegates bound to their operator memberships.
-    Deactivated delegates drop out of both views.
+    Global read-only callers see every active delegate, including those without
+    desk memberships. Other read-only callers see delegates bound to their
+    operator memberships. Deactivated delegates drop out of every view.
     """
     service = _build_service(repo)
     try:
@@ -257,6 +259,10 @@ async def list_delegates(
         )
         if Permission.MANAGE_AI_INTEGRATION in effective_permissions:
             delegates = await service.list_delegates(owner_public_id=owner.user_public_id)
+        elif has_global_read_permission(
+            owner.role, owner.permissions, owner.permission_scope_version
+        ):
+            delegates = await service.list_all_delegates()
         else:
             delegates = await service.list_delegates(operator_public_ids=owner.operator_public_ids)
     except InvalidOwnerPrincipalError as exc:
@@ -288,7 +294,8 @@ async def get_delegate(
     """Fetch one delegate in the caller's permission-appropriate scope.
 
     Management-capable callers retain creator ownership; read-only callers
-    use operator memberships. Every absent or out-of-scope result is 404.
+    use global read authority or operator memberships. Every absent or
+    out-of-scope result is 404.
     """
     service = _build_service(repo)
     try:
@@ -302,6 +309,10 @@ async def get_delegate(
                 public_id=delegate_public_id,
                 owner_public_id=owner.user_public_id,
             )
+        elif has_global_read_permission(
+            owner.role, owner.permissions, owner.permission_scope_version
+        ):
+            delegate = await service.get_any_delegate(delegate_public_id)
         else:
             delegate = await service.get_delegate(
                 public_id=delegate_public_id,
