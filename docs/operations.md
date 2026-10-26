@@ -716,6 +716,40 @@ parked Futures path. A warning identifies parked durable orders and inventory
 availability. Do not inject synthetic acceptance, terminal or corrective-fill
 events to resolve it.
 
+### Inventory schema rollback compatibility probe
+
+Before upgrading an existing deployment to 0066, verify the retained rollback
+image against synthetic populated inventory history. The preparation command
+uses the checked-out source and development dependencies to create a new
+directory; it refuses to replace an existing one:
+
+```bash
+PYTHONPATH=.:src:proprietary/src:integrations/snapper-delegate/src \
+    .venv/bin/python -m scripts.verify_inventory_rollback prepare /absolute/new-fixture
+```
+
+Use the exact retained image ID for the probe. Mount only that new fixture and
+the probe script, leave `PYTHONPATH` empty and supply no deployment environment
+file or production mount:
+
+```bash
+docker run --rm --network none --cap-drop ALL \
+    --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+    --workdir /fixture --env PYTHONPATH= \
+    --mount type=bind,src=/absolute/new-fixture,dst=/fixture \
+    --mount type=bind,src=/absolute/checkout/scripts/verify_inventory_rollback.py,dst=/probe.py,readonly \
+    --entrypoint python sha256:EXACT_RETAINED_IMAGE_ID /probe.py probe /fixture
+```
+
+The probe initializes the installed image's actual `SettingsService`, performs
+existing setting, wallet, symbol and recovery reads through its repository and
+checks that the genuine captured/pending inventory rows remain unchanged. The
+SQLite connection is read-only. Exit zero and the same evidence fingerprint
+prove this bounded database/application-read compatibility. They do not prove
+default-image UID permissions, complete seven-service startup or venue behavior;
+normal deployment health and read UAT remain required. Never run a populated
+schema downgrade or seed production to obtain a passing probe.
+
 ### Stop orders — venue support and pre-send rejects
 
 Order commands speak the core order-type vocabulary end-to-end —
