@@ -836,3 +836,8 @@ Generates `frontend/public/snapper.pdf` from README + docs/*.md so the docs ship
 Because `frontend/` is the `snapper-frontend` submodule, commit and push
 `frontend/public/snapper.pdf` from inside that submodule, then commit the
 updated frontend submodule pointer in the parent Snapper repository.
+
+Docker image builds make the frontend distribution readable by the runtime user.
+After switching to that user, the build checks the PDF header at both
+`/app/frontend/dist/snapper.pdf` and `/srv/dist/snapper.pdf`. Missing files,
+unreadable files and unexpected PDF headers fail the image build.
