@@ -15,7 +15,8 @@ WORKDIR /app/frontend
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY frontend/ /app/frontend/
-RUN pnpm build
+RUN pnpm build \
+    && chmod -R a+rX dist
 
 FROM python:3.14-slim AS py-build
 ARG POETRY_VERSION=2.5.1
@@ -97,6 +98,11 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=180s --retries=3 \
     CMD ["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "1", "--max-time", "2", "http://localhost:8000/api/health"]
 
 USER snapper
+
+RUN python -c "from pathlib import Path; \
+    assert all(Path(path).read_bytes()[:5] == b'%PDF-' for path in \
+    ('/app/frontend/dist/snapper.pdf', '/srv/dist/snapper.pdf')), \
+    'Documentation PDFs must be readable by the runtime user'"
 
 EXPOSE 8000 8081
 ENTRYPOINT ["snapper"]
