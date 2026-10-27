@@ -46,12 +46,20 @@ class Permission(StrEnum):
     READ_AI_REVIEWS = "read:ai_reviews"
     READ_AI_INTEGRATION = "read:ai_integration"
     MANAGE_AI_INTEGRATION = "manage:ai_integration"
+    READ_SYSTEM_SETTINGS = "read:system_settings"
     CONFIGURE_SYSTEM = "configure:system"
+    READ_USERS = "read:users"
     MANAGE_USERS = "manage:users"
+    MANAGE_SELF_ACCOUNT = "manage:self_account"
+    READ_DESK_MEMBERSHIPS = "read:desk_memberships"
     MANAGE_DESK_MEMBERSHIPS = "manage:desk_memberships"
     READ_WALLET_CREDENTIALS = "read:wallet_credentials"
     MANAGE_WALLET_CREDENTIALS = "manage:wallet_credentials"
+    READ_SCOPE_GRANTS = "read:scope_grants"
     MANAGE_SCOPE_GRANTS = "manage:scope_grants"
+    READ_ALL_SCOPES = "read:all_scopes"
+    READ_POSITION_CYCLES = "read:position_cycles"
+    INITIALIZE_PNL_ANCHORS = "initialize:pnl_anchors"
     IMPERSONATE_OPERATOR = "impersonate:operator"
     READ_BACKTESTS = "read:backtests"
     CREATE_BACKTEST_COMPARISONS = "create:backtest_comparisons"
@@ -71,8 +79,16 @@ RESOURCE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "accounts": frozenset({Permission.READ_ACCOUNT_STATE}),
     "signals": frozenset({Permission.READ_SIGNALS}),
     "health": frozenset({Permission.READ_SYSTEM_STATUS}),
-    "admin": frozenset({Permission.MANAGE_USERS}),
-    "settings": frozenset({Permission.CONFIGURE_SYSTEM}),
+    "admin": frozenset(
+        {
+            Permission.READ_USERS,
+            Permission.MANAGE_USERS,
+            Permission.READ_DESK_MEMBERSHIPS,
+            Permission.MANAGE_DESK_MEMBERSHIPS,
+            Permission.READ_WALLET_CREDENTIALS,
+        }
+    ),
+    "settings": frozenset({Permission.READ_SYSTEM_SETTINGS, Permission.CONFIGURE_SYSTEM}),
     "backtests": frozenset({Permission.READ_BACKTESTS}),
     "ai-integration": frozenset({Permission.READ_AI_INTEGRATION}),
     "ai-reviews": frozenset(
@@ -93,11 +109,16 @@ resource when at least one listed permission is effective for the token.
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
     UserRole.AI_RESEARCHER: {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.SUBMIT_MARKET_VIEW,
     },
     UserRole.AI_REVIEWER: {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.INITIALIZE_PNL_ANCHORS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
@@ -111,6 +132,9 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.SUBMIT_AI_REVIEW_DECISION,
     },
     UserRole.AI_DELEGATE: {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.INITIALIZE_PNL_ANCHORS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
@@ -127,6 +151,9 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.SUBMIT_AI_REVIEW_DECISION,
     },
     UserRole.VIEWER: {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.INITIALIZE_PNL_ANCHORS,
         Permission.READ_MARKET_DATA,
         Permission.READ_ORDERS,
         Permission.READ_POSITIONS,
@@ -142,7 +169,32 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_NOTIFICATIONS,
         Permission.MANAGE_NOTIFICATION_DEVICES,
     },
+    UserRole.AUDITOR: {
+        Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
+        Permission.READ_ORDERS,
+        Permission.READ_POSITIONS,
+        Permission.READ_ACCOUNT_STATE,
+        Permission.READ_STRATEGIES,
+        Permission.READ_SIGNALS,
+        Permission.READ_SYSTEM_STATUS,
+        Permission.READ_PROCESSES,
+        Permission.READ_AI_REVIEWS,
+        Permission.READ_AI_INTEGRATION,
+        Permission.READ_SYSTEM_SETTINGS,
+        Permission.READ_USERS,
+        Permission.READ_DESK_MEMBERSHIPS,
+        Permission.READ_WALLET_CREDENTIALS,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.READ_ALL_SCOPES,
+        Permission.READ_POSITION_CYCLES,
+        Permission.READ_BACKTESTS,
+        Permission.READ_NOTIFICATIONS,
+    },
     UserRole.OPERATOR: {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.INITIALIZE_PNL_ANCHORS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
@@ -210,6 +262,57 @@ one-line change, and ``get_role_allowed_categories`` already handles it.
 """
 
 
+CATEGORY_READ_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    "admin": frozenset(
+        {
+            Permission.READ_USERS,
+            Permission.READ_DESK_MEMBERSHIPS,
+            Permission.READ_SCOPE_GRANTS,
+            Permission.READ_ALL_SCOPES,
+        }
+    ),
+    "processes_admin": frozenset({Permission.READ_PROCESSES, Permission.READ_ALL_SCOPES}),
+    "ai_reviews": frozenset({Permission.READ_AI_REVIEWS, Permission.READ_ALL_SCOPES}),
+}
+"""Global read-event alternatives requiring every content and scope capability.
+
+The administrative category mixes user, membership and scope events, so its
+read alternative requires all three content permissions. These alternatives
+preserve the existing scoped roles' subscription sets and never authorize
+publishing operational commands.
+"""
+
+
+_PERMISSION_SCOPE_V4_ADDITIONS: frozenset[Permission] = frozenset(
+    {
+        Permission.READ_SYSTEM_SETTINGS,
+        Permission.READ_USERS,
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_DESK_MEMBERSHIPS,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.READ_ALL_SCOPES,
+        Permission.READ_POSITION_CYCLES,
+        Permission.INITIALIZE_PNL_ANCHORS,
+    }
+)
+"""Capabilities introduced with global read-only administration."""
+
+
+_PRE_V4_AUTHENTICATED_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
+    UserRole.AI_RESEARCHER: frozenset({Permission.READ_SCOPE_GRANTS}),
+    UserRole.AI_REVIEWER: frozenset({Permission.READ_SCOPE_GRANTS}),
+    UserRole.AI_DELEGATE: frozenset({Permission.READ_SCOPE_GRANTS}),
+    UserRole.VIEWER: frozenset({Permission.READ_SCOPE_GRANTS}),
+    UserRole.OPERATOR: frozenset({Permission.READ_SCOPE_GRANTS}),
+    UserRole.ADMIN: frozenset({Permission.READ_SCOPE_GRANTS}),
+}
+"""Historical named sets and their previously authenticated-only scope reads.
+
+Roles introduced with version four have no legacy entry and receive no
+compatibility grant or version-two full-role expansion.
+"""
+
+
 _PERMISSION_SCOPE_V3_ADDITIONS: frozenset[Permission] = frozenset(
     {
         Permission.READ_PROCESSES,
@@ -266,7 +369,11 @@ def get_effective_permissions(
     Version-two tokens are migrated by capability equivalence: an exact old
     full-role grant adopts the current role set, while narrowed operational
     grants inherit only the permissions that replaced their retained v2
-    signal and process capabilities. Narrow viewer grants remain exact.
+    signal and process capabilities. Pre-version-four tokens retain the
+    self-service access previously available to every authenticated user
+    and anchor initialization previously implied by position reads. Roles
+    that existed before version four also retain their authenticated-only
+    scope-grant read access; this does not apply to auditor tokens.
 
     Args:
         role: Authenticated principal's role.
@@ -287,12 +394,43 @@ def get_effective_permissions(
         permission for permission in role_permissions if permission.value in token_permission_values
     }
     effective_permissions.update(role_permissions & _NON_DOWNSCOPABLE_PERMISSIONS)
-    if permission_scope_version != 2:
+    if permission_scope_version == 2:
+        effective_permissions = _migrate_v2_permissions(
+            role, token_permission_values, effective_permissions
+        )
+    if permission_scope_version in (None, 1, 2, 3):
+        effective_permissions.update(role_permissions & {Permission.MANAGE_SELF_ACCOUNT})
+        effective_permissions.update(
+            role_permissions & _PRE_V4_AUTHENTICATED_PERMISSIONS.get(role, frozenset())
+        )
+        if Permission.READ_POSITIONS in effective_permissions:
+            effective_permissions.update(role_permissions & {Permission.INITIALIZE_PNL_ANCHORS})
+    return effective_permissions
+
+
+def _migrate_v2_permissions(
+    role: UserRole,
+    token_permission_values: set[str],
+    effective_permissions: set[Permission],
+) -> set[Permission]:
+    """Preserve historical version-two capabilities for roles that existed then.
+
+    Args:
+        role: Named permission-set ceiling.
+        token_permission_values: Explicit version-two claim values.
+        effective_permissions: Already intersected current permission grant.
+
+    Returns:
+        Equivalent current permissions without inventing legacy auditor grants.
+    """
+    if _PRE_V4_AUTHENTICATED_PERMISSIONS.get(role) is None:
         return effective_permissions
+    role_permissions = ROLE_PERMISSIONS.get(role, set())
 
     v2_role_permissions = (
         role_permissions
         - _PERMISSION_SCOPE_V3_ADDITIONS
+        - _PERMISSION_SCOPE_V4_ADDITIONS
         - _PERMISSION_SCOPE_V3_ROLE_ADDITIONS.get(role, frozenset())
     )
     if token_permission_values == {permission.value for permission in v2_role_permissions}:
@@ -332,6 +470,28 @@ def get_effective_permissions(
         if historical in effective_permissions and role_grants_permission(role, replacement)
     )
     return effective_permissions
+
+
+def has_global_read_permission(
+    role: UserRole,
+    token_permissions: list[str] | None = None,
+    permission_scope_version: int | None = None,
+) -> bool:
+    """Determine global observation without granting any trade authority.
+
+    Args:
+        role: Named permission-set ceiling.
+        token_permissions: Explicit grant carried by the session, if present.
+        permission_scope_version: Compatibility version of the session grant.
+
+    Returns:
+        Whether the effective grant contains global read access or the
+        historical administrator scope permission. Use only at read sites.
+    """
+    return bool(
+        get_effective_permissions(role, token_permissions, permission_scope_version)
+        & {Permission.READ_ALL_SCOPES, Permission.IMPERSONATE_OPERATOR}
+    )
 
 
 def has_effective_permission(
@@ -419,8 +579,8 @@ def get_role_allowed_categories(
     """Derive allowed WS topic categories from effective permissions.
 
     A token is allowed a category when its role-bounded effective grant
-    holds every permission listed in ``CATEGORY_PERMISSIONS`` for that
-    category.
+    holds every permission in the category's established requirements or
+    every content and scope permission in its global read alternative.
 
     Args:
         role: User role to check.
@@ -437,8 +597,14 @@ def get_role_allowed_categories(
         token_permissions,
         permission_scope_version,
     )
-    return {
+    categories = {
         category
         for category, required in CATEGORY_PERMISSIONS.items()
         if required <= effective_permissions
     }
+    categories.update(
+        category
+        for category, required in CATEGORY_READ_PERMISSIONS.items()
+        if required <= effective_permissions
+    )
+    return categories

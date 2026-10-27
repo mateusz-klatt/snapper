@@ -24,12 +24,13 @@ from snapper.api.auth.schemas.ws_token import WsAuthorizationContext
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.base import MessageResponse
 from snapper.auth.dependencies import get_csrf_manager
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
@@ -351,7 +352,7 @@ async def _readable_wallet_ids(principal: AuthPrincipal, repo: Repository) -> se
     Shared by the two paths through :func:`_apply_wallet_hint` — the
     hint being validated and the carried claim being re-validated — so
     the two can never drift onto different planes. A named set carrying
-    ``IMPERSONATE_OPERATOR`` sees every active wallet; every other set
+    global read authority sees every active wallet; every other set
     sees the READ plane (operator scope grants UNION the user's personal
     ``wallet_user_read_grants`` rows).
 
@@ -364,11 +365,10 @@ async def _readable_wallet_ids(principal: AuthPrincipal, repo: Repository) -> se
         current instant.
     """
     now = datetime.now(UTC)
-    if has_effective_permission(
+    if has_global_read_permission(
         principal.role,
         principal.permissions,
         principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         rows = await repo.list_active_wallets(now)
     else:
@@ -386,7 +386,7 @@ async def _apply_wallet_hint(
     """Apply an optional wallet hint to the authenticated principal.
 
     Permission-derived membership validation: a named set carrying
-    ``IMPERSONATE_OPERATOR`` sees every active wallet via
+    global read authority sees every active wallet via
     ``list_active_wallets``; other sets see the READ plane via
     ``list_readable_wallets_for_user`` — their operators' scope grants
     UNION their personal ``wallet_user_read_grants`` rows. A hint that
@@ -476,7 +476,9 @@ async def _load_refresh_identity(
     was validated when it was minted and has been carried across every
     refresh since. :func:`_apply_wallet_hint` re-validates it against
     the read plane before it is minted again, so the copy here is an
-    input to that check rather than a decision.
+    input to that check rather than a decision. The token's permission
+    scope and compatibility version accompany it so the read-plane
+    check cannot temporarily restore the full role grant.
     """
     refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(
         "refresh_token"
@@ -507,7 +509,11 @@ async def _load_refresh_identity(
     principal = await user_service.build_auth_principal(user)
     principal = _constrain_refresh_memberships(principal, token_data)
     principal = principal.model_copy(
-        update={"active_wallet_public_id": token_data.active_wallet_public_id}
+        update={
+            "active_wallet_public_id": token_data.active_wallet_public_id,
+            "permissions": token_data.permissions,
+            "permission_scope_version": token_data.permission_scope_version,
+        }
     )
     return _RefreshIdentity(token_manager, token_data, user, principal)
 
@@ -577,7 +583,7 @@ def _refresh_permissions(
     token_data: TokenClaims,
 ) -> set[Permission] | None:
     """Resolve refresh-token permissions under the carried scope version."""
-    if token_data.permission_scope_version is None:
+    if token_data.permission_scope_version is None and token_data.permissions is None:
         return None
     return get_effective_permissions(
         principal.role,
@@ -933,7 +939,9 @@ async def get_current_user_profile(
 @router.post("/me/update", openapi_extra=openapi_schema(UpdateAuthMeRequest))
 async def update_current_user_preferences(
     request: Request,
-    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    current_user: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[UpdateAuthMeRequest, Depends(json_body(UpdateAuthMeRequest))],
 ) -> UserResponse:
@@ -1067,7 +1075,10 @@ async def logout(
 @router.get("/users")
 async def get_users(
     request: Request,
-    current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
+    current_user: Annotated[
+        AuthPrincipal,
+        Depends(require_any_permission(Permission.READ_USERS, Permission.MANAGE_USERS)),
+    ],
     include_inactive: bool = False,
     as_of: datetime | None = None,
 ) -> UserListResponse:
@@ -1075,7 +1086,7 @@ async def get_users(
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        current_user: Authenticated user with MANAGE_USERS permission.
+        current_user: Authenticated user with user-directory read permission.
         include_inactive: Whether to include deactivated users.
         as_of: Optional point-in-time query timestamp (UTC).
 
@@ -1101,19 +1112,23 @@ async def list_desk_members(
     operator_public_id: str,
     current_user: Annotated[
         AuthPrincipal,
-        Depends(require_permission(Permission.MANAGE_DESK_MEMBERSHIPS)),
+        Depends(
+            require_any_permission(
+                Permission.READ_DESK_MEMBERSHIPS, Permission.MANAGE_DESK_MEMBERSHIPS
+            )
+        ),
     ],
     as_of: Annotated[
         datetime | None,
         Query(description="Point-in-time desk-membership query (UTC)"),
     ] = None,
 ) -> UserListResponse:
-    """List active human members of a desk the caller may manage.
+    """List active human members of a desk the caller may read.
 
     Args:
         request: FastAPI request providing response provenance.
         operator_public_id: Public ID of the target desk.
-        current_user: Caller holding MANAGE_DESK_MEMBERSHIPS.
+        current_user: Caller holding desk-directory read permission.
         as_of: Optional point-in-time membership horizon.
 
     Returns:
@@ -1373,13 +1388,16 @@ async def deactivate_user(
 async def change_user_password(
     request: Request,
     user_id: str,
-    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    current_user: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     password_data: Annotated[ChangePasswordRequest, Depends(json_body(ChangePasswordRequest))],
 ) -> MessageResponse:
     """Change a user's password.
 
-    Users can change their own password. Admins can change any password.
+    Self-service-capable users can change their own password. Admins can
+    change any password.
 
     Args:
         request: FastAPI request (used by rate limiter).

@@ -7,21 +7,35 @@ claim carried across a hint-less refresh) and the
 rotation can shrink, but never widen, the authenticated desk scope.
 """
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from snapper.api.auth.services.ws_token_service import WsTokenService
+from snapper.api.auth.services.ws_token_service import compute_sid_hash
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import _apply_wallet_hint
 from snapper.auth.routes import _constrain_refresh_memberships
+from snapper.auth.routes import router
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import RefreshTokenPayload
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.schemas.tokens import TokenPair
+from snapper.auth.schemas.user import UserProfile
+from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.dependencies import get_repository_dependency
 
 _OWN_WALLET = "01948f94-0001-7a00-8000-000000000001"
 _FOREIGN_WALLET = "01948f94-0001-7a00-8000-0000000000ff"
@@ -72,6 +86,150 @@ def _claims(
         operator_membership_public_ids=operator_membership_public_ids or {},
         primary_operator_public_id=primary_operator_public_id,
     )
+
+
+@contextmanager
+def _refresh_client(
+    monkeypatch: pytest.MonkeyPatch, claims: TokenClaims
+) -> Generator[tuple[TestClient, MagicMock, MagicMock]]:
+    """Exercise the real refresh pipeline against verified claims and live identity."""
+    repo = _repo(
+        rows=[{"public_id": _OWN_WALLET}],
+        admin_rows=[{"public_id": _OWN_WALLET}, {"public_id": _FOREIGN_WALLET}],
+    )
+    user = UserProfile(
+        session_id="test-session",
+        sequence_id=1,
+        public_id=claims.sub,
+        timestamp=datetime.now(UTC),
+        username=claims.username,
+        role=claims.role,
+        created_at=datetime.now(UTC),
+    )
+    service = MagicMock()
+    service.get_user_by_id = AsyncMock(return_value=user)
+    service.build_auth_principal = AsyncMock(
+        return_value=AuthPrincipal(
+            username=claims.username, role=claims.role, user_public_id=claims.sub
+        )
+    )
+    pair = TokenPair(access_token="new-access", refresh_token="new-refresh", expires_in=300)
+    manager = MagicMock()
+    manager.verify_token_with_db = AsyncMock(return_value=claims)
+    manager.create_tokens.return_value = pair
+    manager.rotate_tokens = AsyncMock(return_value=pair)
+    monkeypatch.setattr("snapper.auth.routes.get_user_service", lambda: service)
+    monkeypatch.setattr("snapper.auth.routes.get_token_manager", lambda: manager)
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(session_secure=False, session_same_site="lax")
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(router)
+    app.dependency_overrides[get_repository_dependency] = lambda: repo
+    with TestClient(app) as client:
+        client.cookies.set("refresh_token", "verified-refresh")
+        yield client, repo, manager
+
+
+class TestRefreshPermissionScopeHTTP:
+    """Wallet validation and successor minting must share the signed permission scope."""
+
+    @pytest.mark.parametrize("scope_version", [None, 1, 2, 3, 4])
+    def test_narrowed_auditor_cannot_select_a_foreign_wallet(
+        self, monkeypatch: pytest.MonkeyPatch, scope_version: int | None
+    ) -> None:
+        """Rebuilding a live auditor must not restore global reads before hint validation."""
+        claims = _claims([], "").model_copy(
+            update={
+                "role": UserRole.AUDITOR,
+                "permissions": [Permission.READ_BACKTESTS.value],
+                "permission_scope_version": scope_version,
+            }
+        )
+        with _refresh_client(monkeypatch, claims) as (client, repo, manager):
+            response = client.post(
+                "/auth/refresh",
+                json={
+                    "type": "refresh_token_request",
+                    "session_id": "test-session",
+                    "sequence_id": 1,
+                    "public_id": "test-request",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "payload": {"active_wallet_public_id": _FOREIGN_WALLET},
+                },
+            )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "wallet not found"
+        repo.list_active_wallets.assert_not_awaited()
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+        manager.create_tokens.assert_not_called()
+        manager.rotate_tokens.assert_not_awaited()
+
+    @pytest.mark.parametrize("scope_version", [None, 1, 2, 3, 4])
+    def test_narrowed_auditor_drops_carried_foreign_wallet_without_widening(
+        self, monkeypatch: pytest.MonkeyPatch, scope_version: int | None
+    ) -> None:
+        """Both explicit and unversioned scopes survive rotation after the hint is dropped."""
+        claims = _claims([], "").model_copy(
+            update={
+                "role": UserRole.AUDITOR,
+                "permissions": [Permission.READ_BACKTESTS.value],
+                "permission_scope_version": scope_version,
+                "active_wallet_public_id": _FOREIGN_WALLET,
+            }
+        )
+        with _refresh_client(monkeypatch, claims) as (client, repo, manager):
+            response = client.post("/auth/refresh")
+
+        assert response.status_code == 200
+        profile = response.json()["payload"]["user"]
+        assert profile["active_wallet_public_id"] is None
+        assert profile["operator_public_ids"] == []
+        assert profile["effective_permissions"] == [Permission.READ_BACKTESTS.value]
+        assert manager.create_tokens.call_args.kwargs["permissions"] == {Permission.READ_BACKTESTS}
+        principal = manager.create_tokens.call_args.args[0]
+        assert principal.permissions == claims.permissions
+        assert principal.permission_scope_version == scope_version
+        assert principal.active_wallet_public_id is None
+        ticket = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=claims.username,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert ticket.active_wallet_public_id is None
+        assert ticket.permissions == [Permission.READ_BACKTESTS.value]
+        assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
+        repo.list_active_wallets.assert_not_awaited()
+        repo.list_readable_wallets_for_user.assert_awaited_once()
+
+    @pytest.mark.parametrize("scope_version", [None, 1, 2, 3, 4])
+    def test_legacy_scope_grant_read_is_explicit_in_current_successor(
+        self, monkeypatch: pytest.MonkeyPatch, scope_version: int | None
+    ) -> None:
+        """Migration carries authenticated legacy reads into v4 without widening v4 tokens."""
+        claims = _claims([], "").model_copy(
+            update={
+                "role": UserRole.VIEWER,
+                "permissions": [Permission.READ_BACKTESTS.value],
+                "permission_scope_version": scope_version,
+            }
+        )
+        with _refresh_client(monkeypatch, claims) as (client, _repo_mock, manager):
+            response = client.post("/auth/refresh")
+
+        assert response.status_code == 200
+        expected = {Permission.READ_BACKTESTS.value}
+        if scope_version != 4:
+            expected |= {Permission.READ_SCOPE_GRANTS.value, Permission.MANAGE_SELF_ACCOUNT.value}
+        assert manager.create_tokens.call_args.kwargs["permissions"] == expected
+        assert set(response.json()["payload"]["user"]["effective_permissions"]) == expected
+        ticket = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=claims.username,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert set(ticket.permissions or []) == expected
+        assert ticket.permission_scope_version == PERMISSION_SCOPE_VERSION
 
 
 class TestConstrainRefreshMemberships:

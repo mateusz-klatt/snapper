@@ -2,7 +2,7 @@
 
 Provides the frontend operator picker with the list of
 operators the current principal may act AS. Principals granted
-``IMPERSONATE_OPERATOR`` see every active operator (matching the expansion rule in
+global read authority see every active operator (matching the expansion rule in
 ``UserService.build_auth_principal`` / ``get_user_with_operators``)
 other principals see only the operators covered by
 their ``user_operator_memberships`` (exposed on the principal as
@@ -34,7 +34,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import OperatorConflictError
 from snapper.data.repository import Repository
@@ -60,7 +60,7 @@ async def list_operators(
 ) -> OperatorListResponse:
     """List operators accessible to the current principal.
 
-    A caller granted ``IMPERSONATE_OPERATOR`` sees every active operator.
+    A caller granted global read authority sees every active operator.
     Other callers see only the operators in ``principal.operator_public_ids``, resolved to
     ``OperatorInfo`` projections via ``list_active_operators`` so
     the label / description fields are populated for the picker UI.
@@ -77,11 +77,10 @@ async def list_operators(
     """
     effective_as_of = as_of or datetime.now(UTC)
     all_active = await repo.list_active_operators(effective_as_of)
-    if has_effective_permission(
+    if has_global_read_permission(
         principal.role,
         principal.permissions,
         principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         visible = all_active
     else:

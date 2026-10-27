@@ -1,6 +1,7 @@
 """REST API routes for wallet credential management.
 
-All endpoints require ``MANAGE_WALLET_CREDENTIALS`` (ADMIN only).
+Mutations require ``MANAGE_WALLET_CREDENTIALS``. Reads require
+``READ_WALLET_CREDENTIALS`` plus visibility into the requested wallet.
 The GET listing returns ``CredentialSummary``
 projections that deliberately omit the ``encrypted_payload`` column
 so ciphertext never reaches the wire. Create and rotate accept
@@ -50,6 +51,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.server.scoping import resolve_readable_wallets
 
 router = APIRouter(prefix="/wallets", tags=["wallet-credentials"])
 
@@ -140,7 +142,7 @@ def _validate_reconciliation_method_for_credential(
 @router.get("/{wallet_public_id}/credentials")
 async def list_credentials(
     request: Request,
-    _principal: Annotated[
+    principal: Annotated[
         AuthPrincipal,
         Depends(require_permission(Permission.READ_WALLET_CREDENTIALS)),
     ],
@@ -151,13 +153,14 @@ async def list_credentials(
 
     Args:
         request: FastAPI request.
-        _principal: Authenticated caller holding READ_WALLET_CREDENTIALS.
+        principal: Authenticated caller holding READ_WALLET_CREDENTIALS.
         wallet_public_id: Target wallet.
         repo: Repository dependency.
 
     Returns:
         ``CredentialListResponse`` ordered by ``exchange``.
     """
+    await resolve_readable_wallets(principal, repo, wallet_public_id=wallet_public_id)
     now = datetime.now(UTC)
     rows = await repo.list_wallet_credentials_for_wallet(wallet_public_id, now)
     items = [_credential_summary(row) for row in rows]

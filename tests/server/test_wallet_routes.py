@@ -59,7 +59,8 @@ class TestListWallets:
     """Role-scoped behaviour of ``list_wallets``."""
 
     @pytest.mark.asyncio
-    async def test_admin_sees_every_active_wallet(self) -> None:
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+    async def test_global_reader_sees_every_active_wallet(self, role: UserRole) -> None:
         """ADMIN branch calls ``list_active_wallets`` and passes through the result.
 
         Given: An ADMIN principal,
@@ -76,7 +77,7 @@ class TestListWallets:
             ]
         )
         mock_repo.list_readable_wallets_for_user = AsyncMock()
-        principal = AuthPrincipal(username="admin", role=UserRole.ADMIN)
+        principal = AuthPrincipal(username="global-reader", role=role)
 
         result = await list_wallets(request=_make_request(), principal=principal, repo=mock_repo)
 

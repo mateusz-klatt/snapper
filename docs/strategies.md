@@ -26,15 +26,15 @@ flowchart TB
 
 ## Authorization
 
-Authorization uses effective token permissions from Snapper's 34-permission
+Authorization uses effective token permissions from Snapper's 43-permission
 catalogue, not a role hierarchy. The frontend opens the Strategies resource
 with `read:strategies`, derives each control from its exact mutation
 permission, and rechecks that permission when the action runs.
 
 | Surface | Required permission | Current named permission sets |
 | --- | --- | --- |
-| `GET /api/strategies` | `read:strategies` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
-| Read the process catalogue, configured rows, schemas, and runs | `read:processes` | `viewer`, `operator`, `admin` |
+| `GET /api/strategies` | `read:strategies` | `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, `admin` |
+| Read the process catalogue, configured rows, schemas, and runs | `read:processes` | `viewer`, `auditor`, `operator`, `admin` |
 | Register a disabled strategy or edit its scope | `configure:strategies` | `operator`, `admin` |
 | Register an enabled strategy | `configure:strategies` and `start:strategies` | `operator`, `admin` |
 | Start or enable a strategy | `start:strategies` | `operator`, `admin` |
@@ -42,8 +42,8 @@ permission, and rechecks that permission when the action runs.
 | Restart desired state | `start:strategies` and `stop:strategies` | `operator`, `admin` |
 | Create a backtest from a strategy card | `manage:backtests` | `operator`, `admin` |
 
-The current `viewer` set contains both read permissions, so it sees the full
-operator read surface while every strategy mutation remains unavailable.
+The current `viewer` and `auditor` sets contain both read permissions, so they
+see the full operator read surface while every strategy mutation remains unavailable.
 Strategy targets use these target-specific permissions; `manage:processes`
 continues to authorize only non-strategy process targets. Scope configuration
 and launch also validate operator membership, wallet grants, and live-output

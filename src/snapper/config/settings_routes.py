@@ -1,8 +1,8 @@
 """REST API routes for system settings management.
 
 This module provides FastAPI routes for CRUD operations on application
-settings stored in the database. All endpoints require CONFIGURE_SYSTEM
-permission (admin role).
+settings stored in the database. Private reads require READ_SYSTEM_SETTINGS
+or CONFIGURE_SYSTEM; mutations require CONFIGURE_SYSTEM.
 
 Endpoints:
     - ``GET /settings/features`` - Return public feature flags.
@@ -63,6 +63,7 @@ from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.push_beta import serialize_push_beta_config
 from snapper.application.services.settings import get_settings_service
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -129,7 +130,12 @@ async def get_public_feature_flags(
 @router.get("")
 async def get_all_settings(
     request: Request,
-    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(Permission.READ_SYSTEM_SETTINGS, Permission.CONFIGURE_SYSTEM)
+        ),
+    ],
     category: str | None = None,
     as_of: datetime | None = None,
 ) -> SettingListResponse:
@@ -137,7 +143,7 @@ async def get_all_settings(
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        user: Authenticated user with CONFIGURE_SYSTEM permission.
+        user: Authenticated user with settings read permission.
         category: Optional category name to filter settings.
         as_of: Optional point-in-time query timestamp.
 
@@ -181,14 +187,19 @@ async def get_all_settings(
 @router.get("/categories")
 async def get_setting_categories(
     request: Request,
-    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(Permission.READ_SYSTEM_SETTINGS, Permission.CONFIGURE_SYSTEM)
+        ),
+    ],
     as_of: datetime | None = None,
 ) -> SettingCategoriesResponse:
     """Retrieve all distinct setting category names.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        user: Authenticated user with CONFIGURE_SYSTEM permission.
+        user: Authenticated user with settings read permission.
         as_of: Optional point-in-time query timestamp.
 
     Returns:
@@ -288,11 +299,16 @@ async def set_setting(
 @router.get("/push-beta/users")
 async def get_push_beta_users(
     request: Request,
-    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(Permission.READ_SYSTEM_SETTINGS, Permission.CONFIGURE_SYSTEM)
+        ),
+    ],
 ) -> PushBetaConfigResponse:
     """Return the active push-beta gate configuration.
 
-    Admin-only (CONFIGURE_SYSTEM). Returns the decoded
+    Requires settings read permission. Returns the decoded
     ``PushBetaConfig`` — when the underlying setting is absent or
     malformed, the default (gate disabled, empty allowlist) is
     surfaced so the admin can see exactly what the routing layer is

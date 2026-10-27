@@ -23,6 +23,7 @@ class UserRole(StrEnum):
     AI_DELEGATE: Elevated permission set for AI-integration users
       (observe market/signals/orders, submit/cancel trades via MCP).
     VIEWER: Read-only operator with the complete operator read surface.
+    AUDITOR: Global administrative observation without mutation authority.
     OPERATOR: Can execute trades and manage strategies.
     ADMIN: Full system access including user management.
     """
@@ -31,6 +32,7 @@ class UserRole(StrEnum):
     AI_REVIEWER = "ai_reviewer"
     AI_DELEGATE = "ai_delegate"
     VIEWER = "viewer"
+    AUDITOR = "auditor"
     OPERATOR = "operator"
     ADMIN = "admin"
 

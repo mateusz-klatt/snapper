@@ -20,7 +20,9 @@ from snapper.api.schemas.android_devices import RegisterAndroidDeviceCommand
 from snapper.api.schemas.android_devices import UuidText
 from snapper.application.notify.android_config import AndroidPushRuntime
 from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.android_devices import AndroidRegistrationError
 from snapper.data.android_devices import RegistrationWrite
@@ -168,7 +170,9 @@ async def register_android_device(
     command: Annotated[
         RegisterAndroidDeviceCommand, Depends(json_body(RegisterAndroidDeviceCommand))
     ],
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     runtime: Annotated[AndroidPushRuntime, Depends(get_android_push_runtime)],
 ) -> AndroidDeviceResponse:

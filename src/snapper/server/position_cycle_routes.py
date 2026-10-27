@@ -20,9 +20,11 @@ from loguru import logger
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PositionCycleRow
@@ -96,25 +98,37 @@ def _cycle_to_data(row: PositionCycleRow, now: datetime) -> PositionCycleData:
     )
 
 
-@router.get(
-    "/open",
-    dependencies=[Depends(require_permission(Permission.MANAGE_USERS))],
-)
+@router.get("/open")
 async def list_open_cycles(
-    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_any_permission(Permission.READ_POSITION_CYCLES, Permission.MANAGE_USERS)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     min_age_hours: float = 0,
 ) -> PositionCycleListResponse:
-    """List all open position cycles, optionally filtered by minimum age.
+    """List all open position cycles for an authorized global observer.
 
     Args:
-        principal: Authenticated admin user.
+        principal: Caller granted cycle read permission and global observation.
         repo: Database repository.
         min_age_hours: Only show cycles open longer than this (hours).
 
     Returns:
         List of open cycles with age information.
+
+    Raises:
+        HTTPException: 403 when the caller lacks global read authority.
     """
+    if not has_global_read_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Global read authority is required to list position cycles",
+        )
     now = datetime.now(UTC)
     opened_before = now - timedelta(hours=min_age_hours) if min_age_hours > 0 else None
     rows = await repo.get_all_open_position_cycles(as_of=now, opened_before=opened_before)

@@ -3,7 +3,7 @@
 Provides the frontend wallet picker with the list of
 wallets the current principal can act on, plus a guarded create
 endpoint backing the admin Wallet Credentials tab. Principals granted
-``IMPERSONATE_OPERATOR`` see every active wallet; other principals see the
+global read authority see every active wallet; other principals see the
 read plane — the wallets covered by one of their operators' active scope
 grants, plus the wallets they personally hold an active read grant on.
 Credential management (add / rotate / restart) lives on dedicated
@@ -34,7 +34,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository import WalletConflictError
@@ -70,7 +70,7 @@ async def list_wallets(
 ) -> WalletListResponse:
     """List wallets readable by the current principal.
 
-    A caller granted ``IMPERSONATE_OPERATOR`` sees every active wallet.
+    A caller granted global read authority sees every active wallet.
     Other callers see the READ plane: the union of the wallets covered by
     an active scope grant from the principal's operator set and the wallets
     the user personally holds an active ``wallet_user_read_grants`` row on.
@@ -91,11 +91,10 @@ async def list_wallets(
         ``(is_paper, label)``.
     """
     now = datetime.now(UTC)
-    if has_effective_permission(
+    if has_global_read_permission(
         principal.role,
         principal.permissions,
         principal.permission_scope_version,
-        Permission.IMPERSONATE_OPERATOR,
     ):
         rows = await repo.list_active_wallets(now)
     else:

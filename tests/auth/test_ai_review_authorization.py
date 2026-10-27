@@ -35,6 +35,9 @@ def test_ai_reviewer_role_and_grant_are_exact() -> None:
         UserRole.AI_DELEGATE,
     }
     assert ROLE_PERMISSIONS[UserRole.AI_REVIEWER] == {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
+        Permission.INITIALIZE_PNL_ANCHORS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
@@ -327,10 +330,10 @@ def test_new_tokens_stamp_literal_v3_permission_scope() -> None:
     refresh_claims = token_manager.decode_fresh_token(token_pair.refresh_token)
     long_lived_claims = token_manager.decode_fresh_token(long_lived.access_token)
 
-    assert PERMISSION_SCOPE_VERSION == 3
-    assert access_claims.permission_scope_version == 3
-    assert refresh_claims.permission_scope_version == 3
-    assert long_lived_claims.permission_scope_version == 3
+    assert PERMISSION_SCOPE_VERSION == 4
+    assert access_claims.permission_scope_version == 4
+    assert refresh_claims.permission_scope_version == 4
+    assert long_lived_claims.permission_scope_version == 4
 
 
 def test_claimless_ai_delegate_token_resolves_full_current_role() -> None:

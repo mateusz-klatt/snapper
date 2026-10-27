@@ -867,11 +867,13 @@ class TestListAiReviewsRoute:
         kwargs = repo.list_ai_reviews.await_args.kwargs
         assert kwargs["operator_public_ids"] == ["op-1"]
 
-    def test_admin_is_allowed_and_unscoped(self) -> None:
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+    def test_global_reader_is_allowed_and_unscoped(self, role: UserRole) -> None:
         """ADMIN is admitted and sees every operator's rows (no operator scoping)."""
         repo = AsyncMock()
         repo.list_ai_reviews = AsyncMock(return_value=[])
-        client = _create_client(repo=repo, principal=_admin_principal())
+        principal = _admin_principal().model_copy(update={"role": role})
+        client = _create_client(repo=repo, principal=principal)
         response = client.get("/api/ai-reviews")
         assert response.status_code == 200
         assert response.json()["count"] == 0

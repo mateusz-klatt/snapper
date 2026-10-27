@@ -23,6 +23,7 @@ These tests exercise:
 
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -38,6 +39,8 @@ from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import get_role_allowed_categories
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import _get_authenticated_token_claims
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -52,6 +55,7 @@ _TEST_USER_PUBLIC_ID = "user-pid-1"
 _TEST_SID = "session-1"
 
 
+@asynccontextmanager
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Disable the FastAPI lifespan so tests don't spin up ZMQ + DB."""
     yield
@@ -173,6 +177,52 @@ class TestWsTokenRouteHappyPath:
         assert verified.sid_hash == compute_sid_hash(claims.sid)
         assert verified.purpose == "ws_connect"
         client.close()
+
+    def test_auditor_ticket_preserves_read_only_administrative_scope(self) -> None:
+        """The HTTP ticket carries all auditor reads without command authority."""
+        permission_values = sorted(
+            permission.value for permission in ROLE_PERMISSIONS[UserRole.AUDITOR]
+        )
+        principal = _principal().model_copy(
+            update={
+                "role": UserRole.AUDITOR,
+                "operator_public_ids": [],
+                "primary_operator_public_id": "",
+            }
+        )
+        claims = _claims().model_copy(
+            update={
+                "role": UserRole.AUDITOR,
+                "operator_public_ids": [],
+                "primary_operator_public_id": "",
+                "permissions": permission_values,
+                "permission_scope_version": 4,
+            }
+        )
+        with _create_client(principal=principal, claims=claims) as client:
+            response = client.post("/api/auth/ws_token")
+
+        assert response.status_code == 200
+        verified = WsTokenService.get_instance().verify(
+            response.json()["payload"]["ws_token"],
+            expected_sub=_TEST_USERNAME,
+            expected_sid_hash=compute_sid_hash(claims.sid),
+        )
+        assert verified.permissions == permission_values
+        assert all(permission.startswith("read:") for permission in verified.permissions)
+        assert verified.permission_scope_version == 4
+        assert verified.authorization_context_version == WS_AUTHORIZATION_CONTEXT_VERSION
+        categories = get_role_allowed_categories(
+            UserRole.AUDITOR, verified.permissions, verified.permission_scope_version
+        )
+        assert {
+            "admin",
+            "processes_admin",
+            "ai_reviews",
+            "trade_events",
+            "account_state",
+        } <= categories
+        assert {"trade", "strategy", "ai_research"}.isdisjoint(categories)
 
     def test_ticket_carries_the_access_scope_not_the_principal(self) -> None:
         """The minted ticket's context comes from the verified access claims.

@@ -1063,26 +1063,37 @@ class TestTokenManager:
         }
         assert empty_claims.permissions == [Permission.IMPERSONATE_OPERATOR.value]
 
-    def test_refresh_tokens_legacy_empty_claim_falls_back_to_full_role(self) -> None:
-        """An in-flight legacy refresh token retains its historical semantics.
-
-        Given: A pre-version refresh JWT whose permissions list is empty,
-        When: It rotates after scoped-token support is deployed,
-        Then: The successor receives the complete role grant because the old
-            empty list did not represent an intentional empty access scope.
-        """
+    @pytest.mark.parametrize(
+        ("role", "permissions", "expected"),
+        [
+            (UserRole.OPERATOR, None, ROLE_PERMISSIONS[UserRole.OPERATOR]),
+            (
+                UserRole.OPERATOR,
+                [],
+                {Permission.MANAGE_SELF_ACCOUNT, Permission.READ_SCOPE_GRANTS},
+            ),
+            (UserRole.AUDITOR, [Permission.READ_MARKET_DATA.value], {Permission.READ_MARKET_DATA}),
+            (UserRole.AUDITOR, [], set()),
+        ],
+        ids=["claimless-legacy-role", "empty-legacy-scope", "narrow-auditor", "empty-auditor"],
+    )
+    def test_refresh_tokens_preserves_unversioned_permission_claim_semantics(
+        self, role: UserRole, permissions: list[str] | None, expected: set[Permission]
+    ) -> None:
+        """Explicit legacy scopes stay narrow; only an absent claim restores the full role."""
         token_manager = TokenManager()
         now = datetime.now(UTC)
         payload: dict[str, str | int | list[str]] = {
             "sub": "legacy-refresh-user",
             "username": "legacy-refresh-user",
-            "role": UserRole.OPERATOR.value,
-            "permissions": [],
+            "role": role.value,
             "sid": "legacy-refresh-session",
             "exp": int((now + timedelta(hours=1)).timestamp()),
             "iat": int(now.timestamp()),
             "jti": "refresh_legacy-jti",
         }
+        if permissions is not None:
+            payload["permissions"] = permissions
         refresh_token = jwt.encode(
             payload,
             token_manager.settings.auth_secret_key,
@@ -1093,8 +1104,9 @@ class TestTokenManager:
 
         assert successor is not None
         successor_claims = token_manager.decode_fresh_token(successor.access_token)
+        assert successor_claims.permission_scope_version == PERMISSION_SCOPE_VERSION
         assert set(successor_claims.permissions or []) == {
-            permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
+            permission.value for permission in expected
         }
 
     def test_refresh_tokens_upgrades_full_v2_scope_to_full_v3_role(self) -> None:
@@ -1141,7 +1153,7 @@ class TestTokenManager:
 
         assert successor is not None
         successor_claims = token_manager.decode_fresh_token(successor.access_token)
-        assert successor_claims.permission_scope_version == 3
+        assert successor_claims.permission_scope_version == 4
         assert set(successor_claims.permissions or []) == {
             permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
         }
@@ -2142,23 +2154,22 @@ class TestResourcePermissions:
                 isinstance(permission, Permission) for permission in requirements
             ), f"{resource} maps to a non-Permission value"
 
-    def test_admin_requires_manage_users(self) -> None:
-        """Admin resource requires MANAGE_USERS permission.
+    def test_admin_accepts_read_or_existing_management_permissions(self) -> None:
+        """Administrative readers and legacy managers can open their sections."""
+        assert RESOURCE_PERMISSIONS["admin"] == {
+            Permission.READ_USERS,
+            Permission.MANAGE_USERS,
+            Permission.READ_DESK_MEMBERSHIPS,
+            Permission.MANAGE_DESK_MEMBERSHIPS,
+            Permission.READ_WALLET_CREDENTIALS,
+        }
 
-        Given: RESOURCE_PERMISSIONS mapping,
-        When: Checking the 'admin' entry,
-        Then: Its value is Permission.MANAGE_USERS.
-        """
-        assert RESOURCE_PERMISSIONS["admin"] == {Permission.MANAGE_USERS}
-
-    def test_settings_requires_configure_system(self) -> None:
-        """Settings resource requires CONFIGURE_SYSTEM permission.
-
-        Given: RESOURCE_PERMISSIONS mapping,
-        When: Checking the 'settings' entry,
-        Then: Its value is Permission.CONFIGURE_SYSTEM.
-        """
-        assert RESOURCE_PERMISSIONS["settings"] == {Permission.CONFIGURE_SYSTEM}
+    def test_settings_accepts_read_or_existing_configuration_permission(self) -> None:
+        """Settings are inspectable without granting configuration writes."""
+        assert RESOURCE_PERMISSIONS["settings"] == {
+            Permission.READ_SYSTEM_SETTINGS,
+            Permission.CONFIGURE_SYSTEM,
+        }
 
     def test_read_only_operator_resources_use_dedicated_read_permissions(self) -> None:
         """Process and AI resources expose their dedicated read requirements.
@@ -2189,6 +2200,14 @@ class TestCapabilityPermissionSets:
             Permission.MANAGE_AI_INTEGRATION,
             Permission.MANAGE_RUNTIME_DIAGNOSTICS,
             Permission.CREATE_BACKTEST_COMPARISONS,
+            Permission.READ_SYSTEM_SETTINGS,
+            Permission.READ_USERS,
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_DESK_MEMBERSHIPS,
+            Permission.READ_SCOPE_GRANTS,
+            Permission.READ_ALL_SCOPES,
+            Permission.READ_POSITION_CYCLES,
+            Permission.INITIALIZE_PNL_ANCHORS,
         }
         if role == UserRole.OPERATOR:
             version_three_additions.add(Permission.CONFIGURE_STRATEGIES)
@@ -2275,7 +2294,7 @@ class TestCapabilityPermissionSets:
 
     @pytest.mark.parametrize(
         "role",
-        list(UserRole),
+        [role for role in UserRole if role is not UserRole.AUDITOR],
     )
     def test_v2_full_role_claim_upgrades_to_current_role(self, role: UserRole) -> None:
         """An exact full v2 grant inherits its role's newly added permissions."""
@@ -2309,6 +2328,8 @@ class TestCapabilityPermissionSets:
         )
 
         assert effective == structural | {
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
             Permission.READ_SIGNALS,
             Permission.READ_AI_REVIEWS,
         }
@@ -2337,6 +2358,8 @@ class TestCapabilityPermissionSets:
         )
 
         assert effective == structural | {
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
             Permission.MANAGE_PROCESSES,
             Permission.READ_PROCESSES,
             Permission.READ_AI_INTEGRATION,
@@ -2398,7 +2421,10 @@ class TestCapabilityPermissionSets:
             2,
         )
 
-        assert effective == expected
+        assert effective == expected | {
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
+        }
 
     @pytest.mark.parametrize(
         ("role", "expected"),
@@ -2452,7 +2478,10 @@ class TestCapabilityPermissionSets:
             2,
         )
 
-        assert effective == expected
+        assert effective == expected | {
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
+        }
 
     def test_v2_narrow_viewer_scope_does_not_inherit_new_reads(self) -> None:
         """An intentionally narrowed viewer remains narrower than the full role."""
@@ -2462,9 +2491,13 @@ class TestCapabilityPermissionSets:
             2,
         )
 
-        assert effective == {Permission.READ_SIGNALS}
+        assert effective == {
+            Permission.READ_SIGNALS,
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
+        }
 
-    def test_v3_scope_is_a_strict_role_bounded_intersection(self) -> None:
+    def test_v4_scope_is_a_strict_role_bounded_intersection(self) -> None:
         """Current tokens never infer permissions omitted by their explicit scope."""
         effective = get_effective_permissions(
             UserRole.OPERATOR,
@@ -2473,7 +2506,7 @@ class TestCapabilityPermissionSets:
                 Permission.MANAGE_PROCESSES.value,
                 Permission.MANAGE_USERS.value,
             ],
-            3,
+            4,
         )
 
         assert effective == {
@@ -2488,7 +2521,9 @@ class TestCapabilityPermissionSets:
     ) -> None:
         """Explicit admin scopes retain the historically structural grant."""
         assert get_effective_permissions(UserRole.ADMIN, [], scope_version) == {
-            Permission.IMPERSONATE_OPERATOR
+            Permission.IMPERSONATE_OPERATOR,
+            Permission.MANAGE_SELF_ACCOUNT,
+            Permission.READ_SCOPE_GRANTS,
         }
 
     @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR])
@@ -2498,7 +2533,7 @@ class TestCapabilityPermissionSets:
             get_effective_permissions(
                 role,
                 [Permission.IMPERSONATE_OPERATOR.value],
-                3,
+                4,
             )
             == set()
         )

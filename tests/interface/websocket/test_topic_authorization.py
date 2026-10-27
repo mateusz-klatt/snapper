@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
@@ -24,6 +25,58 @@ from snapper.interface.websocket.topic_authorization import partition_authorized
 _AS_OF = datetime(2026, 7, 26, 22, 0, tzinfo=UTC)
 _WALLET = "019e873c-d062-720f-85df-fd4d7fce5bdf"
 _OTHER_WALLET = "019e873c-d060-762d-8cee-5fde4009513d"
+
+
+@pytest.mark.asyncio
+async def test_auditor_reads_global_events_but_cannot_subscribe_to_trade_commands() -> None:
+    """Admin read events and any wallet's backtests never grant the command category.
+
+    Given an auditor without desk memberships,
+    When it subscribes to administrative read streams and a command stream,
+    Then all read streams are allowed and the command stream is denied.
+    """
+    read_topics = [
+        "admin.",
+        "processes.events.configured.",
+        "processes.events.runs.",
+        "ai_reviews.",
+        "orders.events.",
+        f"backtest.{_OTHER_WALLET}.",
+    ]
+    allowed, denied = await partition_authorized_topics(
+        topics=[*read_topics, "orders.commands."],
+        principal=_principal(UserRole.AUDITOR),
+        repository=None,
+        as_of=_AS_OF,
+    )
+
+    assert allowed == read_topics
+    assert denied == ["orders.commands."]
+
+
+@pytest.mark.asyncio
+async def test_downscoped_auditor_loses_global_backtest_subscription() -> None:
+    """Removing the global read capability restores the active-wallet boundary.
+
+    Given an auditor token narrowed to backtest reads,
+    When it requests streams for its active wallet and another wallet,
+    Then only the active wallet stream is authorized.
+    """
+    principal = _principal(UserRole.AUDITOR, active_wallet_public_id=_WALLET).model_copy(
+        update={
+            "permissions": [Permission.READ_BACKTESTS.value],
+            "permission_scope_version": 4,
+        }
+    )
+    allowed, denied = await partition_authorized_topics(
+        topics=[f"backtest.{_WALLET}.", f"backtest.{_OTHER_WALLET}."],
+        principal=principal,
+        repository=None,
+        as_of=_AS_OF,
+    )
+
+    assert allowed == [f"backtest.{_WALLET}."]
+    assert denied == [f"backtest.{_OTHER_WALLET}."]
 
 
 def _principal(

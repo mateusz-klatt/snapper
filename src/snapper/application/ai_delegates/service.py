@@ -22,6 +22,7 @@ from uuid import uuid7
 
 import bcrypt
 from loguru import logger
+from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import select
@@ -715,6 +716,77 @@ class DelegateService:
                 "Caller has no primary operator — supply `operator_public_id` explicitly."
             )
         return owner.primary_operator_public_id
+
+    @staticmethod
+    def _global_delegate_read_query() -> Select[User, UserTradingCaps]:
+        """Select active delegate projections without creator or membership filtering.
+
+        Only the explicitly global read methods use this query. Mutation loaders
+        retain their separate creator-owned predicates.
+        """
+        now = _now_for_join()
+        caps_ts, caps_known_to = where_active(UserTradingCaps, now)
+        user_ts, user_known_to = where_active(User, now)
+        return (
+            select(User, UserTradingCaps)
+            .join(
+                UserTradingCaps,
+                (UserTradingCaps.user_public_id == User.public_id) & caps_ts & caps_known_to,
+                isouter=True,
+            )
+            .where(
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
+                User.is_active,
+                user_ts,
+                user_known_to,
+            )
+        )
+
+    async def list_all_delegates(self) -> list[DelegateRead]:
+        """Read every active delegate, including delegates without desk memberships.
+
+        The caller must enforce global read authority before choosing this method.
+        No credentials are returned and no delegate lifecycle action is performed.
+
+        Returns:
+            Active delegate metadata and caps across all creators and desks.
+        """
+        async with self.repository.session() as session:
+            rows = (await session.execute(self._global_delegate_read_query())).all()
+            return [
+                self._delegate_read_from_rows(
+                    user_row=user,
+                    caps_row=caps,
+                    label=self._label_from_username(user.username),
+                )
+                for user, caps in rows
+            ]
+
+    async def get_any_delegate(self, public_id: str) -> DelegateRead:
+        """Read one active delegate under externally enforced global read authority.
+
+        This query deliberately does not share the owner-checked mutation loader.
+        Missing and inactive delegates raise ``DelegateNotFoundError``.
+
+        Args:
+            public_id: Stable identifier of the delegate to observe.
+
+        Returns:
+            Active delegate metadata and caps without credentials.
+
+        Raises:
+            DelegateNotFoundError: When no active delegate has this identifier.
+        """
+        async with self.repository.session() as session:
+            statement = self._global_delegate_read_query().where(User.public_id == public_id)
+            row = (await session.execute(statement)).first()
+            if row is None:
+                raise DelegateNotFoundError(public_id)
+            return self._delegate_read_from_rows(
+                user_row=row[0],
+                caps_row=row[1],
+                label=self._label_from_username(row[0].username),
+            )
 
     async def list_delegates(
         self,

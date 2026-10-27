@@ -37,9 +37,11 @@ def test_ai_researcher_has_exact_permission_set() -> None:
 
     Given: The canonical role-permission mapping.
     When: The AI_RESEARCHER grant is inspected.
-    Then: It contains exactly market data, market-view read, and market-view submit.
+    Then: It contains research capabilities and the existing authenticated surface.
     """
     assert ROLE_PERMISSIONS[UserRole.AI_RESEARCHER] == {
+        Permission.MANAGE_SELF_ACCOUNT,
+        Permission.READ_SCOPE_GRANTS,
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
         Permission.SUBMIT_MARKET_VIEW,
@@ -86,7 +88,7 @@ def test_ai_researcher_token_cannot_expand_beyond_role_ceiling() -> None:
 
     Given: A researcher token claiming one valid permission plus order and signal grants.
     When: Effective permissions are derived from the role ceiling.
-    Then: Only the valid researcher permission survives the intersection.
+    Then: Only the valid researcher permission survives the current-scope intersection.
     """
     effective = get_effective_permissions(
         UserRole.AI_RESEARCHER,
@@ -95,6 +97,7 @@ def test_ai_researcher_token_cannot_expand_beyond_role_ceiling() -> None:
             Permission.CREATE_ORDERS.value,
             Permission.READ_SIGNALS.value,
         ],
+        4,
     )
 
     assert effective == {Permission.READ_MARKET_VIEWS}

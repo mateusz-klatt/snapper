@@ -14,9 +14,8 @@ Exercises:
   cross-scope overlap (409), self-handover rejection (400), and
   missing source grant (404).
 
-All tests invoke the handler functions directly with a mocked
-``Repository`` so the authorization branches are exercised without
-booting a FastAPI TestClient.
+Handler tests isolate repository behavior. HTTP tests additionally exercise
+the real permission dependency and legacy token compatibility projection.
 """
 
 from datetime import UTC
@@ -25,9 +24,11 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from fastapi.testclient import TestClient
 
 from snapper.api.schemas.multi_tenant import CreateScopeGrantBody
 from snapper.api.schemas.multi_tenant import CreateScopeGrantCommand
@@ -35,6 +36,7 @@ from snapper.api.schemas.multi_tenant import HandoverScopeGrantBody
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantCommand
 from snapper.api.schemas.multi_tenant import RevokeScopeGrantBody
 from snapper.api.schemas.multi_tenant import RevokeScopeGrantCommand
+from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
@@ -47,11 +49,13 @@ from snapper.data.repository import ScopeGrantValidationError
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.dependencies import get_repository_dependency
 from snapper.server.scope_grant_routes import _scope_grant_service_dependency
 from snapper.server.scope_grant_routes import create_scope_grant
 from snapper.server.scope_grant_routes import handover_scope_grant
 from snapper.server.scope_grant_routes import list_scope_grants
 from snapper.server.scope_grant_routes import revoke_scope_grant
+from snapper.server.scope_grant_routes import router
 
 
 def _wallet_row(public_id: str) -> WalletRow:
@@ -106,7 +110,8 @@ class TestListScopeGrants:
     """Authorization and projection behaviour of ``list_scope_grants``."""
 
     @pytest.mark.asyncio
-    async def test_admin_bypasses_visibility_check(self) -> None:
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+    async def test_global_reader_bypasses_visibility_check(self, role: UserRole) -> None:
         """ADMIN skips the wallet-accessibility gate entirely.
 
         Given: An ADMIN principal and a wallet ID,
@@ -123,7 +128,7 @@ class TestListScopeGrants:
                 _grant_row("grant-2", "op-2", "wallet-42", "instrument"),
             ]
         )
-        principal = AuthPrincipal(username="admin", role=UserRole.ADMIN)
+        principal = AuthPrincipal(username="global-reader", role=role)
 
         result = await list_scope_grants(
             request=_make_request(),
@@ -201,6 +206,137 @@ class TestListScopeGrants:
 
         assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
         mock_repo.list_active_scope_grants_for_wallet.assert_not_awaited()
+
+
+def _scope_grant_app(principal: AuthPrincipal, repo: AsyncMock) -> FastAPI:
+    """Mount the real route and permission gate with synthetic session/repository."""
+    app = FastAPI()
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(router)
+    app.dependency_overrides[require_authentication] = lambda: principal
+    app.dependency_overrides[get_repository_dependency] = lambda: repo
+    return app
+
+
+class TestScopeGrantReadPermissions:
+    """Content and wallet scope are independent requirements at the HTTP boundary."""
+
+    @pytest.mark.parametrize("scope_version", [None, 1, 2, 3, 4])
+    @pytest.mark.parametrize("role", [role for role in UserRole if role is not UserRole.AUDITOR])
+    def test_existing_scoped_read_is_preserved(
+        self, role: UserRole, scope_version: int | None
+    ) -> None:
+        """Existing roles keep scoped reads with legacy or explicitly granted tokens."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators.return_value = [_wallet_row("wallet-42")]
+        repo.list_active_scope_grants_for_wallet.return_value = []
+        principal = AuthPrincipal(
+            username="old-session",
+            role=role,
+            permissions=[Permission.READ_SCOPE_GRANTS.value] if scope_version == 4 else [],
+            permission_scope_version=scope_version,
+            operator_public_ids=["op-1"],
+        )
+        with TestClient(_scope_grant_app(principal, repo)) as client:
+            response = client.get("/scope-grants", params={"wallet_public_id": "wallet-42"})
+
+        assert response.status_code == status.HTTP_200_OK
+        repo.list_active_scope_grants_for_wallet.assert_awaited_once()
+
+    @pytest.mark.parametrize("scope_version", [None, 1, 2, 3, 4])
+    @pytest.mark.parametrize("operator_ids", [[], ["op-1"]])
+    def test_global_auditor_without_content_permission_is_rejected(
+        self, scope_version: int | None, operator_ids: list[str]
+    ) -> None:
+        """Legacy shape, membership and global scope never replace the content grant."""
+        repo = AsyncMock()
+        principal = AuthPrincipal(
+            username="narrow-auditor",
+            role=UserRole.AUDITOR,
+            permissions=[Permission.READ_ALL_SCOPES.value],
+            permission_scope_version=scope_version,
+            operator_public_ids=operator_ids,
+        )
+        with TestClient(_scope_grant_app(principal, repo)) as client:
+            response = client.get("/scope-grants", params={"wallet_public_id": "wallet-42"})
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+        repo.list_active_scope_grants_for_wallet.assert_not_awaited()
+
+    @pytest.mark.parametrize("role", list(UserRole))
+    def test_current_token_omitting_content_permission_is_rejected(self, role: UserRole) -> None:
+        """Current explicit tokens need content permission even for administrators."""
+        repo = AsyncMock()
+        principal = AuthPrincipal(
+            username="narrow-session",
+            role=role,
+            permissions=[Permission.READ_ALL_SCOPES.value],
+            permission_scope_version=4,
+            operator_public_ids=["op-1"],
+        )
+        with TestClient(_scope_grant_app(principal, repo)) as client:
+            response = client.get("/scope-grants", params={"wallet_public_id": "wallet-42"})
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+        repo.list_active_scope_grants_for_wallet.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("role", "permissions"),
+        [
+            (
+                UserRole.AUDITOR,
+                [Permission.READ_SCOPE_GRANTS.value, Permission.READ_ALL_SCOPES.value],
+            ),
+            (UserRole.ADMIN, [Permission.MANAGE_SCOPE_GRANTS.value]),
+        ],
+    )
+    def test_explicit_read_or_legacy_management_content_allows_global_reads(
+        self, role: UserRole, permissions: list[str]
+    ) -> None:
+        """Global readers need no invented memberships when their content grant is valid."""
+        repo = AsyncMock()
+        repo.list_active_scope_grants_for_wallet.return_value = [
+            _grant_row("grant-1", "op-1", "wallet-42", "underlying")
+        ]
+        principal = AuthPrincipal(
+            username="global-reader",
+            role=role,
+            permissions=permissions,
+            permission_scope_version=4,
+        )
+        with TestClient(_scope_grant_app(principal, repo)) as client:
+            response = client.get("/scope-grants", params={"wallet_public_id": "wallet-42"})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["count"] == 1
+        repo.list_accessible_wallets_for_operators.assert_not_awaited()
+        repo.list_active_scope_grants_for_wallet.assert_awaited_once()
+
+    @pytest.mark.parametrize("scope_version", [3, 4])
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.AUDITOR])
+    def test_content_permission_preserves_operator_plane_boundary(
+        self, role: UserRole, scope_version: int
+    ) -> None:
+        """A personal data read grant does not expose the wallet's authorization topology."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators.return_value = []
+        repo.list_readable_wallets_for_user.return_value = [_wallet_row("wallet-42")]
+        principal = AuthPrincipal(
+            username="scoped-reader",
+            role=role,
+            permissions=[Permission.READ_SCOPE_GRANTS.value],
+            permission_scope_version=scope_version,
+        )
+        with TestClient(_scope_grant_app(principal, repo)) as client:
+            response = client.get("/scope-grants", params={"wallet_public_id": "wallet-42"})
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+        assert repo.list_accessible_wallets_for_operators.await_args.args[0] == []
+        repo.list_readable_wallets_for_user.assert_not_awaited()
+        repo.list_active_scope_grants_for_wallet.assert_not_awaited()
 
 
 def _make_create_command(

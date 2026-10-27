@@ -273,7 +273,7 @@ signal: it never carries balances or a precomputed reconciliation view.
 
 The ZMQ-WebSocket bridge requires `read:account_state` at subscribe time and
 filters every frame against the destination principal's accessible-wallet set
-(global scope with effective `impersonate:operator`; malformed
+(global scope with effective `read:all_scopes` or `impersonate:operator`; malformed
 payloads and topic/payload wallet mismatches fail closed). The browser
 invalidates the active `GET /api/portfolio/accounts` query so the REST read
 path remains the only builder of the time-sensitive, fail-closed view. A
@@ -707,7 +707,7 @@ Authentication system:
 - JWT tokens with access/refresh via HTTP-only cookies
 - CSRF protection
 - Permission-based authorization. Roles are only stable names for the
-    `ai_researcher`, `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and
+    `ai_researcher`, `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, and
     `admin` base permission sets, plus user-management values and display
     labels. Every REST, WebSocket, frontend, iOS, and MCP capability decision
     consumes effective permissions rather than role identity or rank.
@@ -715,7 +715,10 @@ Authentication system:
     named set but cannot add permissions outside it. The structural
     `impersonate:operator` grant is non-downscopable, preserving historical
     admin-wide scope while allowing runtime scoping to consume effective
-    permissions. Session profiles expose the resulting
+    permissions. New tokens use permission-scope version 4; older tokens retain
+    role-bounded historical self-service, scope-topology reads and position-reader
+    anchor initialization. Those compatibility projections never add auditor
+    capabilities. Session profiles expose the resulting
     `effective_permissions` to clients.
 - Read-only operator visibility for `viewer`, including market data and views,
     account state, scoped wallets and portfolio, orders, positions,
@@ -728,8 +731,16 @@ Authentication system:
     alone. WebSocket wallet filters and MCP tools currently still use the
     operator-grant plane, so a personal REST read grant does not by itself
     authorize those transports.
+- Global read-only administration for `auditor`, with dedicated user, settings,
+    desk, credential, scope and position-cycle read permissions. `read:all_scopes`
+    expands observation without granting impersonation or trade authority and
+    can be removed from a scoped token. Administrative forms remain inspectable
+    with disabled mutations. Account writes require `manage:self_account`, and
+    P&L anchor initialization requires `initialize:pnl_anchors` plus trade scope;
+    neither write capability belongs to the auditor. Native and React clients
+    retain local language changes without attempting account synchronization.
 - Complete-catalog mapping for `admin`. Its named set is constructed from
-    all 34 `Permission` values, including `impersonate:operator` for global
+    all 43 `Permission` values, including `impersonate:operator` for global
     wallet and operator scope.
 - Dedicated mutation permissions keep read grants read-only:
     `create:backtest_comparisons` controls comparison creation,

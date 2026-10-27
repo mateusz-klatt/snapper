@@ -25,19 +25,29 @@ label; it is not an authorization hierarchy.
 
 | Named set | Count | Access summary |
 | --------- | ----: | -------------- |
-| `ai_researcher` | 3 | Research-only access: read market data and market views, then submit market views. It has no signal, order, position, process, or health access. |
-| `ai_reviewer` | 11 | Read market data, market views, orders, positions, strategies, signals, system status, and backtests; create backtest comparisons; control runtime diagnostics; and see the MCP AI-review decision tool in its catalog. It has no order-execution or position-management permission, so current invocation of that tool remains unavailable. |
-| `ai_delegate` | 14 | Scoped MCP and AI-review automation: the reviewer set plus scoped order creation, cancellation, and position management. It cannot manage users, settings, processes, AI integration, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics. |
-| `viewer` | 14 | Full read-only operator visibility: account state; operator-scoped wallets and portfolio; market data and views; orders and positions; signals and AI-review decisions; P&L timeline and attribution; backtests; strategies; process state; health; AI integration; and notifications. It cannot trade, manage positions, create backtest comparisons, control runtime diagnostics, configure or control strategies and processes, manage AI integration, or perform administrative mutations. Self-service notification-device management remains available. |
-| `operator` | 26 | The complete viewer read set plus trade execution, position management, strategy configuration and lifecycle control, non-strategy process management, AI-integration management, runtime diagnostics, backtest comparisons and run management, and paired-execution terminalization. |
-| `admin` | 34 | Every permission in the current `Permission` catalog, including user and system configuration, wallet credentials, scope grants, and operator impersonation. The mapping is defined as the complete catalog, so newly introduced permissions are included automatically. |
+| `ai_researcher` | 5 | Research access: read market data and market views, then submit market views. It has no signal, order, position, process, or health access. |
+| `ai_reviewer` | 14 | Read market data, market views, orders, positions, strategies, signals, system status, and backtests; create backtest comparisons; control runtime diagnostics; and see the MCP AI-review decision tool in its catalog. It has no order-execution or position-management permission, so current invocation of that tool remains unavailable. |
+| `ai_delegate` | 17 | Scoped MCP and AI-review automation: the reviewer set plus scoped order creation, cancellation, and position management. It cannot manage users, settings, processes, AI integration, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics. |
+| `viewer` | 17 | Read-only operator visibility: scoped wallets and portfolio, market data and views, orders, positions, signals, AI-review decisions, P&L, backtests, strategies, process state, health, AI integration, and notifications. It cannot trade or perform operational or administrative mutations. Self-service account and notification-device management remain available. |
+| `auditor` | 20 | Global read-only administration: the operator read surfaces plus users, settings, desk memberships, credential summaries, scope grants and position cycles. It has no mutation or impersonation permissions, cannot initialize P&L anchors, and cannot change its shared account or notification devices. |
+| `operator` | 30 | The complete viewer set plus trade execution, position management, strategy configuration and lifecycle control, process management, AI-integration management, runtime diagnostics, backtest comparisons and run management, desk membership management, and paired-execution terminalization. |
+| `admin` | 43 | Every permission in the current `Permission` catalog, including user and system configuration, wallet credentials, scope grants, and operator impersonation. The mapping is defined as the complete catalog, so newly introduced permissions are included automatically. |
+
+Pre-existing roles retain `manage:self_account` and scoped `read:scope_grants`.
+Their position readers also retain `initialize:pnl_anchors`; this capability
+requires trade-scope access before a missing P&L activation anchor can be created.
+The auditor has none of these write capabilities. Login, refresh, logout and
+WebSocket-token issuance remain available, and display preferences can change
+locally without changing the shared account.
 
 Wallet and portfolio reads use the union of active scope grants from the
 caller's operator memberships and its active personal `wallet_user_read_grants`.
 A caller with no operator membership can therefore read a personally granted
 wallet. Personal read grants never authorize orders, cancellation, or plan
-actions, which use the operator scope-grant plane. Runtime scope
-decisions consume effective `impersonate:operator`; the current `admin` set is
+actions, which use the operator scope-grant plane. Effective `read:all_scopes`
+provides global observation only and can be removed from an explicit token scope.
+Each surface still requires its own content permission. Effective
+`impersonate:operator` also provides global scope; the current `admin` set is
 the only set containing it. This structural permission is non-downscopable, so
 an explicitly narrowed admin token retains the historical system-wide operator
 and wallet scope.
@@ -52,8 +62,15 @@ complete named set. For compatibility, an older access token with no
 Authenticated profile responses expose the result as `effective_permissions`;
 clients use that field for capability decisions.
 
-Version-two explicit scopes are migrated by capability equivalence. An exact
-full named-set scope adopts the current named set. For a narrowed `operator` or
+New tokens use permission-scope version 4. Explicit scopes from before version 4
+retain previously authenticated-only self-service and scope-grant reads for the
+pre-existing roles. Position readers also retain role-bounded anchor initialization.
+These migrations do not synthesize auditor permissions. Version-4 scopes can
+remove every ordinary permission independently.
+
+Version-two explicit scopes for pre-existing roles are migrated by capability
+equivalence. An exact historical full named-set scope adopts the current named set.
+For a narrowed `operator` or
 `admin` scope, retained `read:signals` adds `read:ai_reviews`, while retained
 `manage:processes` adds the process and AI-integration read and management
 permissions plus the strategy configure/start/stop permissions that replace
@@ -61,7 +78,7 @@ its historical controls. For every named set, retained `read:backtests` adds
 `create:backtest_comparisons`, and retained `read:system_status` adds
 `manage:runtime_diagnostics`, only when that named set contains the replacement
 permission. The `viewer` set contains none of those mutation permissions, and
-an intentionally narrowed version-two viewer scope does not inherit the new
+an intentionally narrowed version-two viewer scope does not inherit the version-3
 read permissions.
 
 ### POST /api/auth/login
@@ -399,12 +416,14 @@ wrapping the full `UserProfile` payload, which carries the multi-tenant trio:
 Only `/api/auth/me` resolves the `operator_public_ids` and
 `primary_operator_public_id` membership fields. A caller with effective
 `impersonate:operator` receives every active operator; all other callers,
-including the current `operator` and `viewer` sets, receive only their
+including the current `operator`, `viewer` and `auditor` sets, receive only their
 explicit memberships. `active_wallet_public_id` reflects the active wallet
 selection. These fields power the frontend OperatorPicker without a second
 round trip. `effective_permissions` is the role-bounded token grant that
 clients use for capability checks, and `delegate_public_id` identifies an
-operational AI-delegate lifecycle identity when one exists.
+operational AI-delegate lifecycle identity when one exists. Global read access
+does not fabricate desk memberships; auditors browse the complete operator
+catalogue through `GET /api/operators`.
 
 The login and refresh responses return the `UserProfile` from
 `authenticate_user()` / `get_user_by_id()` with the active wallet overlaid
@@ -418,7 +437,8 @@ wallet the refresh JWT carries or the request hint. Clients should call
 
 ### POST /api/auth/me/update
 
-Update the authenticated caller's self-service preferences. Currently
+Update the authenticated caller's self-service preferences. Requires
+`manage:self_account`. Currently
 exposes `default_language` only; additional preference fields may
 be added later without changing the endpoint contract. Mirrors the
 admin `POST /api/auth/users/{user_id}/update` shape (codebase convention:
@@ -460,7 +480,7 @@ with the updated `default_language` echoed in `payload`.
 
 ### GET /api/auth/users
 
-List users. Requires `manage:users`.
+List users. Requires `read:users` or the existing `manage:users` permission.
 
 **Query parameters:**
 
@@ -485,12 +505,16 @@ explicit global exception. The current named sets grant desk management to
 
 The first CRUD slice may attach or detach active human `viewer` users only.
 AI-delegate membership remains owned by delegate creation and deactivation,
-and human `operator` / `admin` memberships are visible in the directory but
+and human `operator` / `admin` / `auditor` memberships are visible in the directory but
 cannot be mutated through these endpoints.
 
 #### GET /api/auth/desks/{operator_public_id}/members
 
-List active human members of one desk. The response is a `UserListResponse`,
+List active human members of one desk. Requires `read:desk_memberships` or
+`manage:desk_memberships`. Global read access must be effective in both the token
+and the current database role; otherwise the caller needs the token desk claim
+and a live membership. This read exception never permits attaching or detaching
+members. The response is a `UserListResponse`,
 ordered by username. Its `UserProfile` entries are deliberately desk-scoped:
 
 - `operator_public_ids` contains only the requested desk;
@@ -577,7 +601,7 @@ WebSocket close fanout; auth listeners also poll the committed
 
 ### POST /api/auth/users/{user_id}/change-password
 
-Change a password. Users may change their own password; a caller with
+Change a password. Requires `manage:self_account`. Users may change their own password; a caller with
 `manage:users` may change another user's password. Requires CSRF for cookie
 auth and is account-rate limited. Body is `ChangePasswordRequest` with current
 and new password.
@@ -1404,7 +1428,7 @@ event is an invalidation signal, not an account payload. Clients refetch this
 REST endpoint to rebuild the read-time fail-closed view and retain a 60-second
 safety-net poll for missed frames. The bridge enforces the same accessible-wallet
 scope per frame, with system-wide scope for callers holding effective
-`impersonate:operator` and fail-closed malformed-frame handling.
+`read:all_scopes` or `impersonate:operator` and fail-closed malformed-frame handling.
 
 **Request:**
 
@@ -1536,7 +1560,9 @@ The P&L surfaces require `read:positions`; the current `viewer` set contains
 this permission. They never mutate trading, review, or portfolio-projection
 resources. A current-horizon request that omits `as_of` may atomically persist
 the wallet/mode/currency scope's missing immutable activation anchor only when
-the caller also has access to that wallet through the trade-scope resolver.
+the caller holds `initialize:pnl_anchors` and also has access to that wallet
+through the trade-scope resolver. Auditors never initialize anchors, even with
+an actual desk membership; their reads do not invoke the trade-scope resolver.
 A personal read grant alone can read existing P&L but cannot create the anchor;
 without one, it receives an empty series. Supplying `as_of` disables anchor
 creation and performs a strict historical read; when no anchor was visible at
@@ -1707,9 +1733,10 @@ current_stop from the evaluator's in-memory state.
 
 The paired-execution operator surface exposes halted or exposed multi-leg
 groups and the manual attestation used after an operator resolves a
-`manual_intervention` group at the venue. Callers lacking effective
-`impersonate:operator` are filtered to their accessible wallets; callers with
-that effective permission are unscoped.
+`manual_intervention` group at the venue. Reads without effective
+`read:all_scopes` or `impersonate:operator` are filtered to accessible wallets;
+global readers are unscoped. Attestations retain their separate mutation
+permission and trade-scope checks.
 
 ### GET /api/paired-execution/incidents
 
@@ -1754,7 +1781,8 @@ repository backend.
 
 ### GET /api/position-cycles/open
 
-List all open position cycles with age information. Requires `manage:users`
+List all open position cycles with age information. Requires `read:position_cycles`
+or `manage:users`
 for diagnosing orphaned cycles (open cycles without a matching trading
 engine).
 
@@ -1762,8 +1790,9 @@ engine).
 
 - `min_age_hours` (float, optional, default 0): Only return cycles open longer than this.
 
-**Permission:** `manage:users`, which is present only in the current `admin`
-set.
+**Permission:** `read:position_cycles` or `manage:users`, plus effective global
+read scope. This diagnostic endpoint returns a global inventory; a token without
+`read:all_scopes` or the historical `impersonate:operator` grant is rejected.
 
 **Response (200):** `PositionCycleListResponse` envelope whose payload
 items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
@@ -2626,9 +2655,10 @@ creating an enabled strategy requires both configure and start permissions.
 
 ## Settings
 
-Settings-management endpoints require `configure:system` permission
-(present only in the current `admin` set). `GET /api/settings/features` is
-the public exception.
+Settings reads require `read:system_settings` or `configure:system`.
+Mutations require `configure:system`, present only in the current `admin` set.
+`GET /api/settings/features` remains public. Existing secret masking and response
+contracts are unchanged.
 
 ### GET /api/settings
 
@@ -2717,7 +2747,7 @@ List distinct setting category names.
 ### GET /api/settings/push-beta/users
 
 Return the active push-beta gate configuration. Requires
-`configure:system`. If the underlying `push_beta_config` setting is
+`read:system_settings` or `configure:system`. If the underlying `push_beta_config` setting is
 absent or malformed, the endpoint returns the default disabled gate with
 an empty allowlist so a permission-bearing caller can see the effective
 routing state.
@@ -2940,8 +2970,9 @@ claim set, or the requested token permission scope exceeds the
 
 List active delegates visible to the caller. A token with
 `manage:ai_integration` keeps the creator-owned management view; a read-only
-token is narrowed to delegates bound to the caller's operator memberships.
-Deactivated delegates are omitted.
+token is narrowed to delegates bound to the caller's operator memberships unless
+it has global read access. Global readers see all active delegates, including
+unbound delegates. Deactivated delegates are omitted.
 
 **Permission:** `read:ai_integration`.
 
@@ -2951,7 +2982,7 @@ Deactivated delegates are omitted.
 
 Fetch one active delegate in the caller's permission-appropriate scope. A
 management token uses creator ownership; a read-only token uses operator
-memberships. An absent or out-of-scope identifier returns 404.
+memberships or global read access. An absent or out-of-scope identifier returns 404.
 
 **Permission:** `read:ai_integration`.
 
@@ -3101,33 +3132,34 @@ for invalid parameters and 404 when the underlying cannot be resolved.
 
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
-Effective `impersonate:operator` provides global operator and wallet scope on
+Effective `read:all_scopes` or `impersonate:operator` provides global operator and wallet scope on
 wallet-data read surfaces. Other principals see wallets covered by active
 operator scope grants or their own active personal wallet read grants. Both
 `viewer` and `operator` use this read scope, which can include a wallet even
 without any operator membership. Trading and authorization-topology endpoints
-continue to use the operator scope-grant plane; credential endpoints enforce
-their own permissions independently.
+continue to use the operator scope-grant plane. Credential reads require their
+content permission and visibility into the requested wallet independently.
 
 ### GET /api/wallets
 
 List wallets accessible to the current principal. Effective
-`impersonate:operator` exposes all active wallets; other callers see the union
+`read:all_scopes` or `impersonate:operator` exposes all active wallets; other callers see the union
 of wallets covered by their operator set's active scope grants and their own
 active personal read grants.
 
 ### GET /api/operators
 
 List operators accessible to the current principal. Effective
-`impersonate:operator` exposes all operators; every other caller sees only
+`read:all_scopes` or `impersonate:operator` exposes all operators; every other caller sees only
 operators in `principal.operator_public_ids`. Optional `as_of` resolves the
 operator catalogue at the same UTC history horizon used by the desk-membership
 directory; authorization remains bounded by the caller's current signed scope.
 
 ### GET /api/scope-grants
 
-List active scope grants on a given wallet. Callers lacking effective
-`impersonate:operator` must have an active operator scope grant covering the
+List active scope grants on a given wallet. Requires `read:scope_grants` or
+`manage:scope_grants` independently of scope. Callers lacking effective
+`read:all_scopes` or `impersonate:operator` must have an active operator scope grant covering the
 target wallet; a personal wallet read grant alone does not expose this
 authorization topology. Otherwise the route returns 403. Required query
 parameter: `wallet_public_id`.
@@ -3166,8 +3198,10 @@ unique index is violated. Body: `label`, optional `description`, and
 ### GET /api/wallets/{wallet_public_id}/credentials
 
 List active credentials on a wallet as summaries (no encrypted payload
-on the wire). Requires `read:wallet_credentials`, which is present only in
-the current `admin` set.
+on the wire). Requires `read:wallet_credentials`, present in the `admin` and
+`auditor` sets, plus read access to the requested wallet. A narrowed auditor
+without global read authority needs an operator or personal wallet read grant;
+knowing a foreign wallet ID does not authorize reading its credential metadata.
 
 ### POST /api/wallets/{wallet_public_id}/credentials
 
@@ -3743,7 +3777,8 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `system.heartbeats.host.disk` -- API-host disk-pressure heartbeat emitted by the system metrics snapshotter
 - `system.egress.snapshot` -- Egress pool route snapshots
 - `system.egress.transfer` -- WireGuard transfer samples
-- `admin.{resource}` -- Administrative events requiring `manage:users`
+- `admin.{resource}` -- Administrative events requiring `manage:users`, or all of
+    `read:users`, `read:desk_memberships`, `read:scope_grants`, and `read:all_scopes`
 - `processes.events.summary.{coord_slug}` -- Process summary snapshots
 - `processes.events.configured.{coord_slug}` -- Configured process-name snapshots
 - `processes.events.runs.{process_name}` -- Per-process lifecycle transitions
@@ -3892,9 +3927,9 @@ Backtest endpoints manage strategy backtesting runs. Read endpoints require
 `read:backtests`; run creation, cancellation, and reruns require
 `manage:backtests`. Comparison creation is a deliberately separate capability,
 `create:backtest_comparisons`, held by the current `ai_reviewer`,
-`ai_delegate`, `operator`, and `admin` sets. The `viewer` and `ai_researcher`
-sets cannot create comparisons. Every wallet-bound read and mutation fails with
-400 when the caller has no active wallet selected. The global
+`ai_delegate`, `operator`, and `admin` sets. The `viewer`, `auditor`, and
+`ai_researcher` sets cannot create comparisons. Every wallet-bound read and
+mutation fails with 400 when the caller has no active wallet selected. The global
 `GET /api/backtests/strategy-classes` registry read is the exception.
 
 ### POST /api/backtests
@@ -4163,8 +4198,8 @@ counterpart to `/pending` that answers "what did the AI decide, and why?".
 Unlike `/pending`, it is not keyed by the delegate identity, so it never
 returns `422` for a missing delegate identity, and it includes terminal
 decided rows rather than only pending ones. Requires `read:ai_reviews`; the
-current `viewer`, `operator`, and `admin` sets contain that permission. A
-caller with effective `impersonate:operator` sees every operator's reviews;
+current `viewer`, `auditor`, `operator`, and `admin` sets contain that permission. A
+caller with effective `read:all_scopes` or `impersonate:operator` sees every operator's reviews;
 every other reader is narrowed server-side to its explicit operator
 memberships.
 
@@ -4190,7 +4225,10 @@ memberships.
 APNs registration for iOS and optional FCM FID registration for Android,
 plus shared per-device alert preferences for order, position and system events.
 All rows are bound to `user_public_id` and follow the SCD2
-close-and-insert convention.
+close-and-insert convention. Registration, revocation, device preferences and
+account notification-default mutations require `manage:self_account`; reads
+remain available to authenticated owners. Auditor clients suppress automatic
+registration and account-language synchronization.
 
 ### POST /api/devices
 
@@ -4211,7 +4249,8 @@ are excluded.
 ### Android configuration and registration
 
 These routes require authentication but no trading permission or active wallet.
-Mutations also require CSRF. Existing APNs request/response semantics remain unchanged.
+Mutations also require `manage:self_account` and CSRF. Existing APNs
+request/response semantics remain unchanged.
 
 | Method | Route | Contract |
 | ------ | ----- | -------- |
@@ -4402,7 +4441,7 @@ matching `/api/mcp`.
 | Route | Description |
 | ----- | ----------- |
 | `POST /api/ai-delegates` | Create a delegate and return its 90-day access JWT once |
-| `GET /api/ai-delegates` | List active delegates in the caller's creator-owned management scope or read-only operator-membership scope |
+| `GET /api/ai-delegates` | List active delegates in the caller's creator-owned management scope, global read-only scope, or read-only operator-membership scope |
 | `GET /api/ai-delegates/{delegate_public_id}` | Fetch one delegate in the same permission-appropriate scope; 404 also covers out-of-scope IDs |
 | `PATCH /api/ai-delegates/{delegate_public_id}` | SCD2 close+insert new caps for an owned delegate |
 | `POST /api/ai-delegates/{delegate_public_id}/deactivate` | Deactivate via the shared kill-switch flow and revoke active tokens |
@@ -4433,8 +4472,8 @@ The route requires `manage:ai_integration`, plus CSRF for cookie
 authentication. The request is a `ResearcherCreateRequest` envelope whose
 payload contains `label` and an optional narrower `permissions` list. The
 `ai_researcher` named-set ceiling is exactly `read:market_data`,
-`read:market_views`, and `submit:market_view`; a requested permission outside
-that set returns 422.
+`read:market_views`, `submit:market_view`, `manage:self_account`, and
+`read:scope_grants`; a requested permission outside that set returns 422.
 
 At most two active researchers may be provisioned per owner. Researcher
 creation writes only the user identity and access-token inventory: it creates

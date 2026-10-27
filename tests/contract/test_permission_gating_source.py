@@ -21,7 +21,7 @@ import pytest
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _AUTH_ROLE_VALUES = frozenset(
-    {"admin", "operator", "viewer", "ai_delegate", "ai_reviewer", "ai_researcher"}
+    {"admin", "operator", "viewer", "auditor", "ai_delegate", "ai_reviewer", "ai_researcher"}
 )
 _ROLE_HELPERS = frozenset(
     {
@@ -152,6 +152,15 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
             "User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES)))",
         ),
         "AI integration user-domain membership lookup for shared delegate lifecycle roles",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/application/ai_delegates/service.py",
+            "role-query-membership",
+            "User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES)))",
+        ),
+        "AI integration entity classification in a globally authorized audit read",
     ),
     AllowedFinding(
         FindingSignature(

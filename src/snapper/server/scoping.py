@@ -23,8 +23,11 @@ entry point taking a boolean or an enum would mean that the day a viewer
 cannot open a read page, the cheapest fix flips a flag at the call site
 and silently widens every mutation route that shares the function.
 
-Authorization rules (identical on both planes except for the lookup)
-Principals granted ``IMPERSONATE_OPERATOR``: when neither query param
+Authorization rules
+Global read authority (``READ_ALL_SCOPES`` or ``IMPERSONATE_OPERATOR``)
+  applies only to the read plane. Global trade authority continues to require
+  ``IMPERSONATE_OPERATOR``. For a principal with global authority on its plane,
+  when neither query param
   is set, returns ``None`` (no filter — see all). When a param is set,
   narrows accordingly, always through the operator plane: an admin
   narrowing to one operator asks about THAT operator's grants, not about
@@ -101,6 +104,7 @@ from fastapi import status
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import has_effective_permission
+from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.server.dependencies import get_repository_dependency
@@ -195,7 +199,9 @@ async def resolve_readable_wallets(
             outside their readable set.
     """
     now = datetime.now(UTC)
-    has_global_scope = _has_global_scope(principal)
+    has_global_scope = has_global_read_permission(
+        principal.role, principal.permissions, principal.permission_scope_version
+    )
     op_ids = _resolve_operator_filter(principal, has_global_scope, operator_public_id)
     if op_ids is None:
         return _unscoped_result(wallet_public_id)

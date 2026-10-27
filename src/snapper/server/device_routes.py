@@ -41,7 +41,9 @@ from snapper.api.schemas.devices import RevokeDevicePrefCommand
 from snapper.api.schemas.devices import RevokeDevicePrefResponse
 from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import AndroidDeviceStore
 from snapper.data.repository import Repository
@@ -128,7 +130,9 @@ def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
 async def register_device(
     request: Request,
     command: Annotated[RegisterDeviceCommand, Depends(json_body(RegisterDeviceCommand))],
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> NotificationDeviceResponse:
@@ -222,7 +226,9 @@ async def list_devices(
 async def delete_device(
     request: Request,
     device_public_id: str,
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> MessageResponse:
@@ -279,7 +285,9 @@ async def update_device_pref(
     request: Request,
     device_public_id: str,
     command: Annotated[UpdateDevicePrefCommand, Depends(json_body(UpdateDevicePrefCommand))],
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> DeviceAlertPrefResponse:
@@ -365,7 +373,9 @@ async def revoke_device_pref(
     device_public_id: str,
     pref_public_id: str,
     command: Annotated[RevokeDevicePrefCommand, Depends(json_body(RevokeDevicePrefCommand))],
-    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SELF_ACCOUNT))
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> RevokeDevicePrefResponse:
