@@ -9,8 +9,8 @@ Covers:
 - ``POST /wallets/{id}/credentials/{cid}/rotate`` — SCD2 rotation
   + 404 when source credential is missing.
 
-All tests invoke the handlers directly with mocked repository +
-mocked encryption service to isolate the route logic.
+Handler tests use mocked repository and encryption services. HTTP read tests
+exercise the real content and wallet-scope authorization dependencies.
 """
 
 from datetime import UTC
@@ -20,9 +20,11 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from snapper.api.schemas.multi_tenant import CreateCredentialBody
@@ -32,6 +34,8 @@ from snapper.api.schemas.multi_tenant import RotateCredentialCommand
 from snapper.api.schemas.multi_tenant import SetCredentialReconciliationMethodBody
 from snapper.api.schemas.multi_tenant import SetCredentialReconciliationMethodCommand
 from snapper.application.portfolio.reconciliation_methods import RealPortfolioReconciliationMethod
+from snapper.auth.dependencies import require_authentication
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import CredentialConflictError
@@ -43,7 +47,9 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.credential_routes import create_credential
 from snapper.server.credential_routes import list_credentials
 from snapper.server.credential_routes import rotate_credential
+from snapper.server.credential_routes import router
 from snapper.server.credential_routes import set_credential_reconciliation_method
+from snapper.server.dependencies import get_repository_dependency
 
 
 def _cred_row(
@@ -112,6 +118,104 @@ def _admin_principal() -> AuthPrincipal:
     )
 
 
+def _credential_app(principal: AuthPrincipal, repo: MagicMock) -> FastAPI:
+    """Mount credential routes with real authorization and an explicit identity."""
+    app = FastAPI()
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(router)
+    app.dependency_overrides[require_authentication] = lambda: principal
+    app.dependency_overrides[get_repository_dependency] = lambda: repo
+    return app
+
+
+@pytest.mark.parametrize("role", [UserRole.AUDITOR, UserRole.ADMIN])
+def test_global_credential_reads_preserve_auditor_and_legacy_admin_access(role: UserRole) -> None:
+    """Global readers receive the unchanged credential summary contract.
+
+    Given: A full auditor or a legacy admin narrowed to credential content reads.
+    When: The caller reads credentials for a wallet without individual grants.
+    Then: Global scope allows summaries without a readable-wallet lookup or secrets.
+    """
+    principal = AuthPrincipal(
+        username="reader",
+        role=role,
+        user_public_id="credential-reader",
+        permissions=[Permission.READ_WALLET_CREDENTIALS.value] if role is UserRole.ADMIN else None,
+        permission_scope_version=3 if role is UserRole.ADMIN else 4,
+    )
+    repo = MagicMock()
+    repo.list_wallet_credentials_for_wallet = AsyncMock(return_value=[_cred_row()])
+    repo.list_readable_wallets_for_user = AsyncMock()
+    with TestClient(_credential_app(principal, repo)) as client:
+        response = client.get("/wallets/wallet-42/credentials")
+    assert response.status_code == 200, response.text
+    payload = response.json()["payload"]
+    assert len(payload) == 1
+    assert payload[0]["label"] == "main key"
+    assert payload[0]["exchange"] == "kraken"
+    assert "encrypted_payload" not in payload[0]
+    repo.list_wallet_credentials_for_wallet.assert_awaited_once()
+    repo.list_readable_wallets_for_user.assert_not_awaited()
+
+
+@pytest.mark.parametrize("readable", [False, True])
+def test_narrowed_auditor_credential_reads_require_wallet_visibility(readable: bool) -> None:
+    """Removing global scope requires an actual readable-wallet grant.
+
+    Given: An auditor with credential content permission and no operator memberships.
+    When: The requested wallet is either personally readable or outside its read set.
+    Then: Only the readable wallet reaches the credential query and returns summaries.
+    """
+    principal = AuthPrincipal(
+        username="scoped-auditor",
+        role=UserRole.AUDITOR,
+        user_public_id="credential-reader",
+        permissions=[Permission.READ_WALLET_CREDENTIALS.value],
+        permission_scope_version=4,
+    )
+    repo = MagicMock()
+    repo.list_readable_wallets_for_user = AsyncMock(
+        return_value=[{"public_id": "wallet-42"}] if readable else []
+    )
+    repo.list_wallet_credentials_for_wallet = AsyncMock(return_value=[_cred_row()])
+    with TestClient(_credential_app(principal, repo)) as client:
+        response = client.get("/wallets/wallet-42/credentials")
+    assert response.status_code == (200 if readable else 403), response.text
+    repo.list_readable_wallets_for_user.assert_awaited_once()
+    call = repo.list_readable_wallets_for_user.await_args
+    assert call is not None
+    user_public_id, operator_public_ids, _as_of = call.args
+    assert user_public_id == principal.user_public_id
+    assert operator_public_ids == []
+    if readable:
+        assert response.json()["payload"][0]["wallet_public_id"] == "wallet-42"
+        repo.list_wallet_credentials_for_wallet.assert_awaited_once()
+    else:
+        repo.list_wallet_credentials_for_wallet.assert_not_awaited()
+
+
+@pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR])
+def test_scoped_roles_cannot_forge_credential_content_permission(role: UserRole) -> None:
+    """A wallet grant cannot bypass the role ceiling for credential content.
+
+    Given: A scoped role whose token claims credential and global read permissions.
+    When: It submits a direct credential-summary HTTP request.
+    Then: Content authorization rejects it before any repository lookup.
+    """
+    principal = AuthPrincipal(
+        username="scoped-reader",
+        role=role,
+        user_public_id="credential-reader",
+        permissions=[Permission.READ_WALLET_CREDENTIALS.value, Permission.READ_ALL_SCOPES.value],
+        permission_scope_version=4,
+    )
+    repo = MagicMock()
+    with TestClient(_credential_app(principal, repo)) as client:
+        response = client.get("/wallets/wallet-42/credentials")
+    assert response.status_code == 403, response.text
+    assert repo.mock_calls == []
+
+
 class TestListCredentials:
     """Behaviour of ``list_credentials`` GET handler."""
 
@@ -129,7 +233,7 @@ class TestListCredentials:
 
         result = await list_credentials(
             request=_make_request(),
-            _principal=_admin_principal(),
+            principal=_admin_principal(),
             wallet_public_id="wallet-42",
             repo=mock_repo,
         )
@@ -149,7 +253,7 @@ class TestListCredentials:
 
         result = await list_credentials(
             request=_make_request(),
-            _principal=_admin_principal(),
+            principal=_admin_principal(),
             wallet_public_id="wallet-42",
             repo=mock_repo,
         )

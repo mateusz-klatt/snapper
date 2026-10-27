@@ -3137,8 +3137,8 @@ wallet-data read surfaces. Other principals see wallets covered by active
 operator scope grants or their own active personal wallet read grants. Both
 `viewer` and `operator` use this read scope, which can include a wallet even
 without any operator membership. Trading and authorization-topology endpoints
-continue to use the operator scope-grant plane; credential endpoints enforce
-their own permissions independently.
+continue to use the operator scope-grant plane. Credential reads require their
+content permission and visibility into the requested wallet independently.
 
 ### GET /api/wallets
 
@@ -3198,8 +3198,10 @@ unique index is violated. Body: `label`, optional `description`, and
 ### GET /api/wallets/{wallet_public_id}/credentials
 
 List active credentials on a wallet as summaries (no encrypted payload
-on the wire). Requires `read:wallet_credentials`, which is present only in
-the current `admin` set.
+on the wire). Requires `read:wallet_credentials`, present in the `admin` and
+`auditor` sets, plus read access to the requested wallet. A narrowed auditor
+without global read authority needs an operator or personal wallet read grant;
+knowing a foreign wallet ID does not authorize reading its credential metadata.
 
 ### POST /api/wallets/{wallet_public_id}/credentials
 
