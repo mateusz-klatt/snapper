@@ -3777,7 +3777,8 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `system.heartbeats.host.disk` -- API-host disk-pressure heartbeat emitted by the system metrics snapshotter
 - `system.egress.snapshot` -- Egress pool route snapshots
 - `system.egress.transfer` -- WireGuard transfer samples
-- `admin.{resource}` -- Administrative events requiring `manage:users`
+- `admin.{resource}` -- Administrative events requiring `manage:users`, or all of
+    `read:users`, `read:desk_memberships`, `read:scope_grants`, and `read:all_scopes`
 - `processes.events.summary.{coord_slug}` -- Process summary snapshots
 - `processes.events.configured.{coord_slug}` -- Configured process-name snapshots
 - `processes.events.runs.{process_name}` -- Per-process lifecycle transitions
@@ -3926,9 +3927,9 @@ Backtest endpoints manage strategy backtesting runs. Read endpoints require
 `read:backtests`; run creation, cancellation, and reruns require
 `manage:backtests`. Comparison creation is a deliberately separate capability,
 `create:backtest_comparisons`, held by the current `ai_reviewer`,
-`ai_delegate`, `operator`, and `admin` sets. The `viewer` and `ai_researcher`
-sets cannot create comparisons. Every wallet-bound read and mutation fails with
-400 when the caller has no active wallet selected. The global
+`ai_delegate`, `operator`, and `admin` sets. The `viewer`, `auditor`, and
+`ai_researcher` sets cannot create comparisons. Every wallet-bound read and
+mutation fails with 400 when the caller has no active wallet selected. The global
 `GET /api/backtests/strategy-classes` registry read is the exception.
 
 ### POST /api/backtests
@@ -4440,7 +4441,7 @@ matching `/api/mcp`.
 | Route | Description |
 | ----- | ----------- |
 | `POST /api/ai-delegates` | Create a delegate and return its 90-day access JWT once |
-| `GET /api/ai-delegates` | List active delegates in the caller's creator-owned management scope or read-only operator-membership scope |
+| `GET /api/ai-delegates` | List active delegates in the caller's creator-owned management scope, global read-only scope, or read-only operator-membership scope |
 | `GET /api/ai-delegates/{delegate_public_id}` | Fetch one delegate in the same permission-appropriate scope; 404 also covers out-of-scope IDs |
 | `PATCH /api/ai-delegates/{delegate_public_id}` | SCD2 close+insert new caps for an owned delegate |
 | `POST /api/ai-delegates/{delegate_public_id}/deactivate` | Deactivate via the shared kill-switch flow and revoke active tokens |
@@ -4471,8 +4472,8 @@ The route requires `manage:ai_integration`, plus CSRF for cookie
 authentication. The request is a `ResearcherCreateRequest` envelope whose
 payload contains `label` and an optional narrower `permissions` list. The
 `ai_researcher` named-set ceiling is exactly `read:market_data`,
-`read:market_views`, and `submit:market_view`; a requested permission outside
-that set returns 422.
+`read:market_views`, `submit:market_view`, `manage:self_account`, and
+`read:scope_grants`; a requested permission outside that set returns 422.
 
 At most two active researchers may be provisioned per owner. Researcher
 creation writes only the user identity and access-token inventory: it creates

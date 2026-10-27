@@ -7,22 +7,24 @@ either path with confidence.
 ## Authorization
 
 Authorization uses the token's effective permissions from Snapper's
-34-permission catalogue. The frontend opens the Backtests resource with
+43-permission catalogue. The frontend opens the Backtests resource with
 `read:backtests` and independently hides and rechecks each mutation.
 
 | Surface | Required permission | Current named permission sets |
 | --- | --- | --- |
-| List strategy classes, runs, artifacts, and comparisons | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| List strategy classes, runs, artifacts, and comparisons | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, `admin` |
 | Create, cancel, or rerun a backtest | `manage:backtests` | `operator`, `admin` |
 | Create a comparison | `create:backtest_comparisons` | `ai_reviewer`, `ai_delegate`, `operator`, `admin` |
-| Subscribe to backtest progress | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| Subscribe to backtest progress | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, `admin` |
 
-The current `viewer` set therefore has the full operator read surface but no
-backtest mutation. Wallet-bound REST endpoints revalidate the token's active
-wallet on every request. Reads accept operator scope grants plus personal
-`wallet_user_read_grants`; mutations require operator scope grants. A personal
-read grant therefore permits inspection without authorizing a run or comparison
-write. Neither named set receives global wallet visibility.
+The current `viewer` and `auditor` sets have the full operator read surface
+without backtest mutations. Wallet-bound REST endpoints require a selected
+active wallet and revalidate its readability on every request. Reads accept
+operator scope grants plus personal `wallet_user_read_grants`, or effective
+`read:all_scopes` / `impersonate:operator` for global read access. The `auditor`
+set has global read access; the `viewer` set remains scoped. Mutations use the
+operator scope-grant plane. A personal read grant therefore permits inspection
+without authorizing a run or comparison write.
 
 ## Execution modes
 
@@ -216,10 +218,11 @@ every subscribed client.
   once. Degrades gracefully when `total_candles=None` by disabling
   milestones and pinning `progress_pct=0.0`.
 - Per-subscription wallet scope: `read:backtests` admits the topic category,
-    then effective `impersonate:operator` permits subscription to any wallet
-    prefix. Every other caller may subscribe only to prefixes matching its
-    `active_wallet_public_id`. Foreign-wallet or bare `backtest.` subscriptions
-    are denied at the handler before the bridge is touched.
+    then effective `read:all_scopes` or `impersonate:operator` permits subscription
+    to any valid backtest prefix. Every other caller may subscribe only to
+    prefixes matching its `active_wallet_public_id`. For those scoped callers,
+    foreign-wallet or bare `backtest.` subscriptions are denied at the handler
+    before the bridge is touched.
 - `BacktestProgressData.milestone` carries a `@model_validator`
   enforcing the cross-field invariant `milestone is not None iff
   event == 'milestone'` so a malformed payload cannot reach the
@@ -249,12 +252,12 @@ indexed on `(wallet_public_id, config_hash, timestamp)`.
 `POST /api/backtests/compare` creates (or returns existing) a
 comparison row and requires `create:backtest_comparisons`. The current
 `ai_reviewer`, `ai_delegate`, `operator`, and `admin` sets contain that
-permission; `viewer` and `ai_researcher` do not. This preserves historical
-comparison creation for review and delegate principals without widening the
-read-only viewer. `GET /api/backtests/compare/{id}` requires `read:backtests`
-and returns the comparison metadata plus the diff **recomputed from current
-artifact rows** so metric-schema changes never stale a persisted diff. The diff
-surfaces four shapes:
+permission; `viewer`, `auditor`, and `ai_researcher` do not. This preserves
+historical comparison creation for review and delegate principals without
+widening the read-only viewer and auditor sets. `GET /api/backtests/compare/{id}`
+requires `read:backtests` and returns the comparison metadata plus the diff
+**recomputed from current artifact rows** so metric-schema changes never stale
+a persisted diff. The diff surfaces four shapes:
 
 - `metrics_diff` — per-name `{run_a, run_b, delta, pct}` with
   explicit `is not None` precedence.

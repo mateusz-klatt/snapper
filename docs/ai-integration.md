@@ -49,7 +49,8 @@ The `/api/mcp` sub-app is always mounted and gated by the
     navigation entry require `read:ai_integration`. The page derives all
     management controls separately from `manage:ai_integration`, so the
     current `viewer` set can inspect its operator-scoped integration state
-    without gaining a mutation. After authentication, the page reads
+    and the `auditor` set can inspect integration state globally, without
+    gaining a mutation. After authentication, the page reads
     `GET /api/settings/features` and renders the enabled or disabled state.
     The MCP endpoint, `/api/ai-delegates/*`, and `/api/ai-researchers`
     return `503 feature_disabled` only when the flag is explicitly set to
@@ -61,14 +62,16 @@ The `/api/mcp` sub-app is always mounted and gated by the
     all requests — anonymous or authenticated — short-circuit to
     `503 feature_disabled` before any token verification runs.
 
-Authorization uses each token's effective grant from Snapper's 34-permission
+Authorization uses each token's effective grant from Snapper's 43-permission
 catalogue, not a role hierarchy. Roles are named permission sets. The current
 `viewer` set includes `read:ai_integration` and `read:ai_reviews`, uses its
 operator memberships for read-only integration visibility, and contains no
 AI-integration management permission. A token with `manage:ai_integration`
-instead receives the creator-owned delegate view. Only an effective
-`impersonate:operator` grant provides global operator scope on surfaces that
-support global scoping.
+receives the creator-owned delegate view. Read-only tokens with effective
+`read:all_scopes` or `impersonate:operator` receive the global delegate view,
+including active delegates without operator memberships. The current `auditor`
+set has both read permissions and `read:all_scopes`, with no management
+permission. Global read scope also applies to the AI-review audit list.
 
 ---
 
@@ -168,10 +171,12 @@ immediately — Snapper never re-serves it:
 Other endpoints on `/api/ai-delegates`:
 
 - `GET /api/ai-delegates` — requires `read:ai_integration`; a management
-    token sees creator-owned delegates, while a read-only token sees delegates
-    bound to its operator memberships. Tokens are never re-served.
+    token sees creator-owned delegates. A read-only token with effective
+    `read:all_scopes` or `impersonate:operator` sees all active delegates,
+    including those without operator memberships. Other read-only tokens see
+    delegates bound to their operator memberships. Tokens are never re-served.
 - `GET /api/ai-delegates/{id}` — requires `read:ai_integration` and applies
-    the same creator-owned or membership-scoped view.
+    the same creator-owned, global read-only, or membership-scoped view.
 - `PATCH /api/ai-delegates/{id}` — update caps (SCD2 close+insert).
     Requires `manage:ai_integration`; `label` and `username` are immutable
     post-mint.
@@ -192,6 +197,8 @@ That set is exactly:
 - `read:market_data`
 - `read:market_views`
 - `submit:market_view`
+- `manage:self_account`
+- `read:scope_grants`
 
 It does not receive signal, order, position, or system-status permissions.
 Consequently it cannot subscribe to `ai_reviews.` or call the order-,
@@ -733,11 +740,11 @@ anchors every temporal row in the projection, while `window_started_at`
 is the review's persisted `created_at`. This is retrospective evidence only:
 it does not reopen the review and grants no order authority.
 
-Callers with `read:ai_reviews`, including the current `viewer`, `operator`,
-and `admin` sets, audit what the AI decided through
-`GET /api/ai-reviews`. A caller with effective `impersonate:operator` sees
-every operator's reviews; every other reader is narrowed server-side to its
-explicit operator memberships. The route returns
+Callers with `read:ai_reviews`, including the current `viewer`, `auditor`,
+`operator`, and `admin` sets, audit what the AI decided through
+`GET /api/ai-reviews`. A caller with effective `read:all_scopes` or
+`impersonate:operator` sees every operator's reviews; every other reader is
+narrowed server-side to its explicit operator memberships. The route returns
 `AdminAiReviewListResponse` (`items` + `count`) with the full per-row outcome:
 `status`, `decision`, `rationale`, `resolution_mode`, and the responding
 delegate. It accepts optional exact-match `status`, `wallet_public_id`, and

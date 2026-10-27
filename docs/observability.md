@@ -10,14 +10,14 @@ policy state at `/api/metrics/retention`. The retention definition of
 ## Endpoints
 
 Metrics reads require effective `Permission.READ_SYSTEM_STATUS`; the current
-`ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and `admin` named sets
-contain that permission. The two tracemalloc mutations instead require
+`ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, and `admin` named
+sets contain that permission. The two tracemalloc mutations instead require
 effective `Permission.MANAGE_RUNTIME_DIAGNOSTICS`, which is present in the
 current `ai_reviewer`, `ai_delegate`, `operator`, and `admin` sets but not
-`viewer` or `ai_researcher`. Those `POST` routes also require CSRF on the
-cookie-authenticated path; `Authorization: Bearer` requests bypass CSRF per
-the project-wide auth contract. On this surface, `viewer` is a read-only
-operator: it can call every `GET` route below but cannot start or stop
+`viewer`, `auditor`, or `ai_researcher`. Those `POST` routes also require CSRF on
+the cookie-authenticated path; `Authorization: Bearer` requests bypass CSRF per
+the project-wide auth contract. On this surface, `viewer` and `auditor` have
+read-only access: they can call every `GET` route below but cannot start or stop
 tracemalloc.
 
 | Method | Path                                                | Purpose |
@@ -314,8 +314,8 @@ existing `critical_system_error` rule consumes that heartbeat, gates on
 three consecutive non-HEALTHY frames in its rolling window, dedups by
 host/disk/hour, and fans out one alert row per current user SCD2 row whose
 named permission set contains `read:system_status`. The current matching sets
-are `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and `admin`; the fan-out
-helper excludes deactivated users (`users.is_active = FALSE`).
+are `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, and `admin`;
+the fan-out helper excludes deactivated users (`users.is_active = FALSE`).
 
 | Field             | Type                          | Description |
 |-------------------|-------------------------------|-------------|

@@ -197,8 +197,10 @@ class TestResearcherProvisioning:
         assert outcome.rejection_reason is None
         assert outcome.claims.role == UserRole.AI_RESEARCHER
         assert set(outcome.claims.permissions or []) == {
+            Permission.MANAGE_SELF_ACCOUNT.value,
             Permission.READ_MARKET_DATA.value,
             Permission.READ_MARKET_VIEWS.value,
+            Permission.READ_SCOPE_GRANTS.value,
             Permission.SUBMIT_MARKET_VIEW.value,
         }
         assert outcome.claims.operator_public_ids == []

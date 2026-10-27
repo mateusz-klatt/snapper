@@ -13,12 +13,12 @@ a recovery backstop for durable groups, including after the flag is disabled. Th
 reading incidents, resolving `manual_intervention` groups at the venue, and
 attesting the resolution so the halt clears.
 
-Authorization is based on effective permissions from Snapper's 34-permission
+Authorization is based on effective permissions from Snapper's 43-permission
 catalogue:
 
 | Surface | Required permission | Current named permission sets |
 | --- | --- | --- |
-| `GET /api/paired-execution/incidents` | `read:positions` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| `GET /api/paired-execution/incidents` | `read:positions` | `ai_reviewer`, `ai_delegate`, `viewer`, `auditor`, `operator`, `admin` |
 | `POST /api/paired-execution/groups/{id}/terminalize` | `manage:paired_execution` | `operator`, `admin` |
 
 ## State model in sixty seconds
@@ -98,16 +98,18 @@ per-leg exposure: `status`, `filled_signed_qty`, `compensated_signed_qty`,
     is surfaced so you never lose sight of exposure.
 - A `broken` group with zero-fill legs (e.g. an assembly timeout) is NOT an
     incident — the guard deliberately leaves it free to re-assemble.
-- Requires `read:positions`. Effective `impersonate:operator` exposes every
-    wallet; every other caller, including `viewer`, `operator`, and
-    `ai_delegate`, sees only its readable wallets (operator grants plus personal
+- Requires `read:positions`. Effective `read:all_scopes` or
+    `impersonate:operator` exposes every wallet. The current `auditor` set
+    has global read access; callers without either scope permission, including
+    `viewer`, `operator`, and `ai_delegate`, see only their readable wallets
+    (operator grants plus personal
     `wallet_user_read_grants`). Terminalization separately requires the
     operator-grant trade scope; a personal read grant cannot authorize it.
 - Any token retaining `read:positions` can inspect incidents. A long-lived
     AI-delegate token can therefore read incidents, but it receives `403` on
     terminalize because its effective grant lacks
-    `manage:paired_execution`. The `viewer` set is read-only for the same
-    reason.
+    `manage:paired_execution`. The `viewer` and `auditor` sets are read-only for
+    the same reason.
 
 ## Resolve at the venue
 
