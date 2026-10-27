@@ -505,7 +505,7 @@ explicit global exception. The current named sets grant desk management to
 
 The first CRUD slice may attach or detach active human `viewer` users only.
 AI-delegate membership remains owned by delegate creation and deactivation,
-and human `operator` / `admin` memberships are visible in the directory but
+and human `operator` / `admin` / `auditor` memberships are visible in the directory but
 cannot be mutated through these endpoints.
 
 #### GET /api/auth/desks/{operator_public_id}/members

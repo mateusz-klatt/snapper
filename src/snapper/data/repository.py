@@ -514,6 +514,7 @@ _HUMAN_DESK_MEMBER_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
     sorted(
         {
             UserRole.ADMIN.value,
+            UserRole.AUDITOR.value,
             UserRole.OPERATOR.value,
             UserRole.VIEWER.value,
         }

@@ -751,6 +751,42 @@ async def test_repository_lists_human_members_and_excludes_delegate(
 
 
 @pytest.mark.asyncio
+async def test_repository_keeps_members_visible_after_auditor_role_change(
+    desk_repository: SQLAlchemyRepository,
+) -> None:
+    """Changing a human member to auditor preserves directory visibility.
+
+    Given: An active viewer with a primary desk membership.
+    When: Its persisted user role changes to auditor through an SCD2 update.
+    Then: The same membership remains visible with the current and historical roles.
+    """
+    desk_a = "00000000-0000-7000-8000-000000000001"
+    user_public_id = "00000000-0000-7000-8000-000000000021"
+    membership = await desk_repository.attach_viewer_to_desk(_attach("viewer", desk_a, 1))
+    before_change = datetime.now(UTC)
+    with patch("snapper.auth.user_service.get_repository", return_value=desk_repository):
+        UserService.clear_instance()
+        service = UserService()
+    try:
+        updated = await service.update_user("viewer", role=UserRole.AUDITOR)
+    finally:
+        UserService.clear_instance()
+    assert updated is not None
+    assert updated.role is UserRole.AUDITOR
+    now = datetime.now(UTC)
+    memberships = await desk_repository.get_user_operator_memberships(user_public_id, now)
+    assert memberships == [membership]
+    members = await desk_repository.list_human_desk_members(desk_a, now)
+    assert [(member["username"], member["role"], member["is_primary"]) for member in members] == [
+        ("viewer", UserRole.AUDITOR.value, True)
+    ]
+    historical_members = await desk_repository.list_human_desk_members(desk_a, before_change)
+    assert [(member["username"], member["role"]) for member in historical_members] == [
+        ("viewer", UserRole.VIEWER.value)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_repository_detach_primary_revokes_before_close_and_promotes_next(
     desk_repository: SQLAlchemyRepository,
 ) -> None:
