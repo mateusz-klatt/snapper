@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
@@ -79,6 +80,8 @@ from snapper.data.models import VenueEvent
 from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.seed.loader import SeedUser
+from snapper.data.seed.loader import _parse_seed_profile
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.infrastructure.security.path_validation import UnsafePathError
 from snapper.infrastructure.security.path_validation import resolve_operator_file
@@ -126,7 +129,6 @@ _WINDOW: Final[timedelta] = timedelta(hours=24)
 _EUR_FILL_OFFSET: Final[timedelta] = timedelta(hours=12)
 _INCOMPLETE_FILL_OFFSET: Final[timedelta] = timedelta(hours=2)
 _INCOMPLETE_POINT_COUNT: Final[int] = 121
-_DEV_PASSWORD: Final[bytes] = b"change-me-after-first-login"
 _OSS_BASELINE_REFUSAL: Final[str] = (
     "database is not a fresh migrated and bundled-OSS-seeded P&L UAT baseline"
 )
@@ -137,15 +139,26 @@ _OSS_BASELINE_TABLE_COUNTS: Final[dict[str, int]] = {
     "symbol_exchange_capabilities": 20,
     "symbols": 11,
     "user_operator_memberships": 3,
-    "users": 3,
+    "users": 4,
     "wallet_credentials": 1,
     "wallets": 1,
 }
-_OSS_BASELINE_USERS: Final[dict[str, tuple[str, str, int, int]]] = {
-    "admin": ("admin@snapper.local", "admin", 1, 1),
-    "operator": ("operator@snapper.local", "operator", 2, 2),
-    "viewer": ("viewer@snapper.local", "viewer", 3, 3),
-}
+
+
+def _bundled_oss_seed_users() -> dict[str, SeedUser]:
+    """Read canonical user contracts from the bundled profile without private overrides.
+
+    Returns:
+        Configured users keyed by username, including their individual credentials.
+    """
+    seed_path = _ROOT / "src" / "snapper" / "data" / "seed" / "dev.toml"
+    document: JsonObject = tomllib.loads(seed_path.read_text(encoding="utf-8"))
+    profile = _parse_seed_profile(document, str(seed_path))
+    return {user.username: user for user in profile.users}
+
+
+_OSS_BASELINE_USERS: Final[dict[str, SeedUser]] = _bundled_oss_seed_users()
+_OSS_BASELINE_MEMBERSHIP_USERS: Final[tuple[str, ...]] = ("admin", "operator", "viewer")
 _OSS_BASELINE_ENCRYPTED_SETTINGS: Final[frozenset[str]] = frozenset(
     {"gemini_api_key", "kimi_api_key"}
 )
@@ -864,6 +877,21 @@ async def _require_canonical_symbol_seed_baseline(session: AsyncSession) -> None
         raise PnlUatFixtureError(_OSS_BASELINE_REFUSAL)
 
 
+def _matches_seed_user_password(user: User) -> bool:
+    """Compare one persisted user with its own bundled bootstrap credential.
+
+    Args:
+        user: Persisted identity whose credential must match the canonical profile.
+
+    Returns:
+        Whether the identity is configured and its password hash matches that identity.
+    """
+    configured = _OSS_BASELINE_USERS.get(user.username)
+    return configured is not None and bcrypt.checkpw(
+        configured.password.encode(), user.password_hash.encode()
+    )
+
+
 async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
     """Require the exact migrated and bundled-OSS-seeded database baseline.
 
@@ -901,23 +929,21 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
     }
     expected_users = {
         username: (
-            email,
-            role,
+            configured.email,
+            configured.role,
             True,
             None,
             None,
             row_id,
-            sequence_id,
+            row_id,
             True,
             KNOWN_TO_MAX,
         )
-        for username, (email, role, row_id, sequence_id) in _OSS_BASELINE_USERS.items()
+        for row_id, (username, configured) in enumerate(_OSS_BASELINE_USERS.items(), start=1)
     }
     user_sessions = {user.session_id for user in user_rows}
     try:
-        passwords_match = all(
-            bcrypt.checkpw(_DEV_PASSWORD, user.password_hash.encode()) for user in user_rows
-        )
+        passwords_match = all(_matches_seed_user_password(user) for user in user_rows)
     except ValueError:
         passwords_match = False
     if (users, len(user_sessions), passwords_match) != (expected_users, 1, True):
@@ -976,7 +1002,9 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
         .scalars()
         .all()
     )
-    user_public_ids = {user.public_id for user in user_rows}
+    user_public_ids = {
+        user.public_id for user in user_rows if user.username in _OSS_BASELINE_MEMBERSHIP_USERS
+    }
     try:
         credential_envelope: object = json.loads(
             get_encryption_service().decrypt(credential.encrypted_payload)
@@ -1046,7 +1074,7 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
     )
     expected_membership_state = tuple(
         (username, True, True, KNOWN_TO_MAX, True, index, index)
-        for index, username in enumerate(_OSS_BASELINE_USERS, start=1)
+        for index, username in enumerate(_OSS_BASELINE_MEMBERSHIP_USERS, start=1)
     )
     if (
         tenant_state,
