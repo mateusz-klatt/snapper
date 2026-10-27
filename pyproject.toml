@@ -64,7 +64,7 @@ black = {extras = ["jupyter"], version = "^26.10.1"}
 isort = "^9.0.2"
 mypy = "^2.4.0"
 types-PyYAML = ">=6.0.12.20260906"
-pytest = "^9.1.1"
+pytest = "^9.2.0"
 pytest-asyncio = "^1.4.1"
 pytest-timeout = "^2.4.0"
 freezegun = "^1.5.5"
@@ -461,6 +461,7 @@ skip_glob = ["**/node_modules/*"]
 [tool.pytest.ini_options]
 addopts = "-q --tb=short --timeout=15 -m 'not integration'"
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 timeout = 15
 testpaths = ["tests", "proprietary/tests", "integrations/snapper-delegate/tests"]
 pythonpath = ["src", "proprietary/src", "integrations/snapper-delegate/src"]
