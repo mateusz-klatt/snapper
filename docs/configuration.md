@@ -380,8 +380,10 @@ live reconciliation-method config, and exactly the user/operator
 memberships declared by each user's `operators` and `primary_operator`
 fields. A role does not imply a membership: a viewer with `operators = []`
 receives no desk membership. The shipped `dev` profiles declare the `admin`,
-`operator`, and `viewer` bootstrap users as members of the `default` desk;
-this applies only when the tenant graph is wholly fresh. Production profiles
+`operator`, and `viewer` bootstrap users as members of the `default` desk.
+They also declare an `auditor` with no memberships or personal read grants; its
+global read visibility comes from the named permission set. These bootstrap
+entries apply only when the tenant graph is wholly fresh. Production profiles
 must not bootstrap extra active human accounts with shared default passwords:
 attach an existing production viewer through the desk membership API instead.
 
@@ -414,12 +416,17 @@ seed-owned tenant row existed before the run (users, operators, memberships,
 wallets, credentials, or reconciliation-method configs), both user creation
 and the operator/wallet bootstrap are skipped as one unit. Settings retain
 their independent insert-if-absent behavior. In particular, production
-seeding does not add a viewer account, attach an existing viewer to a desk, or
+seeding does not add a missing viewer or auditor account, attach an existing viewer to a desk, or
 reset any password unless that account is explicitly present in the selected
 production profile on a fresh database. Attach an existing viewer with
 `POST /api/auth/desks/{operator_public_id}/members/{username}` and have that user
 log in again; membership exposes the wallet scopes already provisioned for
 that desk, but does not create a scope grant.
+
+For an established installation, create the exact missing auditor through the
+supported user administration API, then verify its active role and read-only
+permissions before sharing demo access. Do not use `seed_demo.py` to provision
+this account: that command also creates paper trading data and desk scope.
 
 The seed loader supports the `api_key_secret`, `rsa_pem`, and `paper`
 envelope shapes. The `oauth` shape is accepted at the

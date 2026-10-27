@@ -53,6 +53,12 @@ or rotate after first login via
 `POST /api/auth/users/{user_id}/change-password` (self-service) or
 `POST /api/auth/users/{user_id}/admin-reset-password` (admin reset).
 
+The development profiles also declare an `auditor` demo account for global
+read-only administration. It has no desk memberships or personal wallet grants;
+its visibility comes from its role. Use the credentials in the selected seed
+profile. Seeding an established database does not create a missing demo account;
+provision it through the supported user administration API.
+
 ## Features
 
 - **Market data collection** — Kraken (WebSocket; spot + futures +

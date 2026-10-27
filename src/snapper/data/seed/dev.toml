@@ -37,6 +37,15 @@ operators = ["default"]
 primary_operator = "default"
 readable_wallets = []
 
+[[users]]
+username = "auditor"
+email = "auditor@example.com"
+password = "peachsage98"
+role = "auditor"
+operators = []
+primary_operator = ""
+readable_wallets = []
+
 [[settings]]
 key = "ui_origin"
 value = "http://localhost:3000,http://localhost:8000"
