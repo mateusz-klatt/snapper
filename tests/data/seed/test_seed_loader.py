@@ -222,18 +222,26 @@ class TestLoadSeedProfile:
         Then: profile contains expected users, settings and v2 identity.
         """
         profile = load_seed_profile("dev")
-        assert len(profile.users) == 3
+        assert len(profile.users) == 4
         assert profile.users[0].username == "admin"
         assert profile.users[0].role == "admin"
         assert profile.users[1].username == "operator"
         assert profile.users[2].username == "viewer"
+        assert profile.users[3].username == "auditor"
+        assert profile.users[3].role == "auditor"
         assert len(profile.settings) >= 1
         ui_origin = next(s for s in profile.settings if s.key == "ui_origin")
         assert ui_origin.value
         assert profile.name == "dev"
         assert profile.format_version == 2
         assert [operator.label for operator in profile.operators] == ["default"]
-        assert all(user.primary_operator == "default" for user in profile.users)
+        primary_operators = {user.username: user.primary_operator for user in profile.users}
+        assert primary_operators == {
+            "admin": "default",
+            "operator": "default",
+            "viewer": "default",
+            "auditor": "",
+        }
 
     def test_load_profile_with_empty_optional_sections(self, tmp_path: Path) -> None:
         """Test loading a header-only profile.
@@ -1502,11 +1510,14 @@ class TestRunSeed:
         with patch("snapper.data.seed.loader.BootstrapSettingsLoader") as mock_bootstrap:
             mock_bootstrap.return_value.db_url = db_url
             users_count, settings_count = run_seed("dev")
-        assert users_count == 3
+        assert users_count == 4
         assert settings_count >= 1
         engine = create_engine(db_url, poolclass=NullPool)
         with engine.connect() as conn:
             operator = conn.execute(text("SELECT label, description FROM operators")).one()
+            auditor_role = conn.execute(
+                text("SELECT role FROM users WHERE username = 'auditor'")
+            ).scalar_one()
             memberships = conn.execute(
                 text(
                     "SELECT users.username, operators.label, memberships.is_primary"
@@ -1541,6 +1552,7 @@ class TestRunSeed:
             }
         engine.dispose()
         assert operator == ("default", "Default seed operator for single-user deployment")
+        assert auditor_role == "auditor"
         assert memberships == [
             ("admin", "default", 1),
             ("operator", "default", 1),
@@ -1736,7 +1748,7 @@ class TestRunSeed:
         with patch("snapper.data.seed.loader.BootstrapSettingsLoader") as mock_bootstrap:
             mock_bootstrap.return_value.db_url = async_url
             users_count, settings_count = run_seed("dev")
-        assert users_count == 3
+        assert users_count == 4
         assert settings_count >= 1
 
 
@@ -2543,6 +2555,33 @@ class TestTrackedSeedProfilesUseFormatV2:
                 assert users[username].operators == ["default"], name
                 assert users[username].primary_operator == "default", name
                 assert users[username].readable_wallets == [], name
+
+    def test_tracked_profiles_declare_auditor_without_memberships_or_grants(self) -> None:
+        """Demo auditors obtain global reads from their role without trading authority."""
+        tracked = self._tracked_profile_paths()
+        assert tracked
+        for name, path in tracked:
+            profile = _parse_seed_profile(
+                tomllib.loads(path.read_text(encoding="utf-8")), str(path)
+            )
+            auditor_usernames = [user.username for user in profile.users if user.role == "auditor"]
+            assert auditor_usernames == ["auditor"], name
+            auditor = next(user for user in profile.users if user.username == "auditor")
+            operators = auditor.operators
+            primary_operator = auditor.primary_operator
+            readable_wallet_count = len(auditor.readable_wallets)
+            runtime_owned_roles = profile.runtime_owned.user_roles
+            password_format_valid = (
+                len(auditor.password) >= 8
+                and auditor.password.isascii()
+                and auditor.password.isalnum()
+                and not set(auditor.password).intersection("0O1Il")
+            )
+            assert operators == [], name
+            assert primary_operator == "", name
+            assert readable_wallet_count == 0, name
+            assert "auditor" not in runtime_owned_roles, name
+            assert password_format_valid, name
 
     def test_tracked_profile_settings_fit_column_widths(self) -> None:
         """Tracked profile settings fit the Setting column widths.

@@ -105,7 +105,7 @@ def oss_seeded_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     with pytest.MonkeyPatch.context() as patch:
         patch.chdir(template_dir)
         patch.setenv("DB_URL", f"sqlite+aiosqlite:///{template_path}")
-        assert run_seed("dev") == (3, 13)
+        assert run_seed("dev") == (4, 13)
     return template_path
 
 
@@ -1026,6 +1026,11 @@ async def test_seed_rejects_a_database_behind_schema_head(
         "UPDATE wallet_credentials SET label = 'changed'",
         "UPDATE operators SET description = 'changed'",
         "UPDATE user_operator_memberships SET is_primary = 0 WHERE id = 1",
+        (
+            "UPDATE user_operator_memberships SET user_public_id = "
+            "(SELECT public_id FROM users WHERE role = 'auditor') WHERE id = 3"
+        ),
+        "UPDATE users SET username = 'unexpected-user' WHERE id = 1",
     ],
 )
 @pytest.mark.asyncio
@@ -1056,13 +1061,13 @@ async def test_seed_rejects_semantically_mutated_oss_baselines(
     assert await _instrument_count(oss_seeded_db_url) == 0
 
 
-@pytest.mark.parametrize("username", ["admin", "operator", "viewer"])
+@pytest.mark.parametrize("username", list(pnl_uat_fixture._OSS_BASELINE_USERS))
 @pytest.mark.asyncio
 async def test_seed_rejects_changed_seed_passwords(
     oss_seeded_db_url: URL,
     username: str,
 ) -> None:
-    """Verify the canonical dev password for every seeded login identity.
+    """Verify the configured bootstrap credential for every seeded login identity.
 
     Given: A valid bcrypt hash for a non-default password on one seeded user,
     When: The exact baseline guard verifies all login credentials,
@@ -1089,7 +1094,7 @@ async def test_seed_rejects_a_malformed_seed_password_hash(
     """Normalize malformed bcrypt evidence into a baseline refusal.
 
     Given: A seeded login whose password hash is not valid bcrypt,
-    When: The exact baseline guard verifies the default dev password,
+    When: The exact baseline guard verifies the configured bootstrap credential,
     Then: It refuses without leaking hash or password material.
     """
     await _execute_sql(
