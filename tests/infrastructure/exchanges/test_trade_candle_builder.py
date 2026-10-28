@@ -9,15 +9,19 @@ assertions inside every client test file.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
+from typing import Literal
 
 import pytest
 from loguru import logger
 
 from snapper.infrastructure.exchanges import _trade_candle_builder as tcb
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleRetentionPolicy
 from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -31,9 +35,8 @@ def _trade(
 ) -> TradeUpdate:
     """Build a minimal ``TradeUpdate`` for one trade fold step.
 
-    The builder ignores side / trade_id / ord_type but contracts
-    require them; this helper just fills in throwaway values so each
-    test stays focused on the OHLC math.
+    Missing identities preserve legitimate equal trades. Identity regressions
+    supply actual distinct or repeated stable IDs explicitly.
     """
     return TradeUpdate(
         symbol=symbol,
@@ -42,12 +45,56 @@ def _trade(
         price=price,
         ord_type="fill",
         timestamp=ts,
-        trade_id=f"{symbol}-{ts.isoformat()}-{price}",
+        trade_id=None,
     )
+
+
+def _builder(
+    retention: TradeCandleRetentionPolicy = TradeCandleRetentionPolicy(),
+) -> TradeCandleBuilder:
+    """Provide complete synthetic history from before every fixture's first minute."""
+    return TradeCandleBuilder(history_start=datetime(2000, 1, 1, tzinfo=UTC), retention=retention)
 
 
 class TestTradeCandleBuilder:
     """Tests for the per-minute OHLCV accumulator."""
+
+    @pytest.mark.parametrize("close_method", ["wall_clock", "event_watermark", "idle"])
+    def test_late_correction_retains_the_entire_emitted_minute(
+        self,
+        close_method: Literal["wall_clock", "event_watermark", "idle"],
+    ) -> None:
+        """A late correction includes original trades and preserves event-time OHLC.
+
+        Given: A two-trade minute has already been emitted through a real pop path,
+        When: Earlier and later event-time trades arrive for that same minute,
+        Then: Its replacement retains all four trades, their volume, and full-minute VWAP.
+        """
+        minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
+        builder = _builder()
+        builder.update(_trade("X-USD", 100.0, 2.0, minute + timedelta(seconds=20)))
+        builder.update(_trade("X-USD", 110.0, 1.0, minute + timedelta(seconds=40)))
+        if close_method == "wall_clock":
+            emitted = builder.pop_completed(minute + timedelta(minutes=1))
+        elif close_method == "event_watermark":
+            builder.update(_trade("X-USD", 120.0, 1.0, minute + timedelta(minutes=3)))
+            emitted = builder.pop_completed_by_event_watermark(60.0)
+        else:
+            emitted = builder.pop_all()
+        assert len(emitted) == 1
+        assert emitted[0].volume == 3.0
+        assert emitted[0].trades == 2
+
+        builder.update(_trade("X-USD", 90.0, 3.0, minute + timedelta(seconds=5)))
+        builder.update(_trade("X-USD", 105.0, 4.0, minute + timedelta(seconds=55)))
+        corrected = [candle for candle in builder.pop_all() if candle.interval_begin == minute]
+
+        assert len(corrected) == 1
+        candle = corrected[0]
+        assert (candle.open, candle.high, candle.low, candle.close) == (90.0, 110.0, 90.0, 105.0)
+        assert candle.volume == 10.0
+        assert candle.trades == 4
+        assert candle.vwap == 100.0
 
     def test_first_trade_sets_open_high_low_close(self) -> None:
         """A single trade in a fresh minute produces a candle where OHLC == price.
@@ -59,7 +106,7 @@ class TestTradeCandleBuilder:
             ``volume=quantity``, ``trades=1``, ``vwap=price``.
         """
         minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("BTC-USD-PERP", price=50000.0, quantity=0.5, ts=minute))
         assert b.active_buckets() == 1
         candles = b.pop_completed(minute + timedelta(minutes=1))
@@ -84,7 +131,7 @@ class TestTradeCandleBuilder:
             mean (``(100*1+110*2+95*1)/4``).
         """
         minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("MNQM6-CME", 100.0, 1.0, minute))
         b.update(_trade("MNQM6-CME", 110.0, 2.0, minute + timedelta(seconds=10)))
         b.update(_trade("MNQM6-CME", 95.0, 1.0, minute + timedelta(seconds=20)))
@@ -108,7 +155,7 @@ class TestTradeCandleBuilder:
         Then: No candles are emitted and the bucket remains live.
         """
         minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("BTC-USD-PERP", 50000.0, 0.1, minute))
         candles = b.pop_completed(minute + timedelta(seconds=45))
         assert candles == []
@@ -124,7 +171,7 @@ class TestTradeCandleBuilder:
         """
         m1 = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
         m2 = m1 + timedelta(minutes=1)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("ETH-USD-PERP", 3000.0, 1.0, m1 + timedelta(seconds=5)))
         b.update(_trade("ETH-USD-PERP", 3010.0, 1.0, m2 + timedelta(seconds=5)))
         candles = b.pop_completed(m2 + timedelta(minutes=1))
@@ -152,7 +199,7 @@ class TestTradeCandleBuilder:
         durable candle plane and must agree.
         """
         minute = datetime(2026, 5, 12, 18, 30, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 1.0, 0.0, minute))
         candles = b.pop_completed(minute + timedelta(minutes=1))
         assert len(candles) == 1
@@ -173,7 +220,7 @@ class TestTradeCandleBuilderEventWatermark:
             trade's timestamp, ignores an earlier trade, and advances on a
             later trade.
         """
-        b = TradeCandleBuilder()
+        b = _builder()
         assert b.watermark is None
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
         b.update(_trade("MCLQ6-CME", 89.5, 1.0, m + timedelta(seconds=30)))
@@ -190,7 +237,7 @@ class TestTradeCandleBuilderEventWatermark:
         When: ``pop_completed_by_event_watermark`` runs,
         Then: It returns ``[]`` (the ``watermark is None`` guard).
         """
-        b = TradeCandleBuilder()
+        b = _builder()
         assert b.pop_completed_by_event_watermark(60.0) == []
 
     def test_event_watermark_keeps_minute_open_within_grace(self) -> None:
@@ -202,7 +249,7 @@ class TestTradeCandleBuilderEventWatermark:
             event-clock has not yet advanced an interval + grace past M.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("MCLQ6-CME", 89.5, 1.0, m + timedelta(seconds=30)))
         assert b.pop_completed_by_event_watermark(60.0) == []
         assert b.active_buckets() == 1
@@ -222,7 +269,7 @@ class TestTradeCandleBuilderEventWatermark:
             trades 3); the M+2 bucket stays open.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("MCLQ6-CME", 89.59, 1.0, m + timedelta(seconds=5)))
         b.update(_trade("MCLQ6-CME", 90.00, 33.0, m + timedelta(seconds=30)))
         b.update(_trade("MCLQ6-CME", 89.74, 8.0, m + timedelta(seconds=58)))
@@ -248,7 +295,7 @@ class TestTradeCandleBuilderEventWatermark:
             ``pop_all`` returns ``[]``.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("A-USD", 1.0, 1.0, m + timedelta(seconds=5)))
         b.update(_trade("B-USD", 2.0, 1.0, m + timedelta(seconds=5)))
         flushed = b.pop_all()
@@ -266,7 +313,7 @@ class TestTradeCandleBuilderEventWatermark:
             idle-flush driver relies on).
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         assert b.update_count == 0
         b.update(_trade("X-USD", 1.0, 1.0, m))
         b.update(_trade("X-USD", 1.0, 1.0, m - timedelta(minutes=5)))
@@ -281,7 +328,7 @@ class TestTradeCandleBuilderEventWatermark:
         Then: Nothing closes at M+119s; bucket M closes at exactly M+120s.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(seconds=119)))
         assert b.pop_completed_by_event_watermark(60.0) == []
@@ -300,7 +347,7 @@ class TestTradeCandleBuilderEventWatermark:
             global (not per-symbol) watermark design. B's later bucket stays.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("A-USD", 1.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("B-USD", 2.0, 1.0, m + timedelta(minutes=2)))
         candles = b.pop_completed_by_event_watermark(60.0)
@@ -323,7 +370,7 @@ class TestTradeCandleBuilderEventWatermark:
             order.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=30)))
         b.update(_trade("X-USD", 105.0, 1.0, m + timedelta(seconds=50)))
         b.update(_trade("X-USD", 95.0, 1.0, m + timedelta(seconds=5)))
@@ -349,7 +396,7 @@ class TestTradeCandleBuilderEventWatermark:
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
         ts = m + timedelta(seconds=30)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, ts))
         b.update(_trade("X-USD", 105.0, 1.0, ts))
         b.update(_trade("X-USD", 110.0, 1.0, ts))
@@ -380,7 +427,7 @@ class TestLateTradesAfterClose:
         Then: ``late_trades_after_close`` stays 0.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("X-USD", 101.0, 1.0, m + timedelta(seconds=40)))
         b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
@@ -399,7 +446,7 @@ class TestLateTradesAfterClose:
             logged exactly once.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
         emitted = b.pop_completed_by_event_watermark(60.0)
@@ -425,7 +472,7 @@ class TestLateTradesAfterClose:
             WARNING fires (the bucket already exists).
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
         b.pop_completed_by_event_watermark(60.0)
@@ -440,7 +487,7 @@ class TestLateTradesAfterClose:
         assert len(reopens) == 0
         final = b.pop_all()
         corrective = [c for c in final if c.interval_begin == m][0]
-        assert corrective.trades == 2
+        assert corrective.trades == 3
         assert corrective.close == pytest.approx(98.0)
 
     def test_idle_flush_counts_as_close(self) -> None:
@@ -453,7 +500,7 @@ class TestLateTradesAfterClose:
             invisible to the early-close signal.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
         b.pop_all()
         b.update(_trade("X-USD", 99.0, 1.0, m + timedelta(seconds=50)))
@@ -468,13 +515,220 @@ class TestLateTradesAfterClose:
             per symbol and only minutes at or before it count.
         """
         m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
-        b = TradeCandleBuilder()
+        b = _builder()
         b.update(_trade("A-USD", 100.0, 1.0, m + timedelta(seconds=10)))
         b.update(_trade("A-USD", 102.0, 1.0, m + timedelta(minutes=3)))
         b.pop_completed_by_event_watermark(60.0)
         b.update(_trade("B-USD", 50.0, 1.0, m + timedelta(seconds=20)))
         b.update(_trade("A-USD", 103.0, 1.0, m + timedelta(minutes=4)))
         assert b.late_trades_after_close == 0
+
+
+class TestRetainedTradeHistory:
+    """Keep complete correction state while refusing gaps, conflicts, and capacity loss."""
+
+    def test_restart_withholds_unknown_first_minute_and_older_fragments(self) -> None:
+        """A new live instance cannot overwrite a prior process's candle with startup fragments."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = TradeCandleBuilder()
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(seconds=20)))
+        builder.update(_trade("X", 90.0, 2.0, minute - timedelta(seconds=10)))
+        assert builder.pop_all() == []
+        assert builder.refused_trades == 2
+        builder.update(_trade("X", 110.0, 3.0, minute + timedelta(minutes=1)))
+        assert builder.pop_all()[0].volume == 3.0
+        restarted = TradeCandleBuilder()
+        restarted.update(_trade("X", 120.0, 1.0, minute + timedelta(minutes=1, seconds=30)))
+        assert restarted.pop_all() == []
+
+    def test_known_history_start_does_not_certify_partial_leading_minute(self) -> None:
+        """An actual mid-minute history boundary withholds only its partial leading bar."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = TradeCandleBuilder(history_start=minute + timedelta(seconds=15))
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(seconds=20)))
+        builder.update(_trade("X", 110.0, 2.0, minute + timedelta(minutes=1)))
+        assert [c.interval_begin for c in builder.pop_all()] == [minute + timedelta(minutes=1)]
+
+    @pytest.mark.parametrize(
+        "start",
+        [datetime(2026, 1, 1), datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=1)))],
+    )
+    def test_history_boundary_requires_utc(self, start: datetime) -> None:
+        """Reject ambiguous or non-UTC coverage boundaries."""
+        with pytest.raises(ValueError, match="must be UTC"):
+            TradeCandleBuilder(history_start=start)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"closed_minutes_per_symbol": 0},
+            {"max_buckets": 0},
+            {"max_trade_ids": 0},
+            {"max_symbols": 0},
+        ],
+    )
+    def test_policy_requires_positive_limits(self, overrides: dict[str, int]) -> None:
+        """Every independent memory budget must retain at least one item."""
+        with pytest.raises(ValueError, match="must be positive"):
+            TradeCandleRetentionPolicy(**overrides)
+
+    def test_stable_id_redelivery_is_ignored_before_and_after_emission(self) -> None:
+        """An exact redelivery never changes volume or dirties an already-emitted bar."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        trade = replace(_trade("X", 100.0, 2.0, minute), trade_id="one")
+        builder = _builder()
+        builder.update(trade)
+        builder.update(trade)
+        candle = builder.pop_all()[0]
+        builder.update(trade)
+        assert builder.pop_all() == []
+        assert (candle.volume, candle.trades) == (2.0, 1)
+        assert builder.duplicate_trades == 2
+        assert builder.update_count == 3
+        assert builder.late_trades_after_close == 0
+        assert builder.retained_trade_ids == 1
+
+    @pytest.mark.parametrize("identified", [False, True])
+    def test_equal_trades_remain_distinct_without_a_shared_id(self, identified: bool) -> None:
+        """Equal payloads represent two trades unless one stable ID proves redelivery."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        trade = _trade("X", 100.0, 2.0, minute)
+        builder = _builder()
+        builder.update(replace(trade, trade_id="one" if identified else None))
+        builder.update(replace(trade, trade_id="two" if identified else None))
+        candle = builder.pop_all()[0]
+        assert (candle.volume, candle.trades) == (4.0, 2)
+
+    def test_trade_identity_is_scoped_to_symbol(self) -> None:
+        """Different products may legitimately reuse the same stable trade ID."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder()
+        for symbol in ["X", "Y"]:
+            builder.update(replace(_trade(symbol, 100.0, 1.0, minute), trade_id="one"))
+        assert len(builder.pop_all()) == 2
+        assert builder.retained_trade_ids == 2
+
+    def test_changed_id_payload_invalidates_the_whole_minute(self) -> None:
+        """Contradictory source identity cannot publish a revised partial or guessed candle."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        trade = replace(_trade("X", 100.0, 1.0, minute), trade_id="one")
+        builder = _builder()
+        builder.update(trade)
+        builder.pop_all()
+        builder.update(replace(trade, price=110.0))
+        builder.update(replace(trade, trade_id="two"))
+        assert builder.pop_all() == []
+        assert builder.refused_trades == 2
+        assert builder.retained_trade_ids == 0
+
+    @pytest.mark.parametrize("target_exists", [False, True])
+    def test_changed_id_timestamp_refuses_both_affected_minutes(self, target_exists: bool) -> None:
+        """A moved stable identity never leaves either minute publishable from inconsistent evidence."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        trade = replace(_trade("X", 100.0, 1.0, minute), trade_id="one")
+        builder = _builder()
+        builder.update(trade)
+        if target_exists:
+            builder.update(replace(trade, timestamp=minute + timedelta(minutes=1), trade_id="two"))
+        builder.update(replace(trade, timestamp=minute + timedelta(minutes=1)))
+        assert builder.pop_all() == []
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=1)))
+        assert builder.pop_all() == []
+
+    def test_retention_evicts_whole_closed_minutes_and_refuses_old_fragments(self) -> None:
+        """A bounded closed history permits full recent corrections and refuses evicted history."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(closed_minutes_per_symbol=2))
+        for offset in range(3):
+            trade = _trade("X", 100.0 + offset, 1.0, minute + timedelta(minutes=offset))
+            builder.update(replace(trade, trade_id=str(offset)))
+            builder.pop_all()
+        assert builder.retained_buckets == builder.retained_trade_ids == 2
+        builder.update(_trade("X", 90.0, 1.0, minute + timedelta(seconds=20)))
+        assert builder.pop_all() == []
+        builder.update(_trade("X", 99.0, 2.0, minute + timedelta(minutes=1, seconds=20)))
+        assert builder.pop_all()[0].volume == 3.0
+
+    def test_default_retention_corrects_a_nine_minute_old_candle(self) -> None:
+        """The live default covers multi-minute delayed corrections with original economics intact."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder()
+        for offset in range(10):
+            builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=offset)))
+            builder.pop_all()
+        builder.update(_trade("X", 110.0, 2.0, minute + timedelta(seconds=30)))
+        candle = builder.pop_all()[0]
+        assert candle.interval_begin == minute
+        assert (candle.volume, candle.trades, candle.open, candle.close) == (3.0, 2, 100.0, 110.0)
+
+    def test_active_bucket_eviction_cannot_recreate_a_fragment(self) -> None:
+        """Accumulator capacity loss fences an unfinished minute through its later close."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(max_buckets=1))
+        builder.update(_trade("X", 100.0, 1.0, minute))
+        builder.update(_trade("X", 110.0, 2.0, minute + timedelta(minutes=1)))
+        builder.update(_trade("X", 90.0, 3.0, minute + timedelta(seconds=30)))
+        candles = builder.pop_all()
+        assert [(c.interval_begin, c.volume) for c in candles] == [
+            (minute + timedelta(minutes=1), 2.0)
+        ]
+        assert builder.refused_trades == 1
+        assert builder.retained_buckets == 1
+
+    def test_capacity_loss_cannot_admit_an_older_unknown_minute(self) -> None:
+        """Evicting newer state cannot make an older first fragment look newly complete."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(max_buckets=1))
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=2)))
+        builder.update(_trade("X", 90.0, 1.0, minute + timedelta(minutes=1)))
+        assert builder.pop_all() == []
+
+    def test_id_budget_loss_invalidates_an_active_minute(self) -> None:
+        """An exhausted ID budget drops the whole active accumulator instead of forgetting one ID."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        trade = _trade("X", 100.0, 1.0, minute)
+        builder = _builder(TradeCandleRetentionPolicy(max_trade_ids=1))
+        builder.update(replace(trade, trade_id="one"))
+        builder.update(replace(trade, trade_id="two"))
+        builder.update(replace(trade, trade_id="three"))
+        assert builder.pop_all() == []
+        assert builder.retained_trade_ids == builder.retained_buckets == 0
+        assert builder.refused_trades == 2
+
+    def test_id_budget_evicts_entire_other_buckets(self) -> None:
+        """Capacity can retain a new complete bucket after removing all older bucket identities."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(max_trade_ids=1))
+        builder.update(_trade("NO-ID", 100.0, 1.0, minute))
+        builder.update(replace(_trade("X", 100.0, 1.0, minute), trade_id="one"))
+        builder.update(replace(_trade("Y", 110.0, 2.0, minute), trade_id="two"))
+        assert [c.symbol for c in builder.pop_all()] == ["Y"]
+        assert builder.retained_trade_ids == 1
+
+    def test_symbol_history_eviction_reinstates_cold_start(self) -> None:
+        """Losing a symbol fence cannot let its returning first minute overwrite history."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(max_symbols=1))
+        builder.update(_trade("X", 100.0, 1.0, minute))
+        builder.update(_trade("Y", 100.0, 1.0, minute))
+        builder.update(_trade("Y", 100.0, 1.0, minute + timedelta(minutes=1)))
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=2)))
+        assert builder.pop_all() == []
+        builder.update(_trade("X", 100.0, 2.0, minute + timedelta(minutes=3)))
+        assert builder.pop_all()[0].volume == 2.0
+        assert builder.tracked_symbols == builder.retained_buckets == 1
+
+    def test_history_eviction_keeps_lost_active_minutes_fenced_after_old_replay(self) -> None:
+        """An older warmup replay cannot erase the fence of a newer evicted active minute."""
+        minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        builder = _builder(TradeCandleRetentionPolicy(max_symbols=1))
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=5)))
+        builder.update(_trade("Y", 100.0, 1.0, minute + timedelta(minutes=6)))
+        builder.update(_trade("X", 100.0, 1.0, minute + timedelta(minutes=2)))
+        builder.update(_trade("X", 110.0, 2.0, minute + timedelta(minutes=5)))
+        assert builder.pop_all() == []
+        builder.update(_trade("X", 120.0, 3.0, minute + timedelta(minutes=7)))
+        assert builder.pop_all()[0].volume == 3.0
 
 
 class TestEnqueueOrDropOldestCandle:

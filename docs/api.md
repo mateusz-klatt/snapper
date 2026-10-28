@@ -928,10 +928,13 @@ the query (unknown instrument, no warm-cache rows, etc.) — the
 results too.
 
 When both `start` and `end` are supplied the route reads a market-time
-range by `open_at` (ascending, capped at `limit`), bypassing the cache and
-the `as_of` write-time routing. This navigates the full persisted history —
-including bulk-backfilled corpora whose database write time is unrelated to
-their market time — and powers the market view's time-travel scrubber.
+range by `open_at` (ascending, capped at `limit`), bypassing the cache.
+The range selects business time; `as_of` independently selects the persisted
+row version visible at that knowledge horizon. Without `as_of`, the current
+versions are used, including backfilled historical market data. With an
+explicit horizon, rows written later are excluded and read-side carried-close
+gap filling is disabled. These separate controls power the market scrubber
+and global time travel.
 Supplying only one of the pair, or `start >= end`, returns `400`.
 
 **Response (200):**
@@ -969,7 +972,10 @@ Supplying only one of the pair, or `start >= end`, returns `400`.
 
 The `complete` flag marks a provisional intra-minute update of a
 still-forming bar when `false`, and the final bar for its window when
-`true` (default `true`).
+`true` (default `true`). Database-backed reads preserve the stored flag;
+closed cache snapshots retain their final-bar contract. Completion belongs
+to each candle and does not imply that asynchronous timeframe projections
+share a materialization watermark.
 
 ### GET /api/candles/db
 
@@ -1597,12 +1603,21 @@ markers.
 | `mode` | string | no | Trading mode, default `live` |
 | `granularity` | string | no | `1m`, `5m`, `1h`, or `1d`; default `1m` |
 | `from` | datetime | yes | Inclusive UTC window start |
-| `to` | datetime | yes | Inclusive UTC window end |
+| `to` | datetime | for historical reads | Inclusive UTC window end; a current read may omit it |
 | `as_of` | datetime | no | Explicit bitemporal knowledge horizon; disables missing-anchor creation |
 | `valuation_ccy` | string | no | Three-letter valuation currency, default `USD` |
 
 Invalid or excessive windows return 400. Both routes return 403 for a wallet
 outside the caller's permission-derived accessible set.
+
+For Live requests, omit both `to` and `as_of`. The server captures one UTC
+instant and uses it as both the inclusive end and the knowledge horizon, so
+browser clock skew cannot place the requested end after its own horizon. The
+`from` value remains required. Historical requests with `as_of` still require
+an explicit `to`, and any explicitly supplied end after the effective horizon
+remains a 400. Omitting the end does not widen activation-anchor permissions.
+The P&L view refreshes its rolling Live window when each UTC minute closes;
+historical windows remain fixed until the selected horizon changes.
 
 ### POST /api/execution-plans
 

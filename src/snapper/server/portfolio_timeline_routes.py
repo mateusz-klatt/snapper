@@ -260,7 +260,7 @@ async def _validate_timeline_request(
         mode: Requested trading mode.
         granularity: Requested series granularity.
         from_time: Raw inclusive ISO window start.
-        to_time: Raw inclusive ISO window end.
+        to_time: Raw inclusive ISO window end; omitted only for a current read.
         as_of: Optional raw ISO knowledge horizon.
         valuation_ccy: Currency the series is expressed in.
 
@@ -277,7 +277,7 @@ async def _validate_timeline_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="wallet_public_id is required",
         )
-    if from_time is None or to_time is None:
+    if from_time is None or (to_time is None and as_of is not None):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="from and to are required",
@@ -299,10 +299,10 @@ async def _validate_timeline_request(
             detail=f"Unsupported granularity: {granularity!r}",
         )
     window_from = _parse_utc_query_datetime(from_time, "from")
-    window_to = _parse_utc_query_datetime(to_time, "to")
     effective_as_of = (
         datetime.now(UTC) if as_of is None else _parse_utc_query_datetime(as_of, "as_of")
     )
+    window_to = effective_as_of if to_time is None else _parse_utc_query_datetime(to_time, "to")
     if window_to < window_from:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -547,7 +547,7 @@ async def get_pnl_series(
         mode: Trading mode scope (``live`` default).
         granularity: One of ``1m`` / ``5m`` / ``1h`` / ``1d``.
         from_time: Required inclusive window start (ISO datetime).
-        to_time: Required inclusive window end (ISO datetime).
+        to_time: Inclusive window end; defaults to the server horizon for current reads.
         as_of: Optional bitemporal knowledge horizon (ISO datetime).
         valuation_ccy: Currency to value the series in, defaulting to USD. A scope
             trading natively in another currency resolves fully when asked for in
@@ -691,7 +691,7 @@ async def get_pnl_timeline(
         mode: Trading mode scope.
         granularity: Requested P&L point granularity.
         from_time: Required inclusive ISO window start.
-        to_time: Required inclusive ISO window end.
+        to_time: Inclusive window end; defaults to the server horizon for current reads.
         as_of: Optional bitemporal knowledge horizon (ISO datetime).
         valuation_ccy: Currency to value the series in, defaulting to USD.
 

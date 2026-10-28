@@ -15,6 +15,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Literal
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
@@ -363,6 +364,115 @@ def _timeline_url(**params: str) -> str:
     return _url(**params).replace("/pnl/series?", "/pnl/timeline?")
 
 
+class TestServerOwnedLiveWindow:
+    """Current reads can share one server-owned window end and knowledge horizon."""
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.AUDITOR])
+    def test_omitted_live_end_uses_one_server_horizon(
+        self, timeline: bool, role: UserRole, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clock skew cannot put an omitted live end after its own knowledge horizon.
+
+        Given: A current read without an end and a clock that advances between reads.
+        When: The series or timeline endpoint reconstructs the requested scope.
+        Then: Its end and horizon are identical, without widening anchor authority.
+        """
+        repo = _seeded_repo()
+        horizon = datetime.fromisoformat(_AS_OF)
+        clock = Mock(wraps=datetime)
+        clock.now.side_effect = [horizon, horizon + timedelta(seconds=1)]
+        monkeypatch.setattr(portfolio_timeline_routes, "datetime", clock)
+        builder_name = "build_wallet_pnl_timeline" if timeline else "build_wallet_pnl_series"
+        builder = AsyncMock(
+            wraps=(
+                portfolio_timeline_routes.build_wallet_pnl_timeline
+                if timeline
+                else portfolio_timeline_routes.build_wallet_pnl_series
+            )
+        )
+        monkeypatch.setattr(portfolio_timeline_routes, builder_name, builder)
+        endpoint = "timeline" if timeline else "series"
+
+        response = _create_client(repo, role=role).get(
+            f"/api/portfolio/pnl/{endpoint}?wallet_public_id={_WALLET}&from={_FROM}"
+        )
+
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert datetime.fromisoformat(payload["to_time"]) == horizon
+        assert datetime.fromisoformat(payload["as_of"]) == horizon
+        assert repo.list_active_wallets.await_args.args[0] == horizon
+        call = builder.await_args
+        assert call is not None
+        assert call.args[4] == horizon
+        assert call.args[6] == horizon
+        assert call.kwargs["policy"].current_truth is True
+        assert call.kwargs["policy"].current_truth_horizon is True
+        assert call.kwargs["policy"].allow_anchor_creation is (role is UserRole.ADMIN)
+        if role is UserRole.AUDITOR:
+            repo.list_accessible_wallets_for_operators.assert_not_awaited()
+            repo.record_portfolio_pnl_anchor_if_execution_prefix_matches.assert_not_awaited()
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    def test_historical_read_still_requires_explicit_end(self, timeline: bool) -> None:
+        """An explicit knowledge horizon does not imply a historical window end."""
+        repo = _seeded_repo()
+        endpoint = "timeline" if timeline else "series"
+
+        response = _create_client(repo).get(
+            f"/api/portfolio/pnl/{endpoint}?wallet_public_id={_WALLET}"
+            f"&from={_FROM}&as_of={_AS_OF}"
+        )
+
+        assert response.status_code == 400
+        assert "from and to" in response.json()["detail"]
+        repo.list_active_wallets.assert_not_awaited()
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    def test_server_owned_end_does_not_default_a_missing_start(self, timeline: bool) -> None:
+        """Current reads still require the caller to choose an explicit window start."""
+        repo = _seeded_repo()
+        endpoint = "timeline" if timeline else "series"
+
+        response = _create_client(repo).get(
+            f"/api/portfolio/pnl/{endpoint}?wallet_public_id={_WALLET}"
+        )
+
+        assert response.status_code == 400
+        assert "from" in response.json()["detail"]
+        repo.list_active_wallets.assert_not_awaited()
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    def test_blank_live_end_is_not_treated_as_omitted(self, timeline: bool) -> None:
+        """An explicitly supplied empty end remains malformed input."""
+        repo = _seeded_repo()
+        url = _timeline_url if timeline else _url
+
+        response = _create_client(repo).get(url(to=""))
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "to is not a supported ISO-8601 datetime"
+        repo.list_active_wallets.assert_not_awaited()
+
+    @pytest.mark.parametrize("timeline", [False, True])
+    def test_explicit_end_after_server_horizon_remains_rejected(
+        self, timeline: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A supplied future end remains invalid even for a current-truth request."""
+        repo = _seeded_repo()
+        clock = Mock(wraps=datetime)
+        clock.now.return_value = datetime.fromisoformat(_AS_OF)
+        monkeypatch.setattr(portfolio_timeline_routes, "datetime", clock)
+        url = _timeline_url if timeline else _url
+
+        response = _create_client(repo).get(url(to="2026-07-20T10:02:30.050Z"))
+
+        assert response.status_code == 400
+        assert "to must be less than or equal to as_of" in response.json()["detail"]
+        repo.list_active_wallets.assert_not_awaited()
+
+
 class TestHappyPath:
     """Cover the successful reconstruction and response shape."""
 
@@ -491,7 +601,7 @@ class TestHappyPath:
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert response_as_of == datetime.fromisoformat(_AS_OF)
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_execution_lineage.await_args.args[1] == response_as_of
         assert repo.get_accruals_for_pnl.await_args.args[2] == response_as_of
         assert repo.get_instrument_symbol_refs.await_args.args[1] == response_as_of
@@ -517,8 +627,8 @@ class TestHappyPath:
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] is None
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[3] is None
+        assert repo.get_pnl_timeline_execution_prefix.await_args.args[2] is None
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_not_awaited()
         build_call = build.await_args
         assert build_call is not None
         assert build_call.kwargs["policy"].allow_anchor_creation is True
@@ -578,7 +688,7 @@ class TestHappyPath:
         """A MARK cause and an UNTRUSTED cause retain both instrument identities."""
         repo = _seeded_repo()
         t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
-        repo.get_pnl_timeline_execution_prefix_bundle.return_value["request"]["executions"].append(
+        repo.get_pnl_timeline_execution_prefix.return_value["executions"].append(
             {
                 "public_id": "execution-2",
                 "instrument_public_id": "i2",
@@ -599,9 +709,7 @@ class TestHappyPath:
                 "trade_id": "t2",
             }
         )
-        repo.get_pnl_timeline_execution_prefix_bundle.return_value["request"]["watermarks"][
-            "kraken"
-        ] = 2
+        repo.get_pnl_timeline_execution_prefix.return_value["watermarks"]["kraken"] = 2
         repo.get_pnl_timeline_candles = AsyncMock(return_value=[])
         response = _create_client(repo).get(_url(**{"to": _FROM}))
         assert response.status_code == 200
@@ -661,8 +769,8 @@ class TestMarkerTimeline:
         assert response.status_code == 200
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] is None
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[3] is None
+        assert repo.get_pnl_timeline_execution_prefix.await_args.args[2] is None
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_not_awaited()
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         build_call = build.await_args
@@ -705,8 +813,9 @@ class TestMarkerTimeline:
         assert markers["ai_decision"]["outcome"] == "rejected"
         response_as_of = datetime.fromisoformat(payload["as_of"])
         assert response_as_of == datetime.fromisoformat(_AS_OF)
-        repo.get_pnl_timeline_execution_prefix_bundle.assert_awaited_once()
-        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
+        repo.get_pnl_timeline_execution_prefix.assert_awaited_once()
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_not_awaited()
+        assert repo.get_pnl_timeline_execution_prefix.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[5] == 2_001
@@ -992,7 +1101,7 @@ class TestScopeAndFailures:
     def test_reconstruction_failure_is_wrapped_as_500(self) -> None:
         """An unexpected repository error is surfaced as a 500."""
         repo = _seeded_repo()
-        repo.get_pnl_timeline_execution_prefix_bundle = AsyncMock(side_effect=RuntimeError("boom"))
+        repo.get_pnl_timeline_execution_prefix = AsyncMock(side_effect=RuntimeError("boom"))
         client = _create_client(repo)
         response = client.get(_url())
         assert response.status_code == 500

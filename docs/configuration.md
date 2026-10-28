@@ -381,11 +381,21 @@ memberships declared by each user's `operators` and `primary_operator`
 fields. A role does not imply a membership: a viewer with `operators = []`
 receives no desk membership. The shipped `dev` profiles declare the `admin`,
 `operator`, and `viewer` bootstrap users as members of the `default` desk.
-They also declare an `auditor` with no memberships or personal read grants; its
-global read visibility comes from the named permission set. These bootstrap
-entries apply only when the tenant graph is wholly fresh. Production profiles
-must not bootstrap extra active human accounts with shared default passwords:
-attach an existing production viewer through the desk membership API instead.
+The bundled `dev` profile also declares an `auditor` in the `default` desk,
+with that desk selected as its primary operator. Proprietary profiles likewise
+explicitly declare auditor desk memberships and a primary operator from that list. These memberships
+provide operator context without adding mutation permissions: the auditor's
+global read visibility and strict read-only ceiling come from its named
+permission set. Tracked auditor profiles declare no personal read grants and
+use passwords of at least eight characters. Profile owners choose their credential
+format; symbols and ambiguous characters are supported without changing the
+auditor's permissions.
+
+These bootstrap entries apply only when the tenant graph is wholly fresh.
+Production profiles must not bootstrap extra active human accounts with shared
+default passwords, except for an explicitly authorized public auditor account
+whose read-only role is verified before sharing access. Attach an existing
+production viewer through the desk membership API instead.
 
 `readable_wallets` and `[[scope_grants]]` are currently parse-and-validation
 only; `db-seed` writes neither `wallet_user_read_grants` nor operator scope

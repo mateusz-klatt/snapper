@@ -618,6 +618,7 @@ class FakeRepo:
         self.fill_gap_calls: list[tuple[str, str, datetime]] = []
         self.fill_gap_prefixes: list[PnlTimelineExecutionPrefix] = []
         self.execution_calls: list[tuple[str, str, datetime]] = []
+        self.execution_prefix_intents: list[datetime | None] = []
         self.execution_bundle_calls: list[tuple[str, str, datetime, datetime]] = []
         self.execution_prefix_bundles: list[PnlTimelineExecutionPrefixBundle] = []
         self.execution_prefixes: list[PnlTimelineExecutionPrefix] = []
@@ -661,11 +662,14 @@ class FakeRepo:
         mode: str,
         as_of: datetime | None,
     ) -> PnlTimelineExecutionPrefix:
-        """Return one canned exact bundle and record its single scope read."""
-        self.execution_calls.append((wallet_public_id, mode, as_of))
+        """Resolve the nullable intent and prove one exact request prefix."""
+        self.execution_prefix_intents.append(as_of)
+        resolved_as_of = self._captured_present if as_of is None else as_of
+        self.execution_calls.append((wallet_public_id, mode, resolved_as_of))
         if self._execution_prefix_error is not None:
             raise self._execution_prefix_error
-        prefix = self._execution_prefix_at(as_of)
+        prefix = self._execution_prefix_at(resolved_as_of)
+        self._validate_exact_fill_witnesses(prefix, resolved_as_of)
         self.execution_prefixes.append(prefix)
         return prefix
 
@@ -4503,6 +4507,102 @@ class TestFxRangeCoversPreWindowFlows:
 class TestDurableActivationAnchor:
     """Cover exact-prefix anchor creation, parsing, and runtime boundaries."""
 
+    @pytest.mark.parametrize("endpoint", ["series", "timeline"])
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            pytest.param(
+                PnlSeriesReadPolicy(current_truth_horizon=True), id="current-trade-reader"
+            ),
+            pytest.param(PnlSeriesReadPolicy(allow_anchor_creation=False), id="historical-reader"),
+            pytest.param(
+                PnlSeriesReadPolicy(allow_anchor_creation=False, current_truth_horizon=True),
+                id="current-auditor",
+            ),
+        ],
+    )
+    async def test_existing_anchor_uses_one_certified_request_cut(
+        self,
+        endpoint: Literal["series", "timeline"],
+        policy: PnlSeriesReadPolicy,
+    ) -> None:
+        """Preserve nullable horizon intent while avoiding an unused activation proof."""
+        repo = FakeRepo()
+        as_of = _T0 + timedelta(seconds=30)
+        repo._captured_present = as_of
+        reader = build_wallet_pnl_series if endpoint == "series" else build_wallet_pnl_timeline
+
+        await reader(repo, _W1, "live", _T0, _T0, "1m", as_of, policy=policy)
+
+        assert repo.execution_prefix_intents == [None if policy.current_truth_horizon else as_of]
+        assert repo.execution_calls == [(_W1, "live", as_of)]
+        assert repo.execution_bundle_calls == []
+        assert len(repo.execution_prefixes) == 1
+        assert repo.fill_gap_prefixes == [repo.execution_prefixes[0]]
+        assert repo.fill_gap_prefixes[0] is repo.execution_prefixes[0]
+        assert len(repo.anchor_calls) == 1
+        assert repo.anchor_record_calls == []
+
+    @pytest.mark.parametrize("endpoint", ["series", "timeline"])
+    async def test_existing_anchor_single_cut_refuses_damaged_fill_identity(
+        self,
+        endpoint: Literal["series", "timeline"],
+    ) -> None:
+        """A request-only proof still rejects aggregate-equal, identity-mismatched evidence."""
+        execution = _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")
+        repo = FakeRepo(executions=[execution])
+        repo.require_exact_fill_witnesses(
+            [
+                _TestFillWitness(
+                    observed_at=_T0,
+                    exec_id="different-original-fill",
+                    shard_key=execution["shard_key"],
+                    size=execution["size"],
+                )
+            ]
+        )
+        reader = build_wallet_pnl_series if endpoint == "series" else build_wallet_pnl_timeline
+
+        with pytest.raises(RuntimeError, match="exact fill identity mismatch"):
+            await reader(repo, _W1, "live", _T0, _T0, "1m", _T0)
+
+        assert repo.execution_prefix_intents == [_T0]
+        assert repo.execution_bundle_calls == []
+        assert repo.fill_gap_calls == []
+        assert repo.anchor_record_calls == []
+
+    @pytest.mark.parametrize("endpoint", ["series", "timeline"])
+    async def test_current_truth_activation_retains_two_independent_cuts(
+        self,
+        endpoint: Literal["series", "timeline"],
+    ) -> None:
+        """New anchors retain actual request and minute activation proof with nullable intent."""
+        repo = FakeRepo(has_anchor=False)
+        as_of = _T0 + timedelta(seconds=30)
+        repo._captured_present = as_of
+        reader = build_wallet_pnl_series if endpoint == "series" else build_wallet_pnl_timeline
+
+        await reader(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            as_of,
+            policy=PnlSeriesReadPolicy(current_truth_horizon=True),
+        )
+
+        assert repo.execution_prefix_intents == []
+        assert repo.execution_bundle_calls == [(_W1, "live", as_of, _T0)]
+        assert len(repo.execution_prefix_bundles) == 1
+        bundle = repo.execution_prefix_bundles[0]
+        assert repo.fill_gap_prefixes[0] is bundle["activation"]
+        assert repo.fill_gap_prefixes[1] is bundle["request"]
+        assert repo.anchor_write_evidence[0]["requested_as_of"] is None
+        assert repo.anchor_write_evidence[0]["requested_activation_as_of"] is None
+        assert repo.anchor_write_evidence[0]["execution_prefix_bundle"] is bundle
+
     @pytest.mark.parametrize(
         ("endpoint", "has_anchor"),
         [
@@ -4517,7 +4617,7 @@ class TestDurableActivationAnchor:
         endpoint: Literal["series", "timeline"],
         has_anchor: bool,
     ) -> None:
-        """Series, markers, activation, and gap checks share one exact bundle."""
+        """Series and markers share one request proof, retaining activation only when needed."""
         repo = FakeRepo(has_anchor=has_anchor)
         as_of = _T0 + timedelta(seconds=30)
 
@@ -4542,17 +4642,18 @@ class TestDurableActivationAnchor:
                 as_of,
             )
 
-        activation_as_of = as_of if has_anchor else _T0
         assert repo.execution_calls == [(_W1, "live", as_of)]
-        assert repo.execution_bundle_calls == [(_W1, "live", as_of, activation_as_of)]
-        assert len(repo.execution_prefix_bundles) == 1
         assert len(repo.execution_prefixes) == 1
-        bundle = repo.execution_prefix_bundles[0]
         if has_anchor:
+            assert repo.execution_bundle_calls == []
+            assert repo.execution_prefix_bundles == []
             assert repo.fill_gap_calls == [(_W1, "live", as_of)]
             assert len(repo.fill_gap_prefixes) == 1
-            assert repo.fill_gap_prefixes[0] is bundle["request"]
+            assert repo.fill_gap_prefixes[0] is repo.execution_prefixes[0]
         else:
+            assert repo.execution_bundle_calls == [(_W1, "live", as_of, _T0)]
+            assert len(repo.execution_prefix_bundles) == 1
+            bundle = repo.execution_prefix_bundles[0]
             assert repo.fill_gap_calls == [
                 (_W1, "live", _T0),
                 (_W1, "live", as_of),

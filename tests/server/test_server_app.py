@@ -1893,7 +1893,8 @@ class TestCreateApiRouter:
         assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
 
-    def test_get_candles_success(self) -> None:
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_get_candles_success(self, complete: bool) -> None:
         """Test candles endpoint returns OHLCV data.
 
         Given: A valid instrument with candle data in repository,
@@ -1915,6 +1916,8 @@ class TestCreateApiRouter:
                 "volume": 1000.0,
                 "vwap": 50250.0,
                 "trades": 10,
+                "source": "native",
+                "complete": complete,
             }
         ]
         repo = MockRepository(session_result=candle_rows)
@@ -1934,8 +1937,10 @@ class TestCreateApiRouter:
         assert items[0]["open"] == pytest.approx(50000.0)
         assert items[0]["close"] == pytest.approx(50500.0)
         assert items[0]["timestamp"] is not None
+        assert items[0]["complete"] is complete
 
-    def test_get_candles_market_time_range_returns_window(self) -> None:
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_get_candles_market_time_range_returns_window(self, complete: bool) -> None:
         """Test candles endpoint serves a market-time ``open_at`` window.
 
         Given: A valid instrument with candle data in repository,
@@ -1957,6 +1962,8 @@ class TestCreateApiRouter:
                 "volume": 1000.0,
                 "vwap": 50250.0,
                 "trades": 10,
+                "source": "native",
+                "complete": complete,
             }
         ]
         repo = MockRepository(session_result=candle_rows)
@@ -1970,6 +1977,7 @@ class TestCreateApiRouter:
         assert data["type"] == "candle_list"
         assert data["count"] == 1
         assert data["payload"][0]["timeframe"] == "1d"
+        assert data["payload"][0]["complete"] is complete
 
     def test_get_candles_market_time_range_is_gap_filled(self) -> None:
         """The scrubber's own window is bridged, which is what a zoom actually hits.
@@ -1997,6 +2005,8 @@ class TestCreateApiRouter:
                 "volume": 1000.0,
                 "vwap": 50250.0,
                 "trades": 10,
+                "source": "native",
+                "complete": True,
             }
             for minute in (0, 3)
         ]
@@ -2115,6 +2125,8 @@ class TestCreateApiRouter:
                 "volume": 50.0,
                 "vwap": None,
                 "trades": None,
+                "source": "native",
+                "complete": True,
             }
         ]
         repo = MockRepository(session_result=candle_rows)
@@ -2181,6 +2193,8 @@ class TestCreateApiRouter:
                 "volume": 10.0,
                 "vwap": None,
                 "trades": None,
+                "source": "native",
+                "complete": True,
             }
         ]
         repo = MockRepository(session_result=candle_rows)
@@ -2350,7 +2364,7 @@ class TestCandleProjectionHelpers:
     populated) pass their original identity through.
     """
 
-    def _cache_row(self, open_at_ms: int) -> CandleQueryRow:
+    def _cache_row(self, open_at_ms: int, complete: bool = True) -> CandleQueryRow:
         """Build a cache-sourced query row with ``None`` provenance."""
         return CandleQueryRow(
             open_at=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
@@ -2366,9 +2380,10 @@ class TestCandleProjectionHelpers:
             timestamp=None,
             session_id=None,
             sequence_id=None,
+            complete=complete,
         )
 
-    def _db_row(self, open_at_ms: int) -> CandleQueryRow:
+    def _db_row(self, open_at_ms: int, complete: bool = True) -> CandleQueryRow:
         """Build a DB-sourced query row with original provenance."""
         return CandleQueryRow(
             open_at=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
@@ -2384,7 +2399,24 @@ class TestCandleProjectionHelpers:
             timestamp=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
             session_id="original-session",
             sequence_id=99,
+            complete=complete,
         )
+
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_db_completeness_survives_wire_projection(self, complete: bool) -> None:
+        """Persisted provisional and final bars retain their actual completion flag."""
+        row = self._db_row(3_600_000, complete=complete)
+        candle = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+
+        assert candle.complete is complete
+
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_synthetic_provenance_preserves_explicit_completeness(self, complete: bool) -> None:
+        """Minting deterministic identity does not replace an explicit completion flag."""
+        row = self._cache_row(60_000, complete=complete)
+        candle = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+
+        assert candle.complete is complete
 
     def test_cache_row_synthetic_provenance_is_deterministic(self) -> None:
         """Same logical 1m bar → same ``public_id`` across two calls."""

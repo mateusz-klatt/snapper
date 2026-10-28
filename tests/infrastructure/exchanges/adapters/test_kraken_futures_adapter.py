@@ -187,6 +187,32 @@ class TestParseKrakenFuturesTrade:
     """Tests for parse_kraken_futures_trade."""
 
     @pytest.mark.parametrize(
+        ("uid", "trade_id", "expected"),
+        [
+            ("actual-uid", 17, "actual-uid"),
+            (None, 17, "kraken-futures:trade_id:17"),
+            (None, 0, "kraken-futures:trade_id:0"),
+            (None, None, None),
+        ],
+    )
+    def test_preserves_the_available_stable_trade_identity(
+        self, uid: str | None, trade_id: int | None, expected: str | None
+    ) -> None:
+        """Keep authoritative UIDs and namespace numeric fallback IDs without inventing absent IDs."""
+        result = parse_kraken_futures_trade(
+            {
+                "product_id": "PI_XBTUSD",
+                "time": 1640995200000,
+                "qty": 1.0,
+                "price": 100.0,
+                "side": "buy",
+                "uid": uid,
+                "trade_id": trade_id,
+            }
+        )
+        assert result.trade_id == expected
+
+    @pytest.mark.parametrize(
         ("milliseconds", "iso_timestamp"),
         _TIMESTAMP_PATH_CASES,
         ids=(

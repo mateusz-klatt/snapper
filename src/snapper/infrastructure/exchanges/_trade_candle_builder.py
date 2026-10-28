@@ -1,7 +1,8 @@
 """Synthesize 1m OHLCV candles from a live stream of TradeUpdate messages.
 
-Used by exchange clients that have a WS trade channel but no WS candle
-channel (Kraken Equities, Kraken Futures). The historical fix-up path
+Used by Kraken Equities and Kraken Futures, which have a WS trade channel
+without a WS candle channel, and by Kraken Spot when trade-built candle mode
+is enabled. The historical fix-up path
 on these venues used REST polling of OHLCV history endpoints; the
 polling approach risks rate-limit / IP-ban and duplicates work the
 exchange already does on the matching engine side. Client-side
@@ -17,9 +18,12 @@ implementation in :mod:`snapper.infrastructure.exchanges.implementations.walutom
 """
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
+from datetime import timedelta
 from time import monotonic
 
 from loguru import logger
@@ -46,6 +50,8 @@ class _CandleAccumulator:
     interval_begin: datetime
     open_ts: datetime
     close_ts: datetime
+    emitted: bool = False
+    trade_ids: set[str] = field(default_factory=set)
 
 
 def enqueue_or_drop_oldest_candle(
@@ -82,299 +88,400 @@ def enqueue_or_drop_oldest_candle(
         queue.put_nowait(item)
 
 
+type _BucketKey = tuple[str, int]
+type _TradeIdentity = tuple[datetime, float, float, str, str]
+
+
+@dataclass(frozen=True)
+class TradeCandleRetentionPolicy:
+    """Bound complete correction history, pending buckets, and stable trade identities."""
+
+    closed_minutes_per_symbol: int = 10
+    max_buckets: int = 32_768
+    max_trade_ids: int = 250_000
+    max_symbols: int = 4_096
+
+    def __post_init__(self) -> None:
+        """Reject limits that cannot retain even one complete observation."""
+        if (
+            min(
+                self.closed_minutes_per_symbol,
+                self.max_buckets,
+                self.max_trade_ids,
+                self.max_symbols,
+            )
+            < 1
+        ):
+            raise ValueError("trade candle retention limits must be positive")
+
+
+_DEFAULT_RETENTION = TradeCandleRetentionPolicy()
+
+
+@dataclass
+class _SymbolHistory:
+    """The bounded symbol's coverage boundary and refused or emitted minute fences."""
+
+    start: datetime
+    closed_minutes: set[int] = field(default_factory=set)
+    closed_minute: int | None = None
+    refused_through: int | None = None
+    warned_through: int | None = None
+
+
+@dataclass(frozen=True)
+class _RetainedTrade:
+    """An identified trade's exact immutable payload and owning retained bucket."""
+
+    bucket: _BucketKey
+    identity: _TradeIdentity
+
+
 class TradeCandleBuilder:
-    """Aggregate trade updates into 1-minute OHLCV candles client-side.
+    """Emit full-minute corrections from bounded, retained trade accumulators.
 
-    Each call to :meth:`update` folds a single :class:`TradeUpdate`
-    into the accumulator bucket for that trade's symbol + minute. A
-    bucket is keyed by ``(symbol, minute_ts)`` where ``minute_ts`` is
-    the floor of the trade's timestamp to its minute. :meth:`pop_completed`
-    returns the candles for every minute strictly older than the
-    caller's "now" and removes them from the accumulator. The wall-clock
-    path holds at most one bucket per active symbol; the event-watermark
-    path (:meth:`pop_completed_by_event_watermark`) may buffer the current
-    minute plus any minute within ``interval + grace`` of the watermark, so
-    a delayed feed can hold a few buckets per symbol at once.
+    Emission clears only the dirty set. The complete accumulator and its trade
+    identities remain available for ten closed minutes per symbol, subject to
+    global policy limits. A correction reuses that full state; an evicted or
+    otherwise unproven minute is withheld instead of emitting a late fragment.
 
-    The builder is single-thread by design — callers drive it from
-    the exchange client's WS callback and a once-per-second background
-    aggregator. No locks. The two methods are not coroutines on
-    purpose; they are cheap and synchronous to keep the WS callback
-    path tight.
+    A fresh live builder cannot know the first observed minute's earlier trades,
+    so that minute and older minutes are withheld. A historical reader may supply
+    its actual inclusive history start; only whole minutes beginning at or after
+    that boundary can then be published. Symbol-history eviction reinstates the
+    live cold-start guard. All methods are synchronous and single-threaded.
     """
 
-    def __init__(self, interval_seconds: int = 60) -> None:
-        """Create an empty builder.
-
-        Args:
-            interval_seconds: Candle width in seconds. ``60`` is the
-                only currently-validated setting (matches the SCD2
-                schema's ``candles.timeframe='1m'`` row family); larger
-                intervals will work mechanically but have not been
-                pressure-tested in production.
-        """
+    def __init__(
+        self,
+        interval_seconds: int = 60,
+        *,
+        history_start: datetime | None = None,
+        retention: TradeCandleRetentionPolicy = _DEFAULT_RETENTION,
+    ) -> None:
+        """Create bounded state, optionally backed by an explicit UTC history boundary."""
+        if history_start is not None and history_start.utcoffset() != timedelta(0):
+            raise ValueError("trade candle history start must be UTC")
         self._interval_s = interval_seconds
-        self._builders: dict[str, _CandleAccumulator] = {}
+        self._history_start = history_start
+        self._retention = retention
+        self._builders: OrderedDict[_BucketKey, _CandleAccumulator] = OrderedDict()
+        self._pending: set[_BucketKey] = set()
+        self._histories: OrderedDict[str, _SymbolHistory] = OrderedDict()
+        self._forgotten_start: datetime | None = None
+        self._trade_ids: dict[tuple[str, str], _RetainedTrade] = {}
         self._watermark: datetime | None = None
-        self._update_count: int = 0
-        self._closed_minute: dict[str, int] = {}
-        self._late_trades_after_close: int = 0
+        self._update_count = 0
+        self._late_trades_after_close = 0
+        self._refused_trades = 0
+        self._duplicate_trades = 0
+
+    def _symbol_history(self, symbol: str, minute: datetime, watermark: datetime) -> _SymbolHistory:
+        """Restore cold-start protection without forgetting a lost minute's fence.
+
+        One monotonic watermark boundary survives symbol-history eviction. New
+        histories cannot publish at or before it, even if an old replay arrives
+        before a fragment from the newer evicted active minute.
+        """
+        history = self._histories.get(symbol)
+        if history is not None:
+            self._histories.move_to_end(symbol)
+            return history
+        if len(self._histories) >= self._retention.max_symbols:
+            evicted_symbol, _ = self._histories.popitem(last=False)
+            self._forgotten_start = watermark.replace(second=0, microsecond=0) + timedelta(
+                minutes=1
+            )
+            for key in [key for key in self._builders if key[0] == evicted_symbol]:
+                self._evict_bucket(key)
+        start = self._history_start
+        if start is None:
+            start = minute + timedelta(minutes=1)
+        if self._forgotten_start is not None:
+            start = max(start, minute + timedelta(minutes=1), self._forgotten_start)
+        history = _SymbolHistory(start=start)
+        self._histories[symbol] = history
+        return history
+
+    def _refuse(self, symbol: str, minute_ts: int, reason: str) -> None:
+        """Count every refusal while bounding its warning history to the symbol cap."""
+        self._refused_trades += 1
+        history = self._histories[symbol]
+        previous = history.refused_through
+        history.refused_through = minute_ts if previous is None else max(previous, minute_ts)
+        if history.warned_through is None or minute_ts > history.warned_through:
+            history.warned_through = minute_ts
+            logger.warning(
+                "Withholding unproven trade candle: symbol={} minute={} reason={} refused={}",
+                symbol,
+                minute_ts,
+                reason,
+                self._refused_trades,
+            )
+
+    def _evict_bucket(self, key: _BucketKey) -> None:
+        """Drop a whole accumulator and all its IDs, fencing off partial recreation."""
+        bucket = self._builders.pop(key)
+        self._pending.discard(key)
+        for trade_id in bucket.trade_ids:
+            del self._trade_ids[(bucket.symbol, trade_id)]
+        history = self._histories.get(bucket.symbol)
+        if history is not None:
+            history.closed_minutes.discard(key[1])
+            previous = history.refused_through
+            history.refused_through = key[1] if previous is None else max(previous, key[1])
+
+    def _already_seen(self, trade: TradeUpdate, key: _BucketKey) -> bool:
+        """Suppress exact stable-ID redelivery and refuse contradictory identified evidence."""
+        if trade.trade_id is None:
+            return False
+        retained = self._trade_ids.get((trade.symbol, trade.trade_id))
+        if retained is None:
+            return False
+        identity = (trade.timestamp, trade.price, trade.quantity, trade.side, trade.ord_type)
+        if retained.identity == identity:
+            self._duplicate_trades += 1
+            return True
+        self._evict_bucket(retained.bucket)
+        if key in self._builders:
+            self._evict_bucket(key)
+        self._refuse(trade.symbol, key[1], "conflicting_trade_id")
+        return True
+
+    def _bucket_for_trade(
+        self, trade: TradeUpdate, minute: datetime, key: _BucketKey
+    ) -> _CandleAccumulator | None:
+        """Return complete retained state or admit a genuinely new proven minute."""
+        history = self._histories[trade.symbol]
+        if minute < history.start:
+            self._refuse(trade.symbol, key[1], "unknown_leading_history")
+            return None
+        existing = self._builders.get(key)
+        if existing is not None:
+            return existing
+        fences = [
+            value for value in (history.closed_minute, history.refused_through) if value is not None
+        ]
+        if fences and key[1] <= max(fences):
+            self._refuse(trade.symbol, key[1], "complete_minute_not_retained")
+            return None
+        if len(self._builders) >= self._retention.max_buckets:
+            self._evict_bucket(next(iter(self._builders)))
+            if history.refused_through is not None and key[1] <= history.refused_through:
+                self._refuse(trade.symbol, key[1], "complete_minute_evicted_for_capacity")
+                return None
+        bucket = _CandleAccumulator(
+            symbol=trade.symbol,
+            open=trade.price,
+            high=trade.price,
+            low=trade.price,
+            close=trade.price,
+            volume=0.0,
+            trades=0,
+            vwap_sum=0.0,
+            interval_begin=minute,
+            open_ts=trade.timestamp,
+            close_ts=trade.timestamp,
+        )
+        self._builders[key] = bucket
+        return bucket
+
+    def _remember_trade(self, trade: TradeUpdate, key: _BucketKey) -> bool:
+        """Reserve stable identity storage by evicting complete buckets, never partial ID sets."""
+        if trade.trade_id is None:
+            return True
+        while len(self._trade_ids) >= self._retention.max_trade_ids:
+            self._evict_bucket(next(iter(self._builders)))
+        if key not in self._builders:
+            self._refuse(trade.symbol, key[1], "trade_identity_budget_exhausted")
+            return False
+        identity = (trade.timestamp, trade.price, trade.quantity, trade.side, trade.ord_type)
+        self._trade_ids[(trade.symbol, trade.trade_id)] = _RetainedTrade(key, identity)
+        self._builders[key].trade_ids.add(trade.trade_id)
+        return True
 
     def update(self, trade: TradeUpdate) -> None:
-        """Fold a single trade into its symbol's open minute-bucket.
-
-        First trade in a bucket sets OHLC = trade.price; subsequent
-        trades widen ``high`` / ``low`` and accumulate ``volume`` +
-        ``vwap_sum``. ``open`` / ``close`` track the EARLIEST / LATEST trade
-        by EVENT time (``trade.timestamp``), not arrival order, so a delayed
-        feed's out-of-order same-minute batches still yield the correct open
-        and close. Also advances the event-time
-        watermark (the highest ``trade.timestamp`` folded so far, consumed by
-        :meth:`pop_completed_by_event_watermark`) and the activity counter
-        (consumed by the idle-flush driver — see :meth:`update_count`).
-        A trade whose minute was ALREADY emitted increments
-        :attr:`late_trades_after_close` (and WARNs once per re-opened
-        bucket) but is still folded — its corrective candle must not be
-        lost; the counter exists so the early close is visible.
+        """Fold one proven unique trade, preserving arrival activity even on refusal or replay.
 
         Args:
-            trade: The :class:`TradeUpdate` to fold into the
-                ``(symbol, minute)`` bucket derived from
-                ``trade.timestamp``.
+            trade: Received trade whose event minute and stable identity are checked before folding.
         """
         self._update_count += 1
         if self._watermark is None or trade.timestamp > self._watermark:
             self._watermark = trade.timestamp
-        floor = trade.timestamp.replace(second=0, microsecond=0)
-        minute_ts = int(floor.timestamp())
-        key = f"{trade.symbol}_{minute_ts}"
-        existing = self._builders.get(key)
-        closed = self._closed_minute.get(trade.symbol)
-        if closed is not None and minute_ts <= closed:
-            self._late_trades_after_close += 1
-            if existing is None:
-                logger.warning(
-                    f"late trade after candle close re-opens bucket: "
-                    f"symbol={trade.symbol} minute={floor.isoformat()} "
-                    f"trade_ts={trade.timestamp.isoformat()} "
-                    f"(will emit a corrective candle that re-fragments the "
-                    f"SCD2 row — widen the grace/idle-flush bound if this "
-                    f"recurs; counter={self._late_trades_after_close})"
-                )
-        if existing is None:
-            self._builders[key] = _CandleAccumulator(
-                symbol=trade.symbol,
-                open=trade.price,
-                high=trade.price,
-                low=trade.price,
-                close=trade.price,
-                volume=trade.quantity,
-                trades=1,
-                vwap_sum=trade.price * trade.quantity,
-                interval_begin=floor,
-                open_ts=trade.timestamp,
-                close_ts=trade.timestamp,
-            )
+        minute = trade.timestamp.replace(second=0, microsecond=0)
+        key = (trade.symbol, int(minute.timestamp()))
+        self._symbol_history(trade.symbol, minute, self._watermark)
+        if self._already_seen(trade, key):
             return
-        existing.high = max(existing.high, trade.price)
-        existing.low = min(existing.low, trade.price)
-        if trade.timestamp < existing.open_ts:
-            existing.open = trade.price
-            existing.open_ts = trade.timestamp
-        if trade.timestamp >= existing.close_ts:
-            existing.close = trade.price
-            existing.close_ts = trade.timestamp
-        existing.volume += trade.quantity
-        existing.trades += 1
-        existing.vwap_sum += trade.price * trade.quantity
+        bucket = self._bucket_for_trade(trade, minute, key)
+        if bucket is None or not self._remember_trade(trade, key):
+            return
+        if bucket.emitted:
+            self._late_trades_after_close += 1
+            if key not in self._pending:
+                logger.warning(
+                    "late trade after candle close re-opens bucket: symbol={} minute={} "
+                    "(retained full-minute correction; counter={})",
+                    trade.symbol,
+                    minute.isoformat(),
+                    self._late_trades_after_close,
+                )
+        bucket.high = max(bucket.high, trade.price)
+        bucket.low = min(bucket.low, trade.price)
+        if trade.timestamp < bucket.open_ts:
+            bucket.open = trade.price
+            bucket.open_ts = trade.timestamp
+        if trade.timestamp >= bucket.close_ts:
+            bucket.close = trade.price
+            bucket.close_ts = trade.timestamp
+        bucket.volume += trade.quantity
+        bucket.trades += 1
+        bucket.vwap_sum += trade.price * trade.quantity
+        self._pending.add(key)
+        self._builders.move_to_end(key)
 
     def pop_completed(self, now_utc: datetime) -> list[CandleUpdate]:
-        """Emit and discard every bucket whose minute has finished.
-
-        A bucket is "complete" when its minute is strictly less than
-        the caller's current-minute floor — i.e. no further trades for
-        that minute can possibly arrive. The active (current-minute)
-        bucket is left in place so subsequent trades continue to
-        update it.
+        """Emit dirty minutes before the caller's current minute, retaining full correction state.
 
         Args:
-            now_utc: The caller's "now" in UTC. Floored to the minute
-                internally; the comparison is ``bucket_minute <
-                current_minute``.
+            now_utc: UTC wall clock whose minute bounds completed dirty buckets.
 
         Returns:
-            List of :class:`CandleUpdate` items in arbitrary order.
-            The caller is responsible for routing them downstream (eg.
-            via :func:`enqueue_or_drop_oldest_candle`).
+            Full candle snapshots for dirty minutes strictly before the current minute.
         """
-        current_minute_ts = int(now_utc.replace(second=0, microsecond=0).timestamp())
-        return self._emit_and_remove(lambda begin_ts: begin_ts < current_minute_ts)
+        current_minute = int(now_utc.replace(second=0, microsecond=0).timestamp())
+        return self._emit_dirty(lambda minute: minute < current_minute)
 
     def pop_completed_by_event_watermark(self, grace_seconds: float) -> list[CandleUpdate]:
-        """Emit buckets the feed's own event-clock has already moved past.
-
-        Wall-clock completion (:meth:`pop_completed`) is correct only for a
-        real-time feed. For a DELAYED feed (e.g. Kraken Equities ~10 min) an
-        event-minute's trades arrive across many wall-clock minutes, so
-        wall-clock close fragments each minute into partial, mutually-
-        superseding candles (the last fragment wrongly becoming current).
-        This instead closes a bucket only once the event watermark (the
-        highest ``trade.timestamp`` folded so far) has advanced past the
-        bucket's minute END by ``grace_seconds`` of skew tolerance, so every
-        delayed batch for a minute accumulates into ONE candle before it is
-        emitted. Returns ``[]`` until the first trade sets the watermark.
+        """Emit dirty minutes beyond the event watermark's interval-plus-grace boundary.
 
         Args:
-            grace_seconds: Event-time slack beyond a bucket's minute end
-                before it is final — absorbs cross-symbol arrival skew
-                within the same feed. A trade arriving more than this past
-                its minute's close (reordering beyond ``interval + grace``)
-                lands in a fresh bucket and yields a separate corrective
-                candle; the feed is delayed-but-monotonic so that is not
-                expected — widen ``grace`` rather than rely on it.
+            grace_seconds: Additional event-time delay allowed after a minute ends.
 
         Returns:
-            Completed :class:`CandleUpdate` items; the watermark's own
-            minute and any minute within ``interval + grace_seconds`` of the
-            watermark stay in place to keep accumulating.
+            Full dirty candle snapshots past the boundary, or an empty list before any trade.
         """
         if self._watermark is None:
             return []
         cutoff = self._watermark.timestamp() - self._interval_s - grace_seconds
-        return self._emit_and_remove(lambda begin_ts: begin_ts <= cutoff)
+        return self._emit_dirty(lambda minute: minute <= cutoff)
 
     def pop_all(self) -> list[CandleUpdate]:
-        """Emit and discard EVERY remaining bucket regardless of completion.
-
-        Idle/shutdown flush: when a delayed feed goes quiet the event
-        watermark stalls and :meth:`pop_completed_by_event_watermark` would
-        strand the final minute's bucket indefinitely. A driver invokes this
-        only after a wall-clock silence threshold so the last bar is not lost
-        until the feed resumes.
+        """Flush dirty idle/shutdown buckets once while retaining bounded correction history.
 
         Returns:
-            All buffered :class:`CandleUpdate` items; the accumulator is
-            empty afterwards.
+            Full snapshots of all dirty buckets; unchanged retained buckets are omitted.
         """
-        return self._emit_and_remove(lambda _begin_ts: True)
+        return self._emit_dirty(lambda _minute: True)
+
+    def _emit_dirty(self, should_emit: Callable[[int], bool]) -> list[CandleUpdate]:
+        """Project full dirty accumulators and enforce per-symbol closed-minute retention."""
+        result: list[CandleUpdate] = []
+        for key in sorted(self._pending, key=lambda item: (item[1], item[0])):
+            if not should_emit(key[1]):
+                continue
+            bucket = self._builders[key]
+            result.append(
+                CandleUpdate(
+                    symbol=bucket.symbol,
+                    open=bucket.open,
+                    high=bucket.high,
+                    low=bucket.low,
+                    close=bucket.close,
+                    vwap=bucket.vwap_sum / bucket.volume if bucket.volume > 0 else bucket.close,
+                    trades=bucket.trades,
+                    volume=bucket.volume,
+                    interval_begin=bucket.interval_begin,
+                    interval=self._interval_s,
+                )
+            )
+            self._pending.remove(key)
+            bucket.emitted = True
+            history = self._histories[bucket.symbol]
+            previous = history.closed_minute
+            history.closed_minute = key[1] if previous is None else max(previous, key[1])
+            history.closed_minutes.add(key[1])
+            while len(history.closed_minutes) > self._retention.closed_minutes_per_symbol:
+                self._evict_bucket((bucket.symbol, min(history.closed_minutes)))
+        return result
 
     @property
     def watermark(self) -> datetime | None:
-        """Return the highest ``trade.timestamp`` folded so far, or ``None``.
-
-        Monotonic non-decreasing across :meth:`update` calls. Exposed so a
-        driver loop can detect whether the feed's event-clock is still
-        advancing and trigger an idle flush when it stalls.
+        """Return the greatest received event timestamp, including replays and refusals.
 
         Returns:
-            The event watermark, or ``None`` before the first trade.
+            The greatest received event timestamp, or None before the first update.
         """
         return self._watermark
 
     @property
     def late_trades_after_close(self) -> int:
-        """Return how many trades arrived for an already-emitted minute.
-
-        Each such trade lands in (or re-opens) a bucket whose
-        ``(symbol, minute)`` was already emitted by one of the pop
-        methods, so its eventual emission is a CORRECTIVE candle that
-        re-fragments the SCD2 row — the failure class behind the
-        2026-06 Kraken Equities candle-fragmentation incident. A fresh
-        re-open additionally logs a WARNING with the symbol and minute.
-        This counter is the agreed trigger for widening the
-        event-watermark grace or the idle-flush bound: zero in steady
-        state; any growth means the close predicate fired too early for
-        the feed's real delay.
+        """Return accepted unique late trades folded into full retained correction state.
 
         Returns:
-            Count of late trades since construction (monotonic).
+            The cumulative number of accepted late trades since construction.
         """
         return self._late_trades_after_close
 
     @property
     def update_count(self) -> int:
-        """Return the total number of trades folded so far.
-
-        A monotonically increasing activity counter (exposed for the
-        idle-flush driver and tests/metrics, like :meth:`active_buckets`). A
-        driver compares it across ticks to distinguish "the feed delivered
-        trades" (which must DEFER an idle flush) from "the feed is silent" —
-        crucially even when those trades do NOT advance the event watermark
-        (out-of-order, duplicate, or same-minute delayed batches whose
-        timestamp is ``<=`` the watermark). Keying idle detection on the
-        watermark alone would wrongly flush mid-activity.
+        """Return every received update so duplicate traffic still defers idle flushing.
 
         Returns:
-            Count of :meth:`update` calls since construction.
+            The cumulative number of update calls, including duplicates and refusals.
         """
         return self._update_count
 
-    def _emit_and_remove(self, should_emit: Callable[[int], bool]) -> list[CandleUpdate]:
-        """Emit + discard every bucket whose minute satisfies ``should_emit``.
-
-        Shared kernel behind :meth:`pop_completed`,
-        :meth:`pop_completed_by_event_watermark`, and :meth:`pop_all` so the
-        OHLCV-to-:class:`CandleUpdate` projection lives in one place. Also
-        advances the per-symbol closed-minute watermark that feeds
-        :attr:`late_trades_after_close` — every pop path (including the
-        idle flush) counts as a close for late-trade accounting.
-
-        A bucket carrying no volume at all falls back to ``b.close`` rather
-        than to ``0.0``. A bucket exists here only because at least one trade
-        was accumulated into it, so its OHLC names a real traded price; zero
-        would price that bar at nothing for every reader joining on VWAP.
-        This is the third and last copy of the same guard — the other two are
-        ``CandleAggregator._to_candle_update`` and ``_build_rows`` in
-        ``scripts/backfill_synth_candles.py``. All three write into the same
-        durable candle plane, so they must agree.
-
-        Args:
-            should_emit: Predicate over a bucket's minute-start UNIX
-                timestamp (int seconds); ``True`` emits + removes that
-                bucket, ``False`` leaves it in place.
+    @property
+    def refused_trades(self) -> int:
+        """Return updates withheld because their complete minute or identity was unproven.
 
         Returns:
-            The emitted candles, in arbitrary order.
+            The cumulative number of refused trade updates since construction.
         """
-        out: list[CandleUpdate] = []
-        to_remove: list[str] = []
-        for key, b in self._builders.items():
-            if not should_emit(int(b.interval_begin.timestamp())):
-                continue
-            vwap = b.vwap_sum / b.volume if b.volume > 0 else b.close
-            out.append(
-                CandleUpdate(
-                    symbol=b.symbol,
-                    open=b.open,
-                    high=b.high,
-                    low=b.low,
-                    close=b.close,
-                    vwap=vwap,
-                    trades=b.trades,
-                    volume=b.volume,
-                    interval_begin=b.interval_begin,
-                    interval=self._interval_s,
-                )
-            )
-            to_remove.append(key)
-            begin_ts = int(b.interval_begin.timestamp())
-            prev_closed = self._closed_minute.get(b.symbol)
-            if prev_closed is None or begin_ts > prev_closed:
-                self._closed_minute[b.symbol] = begin_ts
-        for key in to_remove:
-            del self._builders[key]
-        return out
+        return self._refused_trades
 
-    def active_buckets(self) -> int:
-        """Return the number of in-flight buckets — exposed for tests / metrics.
+    @property
+    def duplicate_trades(self) -> int:
+        """Return exact stable-ID redeliveries ignored without changing candle economics.
 
         Returns:
-            Count of ``(symbol, minute)`` accumulators currently holding
-            state. On the wall-clock path this equals the distinct symbols
-            with a trade in the current still-open minute; on the
-            event-watermark path it also includes minutes still inside the
-            watermark's ``interval + grace`` window (a delayed feed can hold
-            a few minutes per symbol). Past minutes are popped by
-            :meth:`pop_completed` / :meth:`pop_completed_by_event_watermark`.
+            The cumulative number of exact identified trade redeliveries ignored.
+        """
+        return self._duplicate_trades
+
+    @property
+    def retained_buckets(self) -> int:
+        """Return all pending and emitted accumulators under the global bucket cap.
+
+        Returns:
+            The number of currently retained full accumulators.
         """
         return len(self._builders)
+
+    @property
+    def retained_trade_ids(self) -> int:
+        """Return all retained identities under the global ID cap.
+
+        Returns:
+            The number of currently retained stable trade identities.
+        """
+        return len(self._trade_ids)
+
+    @property
+    def tracked_symbols(self) -> int:
+        """Return symbol coverage histories under the global symbol cap.
+
+        Returns:
+            The number of currently retained symbol coverage histories.
+        """
+        return len(self._histories)
+
+    def active_buckets(self) -> int:
+        """Return dirty buckets waiting for emission, excluding retained clean history.
+
+        Returns:
+            The number of dirty accumulators waiting for a pop operation.
+        """
+        return len(self._pending)

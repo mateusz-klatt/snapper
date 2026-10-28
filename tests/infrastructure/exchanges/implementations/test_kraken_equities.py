@@ -21,6 +21,7 @@ from snapper.core.json_types import JsonValue
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
@@ -2852,9 +2853,9 @@ class TestOnWsMessage:
 
         Given: A trade update WS message arrives via the equities channel,
         When: ``_on_ws_message`` is called,
-        Then: ``_candle_builder.active_buckets()`` becomes 1 —
-            confirming the trade-handler path wires the builder, not
-            just the trade queue. Regression guard analogous to the
+        Then: The builder records the update and withholds its unknown leading
+            minute, confirming the handler wires cold-start protection as well
+            as the trade queue. Regression guard analogous to the
             Kraken Futures test for the same property; without it,
             the live candle stream would silently stay empty.
         """
@@ -2875,7 +2876,9 @@ class TestOnWsMessage:
             ],
         }
         await client._on_ws_message(msg)
-        assert client._candle_builder.active_buckets() == 1
+        assert client._candle_builder.update_count == 1
+        assert client._candle_builder.refused_trades == 1
+        assert client._candle_builder.active_buckets() == 0
 
     @pytest.mark.asyncio
     async def test_trade_message_handles_non_symbol_items(
@@ -3825,6 +3828,7 @@ class TestNotImplementedMethods:
             bucket stays open.
         """
         past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
+        client._candle_builder = TradeCandleBuilder(history_start=past_minute)
         client._candle_builder.update(
             TradeUpdate(
                 symbol="MNQM6-CME",
@@ -3880,6 +3884,7 @@ class TestNotImplementedMethods:
             yields it.
         """
         minute = _dt(2026, 6, 8, 14, 39, tzinfo=_UTC)
+        client._candle_builder = TradeCandleBuilder(history_start=minute)
         client._candle_builder.update(
             TradeUpdate(
                 symbol="MNQM6-CME",

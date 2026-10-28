@@ -325,8 +325,11 @@ async def _next_v3_recording(
     return request, result
 
 
+@pytest.mark.parametrize("handoff", ["predecessor_admission", "selected_result"])
 async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history_handoffs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handoff: Literal["predecessor_admission", "selected_result"],
 ) -> None:
     """Prove actual successor conservation before testing lost admission or incomplete read results.
 
@@ -367,23 +370,18 @@ async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history
             )
 
         with monkeypatch.context() as scoped:
-            scoped.setattr(
-                family_history, "get_native_financial_event_family", lose_predecessor_witness
-            )
+            if handoff == "predecessor_admission":
+                scoped.setattr(
+                    family_history, "get_native_financial_event_family", lose_predecessor_witness
+                )
+                expected_error = "native_position_prior_admission_migration_required"
+            else:
+                scoped.setattr(
+                    family_history, "load_native_position_history_v2", omit_selected_result
+                )
+                expected_error = "native_position_event_not_known_at_cutoff"
             async with repository.session() as session:
-                with pytest.raises(
-                    NativeFinancialBindingError,
-                    match="native_position_prior_admission_migration_required",
-                ):
-                    await family_history.get_bound_native_position_family(
-                        session, second.position.public_id, datetime.now(UTC)
-                    )
-        with monkeypatch.context() as scoped:
-            scoped.setattr(family_history, "load_native_position_history_v2", omit_selected_result)
-            async with repository.session() as session:
-                with pytest.raises(
-                    NativeFinancialBindingError, match="native_position_event_not_known_at_cutoff"
-                ):
+                with pytest.raises(NativeFinancialBindingError, match=expected_error):
                     await family_history.get_bound_native_position_family(
                         session, second.position.public_id, datetime.now(UTC)
                     )
