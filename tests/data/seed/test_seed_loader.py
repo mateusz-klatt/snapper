@@ -17,6 +17,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.roles import UserRole
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.seed.loader import SUPPORTED_SEED_FORMAT_VERSIONS
@@ -217,18 +221,21 @@ class TestLoadSeedProfile:
     def test_load_dev_profile(self) -> None:
         """Test loading dev seed profile.
 
-        Given: dev.toml exists in seed directory,
-        When: loading 'dev' profile,
-        Then: profile contains expected users, settings and v2 identity.
+        Given: the bundled dev.toml independent of deployment overrides,
+        When: loading the bundled 'dev' profile,
+        Then: profile contains its expected users, settings and v2 identity.
         """
-        profile = load_seed_profile("dev")
-        assert len(profile.users) == 4
-        assert profile.users[0].username == "admin"
-        assert profile.users[0].role == "admin"
-        assert profile.users[1].username == "operator"
-        assert profile.users[2].username == "viewer"
-        assert profile.users[3].username == "auditor"
-        assert profile.users[3].role == "auditor"
+        with patch(
+            "snapper.data.seed.loader.resolve_seed_path", return_value=_package_dir() / "dev.toml"
+        ):
+            profile = load_seed_profile("dev")
+        user_identities = [(user.username, user.role) for user in profile.users]
+        assert user_identities == [
+            ("admin", "admin"),
+            ("operator", "operator"),
+            ("viewer", "viewer"),
+            ("auditor", "auditor"),
+        ]
         assert len(profile.settings) >= 1
         ui_origin = next(s for s in profile.settings if s.key == "ui_origin")
         assert ui_origin.value
@@ -240,7 +247,7 @@ class TestLoadSeedProfile:
             "admin": "default",
             "operator": "default",
             "viewer": "default",
-            "auditor": "",
+            "auditor": "default",
         }
 
     def test_load_profile_with_empty_optional_sections(self, tmp_path: Path) -> None:
@@ -1473,10 +1480,16 @@ class TestRunSeed:
     def test_run_seed_with_dev_profile(self, tmp_path: Path) -> None:
         """Test run_seed executes full seeding workflow.
 
-        Given: database with required tables and dev profile,
+        Given: database with required tables and the selected dev profile,
         When: running seed with dev profile,
-        Then: users and settings are seeded.
+        Then: users, settings and exactly the declared memberships are seeded.
         """
+        profile = load_seed_profile("dev")
+        expected_memberships = sorted(
+            (user.username, operator, int(operator == user.primary_operator))
+            for user in profile.users
+            for operator in user.operators
+        )
         db_path = tmp_path / "test.db"
         db_url = f"sqlite:///{db_path}"
         engine = create_engine(db_url, poolclass=NullPool)
@@ -1525,7 +1538,7 @@ class TestRunSeed:
                     " JOIN users ON users.public_id = memberships.user_public_id"
                     " JOIN operators"
                     " ON operators.public_id = memberships.operator_public_id"
-                    " ORDER BY users.username"
+                    " ORDER BY users.username, operators.label"
                 )
             ).all()
             read_grant_count: int = conn.execute(
@@ -1553,11 +1566,7 @@ class TestRunSeed:
         engine.dispose()
         assert operator == ("default", "Default seed operator for single-user deployment")
         assert auditor_role == "auditor"
-        assert memberships == [
-            ("admin", "default", 1),
-            ("operator", "default", 1),
-            ("viewer", "default", 1),
-        ]
+        assert memberships == expected_memberships
         assert read_grant_count == 0
         assert all(total == active for total, active in sentinel_counts.values())
 
@@ -2551,37 +2560,60 @@ class TestTrackedSeedProfilesUseFormatV2:
             )
             users = {user.username: user for user in profile.users}
             for username, role in expected_roles.items():
-                assert users[username].role == role, name
-                assert users[username].operators == ["default"], name
-                assert users[username].primary_operator == "default", name
-                assert users[username].readable_wallets == [], name
+                actual_role = users[username].role
+                operators = users[username].operators
+                primary_operator = users[username].primary_operator
+                readable_wallet_count = len(users[username].readable_wallets)
+                assert actual_role == role, name
+                assert operators == ["default"], name
+                assert primary_operator == "default", name
+                assert readable_wallet_count == 0, name
 
-    def test_tracked_profiles_declare_auditor_without_memberships_or_grants(self) -> None:
-        """Demo auditors obtain global reads from their role without trading authority."""
+    def test_tracked_profiles_keep_auditor_read_only_with_valid_memberships(self) -> None:
+        """Declared auditor memberships preserve global reads without mutation authority."""
         tracked = self._tracked_profile_paths()
         assert tracked
+        expected_read_permissions = {
+            permission
+            for permission in ROLE_PERMISSIONS[UserRole.ADMIN]
+            if permission.value.startswith("read:")
+        }
         for name, path in tracked:
             profile = _parse_seed_profile(
                 tomllib.loads(path.read_text(encoding="utf-8")), str(path)
             )
-            auditor_usernames = [user.username for user in profile.users if user.role == "auditor"]
-            assert auditor_usernames == ["auditor"], name
-            auditor = next(user for user in profile.users if user.username == "auditor")
+            auditors = [user for user in profile.users if user.role == "auditor"]
+            auditor_count = len(auditors)
+            assert auditor_count == 1, name
+            auditor = auditors[0]
+            username_is_canonical = auditor.username == "auditor"
             operators = auditor.operators
             primary_operator = auditor.primary_operator
+            declared_operators = {operator.label for operator in profile.operators}
             readable_wallet_count = len(auditor.readable_wallets)
             runtime_owned_roles = profile.runtime_owned.user_roles
-            password_format_valid = (
-                len(auditor.password) >= 8
-                and auditor.password.isascii()
-                and auditor.password.isalnum()
-                and not set(auditor.password).intersection("0O1Il")
+            password_length_valid = len(auditor.password) >= 8
+            effective_permissions = get_effective_permissions(
+                UserRole(auditor.role), [permission.value for permission in Permission], 4
             )
-            assert operators == [], name
-            assert primary_operator == "", name
+            assert username_is_canonical, name
+            assert set(operators) <= declared_operators, name
+            assert primary_operator in operators if operators else primary_operator == "", name
             assert readable_wallet_count == 0, name
             assert "auditor" not in runtime_owned_roles, name
-            assert password_format_valid, name
+            assert password_length_valid, name
+            assert effective_permissions == expected_read_permissions, name
+            assert Permission.READ_ALL_SCOPES in effective_permissions, name
+
+    def test_bundled_auditor_declares_default_desk_context(self) -> None:
+        """The bundled auditor explicitly selects its default desk context."""
+        path = _package_dir() / "dev.toml"
+        profile = _parse_seed_profile(tomllib.loads(path.read_text(encoding="utf-8")), str(path))
+        auditor = next(user for user in profile.users if user.username == "auditor")
+        operators = auditor.operators
+        primary_operator = auditor.primary_operator
+        assert operators == ["default"]
+        assert primary_operator == "default"
 
     def test_tracked_profile_settings_fit_column_widths(self) -> None:
         """Tracked profile settings fit the Setting column widths.

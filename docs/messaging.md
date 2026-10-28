@@ -1033,12 +1033,34 @@ Key properties:
     restores it; the finalizer itself is not a durable queue.
     Set `persist_intermediate_candles=true` to also persist the in-progress
     `complete=false` frames (superseded by the final).
+- **Trade-built 1m corrections retain the whole minute** — emitting a candle
+    keeps its full accumulator and stable trade identities within bounded
+    retention. Later unique trades update that complete state, preserving
+    event-time open/close, extrema, volume, trade count and VWAP; an exact
+    identified replay is ignored, and equal unidentified trades remain distinct.
+    Conflicting identity payloads or missing retained history are refused rather
+    than published as full replacement fragments. Capacity eviction removes
+    complete bucket state and its identity history together, fencing off partial
+    recreation. A fresh live builder withholds its first observed minute;
+    historical backfill supplies its actual coverage boundary and cannot certify
+    a partial leading minute. Idle flush retains correction history and emits
+    only changed buckets. Refusal and duplicate counters expose these outcomes.
 - **Restart rebuild** — on startup the open window of each higher timeframe is
     rebuilt from the persisted `1m` history (excluding the current open minute,
     which the live stream finalizes), so a mid-window restart does not truncate
     that window's bar. The seed reads each row's durable `complete` flag (not a
     write-time heuristic) to decide finality, so a finalized illiquid bar sealed
     with a pre-close write timestamp is correctly seeded.
+- **Late corrections wait for durable writes** — the higher-timeframe
+    aggregator does not fold an already-finalized minute twice. After the exact
+    complete 1m correction commits, the publisher re-derives affected windows
+    from durable 1m rows. Pending repair clears only after that synthesized
+    output's exact writer acknowledgement. Queue eviction or a failed write
+    re-arms bounded retries; an older output acknowledgement cannot clear a
+    newer correction or expanded source gate. The in-memory repair queue does
+    not survive a hard restart, and exhausted or abandoned work still requires
+    an explicit bounded recovery. Each SCD2 version keeps its own knowledge
+    timestamp; corrections do not rewrite what an older horizon knew.
 - **Forward-fill (opt-in, default off)** — with `candle_forward_fill` enabled, a
     time-driven flush (every 30s) seals a wall-clock-ended window that no later
     1m arrived to close, and forward-fills empty windows with a flat bar
@@ -1046,8 +1068,9 @@ Key properties:
     so a thin instrument still yields a contiguous series. It operates only on the
     live region (windows that opened at or after the publisher's live epoch), so
     seeded/restart windows stay owned by the data path, and a late 1m for an
-    already-sealed window is dropped (counted in `late_rolls_after_close`), never
-    re-emitted. Enable it ONLY where the warm-up corpus is contiguous at the
+    already-sealed window is excluded from the incremental fold (counted in
+    `late_rolls_after_close`). Its durable correction follows the repair path
+    above. Enable it ONLY where the warm-up corpus is contiguous at the
     timeframe — 24/7 crypto qualifies; session-based equities (and 24/5 FX without
     verified weekend rows) must leave it off, or the live series would carry bars
     the strategy was never validated on. This is ENFORCED per venue: the global

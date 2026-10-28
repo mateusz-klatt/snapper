@@ -10346,7 +10346,7 @@ async def test_repair_retry_does_not_suppress_live_bar(
             ]
         )
     )
-    pub._publish_synthesized_candle = AsyncMock()
+    pub._publish_synthesized_candle = AsyncMock(return_value=100)
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
     )
@@ -10357,6 +10357,8 @@ async def test_repair_retry_does_not_suppress_live_bar(
     assert pub._publish_synthesized_candle.await_count == 1
     pub._candle_repair_event.clear()
     await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert repair_key in pub._pending_candle_repairs
+    pub._resolve_candle_repair_output(100, committed=True)
     assert repair_key not in pub._pending_candle_repairs
     assert pub._publish_synthesized_candle.await_count == 2
 
@@ -10779,7 +10781,7 @@ async def test_mixed_exact_and_seeded_repair_requires_both_gates() -> None:
         ]
     )
     pub.repository = SimpleNamespace(get_candles=get_candles)
-    pub._publish_synthesized_candle = AsyncMock()
+    pub._publish_synthesized_candle = AsyncMock(return_value=100)
     assert pub._due_candle_repair_groups() == {}
     await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
     get_candles.assert_not_awaited()
@@ -10789,6 +10791,8 @@ async def test_mixed_exact_and_seeded_repair_requires_both_gates() -> None:
     assert pub._pending_candle_repairs[key].attempts == 1
     await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
     pub._publish_synthesized_candle.assert_awaited_once()
+    assert key in pub._pending_candle_repairs
+    pub._resolve_candle_repair_output(100, committed=True)
     assert key not in pub._pending_candle_repairs
     assert 7 not in pub._committed_candle_write_sequences
 
@@ -11040,7 +11044,7 @@ async def test_seeded_incomplete_repair_waits_until_count_reaches_expected() -> 
             ]
         )
     )
-    pub._publish_synthesized_candle = AsyncMock()
+    pub._publish_synthesized_candle = AsyncMock(return_value=100)
     await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
     pub._publish_synthesized_candle.assert_not_awaited()
     assert pub._pending_candle_repairs[key].attempts == 1
@@ -11053,6 +11057,8 @@ async def test_seeded_incomplete_repair_waits_until_count_reaches_expected() -> 
     assert candle.interval_begin == window
     assert candle.open == 11.0
     assert candle.close == 12.0
+    assert key in pub._pending_candle_repairs
+    pub._resolve_candle_repair_output(100, committed=True)
     assert key not in pub._pending_candle_repairs
     await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
     pub._publish_synthesized_candle.assert_awaited_once()
@@ -11277,6 +11283,340 @@ async def test_derive_repaired_synthesized_candle_ignores_nonmatching_emit(
 
     monkeypatch.setattr("snapper.messaging.publishers.base.CandleAggregator", WrongWindowAggregator)
     assert await pub._derive_repaired_synthesized_candle(key) is None
+
+
+async def _enqueued_ack_repair(
+    timeframes: tuple[str, ...] = ("5m",), queue_size: int = 0
+) -> tuple[DummyPublisher, _CandleRepairKey]:
+    """Queue real repair outputs after the exact native correction durably commits."""
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", minute)
+    pub._candle_aggregator = CandleAggregator(list(timeframes))
+    pub._candle_write_queue = asyncio.Queue(maxsize=queue_size)
+    for timeframe in timeframes:
+        pub._candle_aggregator._closed_window[("BTC-USD", timeframe)] = int(minute.timestamp())
+    pub._should_persist_row = Mock(return_value=True)
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            return_value=[
+                _persisted_candle_row(open_at=_candle_minute(10, index), close=10.0 + index)
+                for index in range(5)
+            ]
+        ),
+        upsert_candles=AsyncMock(return_value=1),
+    )
+    pub._record_late_candle_drops([LateCandleDrop("BTC-USD", minute)])
+    correction = _finalized_row(open_at=minute, complete=True)
+    pub._enqueue_finalized_candles([("BTC-USD", correction)], ExchangeEnum.KRAKEN, "kraken")
+    queued_correction = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([queued_correction])
+
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+
+    return pub, key
+
+
+@pytest.mark.asyncio
+async def test_repair_remains_pending_until_synthesized_output_commits() -> None:
+    """A queued higher-timeframe replacement is not yet a durable repair.
+
+    Given: a late complete 1m correction has committed and its 5m window is closed,
+    When: the real repair path derives and enqueues the synthesized replacement,
+    Then: the repair remains pending until that exact output row commits.
+    """
+    pub, key = await _enqueued_ack_repair()
+
+    assert pub._candle_write_queue.qsize() == 1
+    assert key in pub._pending_candle_repairs
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert pub._candle_write_queue.qsize() == 1
+    replacement = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([replacement])
+    assert key not in pub._pending_candle_repairs
+    assert pub._candle_repair_output_keys == {}
+    assert pub._committed_candle_write_sequences == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["generic", "integrity"])
+async def test_dropped_repair_output_retries_until_its_replacement_commits(failure: str) -> None:
+    """A writer drop cannot turn a queued repair into a successful materialization.
+
+    Given: a committed 1m correction has a synthesized replacement queued,
+    When: a generic or integrity failure drops that replacement before commit,
+    Then: the repair retries and clears only after a later replacement commits.
+    """
+    pub, key = await _enqueued_ack_repair()
+    replacement = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    error = (
+        RuntimeError("temporary write failure")
+        if failure == "generic"
+        else IntegrityError("test statement", None, RuntimeError("constraint"))
+    )
+    with patch.object(pub.repository, "upsert_candles", new=AsyncMock(side_effect=error)):
+        await pub._flush_candle_batch([replacement])
+
+    pending = pub._pending_candle_repairs[key]
+    assert pending.output_sequence is None
+    assert pending.attempts == 1
+    assert pub._candle_repair_event.is_set()
+    assert pub._candle_repair_output_keys == {}
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    retry = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([retry])
+    assert key not in pub._pending_candle_repairs
+    assert pub._candle_repair_output_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_evicted_repair_output_survives_group_result_collection() -> None:
+    """Eviction during another timeframe's publish cannot clear the first repair.
+
+    Given: 5m and 1h repairs share a writer queue with capacity for one row,
+    When: the 1h output evicts the 5m output before repair results are collected,
+    Then: each repair clears independently after its own replacement commits.
+    """
+    pub, key_5m = await _enqueued_ack_repair(("5m", "1h"), queue_size=1)
+    key_1h = _CandleRepairKey("BTC-USD", "1h", key_5m.window_begin)
+    assert pub._pending_candle_repairs[key_5m].output_sequence is None
+    assert pub._pending_candle_repairs[key_5m].attempts == 1
+    assert pub._pending_candle_repairs[key_1h].output_sequence is not None
+    output_1h = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    assert output_1h["timeframe"] == "1h"
+    await pub._flush_candle_batch([output_1h])
+    assert key_1h not in pub._pending_candle_repairs
+    assert key_5m in pub._pending_candle_repairs
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    output_5m = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    assert output_5m["timeframe"] == "5m"
+    await pub._flush_candle_batch([output_5m])
+    assert pub._pending_candle_repairs == {}
+    assert pub._candle_repair_output_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_old_output_acknowledgement_does_not_clear_a_newer_correction() -> None:
+    """A newer correction owns a different output even when the old write commits last.
+
+    Given: an older repair output is awaiting its writer acknowledgement,
+    When: another 1m correction produces a new output before the older output commits,
+    Then: the older acknowledgement cannot clear the new output's pending repair.
+    """
+    pub, key = await _enqueued_ack_repair()
+    old_output = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    minute = _candle_minute(10, 1)
+    pub._record_late_candle_drops([LateCandleDrop("BTC-USD", minute)])
+    correction = _finalized_row(open_at=minute, complete=True)
+    pub._enqueue_finalized_candles([("BTC-USD", correction)], ExchangeEnum.KRAKEN, "kraken")
+    queued_correction = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([queued_correction])
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    new_sequence = pub._pending_candle_repairs[key].output_sequence
+    await pub._flush_candle_batch([old_output])
+    assert pub._pending_candle_repairs[key].output_sequence == new_sequence
+    new_output = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([new_output])
+    assert pub._pending_candle_repairs == {}
+    assert pub._candle_repair_output_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_repeated_output_drops_exhaust_the_existing_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated output failures clean all bounded repair and acknowledgement state.
+
+    Given: a repair has a retry budget of two failed output writes,
+    When: the writer drops both the first replacement and its retry,
+    Then: exhaustion clears the repair, late-drop ownership, and acknowledgement state.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_REPAIR_MAX_ATTEMPTS", 2)
+    pub, key = await _enqueued_ack_repair()
+    for attempt in range(2):
+        output = pub._candle_write_queue.get_nowait()
+        pub._candle_write_queue.task_done()
+        with patch.object(
+            pub.repository, "upsert_candles", new=AsyncMock(side_effect=RuntimeError("write"))
+        ):
+            await pub._flush_candle_batch([output])
+        if attempt == 0:
+            assert key in pub._pending_candle_repairs
+            await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert pub._pending_candle_repairs == {}
+    assert pub._pending_late_candle_drops == {}
+    assert pub._candle_repair_output_keys == {}
+    assert pub._committed_candle_write_sequences == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_ambiguous_output_write_keeps_the_same_acknowledgement_gate(cancelled: bool) -> None:
+    """Disconnect or cancellation leaves the output retryable rather than claiming success.
+
+    Given: a queued repair output owns an exact pending writer sequence,
+    When: disconnect or cancellation interrupts its upsert before acknowledgement,
+    Then: the same output stays pending until its subsequent successful commit.
+    """
+    pub, key = await _enqueued_ack_repair()
+    output = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    sequence = pub._pending_candle_repairs[key].output_sequence
+    error = asyncio.CancelledError() if cancelled else ConnectionError("connection reset")
+    expected = asyncio.CancelledError if cancelled else _WriterSessionLostError
+    with (
+        patch.object(pub.repository, "upsert_candles", new=AsyncMock(side_effect=error)),
+        pytest.raises(expected),
+    ):
+        await pub._flush_candle_batch([output])
+    assert pub._pending_candle_repairs[key].output_sequence == sequence
+    assert pub._candle_repair_output_keys
+    await pub._flush_candle_batch([output])
+    assert pub._pending_candle_repairs == {}
+    assert pub._candle_repair_output_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_an_inflight_repair_before_forgetting_its_acknowledgement() -> None:
+    """The existing shutdown writer keepalive durably drains queued repair outputs.
+
+    Given: a repair output is queued and a live writer can commit it,
+    When: the candle pipeline performs its graceful shutdown drain,
+    Then: the output commits before repair ownership clears and the writer is joined.
+    """
+    pub, key = await _enqueued_ack_repair()
+    pub.running = False
+
+    async def _writer() -> None:
+        while pub._candle_shutdown_repair_drain_active or not pub._candle_write_queue.empty():
+            try:
+                output = await asyncio.wait_for(pub._candle_write_queue.get(), timeout=0.01)
+            except TimeoutError:
+                continue
+            assert key in pub._pending_candle_repairs
+            await pub._flush_candle_batch([output])
+            pub._candle_write_queue.task_done()
+
+    pub._candle_writer_task = asyncio.create_task(_writer())
+    await pub._stop_candle_pipeline()
+    assert pub._candle_writer_task is None
+    assert pub._candle_write_queue.empty()
+    assert pub._pending_candle_repairs == {}
+    assert pub._candle_repair_output_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_new_seeded_source_gate_invalidates_an_older_queued_output() -> None:
+    """Expanding source evidence cannot be satisfied by an older derived output.
+
+    Given: a repair has already queued output derived from its previous source gate,
+    When: the required source set expands and the older output commits,
+    Then: the repair remains pending until output from the expanded gate commits.
+    """
+    pub, key = await _enqueued_ack_repair()
+    output = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    pub._schedule_seeded_incomplete_candle_repair_key(key, frozenset({_candle_minute(10, 0)}))
+    pub._schedule_seeded_incomplete_candle_repair_key(key, frozenset({_candle_minute(10, 1)}))
+    await pub._flush_candle_batch([output])
+    assert key in pub._pending_candle_repairs
+    assert pub._pending_candle_repairs[key].output_sequence is None
+    assert pub._candle_repair_output_keys == {}
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    replacement = pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+    await pub._flush_candle_batch([replacement])
+    assert pub._pending_candle_repairs == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_old_source_read_does_not_spend_a_new_generation_retry() -> None:
+    """A failed derivation cannot consume the retry budget of expanded source evidence.
+
+    Given: a repair starts reading its current required source set,
+    When: that set expands before the old read fails and its result is collected,
+    Then: the new source generation retains its untouched retry budget.
+    """
+    pub, key = await _enqueued_ack_repair()
+    pub._forget_candle_write_sequence(pub._candle_write_queue.get_nowait())
+    pub._candle_write_queue.task_done()
+    pub._schedule_seeded_incomplete_candle_repair_key(key, frozenset({_candle_minute(10, 0)}))
+
+    async def _expand_then_fail(*_args: object, **_kwargs: object) -> None:
+        pub._schedule_seeded_incomplete_candle_repair_key(key, frozenset({_candle_minute(10, 1)}))
+        raise RuntimeError("source read failed")
+
+    with patch.object(pub.repository, "get_candles", new=AsyncMock(side_effect=_expand_then_fail)):
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert pub._pending_candle_repairs[key].attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_persisted_output_never_completes_a_repair() -> None:
+    """An unresolved instrument cannot produce a successful persisted repair.
+
+    Given: a committed source correction is waiting for a replacement output,
+    When: instrument resolution prevents the repair from queuing a durable row,
+    Then: the repair remains pending with no completed output sequence.
+    """
+    pub, key = await _enqueued_ack_repair()
+    pub._forget_candle_write_sequence(pub._candle_write_queue.get_nowait())
+    pub._candle_write_queue.task_done()
+    pub._ensure_instrument = AsyncMock(return_value=None)
+    assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is False
+    assert key in pub._pending_candle_repairs
+    assert pub._pending_candle_repairs[key].output_sequence is None
+
+
+def test_obsolete_output_receipts_cannot_clear_unrelated_repair_state() -> None:
+    """Late bookkeeping receipts are harmless after ownership has changed or disappeared.
+
+    Given: output receipts refer to removed ownership or an older output sequence,
+    When: those obsolete acknowledgements are resolved,
+    Then: obsolete receipts clear without disturbing the newer pending output.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    pub._candle_repair_output_keys[10] = key
+    pub._resolve_candle_repair_output(10, committed=True)
+    pub._pending_candle_repairs[key] = _PendingCandleRepair(output_sequence=12)
+    pub._candle_repair_output_keys[11] = key
+    pub._resolve_candle_repair_output(11, committed=True)
+    assert pub._pending_candle_repairs[key].output_sequence == 12
+    assert pub._candle_repair_output_keys == {}
+
+
+def test_uncommitted_and_late_drop_cleanup_accepts_already_removed_repair_keys() -> None:
+    """Idempotent teardown removes dangling owners without inventing completed output.
+
+    Given: late-drop ownership still references an already removed repair key,
+    When: uncommitted-write and late-drop cleanup revisit that missing key,
+    Then: cleanup completes idempotently with no repair or acknowledgement state left.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    late_key = _LateCandleDropKey("BTC-USD", key.window_begin)
+    pub._drop_pending_candle_repair(key)
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(
+        write_sequence=1, repair_keys={key}
+    )
+    pub._drop_uncommitted_candle_write_dependents(1)
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(repair_keys={key})
+    pub._drop_late_candle_drop(late_key)
+    assert pub._pending_late_candle_drops == {}
+    assert pub._pending_candle_repairs == {}
+    assert pub._candle_repair_output_keys == {}
 
 
 @pytest.mark.asyncio

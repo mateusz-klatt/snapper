@@ -309,6 +309,29 @@ async def test_trailing_partial_only_flushes_no_rows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_partial_leading_history_never_replaces_a_complete_minute() -> None:
+    """An explicit mid-minute backfill start cannot certify its missing earlier trades.
+
+    Given: A replay beginning halfway through its leading minute,
+    When: The actual backfill service folds its retained trades,
+    Then: Only the following fully covered minute reaches candle upsert.
+    """
+    repo = FakeRepository(
+        ["BTC-USD"],
+        {"BTC-USD": "inst-btc"},
+        [
+            ("inst-btc", _trade(_dt(0, 40), 100.0, trade_id="leading-fragment")),
+            ("inst-btc", _trade(_dt(1, 5), 110.0, trade_id="complete-minute")),
+        ],
+    )
+    service = _make_service(["BTC-USD"], False, start=_dt(0, 30), end=_dt(2))
+    await _run_service(service, repo)
+    rows = [row for batch in repo.upsert_batches for row in batch]
+    assert [row["open_at"] for row in rows] == [_dt(1)]
+    assert rows[0]["volume"] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_single_instrument_multiple_minutes_skips_trailing_partial() -> None:
     """A partial trailing minute is not emitted.
 

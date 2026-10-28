@@ -132,17 +132,6 @@ _INCOMPLETE_POINT_COUNT: Final[int] = 121
 _OSS_BASELINE_REFUSAL: Final[str] = (
     "database is not a fresh migrated and bundled-OSS-seeded P&L UAT baseline"
 )
-_OSS_BASELINE_TABLE_COUNTS: Final[dict[str, int]] = {
-    "operators": 1,
-    "settings": 13,
-    "symbol_aliases": 36,
-    "symbol_exchange_capabilities": 20,
-    "symbols": 11,
-    "user_operator_memberships": 3,
-    "users": 4,
-    "wallet_credentials": 1,
-    "wallets": 1,
-}
 
 
 def _bundled_oss_seed_users() -> dict[str, SeedUser]:
@@ -158,7 +147,22 @@ def _bundled_oss_seed_users() -> dict[str, SeedUser]:
 
 
 _OSS_BASELINE_USERS: Final[dict[str, SeedUser]] = _bundled_oss_seed_users()
-_OSS_BASELINE_MEMBERSHIP_USERS: Final[tuple[str, ...]] = ("admin", "operator", "viewer")
+_OSS_BASELINE_MEMBERSHIPS: Final[tuple[tuple[str, str, bool], ...]] = tuple(
+    (username, operator_label, operator_label == user.primary_operator)
+    for username, user in _OSS_BASELINE_USERS.items()
+    for operator_label in user.operators
+)
+_OSS_BASELINE_TABLE_COUNTS: Final[dict[str, int]] = {
+    "operators": 1,
+    "settings": 13,
+    "symbol_aliases": 36,
+    "symbol_exchange_capabilities": 20,
+    "symbols": 11,
+    "user_operator_memberships": len(_OSS_BASELINE_MEMBERSHIPS),
+    "users": len(_OSS_BASELINE_USERS),
+    "wallet_credentials": 1,
+    "wallets": 1,
+}
 _OSS_BASELINE_ENCRYPTED_SETTINGS: Final[frozenset[str]] = frozenset(
     {"gemini_api_key", "kimi_api_key"}
 )
@@ -1002,8 +1006,9 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
         .scalars()
         .all()
     )
+    username_to_public_id = {user.username: user.public_id for user in user_rows}
     user_public_ids = {
-        user.public_id for user in user_rows if user.username in _OSS_BASELINE_MEMBERSHIP_USERS
+        username_to_public_id[username] for username, _, _ in _OSS_BASELINE_MEMBERSHIPS
     }
     try:
         credential_envelope: object = json.loads(
@@ -1060,10 +1065,11 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
         True,
     )
     public_id_to_username = {user.public_id: user.username for user in user_rows}
+    public_id_to_operator_label = {operator.public_id: operator.label}
     membership_state = tuple(
         (
             public_id_to_username.get(membership.user_public_id),
-            membership.operator_public_id == operator.public_id,
+            public_id_to_operator_label.get(membership.operator_public_id),
             membership.is_primary,
             membership.known_to,
             membership.session_id == seed_session_id,
@@ -1073,8 +1079,10 @@ async def _require_fresh_oss_seed_baseline(session: AsyncSession) -> None:
         for membership in memberships
     )
     expected_membership_state = tuple(
-        (username, True, True, KNOWN_TO_MAX, True, index, index)
-        for index, username in enumerate(_OSS_BASELINE_MEMBERSHIP_USERS, start=1)
+        (username, operator_label, is_primary, KNOWN_TO_MAX, True, index, index)
+        for index, (username, operator_label, is_primary) in enumerate(
+            _OSS_BASELINE_MEMBERSHIPS, start=1
+        )
     )
     if (
         tenant_state,

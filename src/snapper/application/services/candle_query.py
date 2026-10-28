@@ -125,6 +125,9 @@ class CandleQueryRow:
             sourced rows.
         sequence_id: Producer publisher sequence number. ``None`` for
             cache-sourced rows.
+        complete: Persisted completion flag for DB rows. Closed cache snapshots
+            and existing callers retain the final-bar default; this flag does
+            not establish producer provenance or cross-timeframe coherence.
     """
 
     open_at: datetime
@@ -140,6 +143,7 @@ class CandleQueryRow:
     timestamp: datetime | None
     session_id: str | None
     sequence_id: int | None
+    complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +255,7 @@ def row_from_db(row: CandleRow, timeframe: str) -> CandleQueryRow:
         timestamp=row["timestamp"],
         session_id=row["session_id"],
         sequence_id=row["sequence_id"],
+        complete=row["complete"],
     )
 
 

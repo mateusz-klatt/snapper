@@ -1,6 +1,8 @@
 """Tests for Kraken Futures subscription ACK health tracking."""
 
 from collections.abc import Generator
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import call
@@ -227,7 +229,7 @@ class TestKrakenFuturesDataMarks:
                 quantity=1.0,
                 price=1.0,
                 ord_type="fill",
-                timestamp=MagicMock(),
+                timestamp=datetime(1970, 1, 1, microsecond=1_000, tzinfo=UTC),
                 trade_id="t1",
             ),
         ):
@@ -261,7 +263,7 @@ class TestKrakenFuturesDataMarks:
                 quantity=1.0,
                 price=1.0,
                 ord_type="fill",
-                timestamp=MagicMock(),
+                timestamp=datetime(1970, 1, 1, microsecond=1_000, tzinfo=UTC),
                 trade_id="t1",
             ),
         ):

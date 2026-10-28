@@ -22,6 +22,8 @@ from loguru import logger
 import snapper.infrastructure.exchanges._subscription_health as health_mod
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
+from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
@@ -1881,9 +1883,9 @@ class TestOnWsMessage:
 
         Given: A live ``feed=trade`` WS message,
         When: ``_on_ws_message`` is called,
-        Then: ``_candle_builder.active_buckets()`` becomes >= 1 — proving
-            the trade-handler path wires the builder, not just the
-            trade queue. Regression guard for a defect where
+        Then: The builder records the update and withholds its unknown leading
+            minute, proving the handler wires the builder and preserves cold-start
+            protection. Regression guard for a defect where
             ``builder.update`` was missing on the Kraken Futures hot
             path (Kraken Equities had it; Futures was an accidental
             omission).
@@ -1898,7 +1900,9 @@ class TestOnWsMessage:
             "side": "buy",
         }
         await client._on_ws_message(msg)
-        assert client._candle_builder.active_buckets() == 1
+        assert client._candle_builder.update_count == 1
+        assert client._candle_builder.refused_trades == 1
+        assert client._candle_builder.active_buckets() == 0
 
     @pytest.mark.asyncio
     async def test_live_trade_messages_fold_each_into_candle_builder(
@@ -1906,31 +1910,43 @@ class TestOnWsMessage:
     ) -> None:
         """Every live trade envelope folds into the builder.
 
-        Given: Two live ``feed=trade`` messages,
-        When: ``_on_ws_message`` is called for each,
+        Given: Complete history and two distinct live ``feed=trade`` identities,
+        When: Each is delivered and the second stable identity is redelivered,
         Then: The candle bucket for the current minute holds 2 trades
             in its ``trades`` counter.
         """
+        client._candle_builder = TradeCandleBuilder(history_start=datetime(2022, 1, 1, tzinfo=UTC))
         assert client._candle_builder.active_buckets() == 0
         first_msg = {
             "feed": "trade",
-            "product_id": "PI_XBTUSD",
+            "product_id": "PF_XBTUSD",
             "time": 1640995200000,
             "qty": 1.0,
             "price": 66600.0,
             "side": "buy",
+            "trade_id": 1,
         }
         second_msg = {
             "feed": "trade",
-            "product_id": "PI_XBTUSD",
-            "time": 1640995320000,
+            "product_id": "PF_XBTUSD",
+            "time": 1640995201000,
             "qty": 1.0,
             "price": 66601.0,
             "side": "buy",
+            "trade_id": 2,
         }
-        await client._on_ws_message(first_msg)
-        await client._on_ws_message(second_msg)
+        with (
+            patch.object(mod, "parse_kraken_futures_trade", parse_kraken_futures_trade),
+            patch(
+                "snapper.infrastructure.exchanges.adapters.kraken_futures.kraken_futures_ws_to_native",
+                return_value="BTC-USD-PERP",
+            ),
+        ):
+            await client._on_ws_message(first_msg)
+            await client._on_ws_message(second_msg)
+            await client._on_ws_message(second_msg)
         assert client._candle_builder.active_buckets() == 1
+        assert client._candle_builder.duplicate_trades == 1
         candles = client._candle_builder.pop_completed(datetime.now(UTC) + timedelta(minutes=2))
         assert len(candles) == 1
         assert candles[0].trades == 2
@@ -2726,6 +2742,7 @@ class TestSubscribeCandles:
             the builder.
         """
         past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
+        client._candle_builder = TradeCandleBuilder(history_start=past_minute)
         trade = TradeUpdate(
             symbol="BTC-USD-PERP",
             side="buy",

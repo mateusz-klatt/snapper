@@ -422,10 +422,11 @@ class _AnchorScope:
 
 @dataclass(frozen=True, slots=True)
 class _SeriesReadEvidence:
-    """One preloaded anchor read and its exact two-cut prefix bundle."""
+    """One preloaded anchor, its certified request prefix, and any actual activation proof."""
 
     visible_anchor: PortfolioPnlAnchorRow | None
-    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
+    request_prefix: PnlTimelineExecutionPrefix
+    activation_bundle: PnlTimelineExecutionPrefixBundle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +435,7 @@ class PnlSeriesReplayOptions:
 
     Bundles the builder's two independent optional replay knobs into one argument
     so its parameter surface stays small: the marker endpoint's preloaded anchor
-    read and prefix bundle (avoiding a duplicate durable boundary read), and the
+    read and request prefix (avoiding a duplicate durable boundary read), and the
     snapshotter's per-exchange baseline watermark map that turns on R3 late-fill
     replay metadata. Both default to absent, which reproduces the plain series
     build with no preloaded evidence and no replay metadata.
@@ -518,7 +519,7 @@ class _AnchorLoadResult:
 
     anchor: _ResolvedPnlAnchor | None
     scope: _AnchorScope
-    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle | None
+    execution_prefix: PnlTimelineExecutionPrefix | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3745,6 +3746,53 @@ async def _load_anchor_execution_prefix_bundle(
         raise PnlAnchorEvidenceError("execution prefix cannot be proven at activation") from exc
 
 
+async def _load_timeline_read_evidence(
+    repo: Repository,
+    scope: _AnchorScope,
+    allow_anchor_creation: bool,
+) -> _SeriesReadEvidence:
+    """Share one certified request prefix without inventing an activation proof.
+
+    Existing anchors need only the request cut, whose nullable intent reaches
+    the certified repository read unchanged. A missing anchor retains the real
+    two-cut bundle so an authorized writer can prove its activation independently.
+    """
+    visible_anchor = await repo.get_portfolio_pnl_anchor(
+        scope.wallet_public_id,
+        scope.mode,
+        scope.valuation_ccy,
+        None if allow_anchor_creation else scope.knowledge_horizon,
+    )
+    if visible_anchor is not None:
+        request_prefix = await repo.get_pnl_timeline_execution_prefix(
+            scope.wallet_public_id,
+            scope.mode,
+            scope.requested_horizon,
+        )
+        return _SeriesReadEvidence(
+            visible_anchor=visible_anchor,
+            request_prefix=request_prefix,
+        )
+    activation_bundle = (
+        await _load_anchor_execution_prefix_bundle(repo, scope)
+        if allow_anchor_creation
+        else await _load_execution_prefix_bundle(
+            repo,
+            _ExecutionPrefixRequest(
+                wallet_public_id=scope.wallet_public_id,
+                mode=scope.mode,
+                request_as_of=scope.requested_horizon,
+                activation_as_of=scope.requested_horizon,
+            ),
+        )
+    )
+    return _SeriesReadEvidence(
+        visible_anchor=None,
+        request_prefix=activation_bundle["request"],
+        activation_bundle=activation_bundle,
+    )
+
+
 async def _record_anchor_candidate(
     repo: Repository,
     scope: _AnchorScope,
@@ -3892,10 +3940,8 @@ async def _load_or_create_anchor(
         )
     else:
         visible = request.preloaded_evidence.visible_anchor
-    execution_prefix_bundle = (
-        None
-        if request.preloaded_evidence is None
-        else request.preloaded_evidence.execution_prefix_bundle
+    execution_prefix = (
+        None if request.preloaded_evidence is None else request.preloaded_evidence.request_prefix
     )
     if visible is not None:
         return _AnchorLoadResult(
@@ -3906,14 +3952,17 @@ async def _load_or_create_anchor(
                 scope.mode,
                 scope.valuation_ccy,
             ),
-            execution_prefix_bundle=execution_prefix_bundle,
+            execution_prefix=execution_prefix,
         )
     if not request.allow_anchor_creation:
         return _AnchorLoadResult(
             scope=scope,
             anchor=None,
-            execution_prefix_bundle=execution_prefix_bundle,
+            execution_prefix=execution_prefix,
         )
+    execution_prefix_bundle = (
+        None if request.preloaded_evidence is None else request.preloaded_evidence.activation_bundle
+    )
     if execution_prefix_bundle is None:
         execution_prefix_bundle = await _load_anchor_execution_prefix_bundle(
             repo,
@@ -3927,7 +3976,7 @@ async def _load_or_create_anchor(
     return _AnchorLoadResult(
         scope=scope,
         anchor=anchor,
-        execution_prefix_bundle=execution_prefix_bundle,
+        execution_prefix=execution_prefix_bundle["request"],
     )
 
 
@@ -4026,7 +4075,7 @@ async def _load_series_replay_inputs(
     scope: _AnchorScope,
     to_time: datetime,
     anchor: _ResolvedPnlAnchor,
-    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle | None,
+    execution_prefix: PnlTimelineExecutionPrefix | None,
 ) -> _SeriesReplayInputs:
     """Load and bound the post-watermark accounting evidence for one series.
 
@@ -4038,20 +4087,15 @@ async def _load_series_replay_inputs(
     wallet_public_id = scope.wallet_public_id
     mode = scope.mode
     as_of = scope.knowledge_horizon
-    loaded_bundle = (
-        await _load_execution_prefix_bundle(
-            repo,
-            _ExecutionPrefixRequest(
-                wallet_public_id=wallet_public_id,
-                mode=mode,
-                request_as_of=scope.requested_horizon,
-                activation_as_of=scope.requested_horizon,
-            ),
+    loaded_prefix = (
+        await repo.get_pnl_timeline_execution_prefix(
+            wallet_public_id,
+            mode,
+            scope.requested_horizon,
         )
-        if execution_prefix_bundle is None
-        else execution_prefix_bundle
+        if execution_prefix is None
+        else execution_prefix
     )
-    loaded_prefix = loaded_bundle["request"]
     fill_gap_reason = await _scope_has_fill_gap(
         repo,
         wallet_public_id,
@@ -4592,7 +4636,7 @@ async def build_wallet_pnl_series(
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
     Loads the visible durable activation anchor, captures one exact current
-    execution-prefix bundle, filters the per-exchange suffix above the frozen
+    execution prefix, filters the per-exchange suffix above the frozen
     watermarks, and seeds the shard-aware pure builder from rebased opening
     pools. Historical requests never create an absent anchor and return an
     honest empty series. Durable fill gaps and suffix rows whose timestamp is at
@@ -4619,7 +4663,7 @@ async def build_wallet_pnl_series(
             (``current_truth``) that alone unlocks the equity overlay. Historical
             routes pass neither capability; the snapshotter permits no overlay.
         options: Optional replay inputs (D3). Its ``preloaded_evidence`` supplies
-            the marker endpoint's anchor read and prefix bundle so neither durable
+            the marker endpoint's anchor read and request prefix so neither durable
             boundary read is issued twice; its ``baseline_watermarks`` supplies the
             caller's persisted per-exchange watermark map (R3) so, when the scope
             has a post-activation window, the result carries typed replay metadata.
@@ -4671,7 +4715,7 @@ async def build_wallet_pnl_series(
         anchor_load.scope,
         to_time,
         anchor,
-        anchor_load.execution_prefix_bundle,
+        anchor_load.execution_prefix,
     )
     loaded_execution_rows = replay.loaded_execution_rows
     replayed_execution_rows = replay.replayed_execution_rows
@@ -5030,30 +5074,12 @@ async def build_wallet_pnl_timeline(
             ),
         )
     )
-    visible_anchor = await repo.get_portfolio_pnl_anchor(
-        scope.wallet_public_id,
-        scope.mode,
-        scope.valuation_ccy,
-        None if policy.allow_anchor_creation else scope.knowledge_horizon,
+    preloaded_evidence = await _load_timeline_read_evidence(
+        repo,
+        scope,
+        policy.allow_anchor_creation,
     )
-    execution_prefix_bundle = (
-        await _load_anchor_execution_prefix_bundle(repo, scope)
-        if visible_anchor is None and policy.allow_anchor_creation
-        else await _load_execution_prefix_bundle(
-            repo,
-            _ExecutionPrefixRequest(
-                wallet_public_id=scope.wallet_public_id,
-                mode=scope.mode,
-                request_as_of=scope.requested_horizon,
-                activation_as_of=scope.requested_horizon,
-            ),
-        )
-    )
-    preloaded_evidence = _SeriesReadEvidence(
-        visible_anchor=visible_anchor,
-        execution_prefix_bundle=execution_prefix_bundle,
-    )
-    execution_rows = execution_prefix_bundle["request"]["executions"]
+    execution_rows = preloaded_evidence.request_prefix["executions"]
     series = await build_wallet_pnl_series(
         repo,
         wallet_public_id,
@@ -5130,5 +5156,5 @@ async def build_wallet_pnl_timeline(
         markers=tuple(markers),
         marker_limit=PNL_TIMELINE_MARKER_LIMIT,
         markers_truncated=markers_truncated,
-        applied_annulments=tuple(execution_prefix_bundle["request"]["annulments"]),
+        applied_annulments=tuple(preloaded_evidence.request_prefix["annulments"]),
     )

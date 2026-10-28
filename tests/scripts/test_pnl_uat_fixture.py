@@ -41,9 +41,12 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
+from snapper.data.models import Operator
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import Symbol
 from snapper.data.models import TradeCommand
+from snapper.data.models import User
+from snapper.data.models import UserOperatorMembership
 from snapper.data.models import VenueEvent
 from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
@@ -1027,8 +1030,8 @@ async def test_seed_rejects_a_database_behind_schema_head(
         "UPDATE operators SET description = 'changed'",
         "UPDATE user_operator_memberships SET is_primary = 0 WHERE id = 1",
         (
-            "UPDATE user_operator_memberships SET user_public_id = "
-            "(SELECT public_id FROM users WHERE role = 'auditor') WHERE id = 3"
+            "UPDATE user_operator_memberships SET is_primary = 0 WHERE user_public_id = "
+            "(SELECT public_id FROM users WHERE username = 'auditor')"
         ),
         "UPDATE users SET username = 'unexpected-user' WHERE id = 1",
     ],
@@ -1058,6 +1061,63 @@ async def test_seed_rejects_semantically_mutated_oss_baselines(
 
     if not statement.startswith("UPDATE symbols"):
         assert await _symbol_timestamps(oss_seeded_db_url) == before
+    assert await _instrument_count(oss_seeded_db_url) == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_oss_baseline_retains_declared_auditor_membership(
+    oss_seeded_db_url: URL,
+) -> None:
+    """Accept the canonical auditor context without altering its explicit membership.
+
+    Given: A fresh bundled OSS seed declares the auditor's primary default operator,
+    When: The fixture validates its exact baseline,
+    Then: The declared auditor edge remains unchanged and no fixture rows are inserted.
+    """
+    engine = create_async_engine(oss_seeded_db_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await pnl_uat_fixture._require_fresh_oss_seed_baseline(session)
+            memberships = (
+                await session.execute(
+                    select(User.username, Operator.label, UserOperatorMembership.is_primary)
+                    .select_from(UserOperatorMembership)
+                    .join(User, User.public_id == UserOperatorMembership.user_public_id)
+                    .join(
+                        Operator,
+                        Operator.public_id == UserOperatorMembership.operator_public_id,
+                    )
+                    .where(User.username == "auditor")
+                )
+            ).all()
+            assert memberships == [("auditor", "default", True)]
+    finally:
+        await engine.dispose()
+    assert await _instrument_count(oss_seeded_db_url) == 0
+
+
+@pytest.mark.asyncio
+async def test_seed_rejects_a_missing_declared_auditor_membership(
+    oss_seeded_db_url: URL,
+) -> None:
+    """Refuse a baseline missing the auditor's explicitly declared operator edge.
+
+    Given: A canonical seed clone whose declared auditor membership is removed,
+    When: The fixture checks the complete baseline before mutation,
+    Then: It refuses the clone without backdating symbols or inserting fixture rows.
+    """
+    before = await _symbol_timestamps(oss_seeded_db_url)
+    await _execute_sql(
+        oss_seeded_db_url,
+        "DELETE FROM user_operator_memberships WHERE user_public_id = "
+        "(SELECT public_id FROM users WHERE username = 'auditor')",
+    )
+    with pytest.raises(
+        pnl_uat_fixture.PnlUatFixtureError,
+        match="fresh migrated and bundled-OSS-seeded",
+    ):
+        await pnl_uat_fixture._seed_fixture_database_unchecked(oss_seeded_db_url, _ANCHOR)
+    assert await _symbol_timestamps(oss_seeded_db_url) == before
     assert await _instrument_count(oss_seeded_db_url) == 0
 
 

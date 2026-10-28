@@ -271,7 +271,7 @@ class TradeCandleBackfillService(RegisterableProcess):
                     )
                 current_instrument_public_id = instrument_public_id
                 seen_instrument_public_ids.add(instrument_public_id)
-                builder = TradeCandleBuilder(interval_seconds=60)
+                builder = TradeCandleBuilder(interval_seconds=60, history_start=self._start)
                 current_trades = 0
                 current_rows = 0
                 current_changed = 0

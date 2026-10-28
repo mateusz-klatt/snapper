@@ -114,7 +114,15 @@ def parse_kraken_futures_trade(data: dict[str, Any]) -> TradeUpdate:
         price=schema.price,
         ord_type="fill",
         timestamp=ts,
-        trade_id=schema.uid,
+        trade_id=(
+            schema.uid
+            if schema.uid is not None
+            else (
+                f"kraken-futures:trade_id:{schema.trade_id}"
+                if schema.trade_id is not None
+                else None
+            )
+        ),
     )
 
 

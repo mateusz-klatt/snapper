@@ -1776,6 +1776,7 @@ def project_query_row_to_candle_data(
             volume=row.volume,
             vwap=row.vwap,
             trades=row.trades,
+            complete=row.complete,
         )
     open_at_ms = int(row.open_at.timestamp() * 1000)
     name = f"{exchange}|{instrument}|{row.timeframe}|{open_at_ms}"
@@ -1795,6 +1796,7 @@ def project_query_row_to_candle_data(
         volume=row.volume,
         vwap=row.vwap,
         trades=row.trades,
+        complete=row.complete,
     )
 
 

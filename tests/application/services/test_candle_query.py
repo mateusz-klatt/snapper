@@ -233,6 +233,7 @@ class TestRowFromSnap:
         assert row.sequence_id is None
         assert row.vwap is None
         assert row.trades is None
+        assert row.complete is True
 
     def test_ohlcv_preserved(self) -> None:
         """OHLCV survives the projection."""
@@ -257,6 +258,14 @@ class TestRowFromDb:
         assert row.session_id == "seed-sid"
         assert row.sequence_id == 1
         assert row.timestamp is not None
+
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_preserves_durable_completeness(self, complete: bool) -> None:
+        """An incomplete persisted row never becomes final during projection."""
+        db = _row(0, 1.0)
+        db["complete"] = complete
+
+        assert row_from_db(db, "1m").complete is complete
 
 
 class TestFetchDbOnly:

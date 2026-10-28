@@ -39,11 +39,11 @@ readable_wallets = []
 
 [[users]]
 username = "auditor"
-email = "auditor@example.com"
-password = "peachsage98"
+email = "auditor@snapper.local"
+password = "change-me-after-first-login"
 role = "auditor"
-operators = []
-primary_operator = ""
+operators = ["default"]
+primary_operator = "default"
 readable_wallets = []
 
 [[settings]]
