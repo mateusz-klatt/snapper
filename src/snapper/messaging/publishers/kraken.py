@@ -33,6 +33,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from functools import partial
 from typing import Any
 from typing import Final
@@ -59,10 +60,16 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
+from snapper.messaging.publishers.kraken_candle_catchup import CatchupCallbacks
+from snapper.messaging.publishers.kraken_candle_catchup import KrakenCandleCatchup
+from snapper.messaging.publishers.kraken_candle_catchup import complete_repair_windows
+from snapper.messaging.publishers.kraken_candle_catchup import repair_read_start
 from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
 from snapper.messaging.publishers.minute_completion import confirmed_trade_symbols
 
@@ -86,6 +93,8 @@ the kraken-sdk patches.
 """
 
 _FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0
+_CATCHUP_REPAIR_SOURCE_ROW_LIMIT: Final[int] = 2880
+"""Bound a 120-minute reconciliation expanded to complete enclosing UTC days."""
 _LIVENESS_RECOVERY_THRESHOLD_S: Final[int] = 60
 """Message-silence threshold (seconds) before Spot liveness recovery fires.
 
@@ -390,22 +399,102 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._reconnect_timestamps: deque[float] = deque(maxlen=_RECONNECT_LIMIT * 2)
         self._restart_lock = asyncio.Lock()
         self._force_ws_restart_task: asyncio.Task[None] | None = None
+        self._candle_catchup: KrakenCandleCatchup | None = None
+
+    def _suspend_candle_synthesis_across_break(self) -> None:
+        """Reset live trade trust and request bounded native history reconciliation."""
+        super()._suspend_candle_synthesis_across_break()
+        client = self._exchange_client
+        if client is not None:
+            client.reset_trade_candle_epoch()
+        if self._candle_catchup is not None:
+            self._candle_catchup.request()
+
+    def _catchup_symbols(self, subscribed: list[str]) -> list[str]:
+        """Resolve only subscribed instruments allowed by candle persistence policy.
+
+        Args:
+            subscribed: Actual explicit roster or wildcard of this live publisher.
+
+        Returns:
+            Canonical persisted Spot symbols, empty without a resolved policy.
+        """
+        policy = self._persist_policy
+        if policy is None:
+            return []
+        selected = {
+            symbol
+            for exchange, symbol in policy.iter_persisted_instruments("candles")
+            if exchange == ExchangeEnum.KRAKEN
+        }
+        if "*" in selected:
+            selected = set(get_available_kraken_symbols())
+        return sorted(
+            symbol
+            for symbol in selected
+            if ("*" in subscribed or symbol in subscribed)
+            and policy.should_persist(ExchangeEnum.KRAKEN, "candles", symbol)
+        )
+
+    async def _reconcile_catchup_repairs(self, symbol: str, start: datetime, end: datetime) -> None:
+        """Queue historical-only repairs proved by every committed source minute.
+
+        Args:
+            symbol: Canonical symbol whose bounded acquisition completed.
+            start: Inclusive business-time bound of the history reconciliation.
+            end: Exclusive closed-minute horizon of the history reconciliation.
+        """
+        if self._candle_aggregator is None:
+            return
+        timeframes = [tf for tf in self.settings.timeframes if tf in SUPPORTED_SYNTHESIS_TIMEFRAMES]
+        if not timeframes:
+            return
+        rows = await self._require_repository().get_candles(
+            symbol,
+            "1m",
+            repair_read_start(start, timeframes),
+            end - timedelta(microseconds=1),
+            ExchangeEnum.KRAKEN,
+            datetime.now(UTC),
+            limit=_CATCHUP_REPAIR_SOURCE_ROW_LIMIT,
+            order="asc",
+        )
+        for window in complete_repair_windows(rows, start, end, timeframes):
+            self._schedule_seeded_incomplete_candle_repair_key(
+                _CandleRepairKey(symbol, window.timeframe, window.begin),
+                window.minutes,
+                historical_only=True,
+            )
 
     async def _start_extra_background_tasks(
         self, symbols_to_subscribe: list[str]
     ) -> list[asyncio.Task[None]]:
-        """Start the optional Spot trade-built shadow candle writer.
+        """Start bounded trade-built catchup or the optional native-mode shadow writer.
 
         Args:
             symbols_to_subscribe: Native Spot symbols selected for this
                 publisher connection.
 
         Returns:
-            A single supervised shadow task when the setting is enabled,
-            otherwise an empty task list.
+            Supervised bounded catchup in trade-built mode, or the optional
+            shadow task in native mode; empty without an applicable client.
         """
         if self.settings.spot_candle_source == "trade_built":
-            return []
+            client = self._exchange_client
+            if client is None:
+                return []
+            self._candle_catchup = KrakenCandleCatchup(
+                self._require_repository(),
+                client,
+                CatchupCallbacks(
+                    symbols=partial(self._catchup_symbols, symbols_to_subscribe),
+                    resolve=self._ensure_instrument,
+                    committed=self._reconcile_catchup_repairs,
+                    active=lambda: self.running,
+                    tracker=self._tracker,
+                ),
+            )
+            return [asyncio.create_task(self._candle_catchup.run())]
         if not self.settings.spot_trade_built_shadow_enabled:
             return []
         return [

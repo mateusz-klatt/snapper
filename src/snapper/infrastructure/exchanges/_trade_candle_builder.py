@@ -176,7 +176,13 @@ class TradeCandleBuilder:
         self._refused_trades = 0
         self._duplicate_trades = 0
 
-    def _symbol_history(self, symbol: str, minute: datetime, watermark: datetime) -> _SymbolHistory:
+    def _symbol_history(
+        self,
+        symbol: str,
+        minute: datetime,
+        watermark: datetime,
+        observed_at: datetime | None,
+    ) -> _SymbolHistory:
         """Restore cold-start protection without forgetting a lost minute's fence.
 
         One monotonic watermark boundary survives symbol-history eviction. New
@@ -197,6 +203,8 @@ class TradeCandleBuilder:
         start = self._history_start
         if start is None:
             start = minute + timedelta(minutes=1)
+        if observed_at is not None:
+            start = max(start, minute + timedelta(minutes=1), observed_at)
         if self._forgotten_start is not None:
             start = max(start, minute + timedelta(minutes=1), self._forgotten_start)
         history = _SymbolHistory(start=start)
@@ -300,18 +308,27 @@ class TradeCandleBuilder:
         self._builders[key].trade_ids.add(trade.trade_id)
         return True
 
-    def update(self, trade: TradeUpdate) -> None:
+    @staticmethod
+    def _validate_observed_at(observed_at: datetime | None) -> None:
+        """Require any live receipt boundary to be an aware UTC instant."""
+        if observed_at is not None and observed_at.utcoffset() != timedelta(0):
+            raise ValueError("trade candle observation time must be UTC")
+
+    def update(self, trade: TradeUpdate, *, observed_at: datetime | None = None) -> None:
         """Fold one proven unique trade, preserving arrival activity even on refusal or replay.
 
         Args:
             trade: Received trade whose event minute and stable identity are checked before folding.
+            observed_at: Actual UTC receipt time for a live observation. A new symbol cannot
+                certify its first event minute or a minute preceding this boundary.
         """
+        self._validate_observed_at(observed_at)
         self._update_count += 1
         if self._watermark is None or trade.timestamp > self._watermark:
             self._watermark = trade.timestamp
         minute = trade.timestamp.replace(second=0, microsecond=0)
         key = (trade.symbol, int(minute.timestamp()))
-        self._symbol_history(trade.symbol, minute, self._watermark)
+        self._symbol_history(trade.symbol, minute, self._watermark, observed_at)
         if self._already_seen(trade, key):
             return
         bucket = self._bucket_for_trade(trade, minute, key)

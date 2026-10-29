@@ -935,6 +935,18 @@ versions are used, including backfilled historical market data. With an
 explicit horizon, rows written later are excluded and read-side carried-close
 gap filling is disabled. These separate controls power the market scrubber
 and global time travel.
+
+Kraken Spot trade-built feeds reconcile bounded startup and connection gaps
+from complete native REST minutes while live ingestion continues. Recovered
+minutes preserve native OHLC, VWAP, volume and trade count, and become visible
+only at their actual acquisition/write horizon. This does not fill missing
+minutes in historical `as_of` responses. Recovery leaves existing minute
+versions unchanged and never emits old candles as fresh live strategy events.
+Higher-timeframe recovery waits for committed complete contiguous source
+minutes and its own guarded transaction's durable COMMIT acknowledgement.
+Existing native or calculated higher-timeframe targets retain source ownership;
+unchanged synthesized values do not create another version.
+
 Supplying only one of the pair, or `start >= end`, returns `400`.
 
 **Response (200):**

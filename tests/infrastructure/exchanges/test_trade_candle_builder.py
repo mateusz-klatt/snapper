@@ -527,6 +527,89 @@ class TestLateTradesAfterClose:
 class TestRetainedTradeHistory:
     """Keep complete correction state while refusing gaps, conflicts, and capacity loss."""
 
+    @pytest.mark.parametrize("receipt_seconds", [0, 10])
+    def test_live_receipt_fences_an_old_first_event(self, receipt_seconds: int) -> None:
+        """A delayed first event cannot certify a minute before actual live observation.
+
+        Given: The first received event belongs to the preceding minute,
+        When: Receipt begins exactly at a minute edge or ten seconds later,
+        Then: Only whole minutes beginning at or after receipt are eligible.
+        """
+        minute = datetime(2026, 10, 28, 21, 31, tzinfo=UTC)
+        observed = minute + timedelta(seconds=receipt_seconds)
+        builder = TradeCandleBuilder()
+        builder.update(
+            _trade("BTC-USD", 100.0, 1.0, minute - timedelta(seconds=1)),
+            observed_at=observed,
+        )
+        builder.update(
+            _trade("BTC-USD", 110.0, 2.0, minute + timedelta(seconds=20)),
+            observed_at=minute + timedelta(seconds=21),
+        )
+        builder.update(
+            _trade("BTC-USD", 120.0, 3.0, minute + timedelta(minutes=1, seconds=5)),
+            observed_at=minute + timedelta(minutes=1, seconds=6),
+        )
+        builder.update(
+            _trade("BTC-USD", 130.0, 4.0, minute + timedelta(minutes=1, seconds=10)),
+            observed_at=minute + timedelta(minutes=1, seconds=11),
+        )
+
+        candles = builder.pop_completed(minute + timedelta(minutes=2))
+
+        assert [c.interval_begin for c in candles] == (
+            [minute, minute + timedelta(minutes=1)]
+            if receipt_seconds == 0
+            else [minute + timedelta(minutes=1)]
+        )
+        assert candles[-1].trades == 2
+        assert candles[-1].volume == 7.0
+
+    def test_a_later_new_symbol_keeps_its_own_cold_start_guard(self) -> None:
+        """An earlier symbol's live boundary cannot certify a new symbol's first minute.
+
+        Given: One symbol was observed before a different symbol first appears,
+        When: The later symbol supplies a trade partway through its first minute,
+        Then: That first partial minute remains refused until its next minute.
+        """
+        minute = datetime(2026, 10, 28, 21, 31, tzinfo=UTC)
+        builder = TradeCandleBuilder()
+        builder.update(_trade("BTC-USD", 100.0, 1.0, minute), observed_at=minute)
+        later = minute + timedelta(minutes=4)
+        builder.update(
+            _trade("ETH-USD", 10.0, 1.0, later + timedelta(seconds=10)),
+            observed_at=later + timedelta(seconds=11),
+        )
+        assert builder.pop_all() == []
+
+        builder.update(
+            _trade("ETH-USD", 11.0, 2.0, later + timedelta(minutes=1)),
+            observed_at=later + timedelta(minutes=1, seconds=1),
+        )
+
+        candles = builder.pop_all()
+        assert [(c.symbol, c.interval_begin) for c in candles] == [
+            ("ETH-USD", later + timedelta(minutes=1))
+        ]
+
+    @pytest.mark.parametrize(
+        "observed",
+        [datetime(2026, 1, 1), datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=1)))],
+    )
+    def test_live_receipt_boundary_requires_utc(self, observed: datetime) -> None:
+        """Reject ambiguous receipt clocks before changing retained state or activity.
+
+        Given: An actual receipt boundary is naive or uses a non-UTC offset,
+        When: A live trade is passed to the builder,
+        Then: Validation fails before any activity or retained state changes.
+        """
+        builder = TradeCandleBuilder()
+        trade = _trade("BTC-USD", 100.0, 1.0, datetime(2026, 1, 1, tzinfo=UTC))
+        with pytest.raises(ValueError, match="observation time must be UTC"):
+            builder.update(trade, observed_at=observed)
+        assert builder.update_count == 0
+        assert builder.watermark is None
+
     def test_restart_withholds_unknown_first_minute_and_older_fragments(self) -> None:
         """A new live instance cannot overwrite a prior process's candle with startup fragments."""
         minute = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)

@@ -570,7 +570,7 @@ money-risk action.
 
 ### Market Persist Policy
 
-Market-data publishers always publish ZMQ frames, but DB persistence is
+Live market-data publishers publish ZMQ frames, while DB persistence is
 controlled by these settings so high-volume feeds can be cache-first:
 
 | Key | Description |
@@ -594,6 +594,50 @@ injects immutable allow/deny snapshots into publishers. Invalid edits are
 rejected for that refresh cycle and the previous policy remains active.
 Use `/api/market/cache/health` and `/api/market/coverage` to verify the
 effective persisted universe.
+
+In Kraken Spot `trade_built` mode, a supervised history worker starts alongside
+the live consumers and reconciles the last 120 closed minutes for persisted,
+subscribed instruments. Each pass visits at most three symbols fairly, with a
+five-second attempt bound and a twenty-second pass bound. The typed
+`CatchupPolicy.priority_symbols` defaults to `BTC-USD`, `ETH-USD` and `EUR-USD`,
+restricted to the actual persisted subscription roster. Its first pass visits
+those three immediately. Later passes reserve two rotating priority slots and
+one independent fair slot, reusing spare capacity when either pool is small.
+The fair attempt comes first so an expired pass budget cannot repeatedly skip
+it; pool cursors advance only when a symbol actually begins work. Normal passes are
+spaced sixty seconds apart; reconnect notifications coalesce and retain at
+least five seconds of spacing. These are finite source policy bounds, not
+additional database settings.
+
+This fixed budget does not certify continuity across a large wildcard roster.
+For example, 1,500 nonpriority instruments require at least 1,500 ordinary
+passes for a complete rotation, which exceeds the 120-minute history window.
+Older unobserved intervals remain unavailable and need separately reviewed
+recovery. Priority scheduling keeps the default dashboard pairs prompt without
+silently expanding the request budget or claiming all wildcard gaps healed.
+
+The worker reads the full native REST OHLC fields, including VWAP and trade
+count, and inserts only genuinely absent minute keys with `source = native`.
+Existing versions are preserved. Acquisition and write time remain current;
+the earlier minute is business time, so earlier `as_of` cuts still show the
+original absence. An unfinished venue entry, an unreturned minute, or history
+outside the bounded window stays unavailable. No historical carried-close
+bars or synthetic trade counts are introduced. The live builder resets its
+observation boundary on connection breaks and keeps refusing unproven leading
+minutes, including a late first event received after its minute elapsed.
+
+Recovered history is not published as fresh live strategy input. Affected
+higher-timeframe repairs require every committed complete minute in their
+canonical window and await an owned guarded transaction's COMMIT acknowledgement
+before pending work clears. That transaction inserts an absent target or versions
+an existing synthesized target; native and calculated targets remain unchanged,
+and unchanged synthesized business values do not acquire a new version.
+Whole-window reads expand to enclosing UTC days but remain
+bounded to 2,880 source rows per symbol. Historical-only repairs use the normal
+settle grace and require an exact full minute grid even before a new live
+aggregator frontier exists. A later bounded pass can rediscover committed inputs
+after an uncertain insertion acknowledgement. Older gaps and incorrect
+existing rows require a separate reviewed recovery.
 
 ### Publisher Micro-Batch
 

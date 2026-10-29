@@ -481,6 +481,7 @@ class _PendingCandleRepair:
     expected_source_minutes: frozenset[datetime] | None = None
     last_observed_minute_count: int | None = None
     output_sequence: int | None = None
+    historical_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -3141,7 +3142,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self._schedule_candle_repair_key(repair_key, required_sequence, late_key)
 
     def _schedule_seeded_incomplete_candle_repair_key(
-        self, key: _CandleRepairKey, counted_minutes: frozenset[datetime]
+        self,
+        key: _CandleRepairKey,
+        counted_minutes: frozenset[datetime],
+        *,
+        historical_only: bool = False,
     ) -> None:
         """Add or refresh one source-gated seeded-incomplete repair key.
 
@@ -3149,9 +3154,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             key: Synthesized candle natural key to repair.
             counted_minutes: Distinct complete 1m minutes folded live or from
                 the seed before the bucket was suppressed.
+            historical_only: Persist repair output without live strategy publication.
         """
         pending = self._pending_candle_repairs.get(key)
         if pending is not None:
+            pending.historical_only = pending.historical_only or historical_only
             previous_minutes = pending.expected_source_minutes
             if previous_minutes is None:
                 self._forget_candle_repair_output(pending)
@@ -3180,6 +3187,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._pending_candle_repairs[key] = _PendingCandleRepair(
             expected_minute_count=len(counted_minutes),
             expected_source_minutes=counted_minutes,
+            historical_only=historical_only,
         )
         self._candle_repair_event.set()
 
@@ -3361,6 +3369,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         groups = self._due_candle_repair_groups()
         if not groups:
             return
+        generations = {
+            key: self._pending_candle_repairs.get(key)
+            for entries in groups.values()
+            for key, _sequence, _minutes in entries
+        }
         semaphore = asyncio.Semaphore(_CANDLE_REPAIR_MAX_CONCURRENCY)
         tasks = [
             asyncio.create_task(self._repair_candle_group(entries, exchange, semaphore))
@@ -3373,6 +3386,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 pending = self._pending_candle_repairs.get(result.key)
                 if (
                     pending is None
+                    or pending is not generations.get(result.key)
                     or pending.required_sequence != result.required_sequence
                     or pending.expected_source_minutes != result.expected_source_minutes
                 ):
@@ -3493,13 +3507,35 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 and pending.required_sequence not in self._committed_candle_write_sequences
             ):
                 continue
-            if not aggregator.has_closed_window(key.symbol, key.timeframe, key.window_begin):
+            if not self._candle_repair_window_ready(key, pending, aggregator):
                 continue
             group_key = (key.symbol, key.window_begin)
             groups.setdefault(group_key, []).append(
                 (key, pending.required_sequence, pending.expected_source_minutes)
             )
         return groups
+
+    def _candle_repair_window_ready(
+        self, key: _CandleRepairKey, pending: _PendingCandleRepair, aggregator: CandleAggregator
+    ) -> bool:
+        """Keep live frontiers intact while permitting fully proved settled history.
+
+        Args:
+            key: Canonical synthesized window identity.
+            pending: Repair policy and exact source-minute dependencies.
+            aggregator: Live aggregator whose frontier owns ordinary repairs.
+
+        Returns:
+            Whether the normal frontier or a settled full historical grid permits work.
+        """
+        if not pending.historical_only:
+            return aggregator.has_closed_window(key.symbol, key.timeframe, key.window_begin)
+        width = aggregator.timeframe_seconds(key.timeframe)
+        if key.window_begin != CandleAggregator._floor(key.window_begin, width):
+            return False
+        minutes = frozenset(key.window_begin + timedelta(minutes=i) for i in range(width // 60))
+        settled = key.window_begin + timedelta(seconds=width + self._candle_flush_grace_seconds())
+        return pending.expected_source_minutes == minutes and settled <= datetime.now(UTC)
 
     async def _repair_candle_group(
         self,
@@ -3554,6 +3590,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle = await self._derive_repaired_synthesized_candle(key, expected_source_minutes)
             if candle is None:
                 return False
+            if pending is not None and pending.historical_only:
+                return await self._commit_historical_candle_repair(candle, exchange, key.timeframe)
             output_sequence = await self._publish_synthesized_candle(
                 candle, exchange, key.timeframe
             )
@@ -3574,6 +3612,54 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 f"window={key.window_begin.isoformat()} error={e}"
             )
             return False
+
+    async def _commit_historical_candle_repair(
+        self, candle: CandleUpdate, exchange: MarketDataExchange, timeframe: str
+    ) -> bool:
+        """Commit historical repairs under source ownership without market events.
+
+        Args:
+            candle: Complete synthesized repair derived from committed inputs.
+            exchange: Canonical exchange owning the durable candle.
+            timeframe: Canonical higher timeframe being repaired.
+
+        Returns:
+            True after acknowledged guarded commit, False when identity or policy refuses.
+
+        Raises:
+            Exception: Propagates uncertain or failed transaction outcomes.
+        """
+        if not self._should_persist_row("candles", exchange, candle.symbol):
+            return False
+        instrument = await self._ensure_instrument(candle.symbol)
+        if instrument is None:
+            return False
+        topic = self._build_data_topic(
+            candle.symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
+        )
+        row: CandleUpsertRow = {
+            "public_id": self._resolve_candle_public_id(
+                instrument, timeframe, candle.interval_begin
+            ),
+            "instrument_public_id": instrument,
+            "timeframe": timeframe,
+            "open_at": candle.interval_begin,
+            "timestamp": datetime.now(UTC),
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(topic),
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "vwap": candle.vwap,
+            "volume": candle.volume,
+            "trades": candle.trades,
+            "complete": True,
+            "source": "synthesized",
+            "price_basis": self._candle_price_basis_for(timeframe),
+        }
+        await self._require_repository().upsert_historical_synthesized_candles([row])
+        return True
 
     async def _derive_repaired_synthesized_candle(
         self, key: _CandleRepairKey, expected_source_minutes: frozenset[datetime] | None = None
@@ -3613,8 +3699,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return None
         if any(not row["complete"] for row in rows):
             return None
-        if expected_source_minutes is not None and not observed_source_minutes.issuperset(
-            expected_source_minutes
+        if not self._candle_repair_source_ready(
+            key, rows, observed_source_minutes, expected_source_minutes
         ):
             return None
         repair_aggregator = CandleAggregator(
@@ -3628,6 +3714,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if timeframe == key.timeframe and candle.interval_begin == key.window_begin:
                 return candle
         return None
+
+    def _candle_repair_source_ready(
+        self,
+        key: _CandleRepairKey,
+        rows: list[CandleRow],
+        observed: set[datetime],
+        expected: frozenset[datetime] | None,
+    ) -> bool:
+        """Require exact full history inputs while preserving normal repair semantics.
+
+        Args:
+            key: Repair whose pending policy selects exact historical evidence.
+            rows: Complete committed source versions from the actual read.
+            observed: Distinct complete minute boundaries in that read.
+            expected: Declared source-minute dependency set.
+
+        Returns:
+            Whether exact historical or existing normal source requirements hold.
+        """
+        pending = self._pending_candle_repairs.get(key)
+        if pending is not None and pending.historical_only:
+            return expected is not None and len(rows) == len(expected) and observed == expected
+        return expected is None or observed.issuperset(expected)
 
     async def _candle_writer_loop(self) -> None:
         """Drain :attr:`_candle_write_queue` and flush candles to the database.

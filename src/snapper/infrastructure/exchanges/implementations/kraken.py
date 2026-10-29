@@ -98,6 +98,8 @@ from snapper.infrastructure.exchanges.execution_wire_receipts import (
     install_private_execution_wire_capture,
 )
 from snapper.infrastructure.exchanges.execution_wire_receipts import is_execution_control_message
+from snapper.infrastructure.exchanges.kraken_closed_candles import ClosedCandleRequest
+from snapper.infrastructure.exchanges.kraken_closed_candles import parse_closed_candles
 from snapper.infrastructure.exchanges.kraken_execution_routes import spot_execution_route
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
@@ -895,6 +897,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         client = self._ws_client
         if not client:
             return
+        self.reset_trade_candle_epoch()
         was_connected = self._ws_connected
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
@@ -907,6 +910,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             await force_close_ws_client(client)
         finally:
             if self._ws_client is client:
+                self.reset_trade_candle_epoch()
                 self._ws_client = None
                 self._ws_connected = False
                 if was_connected:
@@ -965,6 +969,60 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to get ticker for {symbol}: {e}")
             raise
+
+    async def get_closed_1m_candles(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> list[CandleUpdate]:
+        """Acquire full-field closed native candles in one routed REST attempt.
+
+        Args:
+            symbol: Canonical native instrument.
+            start: Inclusive whole-minute UTC business-time lower bound.
+            end: Exclusive whole-minute UTC closed business-time horizon.
+
+        Returns:
+            Native closed candles preserving OHLC, VWAP, volume and trade count.
+
+        Raises:
+            ValueError: When the request or native identity/fields disagree.
+            Exception: Propagates the single routed acquisition failure.
+        """
+        canonical_symbol = native_to_ccxt(symbol)
+        market = self._ccxt_client.market(canonical_symbol)
+        if market.get("symbol") != canonical_symbol:
+            raise ValueError("Kraken OHLC market differs from the requested canonical symbol")
+        pair = market.get("id")
+        if not isinstance(pair, str) or not pair:
+            raise ValueError("Kraken OHLC product has no canonical REST identity")
+        request = ClosedCandleRequest(symbol, pair, start, end, datetime.now(UTC))
+        parameters: dict[str, str | int] = {
+            "pair": pair,
+            "interval": 1,
+            "since": int(start.timestamp()) - 60,
+        }
+        if native_to_kraken_asset_class(symbol) == "tokenized_asset":
+            parameters["asset_class"] = "tokenized_asset"
+        payload = await self._dispatch_routed_rest(
+            operation="closed_ohlc_catchup",
+            kind="public_read",
+            target=ccxt_proxy_target(self._ccxt_client),
+            sync_call=lambda: self._ccxt_client.publicGetOHLC(parameters),
+        )
+        return parse_closed_candles(payload, request)
+
+    def reset_trade_candle_epoch(self) -> None:
+        """Withhold unknown history until a new live trade is actually received."""
+        self._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+        while not self._trade_built_candle_queue.empty():
+            self._trade_built_candle_queue.get_nowait()
+
+    def _fold_observed_trade_candle(self, trade: TradeUpdate) -> None:
+        """Fence a new generation by receipt time before folding any event time.
+
+        Args:
+            trade: Actually received live trade with independent venue event time.
+        """
+        self._trade_built_candle_builder.update(trade, observed_at=datetime.now(UTC))
 
     async def get_ohlcv(
         self,
@@ -3220,7 +3278,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             for trade_data in trade_list:
                 _enqueue_or_drop_oldest(self._trade_queue, trade_data, "trade")
                 if self._trade_built_candles_enabled:
-                    self._trade_built_candle_builder.update(trade_data)
+                    self._fold_observed_trade_candle(trade_data)
         except ValueError as e:
             logger.warning(f"Failed to parse trade data: {e}")
 
@@ -3381,6 +3439,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             BaseException: Whatever ``start()`` or the subscription replay
                 raised, re-raised after teardown.
         """
+        self.reset_trade_candle_epoch()
         client = SpotWSClient(
             key=self.api_key or "",
             secret=self.api_secret or "",

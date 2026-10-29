@@ -71,6 +71,14 @@ provision it through the supported user administration API.
     continuously-open trade-driven venues (Kraken spot in `trade_built` mode,
     Kraken futures), emitting a flat zero-volume bar for every minute the
     publisher observed the venue live and the instrument did not trade
+- **Bounded Kraken outage recovery** — Trade-built Spot feeds insert missing
+    closed native minutes while live ingestion continues, preserving full venue
+    fields and actual acquisition time. A fixed three-request policy prioritizes
+    the default dashboard pairs and rotates other persisted instruments fairly.
+    It does not certify a large wildcard roster's continuity; older gaps and
+    incorrect existing rows remain separate recovery work. See
+    [market persistence configuration](docs/configuration.md#market-persist-policy)
+    for the scheduling and historical repair boundaries
 - **Egress routing** — Per-venue VPN egress routing via the WireGuard/SOCKS5
     `snapper-egress` sidecar. `feed_egress_enabled` gates feed-publisher
     pools; the API process initializes its own pool from `egress_pool`, so
