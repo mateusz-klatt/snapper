@@ -519,6 +519,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             prepared = self._bind_pending_candle_identities(rows)
             inserted = await self._require_repository().insert_missing_candles(prepared)
             self._release_committed_candle_identities(inserted)
+            await self._retire_acknowledged_candle_identities(prepared)
 
     async def _persist_historical_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
         """Serialize quiet synthesized commits without touching current-window identity.
@@ -529,6 +530,30 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         async with self._candle_identity_gate:
             prepared = self._bind_pending_candle_identities(rows)
             await self._require_repository().upsert_historical_synthesized_candles(prepared)
+            await self._retire_acknowledged_candle_identities(prepared)
+
+    async def _retire_acknowledged_candle_identities(self, rows: list[CandleUpsertRow]) -> None:
+        """Retire only affected reservations whose acknowledged stored UUID is proven.
+
+        The owning local gate remains held. A successful replay can report no new
+        rows even after an earlier unknown commit succeeded, so a writer-fenced
+        canonical lookup proves each remaining affected identity independently.
+
+        Args:
+            rows: Bounded quiet candidates whose write or replay was acknowledged.
+        """
+        keys: set[tuple[str, str, datetime]] = set()
+        for row in rows:
+            key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+            if key in self._pending_candle_identities:
+                keys.add(key)
+        for key in keys:
+            expected = self._pending_candle_identities.get(key)
+            if expected is None:
+                continue
+            stored = await self._require_repository().get_canonical_candle_public_id(*key)
+            if stored == expected and self._pending_candle_identities.get(key) == expected:
+                self._pending_candle_identities.pop(key)
 
     def _suspend_candle_synthesis_across_break(self) -> None:
         """Reset live trade trust and request bounded native history reconciliation."""

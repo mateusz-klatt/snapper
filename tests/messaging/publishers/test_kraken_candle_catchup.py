@@ -1348,3 +1348,215 @@ async def test_default_historical_boundary_uses_guarded_repository_without_event
     row = _native_identity_row(publisher)
     await MarketDataPublisherService._persist_historical_candle_rows(publisher, [row])
     repository.upsert_historical_synthesized_candles.assert_awaited_once_with([row])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_stored", [False, True])
+async def test_acknowledged_historical_write_retires_dropped_live_identity(
+    tmp_path: Path, already_stored: bool
+) -> None:
+    """A real quiet commit or replay resolves an emitted row whose writer dropped it.
+
+    Given: An emitted higher candle whose queued durable row is subsequently dropped.
+    When: Guarded historical synthesis acknowledges the matching stored UUID.
+    Then: Both a real insert and a no-op replay retire that exact reservation.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'quiet-historical-id.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    instrument = "00000000-0000-4000-8000-000000000501"
+    publisher._ensure_instrument = AsyncMock(return_value=instrument)
+    publisher._publish_message = AsyncMock()
+    try:
+        await publisher._publish_synthesized_candle(_candle(), ExchangeEnum.KRAKEN, "5m")
+        dropped = publisher._candle_write_queue.get_nowait()
+        publisher._forget_candle_write_sequence(dropped)
+        publisher._candle_write_queue.task_done()
+        key = (instrument, "5m", START)
+        assert publisher._pending_candle_identities[key] == dropped["public_id"]
+        if already_stored:
+            assert await repository.upsert_historical_synthesized_candles([dropped]) == 1
+        await publisher._persist_historical_candle_rows([dropped])
+        assert await repository.get_canonical_candle_public_id(*key) == dropped["public_id"]
+        assert key not in publisher._pending_candle_identities
+        assert publisher._publish_message.await_count == 1
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_replay_after_real_commit_and_lost_ack_retires_live_identity(
+    tmp_path: Path,
+) -> None:
+    """An empty native replay still confirms the identity committed before ACK loss.
+
+    Given: A live event and a native insert that commits before losing its acknowledgement.
+    When: Native reconciliation retries and returns an empty inserted-row list.
+    Then: Fenced canonical readback retires the matching live reservation.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'native-replay-id.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    instrument = "00000000-0000-4000-8000-000000000501"
+    publisher._ensure_instrument = AsyncMock(return_value=instrument)
+    publisher._publish_message = AsyncMock()
+    publisher._native_finalizer = NativeCandleFinalizer(
+        persist_intermediate=False, flush_grace_seconds=12
+    )
+    try:
+        candle = _trusted_closed_trade_minute()
+        await _enqueue_trusted_live_minute(publisher, candle, NOW)
+        publisher._candle_write_queue.task_done()
+        row = _native_identity_row(publisher)
+        row.update({"instrument_public_id": instrument, "open_at": candle.interval_begin})
+        key = (instrument, "1m", candle.interval_begin)
+        public_id = publisher._pending_candle_identities[key]
+        original = repository.insert_missing_candles
+
+        async def committed_without_ack(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+            assert len(await original(rows)) == 1
+            raise ConnectionError("acknowledgement lost after real commit")
+
+        with (
+            patch.object(repository, "insert_missing_candles", new=committed_without_ack),
+            pytest.raises(ConnectionError),
+        ):
+            await publisher._insert_catchup_candle_rows([row])
+        assert publisher._pending_candle_identities[key] == public_id
+
+        async def replay(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+            result = await original(rows)
+            assert result == []
+            return result
+
+        with patch.object(repository, "insert_missing_candles", new=replay):
+            await publisher._insert_catchup_candle_rows([row])
+        assert await repository.get_canonical_candle_public_id(*key) == public_id
+        assert key not in publisher._pending_candle_identities
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_small_identity_capacity_survives_repeated_acknowledged_quiet_cycles(
+    tmp_path: Path,
+) -> None:
+    """Durable quiet repair cycles cannot consume the finite publication budget forever.
+
+    Given: Capacity for only one queued and one in-flight unresolved live identity.
+    When: Five emitted rows are dropped and subsequently committed by quiet synthesis.
+    Then: Every matching durable UUID retires and later publications remain admitted.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'quiet-id-cycles.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    publisher._candle_write_queue = asyncio.Queue(maxsize=1)
+    publisher._candle_batch_max_rows = 1
+    publisher._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-000000000501")
+    publisher._publish_message = AsyncMock()
+    try:
+        for offset in range(5):
+            candle = replace(_candle(), interval_begin=START + timedelta(minutes=5 * offset))
+            await publisher._publish_synthesized_candle(candle, ExchangeEnum.KRAKEN, "5m")
+            dropped = publisher._candle_write_queue.get_nowait()
+            publisher._forget_candle_write_sequence(dropped)
+            publisher._candle_write_queue.task_done()
+            await publisher._persist_historical_candle_rows([dropped])
+            assert publisher._pending_candle_identities == {}
+        assert publisher._publish_message.await_count == 5
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["native", "historical"])
+@pytest.mark.parametrize(
+    "outcome", ["absent", "different", "error", "ambiguous", "cancelled", "replacement"]
+)
+async def test_acknowledged_quiet_write_keeps_unproven_or_replaced_reservation(
+    kind: str, outcome: str
+) -> None:
+    """An acknowledged operation cannot retire an unresolved or newly replaced UUID.
+
+    Given: One affected live reservation and a successful quiet write or replay.
+    When: Canonical readback is absent, different, failed, cancelled or superseded.
+    Then: The exact unresolved current reservation remains and the local gate releases.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    if kind == "historical":
+        row.update({"timeframe": "5m", "source": "synthesized"})
+    key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+    public_id = await publisher._resolve_live_candle_public_id(*key, "BTC-USD")
+    repository.get_canonical_candle_public_id.reset_mock()
+
+    async def canonical(*args: object) -> str | None:
+        if outcome == "error":
+            raise ConnectionError("canonical outcome unavailable")
+        if outcome == "ambiguous":
+            raise RuntimeError("conflicting canonical identities")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        if outcome == "replacement":
+            publisher._pending_candle_identities[key] = "replacement-identity"
+            return public_id
+        return "different-canonical-identity" if outcome == "different" else None
+
+    repository.get_canonical_candle_public_id.side_effect = canonical
+    operation = (
+        publisher._insert_catchup_candle_rows
+        if kind == "native"
+        else publisher._persist_historical_candle_rows
+    )
+    if outcome in {"error", "ambiguous", "cancelled"}:
+        error = {
+            "error": ConnectionError,
+            "ambiguous": RuntimeError,
+            "cancelled": asyncio.CancelledError,
+        }[outcome]
+        with pytest.raises(error):
+            await operation([row])
+    else:
+        await operation([row])
+    assert publisher._pending_candle_identities[key] == (
+        "replacement-identity" if outcome == "replacement" else public_id
+    )
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(*key)
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+async def test_quiet_retirement_deduplicates_only_affected_pending_keys_and_rechecks_them() -> None:
+    """Only affected reservations are read, once, and a concurrently acknowledged key is skipped.
+
+    Given: Two affected pending keys, repeated candidates and one unaffected reservation.
+    When: The first canonical lookup independently resolves both affected reservations.
+    Then: The second key is rechecked and no unrelated identity or duplicate is queried.
+    """
+    publisher, repository = _identity_publisher()
+    for offset in range(3):
+        await _resolve_test_identity(publisher, offset)
+    first = _native_identity_row(publisher)
+    second = dict(first)
+    second["open_at"] = START + timedelta(minutes=1)
+    rows = [first, first, cast(CandleUpsertRow, second)]
+
+    async def canonical(*args: object) -> str:
+        key = cast(tuple[str, str, datetime], args)
+        expected = publisher._pending_candle_identities[key]
+        affected = {("instrument", "1m", START), ("instrument", "1m", START + timedelta(minutes=1))}
+        for other in affected - {key}:
+            publisher._pending_candle_identities.pop(other)
+        return expected
+
+    repository.get_canonical_candle_public_id.reset_mock()
+    repository.get_canonical_candle_public_id.side_effect = canonical
+    async with publisher._candle_identity_gate:
+        await publisher._retire_acknowledged_candle_identities(rows)
+    assert repository.get_canonical_candle_public_id.await_count == 1
+    assert set(publisher._pending_candle_identities) == {
+        ("instrument", "1m", START + timedelta(minutes=2))
+    }
