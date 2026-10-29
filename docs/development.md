@@ -798,6 +798,32 @@ logger.debug(f"Calculated RSI: {rsi_value}")
 logger.error(f"Failed to execute order: {e}")
 ```
 
+### P&L read timing
+
+Each P&L series or timeline request that enters its handler attempts one
+`PnlReadTiming` message when the handler completes, including failures. The
+message records the endpoint kind, outcome and elapsed milliseconds without
+request identifiers or financial values. The outcome describes handler
+completion. Response serialization and transfer follow that interval, and a
+logging failure leaves the handler result unchanged.
+
+| Field | Measured interval |
+| --- | --- |
+| `handler_ms` | Handler execution after dependency resolution and before response serialization and transfer |
+| `series_ms` | Inclusive series service execution |
+| `prefix_ms` | Shared evidence preload for a timeline request |
+| `fx_ms` | Inclusive FX loading and resolution |
+| `core_ms` | Synchronous pure timeline construction at the service boundary |
+| `timeline_extra_ms` | Timeline service time remaining after its observed prefix and series intervals |
+
+The intervals can be nested; adding them does not produce a request total.
+`unobserved` identifies an absent stage or a derived interval whose required
+constituents were not observed. `invalid`
+preserves clock failures or inconsistent interval subtraction. Compare these
+summaries with bounded HTTP observations while accounting for concurrent reads
+and the handler's serialization and transfer exclusions. Background service
+callers do not enable this request-local timing.
+
 ### ZMQ Logger
 
 ```bash

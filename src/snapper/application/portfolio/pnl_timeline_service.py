@@ -39,6 +39,7 @@ dropped.
 
 import json
 import math
+from bisect import bisect_left
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -81,6 +82,8 @@ from snapper.application.portfolio.pnl_anchor_identity import (
     normalize_portfolio_pnl_wallet_public_id,
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_read_timing import pnl_read_core
+from snapper.application.portfolio.pnl_read_timing import pnl_read_stage
 from snapper.application.portfolio.pnl_timeline import MarkIncompletenessReasonMap
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
@@ -121,6 +124,8 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 from snapper.data.repository_types import PortfolioPnlSampleRow
+
+_timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
@@ -1210,7 +1215,7 @@ def _preactivation_pnl_series(
     valuation_ccy: str,
 ) -> PnlWalletSeriesResult:
     """Return a wholly pre-t0 grid without demanding post-activation evidence."""
-    result = build_pnl_timeline(
+    result = _timed_build_pnl_timeline(
         (),
         (),
         anchor.marks,
@@ -3035,7 +3040,8 @@ def _carried_minutes_for_plane(
     """Return each required minute this plane reaches only by bounded carry.
 
     A minute already published exactly is excluded, so the two coverage halves
-    never double-count the same requirement.
+    never double-count the same requirement. One sorted history supports nearest
+    predecessor lookups without scanning every publication for each missing minute.
 
     Args:
         published: Minutes this plane closed a usable bar on.
@@ -3044,14 +3050,17 @@ def _carried_minutes_for_plane(
     Returns:
         Carried minutes mapped to how many whole minutes each had to reach back.
     """
+    if required <= published:
+        return {}
+    ordered = sorted(published)
     carried: dict[datetime, int] = {}
     for minute in required:
         if minute in published:
             continue
         earliest = minute - _FX_CARRY_WINDOW
-        reachable = [observed for observed in published if earliest <= observed < minute]
-        if reachable:
-            carried[minute] = int((minute - max(reachable)).total_seconds() // 60)
+        index = bisect_left(ordered, minute)
+        if index and ordered[index - 1] >= earliest:
+            carried[minute] = int((minute - ordered[index - 1]).total_seconds() // 60)
     return carried
 
 
@@ -3274,6 +3283,7 @@ def _fx_planes_by_instrument(
     return selected
 
 
+@pnl_read_stage("fx")
 async def _load_request_fx_rates(
     repo: Repository,
     mark_requirements: Mapping[str, _FxMinuteRequirements],
@@ -3751,6 +3761,7 @@ async def _load_anchor_execution_prefix_bundle(
         raise PnlAnchorEvidenceError("execution prefix cannot be proven at activation") from exc
 
 
+@pnl_read_stage("prefix")
 async def _load_timeline_read_evidence(
     repo: Repository,
     scope: _AnchorScope,
@@ -4625,6 +4636,7 @@ async def _finalize_wallet_pnl_series(
     )
 
 
+@pnl_read_stage("series")
 async def build_wallet_pnl_series(
     repo: Repository,
     wallet_public_id: str,
@@ -4874,7 +4886,7 @@ async def build_wallet_pnl_series(
         granularity=granularity,
         valuation_ccy=valuation_ccy,
     )
-    result = build_pnl_timeline(
+    result = _timed_build_pnl_timeline(
         executions,
         accruals,
         marks,
@@ -5016,6 +5028,7 @@ def _marker_sort_key(marker: PnlTimelineMarker) -> tuple[datetime, str, str]:
     return marker.marker_time, marker.kind, _marker_source_public_id(marker)
 
 
+@pnl_read_stage("timeline")
 async def build_wallet_pnl_timeline(
     repo: Repository,
     wallet_public_id: str,
