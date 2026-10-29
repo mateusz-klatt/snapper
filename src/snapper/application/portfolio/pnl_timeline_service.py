@@ -3293,6 +3293,8 @@ async def _load_request_fx_rates(
     before shared and per-instrument resolution, then every unused orientation
     and venue is discarded. Each instrument uses one plane per pair for its
     marks, execution prices, fees, and accruals at every minute.
+    Wholly owned requirements read their canonical planes directly. Any general
+    consumer retains both original discovery windows and their complete inputs.
 
     Args:
         repo: Repository providing bounded FX plane and candle reads.
@@ -3314,16 +3316,20 @@ async def _load_request_fx_rates(
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
         return {}, {}, set()
-    mark_candidates = await _discover_fx_candidates(
-        repo,
-        mark_pair_requirements,
-        as_of,
-    )
-    event_candidates = await _discover_fx_candidates(
-        repo,
-        event_pair_requirements,
-        as_of,
-    )
+    general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
+    mark_candidates: list[PnlFxRatePlane] = []
+    event_candidates: list[PnlFxRatePlane] = []
+    if general_requirements:
+        mark_candidates = await _discover_fx_candidates(
+            repo,
+            mark_pair_requirements,
+            as_of,
+        )
+        event_candidates = await _discover_fx_candidates(
+            repo,
+            event_pair_requirements,
+            as_of,
+        )
     candidate_planes = _candidate_planes(
         [*mark_candidates, *event_candidates],
         identity_planes,
@@ -3342,7 +3348,7 @@ async def _load_request_fx_rates(
     )
     rows = [*mark_rows, *event_rows]
     shared_planes = _resolve_fx_planes(
-        _general_fx_minutes(instrument_requirements, identity_planes),
+        general_requirements,
         candidate_planes,
         rows,
         valuation_ccy,
@@ -3367,7 +3373,6 @@ async def _load_request_fx_rates(
     selected_rows = [
         row for row in rows if (row["base"], row["quote"], row["exchange"]) in selected_planes
     ]
-    general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
     rates = build_fx_rates(selected_rows)
     shadow_context = current_fx_shadow_context()
     if shadow_context is not None:
