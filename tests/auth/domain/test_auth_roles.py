@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Response
 from fastapi.testclient import TestClient
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -60,7 +61,7 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
     mock_service.get_user_with_operators = AsyncMock(return_value=expected_profile)
     with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
         result = await get_current_user_profile(
-            request=_make_rest_request(), current_user=principal
+            request=_make_rest_request(), response=Response(), current_user=principal
         )
     assert result.payload.username == "testuser"
     assert result.payload.role == UserRole.VIEWER
@@ -89,7 +90,9 @@ async def test_get_current_user_profile_user_deleted_returns_404() -> None:
         patch("snapper.auth.routes.get_user_service", return_value=mock_service),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await get_current_user_profile(request=deleted_user_request, current_user=principal)
+        await get_current_user_profile(
+            request=deleted_user_request, response=Response(), current_user=principal
+        )
     assert exc_info.value.status_code == 404
 
 
@@ -123,6 +126,7 @@ async def test_current_profile_projects_effective_scope_and_delegate_state() -> 
     with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
         result = await get_current_user_profile(
             request=_make_rest_request(),
+            response=Response(),
             current_user=principal,
         )
 

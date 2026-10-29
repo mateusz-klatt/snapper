@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Response
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -4809,6 +4810,7 @@ async def test_get_users_returns_response(monkeypatch: Any) -> None:
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     result = await routes.get_users(
         request=_make_rest_request(),
+        response=Response(),
         current_user=stub_service.all_users[0],
         include_inactive=False,
     )

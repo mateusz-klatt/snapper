@@ -75,6 +75,24 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     AllowedFinding(
         FindingSignature(
             "backend",
+            "src/snapper/auth/client_compatibility.py",
+            "role-comparison",
+            "role is UserRole.AUDITOR",
+        ),
+        "legacy iOS response-role display adaptation preserving canonical permission authority",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/auth/client_compatibility.py",
+            "role-comparison",
+            "role is not user.role",
+        ),
+        "copying a changed display role into an outgoing profile without mutating session identity",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
             "src/snapper/auth/routes.py",
             "role-comparison",
             "principal.role is not token_data.role",

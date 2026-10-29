@@ -23,6 +23,9 @@ from loguru import logger
 from snapper.api.auth.schemas.ws_token import WsAuthorizationContext
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.base import MessageResponse
+from snapper.auth.client_compatibility import client_response_role
+from snapper.auth.client_compatibility import session_response_profile
+from snapper.auth.client_compatibility import set_session_response_headers
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_authentication
@@ -325,6 +328,7 @@ async def login(
         token_permissions,
         PERMISSION_SCOPE_VERSION,
     )
+    user = session_response_profile(request, response, user)
     return_tokens = _should_return_tokens(request)
     login_payload = LoginData(
         session_id=sid,
@@ -768,6 +772,7 @@ async def refresh_token(
         rotation.permission_values,
         rotation.permission_scope_version,
     )
+    user = session_response_profile(request, response, user)
     return_tokens = _should_return_tokens(request)
     refresh_data = RefreshData(
         session_id=sid,
@@ -899,12 +904,14 @@ async def issue_ws_token(
 @router.get("/me")
 async def get_current_user_profile(
     request: Request,
+    response: Response,
     current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
 ) -> UserResponse:
     """Get current user's profile.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
+        response: Response headers preserving canonical role and client variance.
         current_user: Authenticated principal from dependency.
 
     Returns:
@@ -927,6 +934,7 @@ async def get_current_user_profile(
         current_user.permissions,
         current_user.permission_scope_version,
     )
+    user = session_response_profile(request, response, user)
     return UserResponse(
         session_id=sid,
         sequence_id=seq,
@@ -1075,6 +1083,7 @@ async def logout(
 @router.get("/users")
 async def get_users(
     request: Request,
+    response: Response,
     current_user: Annotated[
         AuthPrincipal,
         Depends(require_any_permission(Permission.READ_USERS, Permission.MANAGE_USERS)),
@@ -1086,6 +1095,7 @@ async def get_users(
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
+        response: Response headers preserving canonical session identity.
         current_user: Authenticated user with user-directory read permission.
         include_inactive: Whether to include deactivated users.
         as_of: Optional point-in-time query timestamp (UTC).
@@ -1095,13 +1105,21 @@ async def get_users(
     """
     user_service = get_user_service()
     users = await user_service.get_all_users(include_inactive=include_inactive, as_of=as_of)
+    set_session_response_headers(response, current_user.role)
     sid, seq, pid, ts = _mint_provenance(request)
     return UserListResponse(
         session_id=sid,
         sequence_id=seq,
         public_id=pid,
         timestamp=ts,
-        payload=users,
+        payload=[
+            user.model_copy(
+                update={
+                    "role": client_response_role(request.headers.get("user-agent", ""), user.role)
+                }
+            )
+            for user in users
+        ],
         count=len(users),
     )
 
@@ -1109,6 +1127,7 @@ async def get_users(
 @router.get("/desks/{operator_public_id}/members")
 async def list_desk_members(
     request: Request,
+    response: Response,
     operator_public_id: str,
     current_user: Annotated[
         AuthPrincipal,
@@ -1127,6 +1146,7 @@ async def list_desk_members(
 
     Args:
         request: FastAPI request providing response provenance.
+        response: Response headers preserving canonical session identity.
         operator_public_id: Public ID of the target desk.
         current_user: Caller holding desk-directory read permission.
         as_of: Optional point-in-time membership horizon.
@@ -1145,13 +1165,21 @@ async def list_desk_members(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except DeskMembershipNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    set_session_response_headers(response, current_user.role)
     sid, seq, pid, ts = _mint_provenance(request)
     return UserListResponse(
         session_id=sid,
         sequence_id=seq,
         public_id=pid,
         timestamp=ts,
-        payload=members,
+        payload=[
+            member.model_copy(
+                update={
+                    "role": client_response_role(request.headers.get("user-agent", ""), member.role)
+                }
+            )
+            for member in members
+        ],
         count=len(members),
     )
 

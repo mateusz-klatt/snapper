@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import Match
 
@@ -967,6 +968,7 @@ async def test_route_lists_desk_members_without_manage_users() -> None:
     with patch("snapper.auth.routes.get_user_service", return_value=service):
         response = await list_desk_members(
             request=_route_request(),
+            response=Response(),
             operator_public_id="desk-a",
             current_user=principal,
             as_of=None,
@@ -1073,6 +1075,7 @@ async def test_list_route_maps_membership_errors(
     ):
         await list_desk_members(
             request=list_request,
+            response=Response(),
             operator_public_id="desk-b",
             current_user=principal,
             as_of=None,

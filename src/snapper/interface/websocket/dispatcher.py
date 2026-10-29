@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
+from snapper.auth.client_compatibility import client_response_role
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import get_settings
@@ -223,7 +224,7 @@ async def send_auth_complete(
     session_expires_at_dt = ws_auth_manager.get_connection_expiration(websocket)
     auth_complete = WSAuthCompleteResponse(
         available_topics=allowed_topics,
-        user_role=user.role,
+        user_role=client_response_role(websocket.headers.get("user-agent", ""), user.role),
         session_expires_at=session_expires_at_dt,
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
