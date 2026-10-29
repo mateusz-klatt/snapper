@@ -1880,8 +1880,20 @@ class DummyRepository(Repository):
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
 
+    async def insert_missing_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> list[CandleUpsertRow]:
+        """Return no inserted rows for the dummy repository."""
+        del rows, session
+        return []
+
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles - no-op returning 0."""
+        return 0
+
+    async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
+        """Return no historical changes for the dummy repository."""
+        del rows
         return 0
 
     async def upsert_shadow_candles(
@@ -2448,7 +2460,19 @@ class TestSQLAlchemyRepositoryDialects:
         with patch("snapper.data.repository.create_async_engine") as mock_engine:
             mock_engine.return_value = Mock()
             repo = SQLAlchemyRepository("postgresql+asyncpg://user:pass@localhost/test")
-            with patch.object(type(repo), "dialect_name", new_callable=lambda: "postgresql"):
+
+            async def retain_payload_rows(
+                session: AsyncSession, rows: list[CandleUpsertRow]
+            ) -> list[CandleUpsertRow]:
+                """Keep mocked payload tests separate from independently verified writer fences."""
+                del session
+                return rows
+
+            with (
+                patch.object(type(repo), "dialect_name", new_callable=lambda: "postgresql"),
+                patch.object(repo, "_begin_candle_reconciliation_write", new=AsyncMock()),
+                patch.object(repo, "_retain_nonstale_live_candle_rows", new=retain_payload_rows),
+            ):
                 yield repo
 
     @pytest.fixture
@@ -3024,6 +3048,18 @@ class _MinimalRepository(Repository):
         self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
+
+    async def insert_missing_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> list[CandleUpsertRow]:
+        """Return no inserted rows for the minimal repository."""
+        del rows, session
+        return []
+
+    async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
+        """Return no historical changes for the minimal repository."""
+        del rows
+        return 0
 
     async def upsert_candles(
         self, rows: list[dict[str, Any]], session: AsyncSession | None = None

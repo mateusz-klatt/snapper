@@ -103,6 +103,7 @@ from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import ColumnElement
+from sqlalchemy import Insert
 from sqlalchemy import Row
 from sqlalchemy import Select
 from sqlalchemy import Table
@@ -311,6 +312,7 @@ from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CancelClaimResult
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import CandleVersionRow
 from snapper.data.repository_types import CandleWindowQuery
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
@@ -3733,6 +3735,52 @@ class Repository(ABC):
         Returns:
             Mapping of (instrument_public_id, timeframe) to (open_at, public_id),
             limited to series with a candle in the recent lookback window.
+        """
+        ...
+
+    @abstractmethod
+    async def get_canonical_candle_public_id(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> str | None:
+        """Resolve one exact candle key's sole identity under writer participation.
+
+        This internal publisher boundary waits for reconciliation writers before
+        checking all knowledge history. It returns no identity only when that
+        complete key has no history, and refuses conflicting logical identities.
+        It allocates no identity and changes no candle value. An optional caller
+        transaction remains owned by its caller; an owned short transaction
+        releases its writer participation before returning.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_missing_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> list[CandleUpsertRow]:
+        """Insert closed native minutes only when their complete natural key has no history.
+
+        Return normalized copies of inserted rows after committing an owned
+        transaction. A supplied session remains caller-owned and returned rows
+        are staged until its commit is acknowledged. Existing current, closed
+        and future-authored versions are never changed or replaced. Batches
+        contain at most 720 distinct minute keys, with full native business and
+        acquisition provenance; recovered rows are not publication events.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
+        """Commit bounded historical synthesis without replacing authoritative source winners.
+
+        Missing keys may insert only when no history exists. Current synthesized
+        rows may version at a strictly newer author; native and calculated rows,
+        closed-only anomalies and identical business values are left unchanged.
+        The owned commit is the durable acknowledgement; failures and uncertain
+        acknowledgements propagate and never publish historical market events.
         """
         ...
 
@@ -11268,6 +11316,350 @@ class SQLAlchemyRepository(Repository):
                 continue
         return inserted
 
+    async def get_canonical_candle_public_id(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> str | None:
+        """Resolve bounded all-history identity after pending candle writers finish.
+
+        Args:
+            instrument_public_id: Exact canonical instrument identity.
+            timeframe: Exact candle timeframe label.
+            open_at: Aware business-time instant identifying the exact candle.
+            session: Optional caller-owned short writer transaction.
+
+        Returns:
+            The sole historical public identity, or None for a genuinely absent key.
+
+        Raises:
+            ValueError: When the key is empty, naive or a PostgreSQL snapshot is stale.
+            NotImplementedError: When the engine has no reviewed writer protocol.
+            RuntimeError: When multiple historical public identities occupy the key.
+            Exception: Propagates writer-lock, cancellation and database failures.
+        """
+        if not instrument_public_id or not timeframe:
+            raise ValueError("canonical candle identity requires its complete natural key")
+        opening = self._aware_missing_candle_time(open_at)
+        if self.dialect_name not in {"sqlite", "postgresql"}:
+            raise NotImplementedError("canonical candle identity requires a supported writer fence")
+        key = instrument_public_id, timeframe, opening
+        if session is not None:
+            return await self._canonical_candle_public_id_in_session(session, key)
+        async with self.session() as owned:
+            return await self._canonical_candle_public_id_in_session(owned, key)
+
+    async def _canonical_candle_public_id_in_session(
+        self, session: AsyncSession, key: _CandleNaturalKey
+    ) -> str | None:
+        """Wait under the existing writer protocol, then inspect at most two logical IDs."""
+        await self._prepare_live_candle_write(session, [])
+        instrument_public_id, timeframe, open_at = key
+        result = await session.execute(
+            select(Candle.public_id)
+            .where(
+                Candle.instrument_public_id == instrument_public_id,
+                Candle.timeframe == timeframe,
+                Candle.open_at == open_at,
+            )
+            .distinct()
+            .limit(2)
+        )
+        identities = result.scalars().all()
+        if len(identities) > 1:
+            raise RuntimeError("canonical candle natural key has conflicting public identities")
+        return identities[0] if identities else None
+
+    async def insert_missing_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> list[CandleUpsertRow]:
+        """Atomically insert at most 720 absent complete native one-minute candles.
+
+        All inputs are validated before opening the write transaction. Existing
+        natural keys are checked across every knowledge version, without an
+        author-time or sentinel filter. PostgreSQL serializes the short batch
+        against all candle writers and partition maintenance under a recursive
+        relation lock with at most a one-second acquisition wait. SQLite's
+        INSERT-select statement holds its writer lock before evaluating absence.
+        No existing row is updated, closed, deleted or broadcast.
+
+        Args:
+            rows: Complete native minute rows stamped at actual acquisition.
+            session: Optional short caller-managed transaction. PostgreSQL
+                requires READ COMMITTED; callers retain its lock until commit
+                or rollback and must never perform network I/O while holding it.
+
+        Returns:
+            Normalized copies inserted by this call. Without a supplied session,
+            commit acknowledgement precedes the return; otherwise they remain
+            staged in the caller's transaction.
+        """
+        if not rows:
+            return []
+        if len(rows) > 720:
+            raise ValueError("missing candle insert batch exceeds 720 rows")
+        normalized = self._normalize_reconciled_candle_rows(rows, "native")
+        if session is not None:
+            return await self._insert_missing_candles_in_session(session, normalized)
+        async with self.session() as owned:
+            inserted = await self._insert_missing_candles_in_session(owned, normalized)
+            await owned.commit()
+            return inserted
+
+    @classmethod
+    def _normalize_reconciled_candle_rows(
+        cls, rows: list[CandleUpsertRow], source: Literal["native", "synthesized"]
+    ) -> list[CandleUpsertRow]:
+        """Validate the full batch and copy caller data without choosing duplicate winners."""
+        normalized: list[CandleUpsertRow] = []
+        seen: set[_CandleNaturalKey] = set()
+        acquired_before = datetime.now(UTC)
+        for original in rows:
+            row = cls._normalize_reconciled_candle_row(original, acquired_before, source)
+            key = cls._candle_natural_key(row)
+            if key in seen:
+                raise ValueError("missing candle insert batch has duplicate natural keys")
+            seen.add(key)
+            normalized.append(row)
+        return normalized
+
+    @classmethod
+    def _normalize_reconciled_candle_row(
+        cls,
+        original: CandleUpsertRow,
+        acquired_before: datetime,
+        source: Literal["native", "synthesized"],
+    ) -> CandleUpsertRow:
+        """Require a coherent closed source-owned candle and preserve acquisition provenance."""
+        required = {
+            "instrument_public_id",
+            "open_at",
+            "timestamp",
+            "timeframe",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "trades",
+            "source",
+            "complete",
+            "session_id",
+            "sequence_id",
+        }
+        if (
+            not required <= original.keys()
+            or original.keys() - CandleUpsertRow.__annotations__.keys()
+        ):
+            raise ValueError("missing candle insert requires its complete typed fields")
+        seconds = cls._reconciled_candle_seconds(original["timeframe"], source)
+        if original["source"] != source or original["complete"] is not True:
+            raise ValueError("candle reconciliation requires its complete source-owned rows")
+        row = original.copy()
+        row["open_at"] = cls._aware_missing_candle_time(row["open_at"])
+        row["timestamp"] = cls._aware_missing_candle_time(row["timestamp"])
+        if row["open_at"].microsecond or int(row["open_at"].timestamp()) % seconds:
+            raise ValueError("reconciled candle open time must be canonical UTC aligned")
+        if not row["open_at"] + timedelta(seconds=seconds) <= row["timestamp"] <= acquired_before:
+            raise ValueError(
+                "missing candle knowledge time must follow closure and precede acquisition validation"
+            )
+        cls._validate_missing_candle_business(row)
+        if row.get("known_to", KNOWN_TO_MAX) != KNOWN_TO_MAX:
+            raise ValueError("missing candle insert cannot create a closed historical version")
+        row.setdefault("public_id", str(uuid7()))
+        row["known_to"] = KNOWN_TO_MAX
+        row.setdefault("price_basis", None)
+        return row
+
+    @staticmethod
+    def _reconciled_candle_seconds(timeframe: str, source: Literal["native", "synthesized"]) -> int:
+        """Restrict native catchup to one minute and synthesis to supported closed windows."""
+        supported = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+        seconds = (
+            (60 if timeframe == "1m" else None) if source == "native" else supported.get(timeframe)
+        )
+        if seconds is None:
+            raise ValueError("candle reconciliation timeframe is not supported for its source")
+        return seconds
+
+    @staticmethod
+    def _aware_missing_candle_time(value: datetime) -> datetime:
+        """Normalize an explicitly aware instant without inventing a timezone."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("missing candle timestamps must be timezone aware")
+        return value.astimezone(UTC)
+
+    @staticmethod
+    def _validate_missing_candle_business(row: CandleUpsertRow) -> None:
+        """Reject incomplete numeric data, incoherent geometry or missing writer provenance."""
+        numbers = [row["open"], row["high"], row["low"], row["close"], row["volume"], row["vwap"]]
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            for value in numbers
+        ):
+            raise ValueError("missing candle business fields must be finite numbers")
+        if (
+            row["volume"] < 0
+            or row["high"] < max(row["open"], row["close"], row["low"])
+            or row["low"] > min(row["open"], row["close"], row["high"])
+        ):
+            raise ValueError("missing candle OHLCV geometry is invalid")
+        if type(row["trades"]) is not int or row["trades"] < 0:
+            raise ValueError("missing candle trade count must be a nonnegative integer")
+        if (
+            not row["instrument_public_id"]
+            or not row["session_id"]
+            or type(row["sequence_id"]) is not int
+            or row["sequence_id"] <= 0
+        ):
+            raise ValueError("missing candle acquisition writer provenance is invalid")
+
+    async def _insert_missing_candles_in_session(
+        self, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Serialize absent-key proof and insert-only writes in one short transaction."""
+        await self._begin_candle_reconciliation_write(session, sqlite_write_lock=False)
+        inserted: list[CandleUpsertRow] = []
+        for row in rows:
+            result = await session.execute(self._missing_candle_insert_statement(row))
+            if result.scalar_one_or_none() is not None:
+                inserted.append(row)
+        return inserted
+
+    async def _begin_candle_reconciliation_write(
+        self,
+        session: AsyncSession,
+        *,
+        sqlite_write_lock: bool,
+        lock_mode: Literal["ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"] = "SHARE ROW EXCLUSIVE",
+    ) -> None:
+        """Fence all concurrent candle writers before any historical ownership read."""
+        if self.dialect_name == "postgresql":
+            isolation = (await session.execute(text("SHOW transaction_isolation"))).scalar_one()
+            if isolation != "read committed":
+                raise ValueError("missing candle insertion requires PostgreSQL READ COMMITTED")
+            await session.execute(
+                text(
+                    "SELECT set_config('lock_timeout', CASE WHEN current_setting('lock_timeout')::interval = interval '0' OR current_setting('lock_timeout')::interval > interval '1 second' THEN '1s' ELSE current_setting('lock_timeout') END, true)"
+                )
+            )
+            await session.execute(text(f"LOCK TABLE public.candles IN {lock_mode} MODE"))
+        elif self.dialect_name == "sqlite":
+            if sqlite_write_lock:
+                await session.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                "missing candle insertion supports only SQLite and PostgreSQL"
+            )
+
+    @staticmethod
+    def _missing_candle_insert_statement(row: CandleUpsertRow) -> Insert:
+        """Build an INSERT-only statement whose absence test includes every prior version."""
+        values: dict[str, object] = dict(row)
+        columns = list(values)
+        absent = ~exists().where(
+            Candle.instrument_public_id == row["instrument_public_id"],
+            Candle.timeframe == row["timeframe"],
+            Candle.open_at == row["open_at"],
+        )
+        source = select(
+            *(literal(values[name], type_=Candle.__table__.c[name].type) for name in columns)
+        ).where(absent)
+        return insert(Candle).from_select(columns, source).returning(Candle.public_id)
+
+    async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
+        """Commit insert-or-synthesized-only revisions under the bounded candle writer fence.
+
+        The guard reads actual current source ownership after locking, so a
+        concurrent native or calculated winner is never overwritten. Full
+        natural-key/version CAS protects the exact synthesized predecessor
+        without assuming globally unique physical IDs. No network operation or
+        market event emission occurs in this short owned transaction.
+
+        Args:
+            rows: At most 720 distinct complete higher-timeframe candidates.
+
+        Returns:
+            Changed row count only after commit acknowledgement. Identical or
+            protected targets are no-ops; cancellation and uncertain commit
+            acknowledgements propagate for later bounded reconciliation.
+        """
+        if not rows:
+            return 0
+        if len(rows) > 720:
+            raise ValueError("historical synthesis batch exceeds 720 rows")
+        normalized = self._normalize_reconciled_candle_rows(rows, "synthesized")
+        async with self.session() as session:
+            await self._begin_candle_reconciliation_write(session, sqlite_write_lock=True)
+            changed = 0
+            for row in normalized:
+                changed += await self._upsert_historical_synthesized_row(session, row)
+            await session.commit()
+            return changed
+
+    @staticmethod
+    async def _upsert_historical_synthesized_row(
+        session: AsyncSession, row: CandleUpsertRow
+    ) -> int:
+        """Check write-time ownership and preserve every prior candle payload and author."""
+        result = await session.execute(
+            select(Candle.__table__).where(
+                Candle.instrument_public_id == row["instrument_public_id"],
+                Candle.timeframe == row["timeframe"],
+                Candle.open_at == row["open_at"],
+                Candle.known_to == KNOWN_TO_MAX,
+            )
+        )
+        stored = result.mappings().one_or_none()
+        if stored is None:
+            inserted = await session.execute(
+                SQLAlchemyRepository._missing_candle_insert_statement(row)
+            )
+            return int(inserted.scalar_one_or_none() is not None)
+        existing = cast(CandleVersionRow, dict(stored))
+        if existing["source"] != "synthesized" or existing["timestamp"] >= row["timestamp"]:
+            return 0
+        before: dict[str, object] = dict(existing)
+        candidate: dict[str, object] = dict(row)
+        business = (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "trades",
+            "source",
+            "complete",
+            "price_basis",
+        )
+        if all(before[field] == candidate[field] for field in business):
+            return 0
+        closed = await session.execute(
+            update(Candle)
+            .where(
+                Candle.id == existing["id"],
+                Candle.instrument_public_id == row["instrument_public_id"],
+                Candle.timeframe == row["timeframe"],
+                Candle.open_at == row["open_at"],
+                Candle.timestamp == existing["timestamp"],
+                Candle.public_id == existing["public_id"],
+                Candle.known_to == KNOWN_TO_MAX,
+                Candle.source == "synthesized",
+            )
+            .values(known_to=row["timestamp"])
+            .returning(Candle.public_id)
+        )
+        if closed.scalar_one_or_none() is None:
+            raise RuntimeError("historical synthesis lost its exact source-owned version")
+        row["public_id"] = existing["public_id"]
+        await session.execute(insert(Candle).values(**row))
+        return 1
+
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> int:
@@ -11296,6 +11688,7 @@ class SQLAlchemyRepository(Repository):
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
         if session is not None:
+            rows = await self._prepare_live_candle_write(session, rows)
             unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
             existing_by_key = await self._load_existing_candles_for_rows(session, unique_rows)
             count = await self._upsert_unique_candle_rows(session, unique_rows, existing_by_key)
@@ -11304,6 +11697,7 @@ class SQLAlchemyRepository(Repository):
                     count += 1
             return count
         async with self.session() as s:
+            rows = await self._prepare_live_candle_write(s, rows)
             unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
             existing_by_key = await self._load_existing_candles_for_rows(s, unique_rows)
             count = await self._upsert_unique_candle_rows(s, unique_rows, existing_by_key)
@@ -11312,6 +11706,64 @@ class SQLAlchemyRepository(Repository):
                     count += 1
             await s.commit()
         return count
+
+    async def _prepare_live_candle_write(
+        self, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Serialize a fresh current-author lookup without nesting caller transactions.
+
+        SQLite's empty update acquires its writer reservation even when the
+        caller already owns a transaction. It changes no rows, while ensuring
+        a catchup commit is visible before the current-author read. PostgreSQL
+        retains its existing relation-lock and READ COMMITTED protocol.
+        """
+        if self.dialect_name == "postgresql":
+            await self._begin_candle_reconciliation_write(
+                session, sqlite_write_lock=False, lock_mode="ROW EXCLUSIVE"
+            )
+        elif self.dialect_name == "sqlite":
+            await session.execute(
+                update(cast(Table, Candle.__table__))
+                .where(Candle.id.is_(None))
+                .values(known_to=Candle.known_to)
+            )
+        else:
+            return rows
+        return await self._retain_nonstale_live_candle_rows(session, rows)
+
+    @classmethod
+    async def _retain_nonstale_live_candle_rows(
+        cls, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Leave newer committed knowledge intact after a queued candle writer waits.
+
+        The ordinary writer fence is acquired before this current-author
+        lookup. A catchup or historical repair can have committed a newer
+        current author while a live batch waited; replaying that older batch
+        must not close an older historical version or collide with its active
+        successor. SQLite and PostgreSQL both participate in this guard.
+        """
+        keys = list(dict.fromkeys(cls._candle_natural_key(row) for row in rows))
+        latest: dict[_CandleNaturalKey, datetime] = {}
+        for offset in range(0, len(keys), _CANDLE_LOOKUP_CHUNK_SIZE):
+            result = await session.execute(
+                select(
+                    Candle.instrument_public_id, Candle.timeframe, Candle.open_at, Candle.timestamp
+                ).where(
+                    tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                        keys[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
+                    ),
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+            )
+            for instrument, timeframe, opening, author in result.all():
+                key = (instrument, timeframe, opening)
+                latest[key] = max(author, latest.get(key, author))
+        return [
+            row
+            for row in rows
+            if latest.get(cls._candle_natural_key(row), row["timestamp"]) <= row["timestamp"]
+        ]
 
     @staticmethod
     def _candle_natural_key(row: CandleUpsertRow) -> _CandleNaturalKey:

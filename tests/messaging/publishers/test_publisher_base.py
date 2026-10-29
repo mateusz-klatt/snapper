@@ -4519,7 +4519,9 @@ class TestFeedPublisherCoverage:
         publisher_any.running = True
         publish_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
-        publisher_any.repository = SimpleNamespace(upsert_candles=AsyncMock())
+        publisher_any.repository = SimpleNamespace(
+            upsert_candles=AsyncMock(), get_canonical_candle_public_id=AsyncMock(return_value=None)
+        )
 
         async def generator() -> AsyncIterator[CandleUpdate]:
             yield CandleUpdate(
@@ -5019,7 +5021,9 @@ class TestFeedPublisherCandleLoop:
 
         publisher_any._publish_message = publish_stub
         publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-        publisher_any.repository = SimpleNamespace(upsert_candles=AsyncMock())
+        publisher_any.repository = SimpleNamespace(
+            upsert_candles=AsyncMock(), get_canonical_candle_public_id=AsyncMock(return_value=None)
+        )
         await publisher_any._candle_loop(
             ["BTC-USD", "ETH-USD"],
             "1m",

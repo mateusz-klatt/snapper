@@ -13,11 +13,14 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from snapper.config.app import AppSettings
 from snapper.core.types import ExchangeEnum
+from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionStatus
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -1215,6 +1218,9 @@ class TestPublisherSweep:
         publisher.settings = cast(AppSettings, _CompletionSettings())
         publisher.running = True
         publisher._minute_emitter = _make_emitter(settle=_SPOT_SETTLE_S)
+        repository = MagicMock(spec=Repository)
+        repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
+        publisher.repository = repository
         return publisher
 
     @staticmethod

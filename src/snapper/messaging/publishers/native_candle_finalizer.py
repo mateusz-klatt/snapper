@@ -32,13 +32,16 @@ It is the persistence-side analogue of
 (1m to higher TF), and reuses their proven hold/finalize/watermark shape.
 """
 
+import math
 from dataclasses import dataclass
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import cast
 
 from loguru import logger
 
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 
 _TIMEFRAME_WINDOW_SECONDS: dict[str, int] = {
@@ -82,6 +85,74 @@ def window_seconds(timeframe: str) -> int:
         The window width in seconds, or ``0`` for an unrecognized label.
     """
     return _TIMEFRAME_WINDOW_SECONDS.get(timeframe, 0)
+
+
+def _finite_historical_candle_number(value: object) -> bool:
+    """Reject missing, boolean and non-finite source numbers before arithmetic.
+
+    Args:
+        value: Original stored business field.
+
+    Returns:
+        Whether the field is a finite real number representable by binary64.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _closed_historical_minute(opened: datetime, closed_before: datetime) -> bool:
+    """Require an aware canonical UTC minute whose full interval has closed.
+
+    Args:
+        opened: Original minute-open business timestamp.
+        closed_before: Exclusive closed-minute horizon of the read.
+
+    Returns:
+        Whether the original minute has a valid fully closed boundary.
+    """
+    if opened.utcoffset() is None or closed_before.utcoffset() is None:
+        return False
+    canonical = opened.astimezone(UTC)
+    return (
+        not (canonical.second or canonical.microsecond)
+        and opened + timedelta(minutes=1) <= closed_before
+    )
+
+
+def is_complete_historical_minute(row: CandleRow, closed_before: datetime) -> bool:
+    """Validate full original minute fields without inventing nullable values.
+
+    Args:
+        row: Actual persisted minute observation re-read for historical synthesis.
+        closed_before: Exclusive horizon through which minutes are fully closed.
+
+    Returns:
+        Whether boundary, completeness and every required business field are usable.
+    """
+    values = (row["open"], row["high"], row["low"], row["close"], row["volume"], row["vwap"])
+    if row["complete"] is not True or row["timeframe"] != "1m":
+        return False
+    if not all(_finite_historical_candle_number(value) for value in values):
+        return False
+    trades = row["trades"]
+    if type(trades) is not int:
+        return False
+    vwap = cast(float, row["vwap"])
+    return all(
+        (
+            trades >= 0,
+            row["volume"] >= 0,
+            vwap >= 0,
+            row["low"] > 0,
+            row["low"] <= min(row["open"], row["close"]),
+            row["high"] >= max(row["open"], row["close"], row["low"]),
+            _closed_historical_minute(row["open_at"], closed_before),
+        )
+    )
 
 
 class NativeCandleFinalizer:

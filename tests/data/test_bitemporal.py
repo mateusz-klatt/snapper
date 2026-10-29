@@ -1096,25 +1096,42 @@ class TestCandlePolicyBitemporal:
         assert {r.open_at for r in rows} == {open_at_a, open_at_b}
 
     @pytest.mark.asyncio
-    async def test_upsert_candles_out_of_order_timestamp_rejected(self, tmp_path: Path) -> None:
-        """Out-of-order timestamp is rejected by the unique partial index.
+    async def test_upsert_candles_out_of_order_timestamp_preserves_newer_version(
+        self, tmp_path: Path
+    ) -> None:
+        """An older live author is a no-op that preserves the full newer candle history.
 
         Given: A candle inserted at t2,
         When: A candle is upserted at t1 < t2 for the same business key,
-        Then: The temporal filter (timestamp <= t1 AND known_to > t1) does not
-            find the active record (which has timestamp=t2 > t1), so the repo
-            attempts a second insert which violates the partial unique index
-            on (instrument_public_id, timeframe, open_at) WHERE known_to = MAX.
+        Then: The writer reports zero changes and leaves every original field,
+            public identity and knowledge interval unchanged.
         """
-        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        repo, _inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
-        s5778_value_1 = _candle_row(inst_public_id, open_at, t1, close=100.0)
-        with pytest.raises(IntegrityError):
-            await repo.upsert_candles([s5778_value_1])
+        assert (
+            await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)]) == 1
+        )
+        async with repo.session() as session:
+            result = await session.execute(select(Candle.__table__).order_by(Candle.timestamp))
+            before = [dict(row) for row in result.mappings().all()]
+
+        assert (
+            await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)]) == 0
+        )
+
+        async with repo.session() as session:
+            result = await session.execute(select(Candle.__table__).order_by(Candle.timestamp))
+            after = [dict(row) for row in result.mappings().all()]
+
+        assert after == before
+        assert len(after) == 1
+        assert after[0]["timestamp"] == t2
+        assert after[0]["known_to"] == KNOWN_TO_MAX
+        assert after[0]["close"] == 105.0
+        assert after[0]["instrument_public_id"] == inst_public_id
 
 
 async def _create_user(

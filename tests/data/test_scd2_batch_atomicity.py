@@ -1,54 +1,15 @@
-"""SCD2 batch atomicity regression tests.
+"""Protect real SCD2 batch rollback and concurrent candle version chains.
 
-Pins the all-or-nothing transaction contract for true SCD2 batch writes
-(``upsert_candles``, ``upsert_market_snapshots``) and the contention
-outcome under concurrent writers on the same natural key.
+Candle and market-snapshot faults must roll back earlier staged changes in
+that batch. The candle fault counts actual predecessor-close updates rather
+than writer-fence or lookup statements, flushes the first successor, then
+fails the second close to prove durable transaction atomicity.
 
-The atomicity contract is documented in ``docs/architecture.md``
-subsection "Batch atomicity guarantees" under ``## Bitemporal Model``.
-The three tests below pin the same contract at the integration layer:
-
-1. ``test_upsert_candles_mid_batch_failure_rolls_back_all`` — a
-   ``RuntimeError`` injected on the UPDATE-close step for the SECOND
-   row of a 2-row batch, where both rows target existing active
-   candles, must roll back the entire batch: row 1's UPDATE-close
-   (already emitted at wrapper call 2) AND row 1's INSERT (already
-   flushed by the autoflush that fires at the start of wrapper call 3
-   for row 2's SELECT-FOR-UPDATE) AND the aborted UPDATE for row 2.
-   Both seeded candles must remain active with their original
-   ``public_id`` values; no new candle rows land.
-2. ``test_upsert_market_snapshots_mid_batch_failure_rolls_back_all`` —
-   same contract for market snapshots (the other true-SCD2 batch path),
-   with two seeded snapshots and a 2-instrument batch.
-3. ``test_concurrent_upsert_candles_serializes`` — two concurrent tasks
-   writing the same ``(instrument, timeframe, open_at)`` must preserve
-   the SCD2 chain invariant in the final DB state regardless of
-   dialect. Accepted outcomes: both tasks succeed (Postgres MVCC) OR
-   one task succeeds and the other raises ``IntegrityError`` on the
-   ``candles.public_id`` UNIQUE constraint under SQLite's default transaction mode.
-   Invariant asserted: exactly one active row, every row shares the
-   single carried-forward ``public_id``, ``#closed_rows == #successful
-   upserts``, no orphan inserts.
-
-The mid-batch fault injection uses ``monkeypatch.setattr`` on
-``AsyncSession.execute``. In the ``upsert_candles`` flow for a 2-row
-batch where both rows target unique existing natural keys, the
-per-batch execute sequence is (staging by ``s.add(...)`` and
-autoflushed INSERTs fire at the Connection layer, below
-``AsyncSession.execute``, so only Session-level ``execute`` calls are
-counted):
-
-- call 1 — SELECT ... FOR UPDATE for both natural keys
-- call 2 — UPDATE Candle SET known_to=bus_time WHERE id=A.id
-- (s.add(new_row_1) stages the new candle in the identity map)
-- call 3 — UPDATE Candle SET known_to=bus_time WHERE id=B.id
-
-Raising on call 3 aborts the transaction AFTER new_row_1's INSERT has
-been flushed to the connection (uncommitted) and before row 2's close
-UPDATE lands. The transaction rollback must undo both the UPDATE-close
-and the flushed-but-uncommitted INSERT from row 1, plus leave row 2
-completely untouched. This exercises the full close+insert rollback
-path rather than a bare UPDATE-only rollback.
+Concurrent candle writers reserve their transaction before checking current
+authors. Both calls complete normally; an older queued author may return zero
+when the newer author committed first. Actual positive write counts determine
+the number of closed versions, with one carried public identity and an exact
+contiguous history ending at the newest author.
 """
 
 import asyncio
@@ -63,8 +24,8 @@ from typing import Any
 import pytest
 from sqlalchemy import and_
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Update
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
@@ -169,23 +130,39 @@ def _snapshot_row(
 def _fail_on_nth_execute(
     target: int,
     message: str = "injected mid-batch fault",
+    match: Callable[[object], bool] | None = None,
+    flush_before_fault: bool = False,
 ) -> tuple[Callable[..., Awaitable[Any]], Callable[[], int]]:
-    """Return an async execute wrapper that raises on the Nth call.
+    """Fault on a selected execute call after optionally flushing its predecessor.
 
-    The wrapper captures the original ``AsyncSession.execute`` via a
-    module-level reference so the patched version can delegate pre- and
-    post-injection calls through.
+    An optional statement predicate excludes serialization and lookup work.
+    Flushing before the injected fault proves an earlier staged successor was
+    actually sent to the database before the transaction rolls back.
     """
     original = AsyncSession.execute
     counter = {"n": 0}
 
     async def wrapped(self: AsyncSession, *args: Any, **kwargs: Any) -> Any:
+        """Delegate unrelated statements and fault only at the selected write boundary."""
+        if match is not None and not match(args[0]):
+            return await original(self, *args, **kwargs)
         counter["n"] += 1
         if counter["n"] == target:
+            if flush_before_fault:
+                await self.flush()
             raise RuntimeError(message)
         return await original(self, *args, **kwargs)
 
     return wrapped, lambda: counter["n"]
+
+
+def _is_candle_close(statement: object, timestamp: datetime) -> bool:
+    """Match a real candle predecessor close while excluding the empty writer fence."""
+    return (
+        isinstance(statement, Update)
+        and getattr(statement.table, "name", None) == "candles"
+        and statement.compile().params.get("known_to") == timestamp
+    )
 
 
 @pytest.mark.asyncio
@@ -197,7 +174,7 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
     Both seeded candles (``open_at=t0`` and ``open_at=t1``) must keep
     their original ``public_id`` with ``known_to == KNOWN_TO_MAX``;
     no closed versions exist; no new candle rows land — meaning the
-    autoflushed INSERT for row 1's new version was rolled back along
+    explicitly flushed INSERT for row 1's new version was rolled back along
     with row 1's UPDATE-close and the aborted row 2 UPDATE-close.
     """
     db_path = tmp_path / "scd2_candles.db"
@@ -229,7 +206,11 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
     assert len(seeded_rows) == 2
     original_public_ids = {row.open_at: row.public_id for row in seeded_rows}
 
-    wrapped, get_n = _fail_on_nth_execute(target=3)
+    wrapped, get_n = _fail_on_nth_execute(
+        target=2,
+        match=lambda statement: _is_candle_close(statement, batch_ts),
+        flush_before_fault=True,
+    )
     monkeypatch.setattr(AsyncSession, "execute", wrapped)
 
     batch: list[CandleUpsertRow] = [
@@ -238,7 +219,7 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
     ]
     with pytest.raises(RuntimeError, match="injected mid-batch fault"):
         await repo.upsert_candles(batch)
-    assert get_n() == 3
+    assert get_n() == 2
 
     monkeypatch.undo()
 
@@ -347,32 +328,12 @@ async def test_upsert_market_snapshots_mid_batch_failure_rolls_back_all(
 
 @pytest.mark.asyncio
 async def test_concurrent_upsert_candles_serializes() -> None:
-    """Two concurrent tasks on the same natural key preserve the SCD2 chain invariant.
+    """Real concurrent SQLite writers preserve the newest author and exact SCD2 chain.
 
-    Uses a file-based SQLite database (not ``:memory:`` — which shares a
-    single connection through the StaticPool and hides real
-    multi-connection serialization) with two separate ``SQLAlchemyRepository``
-    instances to exercise the actual write-lock contention path.
-
-    Accepted outcomes (per the documented SQLite isolation semantics):
-
-    - **PostgreSQL**: both tasks complete without exception thanks to
-      MVCC row locks acquired by ``SELECT ... FOR UPDATE``. Final DB
-      state carries one active row + two closed versions, all rows
-      sharing the single carried-forward ``public_id``.
-    - **SQLite** (aiosqlite): default transaction startup mode
-      makes ``SELECT ... FOR UPDATE`` a no-op. Both tasks can read the
-      same seeded active row before either writes, so the second task
-      to INSERT raises ``IntegrityError`` on ``candles.public_id``
-      UNIQUE (both tasks try to reuse the carried-forward
-      ``public_id``). Final DB state carries one active row + one
-      closed version.
-
-    Invariants pinned (dialect-agnostic): exactly one active row; every
-    row shares the single carried-forward ``public_id``; no orphan row
-    with a different ``public_id`` landed; the number of closed rows
-    equals the number of successful upserts; any failure is
-    ``IntegrityError`` (not some other unexpected error).
+    Given: Independent file-backed connections and one seeded candle version,
+    When: Older and newer author batches contend for the same natural key,
+    Then: Both calls finish without errors, stale work can return zero, and
+        actual positive writes exactly match the contiguous carried-ID history.
     """
     with tempfile.TemporaryDirectory() as td:
         seed_repo: SQLAlchemyRepository | None = None
@@ -397,6 +358,11 @@ async def test_concurrent_upsert_candles_serializes() -> None:
                 )
             assert seeded is not None
             seed_public_id = seeded.public_id
+            invariant_fields = {
+                column.name: getattr(seeded, column.name)
+                for column in Candle.__table__.columns
+                if column.name not in {"id", "timestamp", "known_to", "close"}
+            }
 
             db_url = f"sqlite+aiosqlite:///{db_path}"
             repo_a = SQLAlchemyRepository(db_url)
@@ -410,15 +376,11 @@ async def test_concurrent_upsert_candles_serializes() -> None:
             task_b = asyncio.create_task(
                 repo_b.upsert_candles([_candle_row(inst_public_id, open_at, ts_b, close=222.0)])
             )
-            results = await asyncio.gather(task_a, task_b, return_exceptions=True)
-
-            successes = [r for r in results if isinstance(r, int)]
-            failures = [r for r in results if isinstance(r, BaseException)]
-            assert successes, "at least one concurrent upsert must succeed"
-            for failure in failures:
-                assert isinstance(
-                    failure, IntegrityError
-                ), f"unexpected failure type under contention: {type(failure).__name__}"
+            results = await asyncio.gather(task_a, task_b)
+            assert all(type(result) is int and result in (0, 1) for result in results)
+            assert results[1] == 1
+            changed_versions = sum(results)
+            assert 1 <= changed_versions <= 2
 
             async with seed_repo.session() as s:
                 rows = (
@@ -437,19 +399,27 @@ async def test_concurrent_upsert_candles_serializes() -> None:
                 )
 
             active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
-            closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
             assert len(active) == 1, f"SCD2 chain broken: expected 1 active row, got {len(active)}"
-            public_ids = {r.public_id for r in rows}
-            assert public_ids == {
+            assert {r.public_id for r in rows} == {
                 seed_public_id
-            }, f"orphan public_id introduced under contention: {public_ids}"
-            expected_rows = len(successes) + 1
-            assert (
-                len(rows) == expected_rows
-            ), f"expected seed + {len(successes)} successful version(s), got {len(rows)}"
-            assert len(closed) == len(
-                successes
-            ), f"expected {len(successes)} closed version(s), got {len(closed)}"
+            }, "orphan public_id introduced under contention"
+            assert len(rows) == changed_versions + 1
+            assert sum(row.known_to != KNOWN_TO_MAX for row in rows) == changed_versions
+            assert active[0].timestamp == ts_b
+            assert active[0].close == 222.0
+            expected_versions = [(seed_ts, 100.0)]
+            if results[0] == 1:
+                expected_versions.append((ts_a, 111.0))
+            expected_versions.append((ts_b, 222.0))
+            ordered = sorted(rows, key=lambda row: row.timestamp)
+            assert [(row.timestamp, row.close) for row in ordered] == expected_versions
+            assert [row.known_to for row in ordered] == [
+                timestamp for timestamp, _close in expected_versions[1:]
+            ] + [KNOWN_TO_MAX]
+            assert all(
+                all(getattr(row, name) == value for name, value in invariant_fields.items())
+                for row in ordered
+            )
         finally:
             for repo in (repo_b, repo_a, seed_repo):
                 if repo is not None:
