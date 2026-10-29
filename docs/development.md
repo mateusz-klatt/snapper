@@ -824,6 +824,27 @@ summaries with bounded HTTP observations while accounting for concurrent reads
 and the handler's serialization and transfer exclusions. Background service
 callers do not enable this request-local timing.
 
+### P&L FX event reads
+
+Mark and event FX evidence retain their separate bounded reads, original
+candidate-discovery windows and shared knowledge horizon. Sparse event reads
+add a conservative union of intervals inside the original event bounds. The
+union preserves every mark and event conversion requirement, including
+mark-only minutes whose conflicting evidence may become visible between the
+two reads; the read path does not assume a repeatable-read database snapshot.
+
+Each requirement retains the existing twenty-minute carry look-back plus the
+one-minute candle-close offset. This twenty-one-minute read padding does not
+extend the twenty-minute freshness limit or change plane election. The
+author-time ownership, as-of denomination proof, forex classification and
+finalized-candle predicates remain unchanged.
+
+A dense union or more than sixteen disjoint intervals retains the original
+range read. Active shadow consumers also retain that read so their complete
+candidate-provenance inputs remain unchanged. This optimization narrows
+materialized evidence; production SQL cost and end-to-end latency still need
+measurement. It adds no public API fields or configuration.
+
 ### ZMQ Logger
 
 ```bash

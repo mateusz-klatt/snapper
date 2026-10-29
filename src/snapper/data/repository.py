@@ -5076,6 +5076,8 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRateRow]:
         """Load finalized one-minute closes for pinned spot-FX venue planes.
 
@@ -5100,6 +5102,8 @@ class Repository(ABC):
             end: Inclusive upper candle-open bound.
             as_of: Snapshot time threading the instrument, symbol, and candle
                 temporal predicates, so a corrected candle is seen AS KNOWN then.
+            open_intervals: Optional conservative candle-open intervals inside
+                the outer bounds. Empty input retains the entire bounded range.
 
         Returns:
             Rows ordered by candle open time and plane identity.
@@ -20617,6 +20621,8 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRateRow]:
         """Load finalized one-minute closes for pinned FX planes in one query.
 
@@ -20629,15 +20635,25 @@ class SQLAlchemyRepository(Repository):
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
             as_of: Snapshot time threading the temporal predicates.
+            open_intervals: Optional intervals intersected with the outer bounds.
 
         Returns:
             Rows ordered by ``(open_at, base, quote, exchange)``.
         """
         if not planes:
             return []
-        rows = await self._pnl_fx_rate_candles(
-            planes, as_of, and_(Candle.open_at >= start, Candle.open_at <= end)
-        )
+        minute_filter = and_(Candle.open_at >= start, Candle.open_at <= end)
+        if open_intervals:
+            minute_filter = and_(
+                minute_filter,
+                or_(
+                    *(
+                        and_(Candle.open_at >= lower, Candle.open_at <= upper)
+                        for lower, upper in open_intervals
+                    )
+                ),
+            )
+        rows = await self._pnl_fx_rate_candles(planes, as_of, minute_filter)
         rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
         return rows
 

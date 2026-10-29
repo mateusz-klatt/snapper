@@ -156,6 +156,9 @@ bounded carry-forward is unreachable: the rows never load, and a minute with no
 exact mark leaves every candidate plane at zero coverage, so none is pinned.
 """
 
+_FX_SPARSE_EVENT_INTERVAL_LIMIT: Final[int] = 16
+"""Maximum sparse event intervals before retaining the original range read."""
+
 PNL_TIMELINE_MAX_WORK_UNITS: Final[int] = 131_040
 """Maximum minute-instrument work for one reconstruction.
 
@@ -2777,7 +2780,8 @@ def _merge_fx_minutes(
         second: Second bounded requirement map.
 
     Returns:
-        Unioned exact minutes used only for request-wide venue resolution.
+        Unioned exact minutes for request-wide venue resolution and conservative
+        event-row interval planning.
     """
     merged: _FxMinuteRequirements = {pair: set(minutes) for pair, minutes in first.items()}
     for pair, minutes in second.items():
@@ -2978,6 +2982,8 @@ async def _load_fx_candidate_rows(
     requirements: Mapping[FxPairKey, set[datetime]],
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     as_of: datetime,
+    *,
+    sparse_requirements: Mapping[FxPairKey, set[datetime]] | None = None,
 ) -> list[PnlFxRateRow]:
     """Load eligible exact oriented planes in one bounded window.
 
@@ -2986,6 +2992,8 @@ async def _load_fx_candidate_rows(
         requirements: Exact pair minutes in this mark or event window.
         candidate_planes: Eligible discovered and identity planes by pair.
         as_of: Knowledge horizon threading the repository read.
+        sparse_requirements: All causal mark and event minutes to retain in an
+            event read, including cross-read conflict evidence at mark-only minutes.
 
     Returns:
         Candidate rows used to resolve shared and instrument-owned planes.
@@ -2998,12 +3006,56 @@ async def _load_fx_candidate_rows(
         planes.update(candidate_planes.get(pair, set()))
     if not planes:
         return []
+    intervals = (
+        _sparse_event_fx_intervals(sparse_requirements) if sparse_requirements is not None else ()
+    )
+    if intervals:
+        return await repo.get_pnl_fx_rate_candles(
+            sorted(planes),
+            bounds[0] - _FX_CARRY_WINDOW,
+            bounds[1],
+            as_of,
+            open_intervals=intervals,
+        )
     return await repo.get_pnl_fx_rate_candles(
         sorted(planes),
         bounds[0] - _FX_CARRY_WINDOW,
         bounds[1],
         as_of,
     )
+
+
+def _sparse_event_fx_intervals(
+    requirements: Mapping[FxPairKey, set[datetime]],
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Bound sparse event evidence without changing durable shadow input rows.
+
+    Every interval retains the existing twenty-minute carry look-back and its
+    closing-bar offset. The global union is deliberately conservative across
+    pairs and preserves both mark and event requirements, so a later event read
+    still sees conflicts at mark-only minutes without assuming a database
+    snapshot. Dense or fragmented requirements keep the original range read, and
+    active shadow consumers retain every original candidate-provenance row.
+
+    Args:
+        requirements: Exact mark and event conversion minutes grouped by pair.
+
+    Returns:
+        At most sixteen disjoint intervals, or an empty tuple for the original read.
+    """
+    if current_fx_shadow_context() is not None:
+        return ()
+    minutes = sorted({minute for pair_minutes in requirements.values() for minute in pair_minutes})
+    intervals: list[tuple[datetime, datetime]] = []
+    for minute in minutes:
+        start = minute - _FX_CARRY_WINDOW - timedelta(minutes=1)
+        if intervals and start - intervals[-1][1] <= timedelta(minutes=1):
+            intervals[-1] = (intervals[-1][0], minute)
+        else:
+            intervals.append((start, minute))
+        if len(intervals) > _FX_SPARSE_EVENT_INTERVAL_LIMIT:
+            return ()
+    return tuple(intervals) if len(intervals) > 1 else ()
 
 
 class _PlaneCoverage(NamedTuple):
@@ -3304,7 +3356,9 @@ async def _load_request_fx_rates(
     and venue is discarded. Each instrument uses one plane per pair for its
     marks, execution prices, fees, and accruals at every minute.
     Wholly owned requirements read their canonical planes directly. Any general
-    consumer retains both original discovery windows and their complete inputs.
+    consumer retains both original discovery calls and their complete phase
+    inputs. Non-shadow event rows may be pruned only outside all causal mark
+    and event carry intervals, inside the unchanged event bounds.
 
     Args:
         repo: Repository providing bounded FX plane and candle reads.
@@ -3355,6 +3409,7 @@ async def _load_request_fx_rates(
         event_pair_requirements,
         candidate_planes,
         as_of,
+        sparse_requirements=requirements,
     )
     rows = [*mark_rows, *event_rows]
     shared_planes = _resolve_fx_planes(

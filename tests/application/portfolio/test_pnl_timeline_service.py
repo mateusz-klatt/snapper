@@ -953,6 +953,8 @@ class FakeRepo:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRateRow]:
         """Record exact venue planes and return their bounded canned candles."""
         plane_list = list(planes)
@@ -965,6 +967,7 @@ class FakeRepo:
                 start,
                 end,
                 as_of,
+                open_intervals=open_intervals,
             )
         requested = set(planes)
         return [
@@ -972,6 +975,10 @@ class FakeRepo:
             for row in self._fx_rows
             if (row["base"], row["quote"], row["exchange"]) in requested
             and start <= row["open_at"] <= end
+            and (
+                not open_intervals
+                or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
+            )
         ]
 
     def load_samples(self, samples: Sequence[PortfolioPnlSampleRow]) -> None:
