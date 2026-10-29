@@ -10,10 +10,15 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
+from sqlalchemy import and_
 from sqlalchemy import create_engine
+from sqlalchemy import event
 from sqlalchemy import select
+from sqlalchemy import tuple_
+from sqlalchemy.sql import Select
 
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
@@ -25,6 +30,9 @@ from snapper.data.models import FxConversionProof
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _pnl_fx_symbol_proof_filters
+from snapper.data.repository import where_active
+from snapper.data.repository_types import PnlFxRatePlane
 
 _NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _TS = _NOW - timedelta(hours=6)
@@ -232,6 +240,196 @@ class TestGetPnlFxRateExchanges:
             [("EUR", "USD")], _M, _M, _NOW + timedelta(days=1)
         )
         assert ("EUR", "USD", "kraken_futures") not in planes
+
+
+def _original_discovery_query(
+    pairs: list[tuple[str, str]], start: datetime, end: datetime, as_of: datetime
+) -> Select[tuple[str, str | None, str]]:
+    """Retain the exact be9 candle-join discovery expression as an equivalence oracle."""
+    return (
+        select(Symbol.base, Symbol.quote, Instrument.exchange)
+        .select_from(Candle)
+        .join(
+            Instrument,
+            and_(
+                Candle.instrument_public_id == Instrument.public_id,
+                Instrument.timestamp <= Candle.timestamp,
+                Instrument.known_to > Candle.timestamp,
+            ),
+        )
+        .join(
+            Symbol,
+            and_(
+                Instrument.symbol_public_id == Symbol.public_id,
+                Symbol.timestamp <= Candle.timestamp,
+                Symbol.known_to > Candle.timestamp,
+            ),
+        )
+        .where(
+            tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
+            *_pnl_fx_symbol_proof_filters(as_of),
+            Candle.timeframe == "1m",
+            Candle.open_at >= start,
+            Candle.open_at <= end,
+            Candle.complete.is_(True),
+            *where_active(Candle, as_of),
+        )
+        .distinct()
+        .order_by(Symbol.base.asc(), Symbol.quote.asc(), Instrument.exchange.asc())
+    )
+
+
+async def _original_planes(
+    repository: SQLAlchemyRepository, pair: tuple[str, str], minute: datetime, as_of: datetime
+) -> list[PnlFxRatePlane]:
+    """Execute the frozen original query against the same isolated fixture evidence."""
+    async with repository.session() as session:
+        result = await session.execute(_original_discovery_query([pair], minute, minute, as_of))
+        return [(base, cast(str, quote), exchange) for base, quote, exchange in result.all()]
+
+
+class TestDiscoveryCandleExistence:
+    """Preserve candidate evidence while avoiding candle-row expansion before DISTINCT."""
+
+    async def test_executes_metadata_driven_candle_existence_query(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A real discovery query tests candle presence under historical metadata.
+
+        Given: Multiple finalized candles and multiple venues for one currency pair.
+        When: Candidate discovery executes against the actual fixture database.
+        Then: Metadata drives a correlated candle EXISTS and matches the original rowset.
+        """
+        statements: list[str] = []
+
+        def capture(*args: object) -> None:
+            """Capture executed SQL without replacing the repository or database."""
+            statement = args[2]
+            assert isinstance(statement, str)
+            statements.append(" ".join(statement.split()))
+
+        event.listen(repository.engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            actual = await repository.get_pnl_fx_rate_exchanges([("EUR", "USD")], _M, _M, _NOW)
+        finally:
+            event.remove(repository.engine.sync_engine, "before_cursor_execute", capture)
+        assert len(statements) == 1
+        assert "FROM instruments JOIN symbols" in statements[0]
+        assert "EXISTS (SELECT * FROM candles" in statements[0]
+        assert actual == await _original_planes(repository, ("EUR", "USD"), _M, _NOW)
+
+    async def test_expired_metadata_and_old_forex_classification_remain_candidates(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A current metadata shortcut cannot remove a valid historical candle author.
+
+        Given: Expired forex metadata followed by crypto classification and another venue.
+        When: The candle remains known at a later horizon within its original author bands.
+        Then: Only the original venue qualifies, exactly as the original query returned.
+        """
+        changed_at = _M + timedelta(minutes=1)
+        old_instrument = _instrument("ins-history", "sym-history", "walutomat")
+        old_instrument.known_to = changed_at
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol("sym-history", "GBP-X", "GBP", "USD", known_to=changed_at),
+                    _symbol("sym-history", "GBP-X", "GBP", "USD", "crypto", timestamp=changed_at),
+                    old_instrument,
+                    _instrument("ins-history", "sym-history", "kraken", timestamp=changed_at),
+                    _candle("ins-history", _M, 1.2),
+                ]
+            )
+            await session.commit()
+        expected = [("GBP", "USD", "walutomat")]
+        assert await _original_planes(repository, ("GBP", "USD"), _M, _NOW) == expected
+        assert (
+            await repository.get_pnl_fx_rate_exchanges([("GBP", "USD")], _M, _M, _NOW) == expected
+        )
+
+    async def test_nonoverlapping_author_bands_do_not_create_a_candidate(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Matching logical identifiers cannot replace a common candle author instant.
+
+        Given: Symbol and instrument bands that meet at an exclusive upper boundary.
+        When: A candle exists outside every common author interval.
+        Then: Both query shapes return no candidate despite known forex classification.
+        """
+        boundary = _M - timedelta(minutes=1)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol("sym-gap", "AUD-X", "AUD", "CAD", known_to=boundary),
+                    _symbol("sym-gap", "AUD-X", "AUD", "CAD", timestamp=_M + timedelta(minutes=1)),
+                    _instrument("ins-gap", "sym-gap", "walutomat", timestamp=boundary),
+                    _candle("ins-gap", _M, 1.2),
+                ]
+            )
+            await session.commit()
+        assert await _original_planes(repository, ("AUD", "CAD"), _M, _NOW) == []
+        assert await repository.get_pnl_fx_rate_exchanges([("AUD", "CAD")], _M, _M, _NOW) == []
+
+    @pytest.mark.parametrize(
+        ("authored_offset", "retired_offset", "eligible"),
+        [(0, None, True), (1, None, False), (-1, 0, False), (-1, 1, True)],
+    )
+    async def test_candle_version_horizon_boundaries_remain_exact(
+        self,
+        repository: SQLAlchemyRepository,
+        authored_offset: int,
+        retired_offset: int | None,
+        eligible: bool,
+    ) -> None:
+        """Candidate existence retains inclusive knowledge and exclusive retirement bounds.
+
+        Given: A candle authored or retired immediately around the response horizon.
+        When: Discovery reads that fixed horizon.
+        Then: Both queries preserve the exact active-version boundary behavior.
+        """
+        candle = _candle("ins-boundary", _M, 0.0)
+        candle.timestamp = _NOW + timedelta(seconds=authored_offset)
+        if retired_offset is not None:
+            candle.known_to = _NOW + timedelta(seconds=retired_offset)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol("sym-boundary", "CAD-X", "CAD", "CHF"),
+                    _instrument("ins-boundary", "sym-boundary", "walutomat"),
+                    candle,
+                ]
+            )
+            await session.commit()
+        expected = [("CAD", "CHF", "walutomat")] if eligible else []
+        assert await _original_planes(repository, ("CAD", "CHF"), _M, _NOW) == expected
+        assert (
+            await repository.get_pnl_fx_rate_exchanges([("CAD", "CHF")], _M, _M, _NOW) == expected
+        )
+
+    @pytest.mark.parametrize("close", [0.0, -1.0])
+    async def test_discovery_does_not_add_a_close_validity_filter(
+        self, repository: SQLAlchemyRepository, close: float
+    ) -> None:
+        """Candidate presence remains distinct from downstream usable price coverage.
+
+        Given: A finalized candle whose close is not a usable positive FX rate.
+        When: Its plane is discovered for the original inclusive minute window.
+        Then: The candidate remains present exactly as in the original query.
+        """
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol("sym-price", "NZD-X", "NZD", "CHF"),
+                    _instrument("ins-price", "sym-price", "walutomat"),
+                    _candle("ins-price", _M, close),
+                ]
+            )
+            await session.commit()
+        expected = [("NZD", "CHF", "walutomat")]
+        assert await _original_planes(repository, ("NZD", "CHF"), _M, _NOW) == expected
+        assert (
+            await repository.get_pnl_fx_rate_exchanges([("NZD", "CHF")], _M, _M, _NOW) == expected
+        )
 
 
 class TestGetPnlFxRateCandlesAt:
