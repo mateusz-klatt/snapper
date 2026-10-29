@@ -1652,7 +1652,12 @@ browser clock skew cannot place the requested end after its own horizon. The
 an explicit `to`, and any explicitly supplied end after the effective horizon
 remains a 400. Omitting the end does not widen activation-anchor permissions.
 The P&L view refreshes its rolling Live window when each UTC minute closes;
-historical windows remain fixed until the selected horizon changes.
+while a request is pending, subsequent minute changes are coalesced into the
+latest window. The previous successful data stays visible with a loading
+indicator during a same-scope refresh. Changing the wallet, operator,
+authenticated user, login state, time window, mode, currency, granularity or knowledge horizon retires
+that retained view. Historical windows remain fixed until the selected horizon
+changes.
 
 ### POST /api/execution-plans
 

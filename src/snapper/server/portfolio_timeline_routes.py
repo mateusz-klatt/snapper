@@ -61,6 +61,7 @@ from snapper.api.schemas.pnl_timeline import PnlTimelineData
 from snapper.api.schemas.pnl_timeline import PnlTimelineMarkerData
 from snapper.api.schemas.pnl_timeline import PnlTimelinePointData
 from snapper.api.schemas.pnl_timeline import PnlTimelineResponse
+from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
@@ -504,6 +505,7 @@ def _marker_data(marker: PnlTimelineMarker) -> PnlTimelineMarkerData:
         500: {"description": _INTERNAL_ERROR_DETAIL},
     },
 )
+@observe_pnl_read("series")
 async def get_pnl_series(
     request: Request,
     _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_POSITIONS))],
@@ -649,6 +651,7 @@ async def get_pnl_series(
         500: {"description": _INTERNAL_TIMELINE_ERROR_DETAIL},
     },
 )
+@observe_pnl_read("timeline")
 async def get_pnl_timeline(
     request: Request,
     _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_POSITIONS))],
