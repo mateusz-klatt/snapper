@@ -30,7 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml poetry.lock README.md LICENSE NOTICE ./
-COPY vendor/ccxt/ ./vendor/ccxt/
 COPY src/ ./src/
 COPY *proprietary/data/seed/ ./src/snapper/data/seed/
 

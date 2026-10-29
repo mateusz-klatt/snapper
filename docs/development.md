@@ -14,7 +14,7 @@ Guidelines for developers working on the Snapper project.
 - Pre-commit hooks
 
 Docker builds use Python 3.14 and require binary distributions for all locked
-dependencies. The vendored CCXT package currently pins `cffi==2.0.0`, which has no
+dependencies. The official CCXT package currently pins `cffi==2.0.0`, which has no
 compatible Python 3.15 wheel. Python image minor and major upgrades therefore
 require a separate dependency compatibility review; patch updates remain enabled.
 
@@ -65,10 +65,10 @@ and pre-commit hooks. The Python refresh also reinstalls the current project
 so its installed dependency metadata matches the updated manifest and lock file.
 `make update` additionally refreshes Docker build-tool pins.
 
-CCXT currently uses a [reproducible dependency metadata patch](../vendor/ccxt/README.md)
-so its exact urllib3 requirement includes the current security fixes. Keep the
-vendored wheel in source checkouts and Docker build contexts; the linked note
-documents verification, rebuilding, distribution limits, and retirement of the patch.
+CCXT uses the official PyPI release. Explicit minimum versions for urllib3,
+multidict, and certifi retain the security fixes that previously required a
+vendored metadata patch. The [CCXT dependency note](../vendor/ccxt/README.md)
+records the verified upstream artifact and retirement of that patch.
 
 ## Isolated Worktrees for Parallel Sessions
 
