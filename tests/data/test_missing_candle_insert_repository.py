@@ -15,7 +15,9 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
@@ -411,3 +413,387 @@ async def test_empty_duplicate_missing_field_and_over_budget_batches(
     with pytest.raises(ValueError):
         await repository.insert_missing_candles([_row(offset) for offset in range(721)])
     assert await _stored(repository) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller_owned", [False, True])
+async def test_catchup_first_older_live_batch_keeps_fresh_keys_without_replacing_newer_history(
+    repository: SQLAlchemyRepository, caller_owned: bool
+) -> None:
+    """An older queued live row cannot invalidate unrelated valid writes after catchup wins.
+
+    Given: Missing-only catchup holds a newer native row before committing.
+    When: An older live batch waits with that key and a distinct valid key.
+    Then: The stale key stays untouched while the other live key commits normally.
+    """
+    caught_up = _row()
+    caught_up["timestamp"] = _ACQUIRED + timedelta(hours=1)
+    stale, fresh = _row(), _row(1)
+    stale["close"] = 10.5
+
+    async def write_live() -> int:
+        """Run the real owned or caller-managed live transaction."""
+        if not caller_owned:
+            return await repository.upsert_candles([stale, fresh])
+        async with repository.session() as live:
+            changed = await repository.upsert_candles([stale, fresh], session=live)
+            await live.commit()
+            return changed
+
+    async with repository.session() as catchup:
+        assert len(await repository.insert_missing_candles([caught_up], session=catchup)) == 1
+        writer = asyncio.create_task(write_live())
+        try:
+            await asyncio.sleep(0.05)
+            assert not writer.done()
+            await catchup.commit()
+            assert await writer == 1
+        finally:
+            if not writer.done():
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
+    async with repository.session() as session:
+        stored = (await session.execute(select(Candle).order_by(Candle.open_at))).scalars().all()
+        assert len(stored) == 2
+        assert stored[0].timestamp == caught_up["timestamp"]
+        assert stored[0].close == caught_up["close"]
+        assert stored[0].known_to == KNOWN_TO_MAX
+        assert stored[1].timestamp == fresh["timestamp"]
+        assert stored[1].close == fresh["close"]
+
+
+@pytest.mark.asyncio
+async def test_older_live_replay_after_catchup_commit_is_a_true_noop(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A newer durable catchup author makes an older live replay a harmless exact no-op."""
+    caught_up = _row()
+    caught_up["timestamp"] = _ACQUIRED + timedelta(hours=1)
+    await repository.insert_missing_candles([caught_up])
+    before = await _stored(repository)
+    stale = _row()
+    stale["close"] = 10.5
+    assert await repository.upsert_candles([stale]) == 0
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_sqlite_live_fence_reuses_an_already_writing_caller_transaction(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A caller may stage repeated candle writes and roll them all back without nested BEGIN."""
+    async with repository.session() as session:
+        session.add(Candle(**(_row() | {"public_id": _SESSION, "known_to": KNOWN_TO_MAX})))
+        await session.flush()
+        assert await repository.upsert_candles([_row(1)], session=session) == 1
+        assert await repository.upsert_candles([_row(2)], session=session) == 1
+        await session.rollback()
+    assert await _stored(repository) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_live_wait_does_not_commit_after_catchup_releases_the_writer(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Cancelling the real SQLite writer wait cannot later persist an abandoned live batch."""
+    caught_up = _row()
+    caught_up["timestamp"] = _ACQUIRED + timedelta(hours=1)
+    async with repository.session() as catchup:
+        assert len(await repository.insert_missing_candles([caught_up], session=catchup)) == 1
+        writer = asyncio.create_task(repository.upsert_candles([_row(), _row(1)]))
+        await asyncio.sleep(0.05)
+        assert not writer.done()
+        writer.cancel()
+        await catchup.commit()
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+    async with repository.session() as session:
+        stored = (await session.execute(select(Candle))).scalars().all()
+        assert len(stored) == 1
+        assert stored[0].timestamp == caught_up["timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_filtered_stale_row_does_not_hide_a_real_live_batch_integrity_failure(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A stale skip preserves atomic rollback rather than swallowing unrelated integrity errors."""
+    caught_up = _row()
+    caught_up["timestamp"] = _ACQUIRED + timedelta(hours=1)
+    await repository.insert_missing_candles([caught_up])
+    before = await _stored(repository)
+    first, second = _row(1), _row(2)
+    first["public_id"] = _SESSION
+    second["public_id"] = _SESSION
+    with pytest.raises(IntegrityError):
+        await repository.upsert_candles([_row(), first, second])
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_canonical_candle_identity_lookup_preserves_all_history(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """One exact key resolves its sole logical identity across closed and future history.
+
+    Given: A closed version and a future-authored current version share one public ID.
+    When: A publisher acquires canonical identity before live publication.
+    Then: The historical identity is returned without changing any candle column.
+    """
+    public_id = "00000000-0000-4000-8000-000000000701"
+    async with repository.session() as session:
+        closed = _row() | {
+            "public_id": public_id,
+            "timestamp": _ACQUIRED - timedelta(days=2),
+            "known_to": _ACQUIRED - timedelta(days=1),
+        }
+        future = _row() | {
+            "public_id": public_id,
+            "timestamp": datetime.now(UTC) + timedelta(days=1),
+            "known_to": KNOWN_TO_MAX,
+        }
+        session.add_all([Candle(**closed), Candle(**future)])
+        await session.commit()
+    before = await _stored(repository)
+    assert await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN) == public_id
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_canonical_identity_waits_for_the_native_transaction_outcome(
+    repository: SQLAlchemyRepository, committed: bool
+) -> None:
+    """A pending native transaction must finish before identity absence can be observed."""
+    async with repository.session() as native:
+        inserted = await repository.insert_missing_candles([_row()], session=native)
+        lookup = asyncio.create_task(
+            repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert not lookup.done()
+            if committed:
+                await native.commit()
+            else:
+                await native.rollback()
+            assert await lookup == (inserted[0]["public_id"] if committed else None)
+        finally:
+            if not lookup.done():
+                lookup.cancel()
+                await asyncio.gather(lookup, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["current", "closed", "future"])
+async def test_canonical_identity_includes_every_knowledge_version(
+    repository: SQLAlchemyRepository, version: str
+) -> None:
+    """The canonical identity comes from history even when no version is visible now."""
+    candidate = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000702",
+        "known_to": KNOWN_TO_MAX,
+    }
+    if version == "closed":
+        candidate["known_to"] = _ACQUIRED + timedelta(days=1)
+    elif version == "future":
+        candidate["timestamp"] = datetime.now(UTC) + timedelta(days=1)
+    async with repository.session() as session:
+        session.add(Candle(**candidate))
+        await session.commit()
+    before = await _stored(repository)
+    assert (
+        await repository.get_canonical_candle_public_id(
+            _INSTRUMENT, "1m", _OPEN.astimezone(timezone(timedelta(hours=2)))
+        )
+        == candidate["public_id"]
+    )
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_refuses_conflicting_historical_logical_ids(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Distinct logical identities across one key's history are ambiguous, never guessed."""
+    first = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000703",
+        "known_to": _ACQUIRED + timedelta(days=1),
+    }
+    second = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000704",
+        "timestamp": _ACQUIRED + timedelta(days=1),
+        "known_to": KNOWN_TO_MAX,
+    }
+    async with repository.session() as session:
+        session.add_all([Candle(**first), Candle(**second)])
+        await session.commit()
+    before = await _stored(repository)
+    with pytest.raises(RuntimeError, match="conflicting public identities"):
+        await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_lookup_matches_the_complete_exact_key(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Other instruments, intervals and business opens cannot supply a candle identity."""
+    first = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000705",
+        "known_to": KNOWN_TO_MAX,
+    }
+    other_timeframe = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000706",
+        "timeframe": "5m",
+        "known_to": KNOWN_TO_MAX,
+    }
+    other_instrument = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000707",
+        "instrument_public_id": _SESSION,
+        "known_to": KNOWN_TO_MAX,
+    }
+    async with repository.session() as session:
+        session.add_all([Candle(**first), Candle(**other_timeframe), Candle(**other_instrument)])
+        await session.commit()
+    before = await _stored(repository)
+    assert (
+        await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+        == first["public_id"]
+    )
+    assert (
+        await repository.get_canonical_candle_public_id(
+            _INSTRUMENT, "1m", _OPEN + timedelta(minutes=1)
+        )
+        is None
+    )
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_retains_caller_transaction_ownership(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A writing caller can read its staged ID repeatedly and still roll the row back."""
+    async with repository.session() as session:
+        staged = await repository.insert_missing_candles([_row()], session=session)
+        for _ in range(2):
+            assert (
+                await repository.get_canonical_candle_public_id(
+                    _INSTRUMENT, "1m", _OPEN, session=session
+                )
+                == staged[0]["public_id"]
+            )
+        await session.rollback()
+    assert await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN) is None
+    assert await _stored(repository) == []
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_cancellation_never_reports_uncommitted_absence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Cancellation during the writer wait propagates without manufacturing an identity."""
+    async with repository.session() as native:
+        staged = await repository.insert_missing_candles([_row()], session=native)
+        lookup = asyncio.create_task(
+            repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+        )
+        await asyncio.sleep(0.05)
+        assert not lookup.done()
+        lookup.cancel()
+        await native.commit()
+        with pytest.raises(asyncio.CancelledError):
+            await lookup
+    before = await _stored(repository)
+    assert (
+        await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+        == staged[0]["public_id"]
+    )
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_sqlite_lock_timeout_refuses_instead_of_guessing(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A caller's short SQLite wait limit remains a refusal, not evidence of absence."""
+    async with repository.session() as native:
+        staged = await repository.insert_missing_candles([_row()], session=native)
+        async with repository.session() as waiter:
+            await waiter.execute(text("PRAGMA busy_timeout = 50"))
+            with pytest.raises(OperationalError, match="locked"):
+                await repository.get_canonical_candle_public_id(
+                    _INSTRUMENT, "1m", _OPEN, session=waiter
+                )
+            await waiter.rollback()
+        await native.commit()
+    before = await _stored(repository)
+    assert (
+        await repository.get_canonical_candle_public_id(_INSTRUMENT, "1m", _OPEN)
+        == staged[0]["public_id"]
+    )
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("instrument", "timeframe", "opening"),
+    [("", "1m", _OPEN), (_INSTRUMENT, "", _OPEN), (_INSTRUMENT, "1m", _OPEN.replace(tzinfo=None))],
+)
+async def test_canonical_identity_invalid_key_refuses_before_database_work(
+    repository: SQLAlchemyRepository, instrument: str, timeframe: str, opening: datetime
+) -> None:
+    """An incomplete or naive natural key never acquires a database writer fence."""
+    session = AsyncMock(spec=AsyncSession)
+    with pytest.raises(ValueError):
+        await repository.get_canonical_candle_public_id(
+            instrument, timeframe, opening, session=cast(AsyncSession, session)
+        )
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_unsupported_dialect_refuses_without_queries() -> None:
+    """Canonical publisher identity cannot fall back to an unreviewed writer protocol."""
+    repo = _UnsupportedDialectRepository("sqlite+aiosqlite:///:memory:")
+    session = AsyncMock(spec=AsyncSession)
+    try:
+        with pytest.raises(NotImplementedError):
+            await repo.get_canonical_candle_public_id(
+                _INSTRUMENT, "1m", _OPEN, session=cast(AsyncSession, session)
+            )
+        session.execute.assert_not_awaited()
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_canonical_identity_postgres_fence_precedes_bounded_all_history_lookup() -> None:
+    """Actual identity SQL follows the existing PG participation fence with no temporal filter."""
+    repo = _PostgresDialectRepository("sqlite+aiosqlite:///:memory:")
+    session = AsyncMock(spec=AsyncSession)
+    isolation = MagicMock()
+    isolation.scalar_one.return_value = "read committed"
+    identity = MagicMock()
+    identity.scalars.return_value.all.return_value = [_SESSION]
+    session.execute.side_effect = [isolation, MagicMock(), MagicMock(), identity]
+    try:
+        assert (
+            await repo.get_canonical_candle_public_id(
+                _INSTRUMENT, "1m", _OPEN, session=cast(AsyncSession, session)
+            )
+            == _SESSION
+        )
+        commands = [
+            str(call.args[0].compile(compile_kwargs={"literal_binds": True}))
+            for call in session.execute.await_args_list
+        ]
+        assert commands[0] == "SHOW transaction_isolation"
+        assert "ROW EXCLUSIVE" in commands[2] and "SHARE ROW" not in commands[2]
+        assert "SELECT DISTINCT candles.public_id" in commands[3]
+        assert "LIMIT 2" in commands[3]
+        assert "known_to" not in commands[3] and "timestamp" not in commands[3]
+        session.commit.assert_not_awaited()
+    finally:
+        await repo.engine.dispose()

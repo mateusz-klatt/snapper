@@ -18,6 +18,7 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.publishers.native_candle_finalizer import is_complete_historical_minute
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 
 
@@ -72,6 +73,7 @@ class CatchupCallbacks:
     active: Callable[[], bool]
     tracker: SequenceTracker
     clock: Callable[[], datetime] = _now
+    insert_missing: Callable[[list[CandleUpsertRow]], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,34 +111,6 @@ def repair_read_start(start: datetime, timeframes: list[str]) -> datetime:
     return min((_floor(start, window_seconds(tf)) for tf in timeframes), default=start)
 
 
-def _eligible_minute(row: CandleRow) -> bool:
-    """Refuse incomplete, non-finite or malformed durable minute evidence.
-
-    Args:
-        row: Actual persisted candle observation.
-
-    Returns:
-        Whether all required native business fields and boundaries are usable.
-    """
-    values = (row["open"], row["high"], row["low"], row["close"], row["volume"], row["vwap"])
-    if any(value is None or not math.isfinite(value) for value in values):
-        return False
-    trades = row["trades"]
-    return (
-        row["complete"]
-        and row["timeframe"] == "1m"
-        and not (row["open_at"].second or row["open_at"].microsecond)
-        and type(trades) is int
-        and trades >= 0
-        and row["volume"] >= 0
-        and row["vwap"] is not None
-        and row["vwap"] >= 0
-        and row["low"] > 0
-        and row["low"] <= min(row["open"], row["close"])
-        and row["high"] >= max(row["open"], row["close"], row["low"])
-    )
-
-
 def complete_repair_windows(
     rows: list[CandleRow], start: datetime, end: datetime, timeframes: list[str]
 ) -> list[CatchupRepairWindow]:
@@ -155,7 +129,7 @@ def complete_repair_windows(
     invalid: set[datetime] = set()
     for row in rows:
         stamp = row["open_at"]
-        if stamp in valid or not _eligible_minute(row):
+        if stamp in valid or not is_complete_historical_minute(row, end):
             invalid.add(stamp)
         valid.add(stamp)
     valid.difference_update(invalid)
@@ -301,7 +275,10 @@ class KrakenCandleCatchup:
             raise ValueError("Kraken catchup symbol left the permitted persistence roster")
         author = self._callbacks.clock()
         rows = [self._row(candle, instrument, author) for candle in candles]
-        await self._repository.insert_missing_candles(rows)
+        if self._callbacks.insert_missing is None:
+            await self._repository.insert_missing_candles(rows)
+        else:
+            await self._callbacks.insert_missing(rows)
         await self._callbacks.committed(symbol, start, end)
 
     def _row(self, candle: CandleUpdate, instrument: str, author: datetime) -> CandleUpsertRow:

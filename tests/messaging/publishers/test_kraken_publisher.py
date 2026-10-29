@@ -471,6 +471,9 @@ class TestKrakenMarketDataPublisher:
             return_value="00000000-0000-7000-8000-000000000501"
         )
         publisher._publish_message = AsyncMock()
+        repository = MagicMock(spec=Repository)
+        repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
+        publisher.repository = repository
         publisher._last_candle_msg_at = 0.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 700.0)
         row = await publisher._process_candle(_shadow_candle(), "kraken", "1m")

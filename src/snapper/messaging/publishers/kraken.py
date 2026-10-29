@@ -38,6 +38,7 @@ from functools import partial
 from typing import Any
 from typing import Final
 from typing import cast
+from uuid import uuid7
 
 from loguru import logger
 
@@ -49,6 +50,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
@@ -400,6 +402,133 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._restart_lock = asyncio.Lock()
         self._force_ws_restart_task: asyncio.Task[None] | None = None
         self._candle_catchup: KrakenCandleCatchup | None = None
+        self._candle_identity_gate = asyncio.Lock()
+        self._pending_candle_identities: dict[tuple[str, str, datetime], str] = {}
+
+    async def _resolve_live_candle_public_id(
+        self, instrument_public_id: str, timeframe: str, open_at: datetime, native_symbol: str
+    ) -> str:
+        """Adopt committed identities or reserve one bounded UUID before publication.
+
+        Args:
+            instrument_public_id: Canonical instrument identity.
+            timeframe: Explicit candle timeframe.
+            open_at: Candle business opening boundary.
+            native_symbol: Native symbol whose persistence policy owns the row.
+
+        Returns:
+            Proven stored identity or the sole unresolved local UUID for this key.
+
+        Raises:
+            RuntimeError: When unresolved reservations exhaust the writer capacity.
+        """
+        if not self._should_persist_row("candles", self._get_data_exchange(), native_symbol):
+            return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
+        async with self._candle_identity_gate:
+            key = (instrument_public_id, timeframe, open_at)
+            pending = self._pending_candle_identities.get(key)
+            if pending is not None:
+                return pending
+            cached = self._candle_id_cache.get((instrument_public_id, timeframe))
+            if cached is not None and cached[0] == open_at:
+                return cached[1]
+            public_id = await self._require_repository().get_canonical_candle_public_id(
+                instrument_public_id, timeframe, open_at
+            )
+            if public_id is None:
+                public_id = self._reserve_live_candle_identity(key)
+            if cached is None or cached[0] <= open_at:
+                self._candle_id_cache[(instrument_public_id, timeframe)] = (open_at, public_id)
+            return public_id
+
+    def _reserve_live_candle_identity(self, key: tuple[str, str, datetime]) -> str:
+        """Retain unresolved publication identities within queue and in-flight capacity.
+
+        Queue eviction, failed sends, cancellation and unknown commit acknowledgements
+        cannot discard an unresolved identity. Exhaustion refuses a new publication
+        rather than guessing or evicting a prior event's UUID.
+
+        Args:
+            key: Full natural key whose first event is about to be emitted.
+
+        Returns:
+            New UUID7 retained until a durable matching commit acknowledgement.
+
+        Raises:
+            RuntimeError: When the finite writer-derived reservation bound is full.
+        """
+        capacity = self._candle_write_queue.maxsize + self._candle_batch_max_rows
+        if capacity <= 0 or len(self._pending_candle_identities) >= capacity:
+            raise RuntimeError("unresolved candle identities exhaust bounded writer capacity")
+        public_id = str(uuid7())
+        self._pending_candle_identities[key] = public_id
+        return public_id
+
+    def _bind_pending_candle_identities(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Reuse outstanding event UUIDs without mutating the latest-window cache.
+
+        Args:
+            rows: Quiet native or synthesized candidate rows.
+
+        Returns:
+            Independent candidate copies carrying matching unresolved event identities.
+        """
+        prepared = []
+        for original in rows:
+            row = original.copy()
+            key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+            public_id = self._pending_candle_identities.get(key)
+            if public_id is None:
+                cached = self._candle_id_cache.get((row["instrument_public_id"], row["timeframe"]))
+                if cached is not None and cached[0] == row["open_at"]:
+                    public_id = cached[1]
+            if public_id is not None:
+                row["public_id"] = public_id
+            prepared.append(row)
+        return prepared
+
+    def _release_committed_candle_identities(self, rows: list[CandleUpsertRow]) -> None:
+        """Release only reservations acknowledged under their exact durable identity.
+
+        Args:
+            rows: Actual committed rows or acknowledged native inserts.
+        """
+        for row in rows:
+            key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+            if key in self._pending_candle_identities and self._pending_candle_identities[
+                key
+            ] == row.get("public_id"):
+                self._pending_candle_identities.pop(key, None)
+
+    def _mark_candle_writes_committed(self, rows: list[CandleUpsertRow]) -> None:
+        """Preserve writer bookkeeping and retire only acknowledged event identities.
+
+        Args:
+            rows: Writer rows whose commit acknowledgement completed.
+        """
+        super()._mark_candle_writes_committed(rows)
+        self._release_committed_candle_identities(rows)
+
+    async def _insert_catchup_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
+        """Serialize quiet native commits with live identity choice after REST acquisition.
+
+        Args:
+            rows: Full closed native observations acquired outside the local gate.
+        """
+        async with self._candle_identity_gate:
+            prepared = self._bind_pending_candle_identities(rows)
+            inserted = await self._require_repository().insert_missing_candles(prepared)
+            self._release_committed_candle_identities(inserted)
+
+    async def _persist_historical_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
+        """Serialize quiet synthesized commits without touching current-window identity.
+
+        Args:
+            rows: Full historically derived synthesized candidate rows.
+        """
+        async with self._candle_identity_gate:
+            prepared = self._bind_pending_candle_identities(rows)
+            await self._require_repository().upsert_historical_synthesized_candles(prepared)
 
     def _suspend_candle_synthesis_across_break(self) -> None:
         """Reset live trade trust and request bounded native history reconciliation."""
@@ -492,6 +621,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                     committed=self._reconcile_catchup_repairs,
                     active=lambda: self.running,
                     tracker=self._tracker,
+                    insert_missing=self._insert_catchup_candle_rows,
                 ),
             )
             return [asyncio.create_task(self._candle_catchup.run())]

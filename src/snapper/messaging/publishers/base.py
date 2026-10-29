@@ -86,6 +86,7 @@ from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindo
 from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
 from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitter
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
+from snapper.messaging.publishers.native_candle_finalizer import is_complete_historical_minute
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -2485,6 +2486,22 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._candle_id_cache[cache_key] = (open_at, public_id)
         return public_id
 
+    async def _resolve_live_candle_public_id(
+        self, instrument_public_id: str, timeframe: str, open_at: datetime, native_symbol: str
+    ) -> str:
+        """Resolve an event identity through the publisher's synchronization boundary.
+
+        Args:
+            instrument_public_id: Canonical instrument identity.
+            timeframe: Explicit candle timeframe.
+            open_at: Candle business opening boundary.
+            native_symbol: Native symbol whose persistence policy owns the row.
+
+        Returns:
+            Logical identity shared by publication and its durable write.
+        """
+        return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
+
     def _batch_age_remaining(
         self, batch_start: float | None, ev_loop: asyncio.AbstractEventLoop
     ) -> float:
@@ -3634,19 +3651,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         instrument = await self._ensure_instrument(candle.symbol)
         if instrument is None:
             return False
-        topic = self._build_data_topic(
-            candle.symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
-        )
         row: CandleUpsertRow = {
-            "public_id": self._resolve_candle_public_id(
-                instrument, timeframe, candle.interval_begin
-            ),
             "instrument_public_id": instrument,
             "timeframe": timeframe,
             "open_at": candle.interval_begin,
             "timestamp": datetime.now(UTC),
             "session_id": self._tracker.session_id,
-            "sequence_id": self._tracker.next_sequence(topic),
+            "sequence_id": self._tracker.next_sequence("candles.historical_repair"),
             "open": candle.open,
             "high": candle.high,
             "low": candle.low,
@@ -3658,8 +3669,16 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "source": "synthesized",
             "price_basis": self._candle_price_basis_for(timeframe),
         }
-        await self._require_repository().upsert_historical_synthesized_candles([row])
+        await self._persist_historical_candle_rows([row])
         return True
+
+    async def _persist_historical_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
+        """Commit quiet historical rows through the publisher's owned boundary.
+
+        Args:
+            rows: Complete synthesized rows without live event sequence numbers.
+        """
+        await self._require_repository().upsert_historical_synthesized_candles(rows)
 
     async def _derive_repaired_synthesized_candle(
         self, key: _CandleRepairKey, expected_source_minutes: frozenset[datetime] | None = None
@@ -3735,7 +3754,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         pending = self._pending_candle_repairs.get(key)
         if pending is not None and pending.historical_only:
-            return expected is not None and len(rows) == len(expected) and observed == expected
+            return (
+                expected is not None
+                and len(rows) == len(expected)
+                and observed == expected
+                and all(is_complete_historical_minute(row, datetime.now(UTC)) for row in rows)
+            )
         return expected is None or observed.issuperset(expected)
 
     async def _candle_writer_loop(self) -> None:
@@ -3862,8 +3886,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
             return None
-        public_id = self._resolve_candle_public_id(
-            instrument_public_id, timeframe, candle.interval_begin
+        public_id = await self._resolve_live_candle_public_id(
+            instrument_public_id, timeframe, candle.interval_begin, native_symbol
         )
         topic = self._build_data_topic(
             native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
@@ -3944,8 +3968,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
             return None
-        public_id = self._resolve_candle_public_id(
-            instrument_public_id, timeframe, candle.interval_begin
+        public_id = await self._resolve_live_candle_public_id(
+            instrument_public_id, timeframe, candle.interval_begin, native_symbol
         )
         topic = self._build_data_topic(
             native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe

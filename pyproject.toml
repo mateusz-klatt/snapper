@@ -88,7 +88,7 @@ ipykernel = "^7.4.0"
 matplotlib = "^3.11.2"
 scikit-learn = "^1.9.1"
 tqdm = "^4.70.1"
-types-markdown = "^3.10.2.20261007"
+types-markdown = "^3.11.2.20261029"
 httpx2 = "^2.16.0"
 
 [tool.poetry.scripts]

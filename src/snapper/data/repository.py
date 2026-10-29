@@ -3739,6 +3739,25 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_canonical_candle_public_id(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> str | None:
+        """Resolve one exact candle key's sole identity under writer participation.
+
+        This internal publisher boundary waits for reconciliation writers before
+        checking all knowledge history. It returns no identity only when that
+        complete key has no history, and refuses conflicting logical identities.
+        It allocates no identity and changes no candle value. An optional caller
+        transaction remains owned by its caller; an owned short transaction
+        releases its writer participation before returning.
+        """
+        ...
+
+    @abstractmethod
     async def insert_missing_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> list[CandleUpsertRow]:
@@ -11297,6 +11316,62 @@ class SQLAlchemyRepository(Repository):
                 continue
         return inserted
 
+    async def get_canonical_candle_public_id(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> str | None:
+        """Resolve bounded all-history identity after pending candle writers finish.
+
+        Args:
+            instrument_public_id: Exact canonical instrument identity.
+            timeframe: Exact candle timeframe label.
+            open_at: Aware business-time instant identifying the exact candle.
+            session: Optional caller-owned short writer transaction.
+
+        Returns:
+            The sole historical public identity, or None for a genuinely absent key.
+
+        Raises:
+            ValueError: When the key is empty, naive or a PostgreSQL snapshot is stale.
+            NotImplementedError: When the engine has no reviewed writer protocol.
+            RuntimeError: When multiple historical public identities occupy the key.
+            Exception: Propagates writer-lock, cancellation and database failures.
+        """
+        if not instrument_public_id or not timeframe:
+            raise ValueError("canonical candle identity requires its complete natural key")
+        opening = self._aware_missing_candle_time(open_at)
+        if self.dialect_name not in {"sqlite", "postgresql"}:
+            raise NotImplementedError("canonical candle identity requires a supported writer fence")
+        key = instrument_public_id, timeframe, opening
+        if session is not None:
+            return await self._canonical_candle_public_id_in_session(session, key)
+        async with self.session() as owned:
+            return await self._canonical_candle_public_id_in_session(owned, key)
+
+    async def _canonical_candle_public_id_in_session(
+        self, session: AsyncSession, key: _CandleNaturalKey
+    ) -> str | None:
+        """Wait under the existing writer protocol, then inspect at most two logical IDs."""
+        await self._prepare_live_candle_write(session, [])
+        instrument_public_id, timeframe, open_at = key
+        result = await session.execute(
+            select(Candle.public_id)
+            .where(
+                Candle.instrument_public_id == instrument_public_id,
+                Candle.timeframe == timeframe,
+                Candle.open_at == open_at,
+            )
+            .distinct()
+            .limit(2)
+        )
+        identities = result.scalars().all()
+        if len(identities) > 1:
+            raise RuntimeError("canonical candle natural key has conflicting public identities")
+        return identities[0] if identities else None
+
     async def insert_missing_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> list[CandleUpsertRow]:
@@ -11635,25 +11710,38 @@ class SQLAlchemyRepository(Repository):
     async def _prepare_live_candle_write(
         self, session: AsyncSession, rows: list[CandleUpsertRow]
     ) -> list[CandleUpsertRow]:
-        """Acquire PostgreSQL write participation before a fresh candle author lookup."""
-        if self.dialect_name != "postgresql":
+        """Serialize a fresh current-author lookup without nesting caller transactions.
+
+        SQLite's empty update acquires its writer reservation even when the
+        caller already owns a transaction. It changes no rows, while ensuring
+        a catchup commit is visible before the current-author read. PostgreSQL
+        retains its existing relation-lock and READ COMMITTED protocol.
+        """
+        if self.dialect_name == "postgresql":
+            await self._begin_candle_reconciliation_write(
+                session, sqlite_write_lock=False, lock_mode="ROW EXCLUSIVE"
+            )
+        elif self.dialect_name == "sqlite":
+            await session.execute(
+                update(cast(Table, Candle.__table__))
+                .where(Candle.id.is_(None))
+                .values(known_to=Candle.known_to)
+            )
+        else:
             return rows
-        await self._begin_candle_reconciliation_write(
-            session, sqlite_write_lock=False, lock_mode="ROW EXCLUSIVE"
-        )
         return await self._retain_nonstale_live_candle_rows(session, rows)
 
     @classmethod
     async def _retain_nonstale_live_candle_rows(
         cls, session: AsyncSession, rows: list[CandleUpsertRow]
     ) -> list[CandleUpsertRow]:
-        """Leave newer committed knowledge intact after a queued PostgreSQL writer waits.
+        """Leave newer committed knowledge intact after a queued candle writer waits.
 
-        The ordinary writer fence is acquired before this fresh READ COMMITTED
+        The ordinary writer fence is acquired before this current-author
         lookup. A catchup or historical repair can have committed a newer
         current author while a live batch waited; replaying that older batch
         must not close an older historical version or collide with its active
-        successor. Non-PostgreSQL callers retain their existing behavior.
+        successor. SQLite and PostgreSQL both participate in this guard.
         """
         keys = list(dict.fromkeys(cls._candle_natural_key(row) for row in rows))
         latest: dict[_CandleNaturalKey, datetime] = {}

@@ -5,21 +5,29 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from snapper.config.app import AppSettings
 from snapper.core.types import ExchangeEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.base import _PendingCandleRepair
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
@@ -29,6 +37,8 @@ from snapper.messaging.publishers.kraken_candle_catchup import CatchupPolicy
 from snapper.messaging.publishers.kraken_candle_catchup import KrakenCandleCatchup
 from snapper.messaging.publishers.kraken_candle_catchup import complete_repair_windows
 from snapper.messaging.publishers.kraken_candle_catchup import repair_read_start
+from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
+from snapper.messaging.publishers.native_candle_finalizer import is_complete_historical_minute
 
 NOW = datetime(2026, 10, 28, 21, 35, 30, tzinfo=UTC)
 START = NOW.replace(minute=25, second=0)
@@ -350,12 +360,17 @@ def test_repair_windows_require_exact_complete_contiguous_input() -> None:
         ("timeframe", "5m"),
         ("vwap", None),
         ("vwap", -1.0),
+        ("vwap", True),
         ("volume", -1.0),
+        ("volume", True),
+        ("open", True),
+        ("complete", 1),
         ("low", 0.0),
         ("open", 1.0),
         ("high", 1.0),
         ("trades", None),
         ("trades", -1),
+        ("trades", True),
         ("close", float("nan")),
         ("open_at", START + timedelta(seconds=1)),
     ],
@@ -385,6 +400,44 @@ def test_repair_read_includes_full_enclosing_windows_and_empty_selection() -> No
     """
     assert repair_read_start(START, []) == START
     assert repair_read_start(START, ["5m", "1h"]) == START.replace(minute=0)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("volume", 10**400),
+        ("open", "10.0"),
+        ("open_at", START.replace(tzinfo=None)),
+        ("open_at", START.replace(second=1)),
+        ("open_at", START.replace(microsecond=1)),
+        ("open_at", NOW.replace(minute=36, second=0)),
+    ],
+)
+def test_historical_minute_validator_refuses_invalid_number_and_closed_boundary(
+    field: str, value: object
+) -> None:
+    """The shared first and second proof reject malformed numbers and open intervals.
+
+    Given: One otherwise valid complete minute with a malformed numeric or temporal field.
+    When: Historical eligibility is checked at the actual observation horizon.
+    Then: Neither a non-number, overflow, naive clock nor unclosed minute is eligible.
+    """
+    changed: dict[str, object] = dict(_row(25))
+    changed[field] = value
+    assert not is_complete_historical_minute(cast(CandleRow, changed), NOW)
+
+
+def test_historical_minute_validator_requires_aware_horizon_and_preserves_zero_vwap() -> None:
+    """Strict evidence checks preserve the existing nonnegative native VWAP convention.
+
+    Given: A canonical completed source minute with explicit zero VWAP and volume.
+    When: An aware closed horizon and a naive horizon are compared.
+    Then: Only the aware read is eligible and original zero values remain valid.
+    """
+    row = _row(25)
+    row.update({"vwap": 0.0, "volume": 0.0})
+    assert is_complete_historical_minute(row, START + timedelta(minutes=1))
+    assert not is_complete_historical_minute(row, NOW.replace(tzinfo=None))
 
 
 def _publisher() -> KrakenMarketDataPublisher:
@@ -792,3 +845,506 @@ async def test_historical_derivation_rechecks_actual_committed_source_grid(fault
     repository.get_candles = AsyncMock(return_value=rows)
     publisher.repository = repository
     assert await publisher._derive_repaired_synthesized_candle(key, expected) is None
+
+
+async def _publish_and_commit_live_candle(
+    publisher: KrakenMarketDataPublisher, repository: SQLAlchemyRepository, candle: CandleUpdate
+) -> CandleUpsertRow:
+    """Drive real publication and its queued durable write without a running writer."""
+    await publisher._publish_synthesized_candle(candle, ExchangeEnum.KRAKEN, "5m")
+    row = publisher._candle_write_queue.get_nowait()
+    await repository.upsert_candles([row])
+    publisher._candle_write_queue.task_done()
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [0, 1, "failed"])
+async def test_historical_commit_does_not_consume_live_topic_sequences(
+    outcome: int | str,
+) -> None:
+    """Historical attempt provenance stays independent even for no-ops and failures.
+
+    Given: An already numbered live candle stream and quiet historical work.
+    When: The historical repository operation changes, skips or refuses its row.
+    Then: The next real live event receives the immediately following sequence.
+    """
+    publisher = _publisher()
+    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    repository = MagicMock(spec=Repository)
+    publisher.repository = repository
+    topic = publisher._build_data_topic("BTC-USD", "candles", timeframe="5m")
+    assert publisher._tracker.next_sequence(topic) == 1
+    if outcome == "failed":
+        repository.upsert_historical_synthesized_candles = AsyncMock(
+            side_effect=ConnectionError("historical transaction failed")
+        )
+        with pytest.raises(ConnectionError):
+            await publisher._commit_historical_candle_repair(_candle(), ExchangeEnum.KRAKEN, "5m")
+    else:
+        repository.upsert_historical_synthesized_candles = AsyncMock(return_value=outcome)
+        assert await publisher._commit_historical_candle_repair(
+            _candle(), ExchangeEnum.KRAKEN, "5m"
+        )
+    assert publisher._tracker.next_sequence(topic) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["noop", "changed", "failed"])
+async def test_historical_commit_preserves_live_identity_and_event_sequence(
+    tmp_path: Path, outcome: str
+) -> None:
+    """Quiet historical persistence cannot rewrite live identity or consume event numbers.
+
+    Given: A real committed live candle and a historical no-op, write or failure.
+    When: Historical work runs between two ordinary live candle publications.
+    Then: The live logical ID still equals storage and its sequence remains contiguous.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'publisher-history.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    publisher._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-000000000501")
+    publisher._publish_message = AsyncMock()
+    live = replace(_candle(), interval_begin=START + timedelta(minutes=10), interval=300)
+    try:
+        first = await _publish_and_commit_live_candle(publisher, repository, live)
+        if outcome == "noop":
+            native = dict(first)
+            native.update({"open_at": START, "source": "native"})
+            native.pop("public_id")
+            await repository.upsert_candles([cast(CandleUpsertRow, native)])
+        cache_before = dict(publisher._candle_id_cache)
+        guarded = repository.upsert_historical_synthesized_candles
+        with patch.object(
+            repository, "upsert_historical_synthesized_candles", wraps=guarded
+        ) as write:
+            if outcome == "failed":
+                write.side_effect = ConnectionError("historical transaction failed")
+                with pytest.raises(ConnectionError):
+                    await publisher._commit_historical_candle_repair(
+                        _candle(), ExchangeEnum.KRAKEN, "5m"
+                    )
+            else:
+                assert await publisher._commit_historical_candle_repair(
+                    _candle(), ExchangeEnum.KRAKEN, "5m"
+                )
+            historical_row = write.call_args.args[0][0]
+        assert publisher._candle_id_cache == cache_before
+        assert "public_id" not in historical_row
+        assert historical_row["session_id"] == publisher._tracker.session_id
+        assert historical_row["sequence_id"] == 1
+        assert publisher._tracker._counters["candles.historical_repair"] == 1
+        second = await _publish_and_commit_live_candle(
+            publisher, repository, replace(live, close=11.5)
+        )
+        assert second["public_id"] == first["public_id"]
+        assert [
+            call.args[1].sequence_id for call in publisher._publish_message.await_args_list
+        ] == [1, 2]
+        async with repository.session() as session:
+            stored = (
+                await session.execute(
+                    select(Candle.public_id).where(
+                        Candle.open_at == live.interval_begin, Candle.known_to == KNOWN_TO_MAX
+                    )
+                )
+            ).scalar_one()
+        assert second["public_id"] == stored
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("vwap", None),
+        ("trades", None),
+        ("trades", True),
+        ("volume", True),
+        ("open", True),
+        ("complete", 1),
+        ("vwap", float("inf")),
+        ("close", float("nan")),
+        ("timeframe", "5m"),
+        ("open_at", START + timedelta(seconds=1)),
+    ],
+)
+async def test_historical_reread_refuses_changed_business_fields_and_keeps_pending(
+    field: str, value: object
+) -> None:
+    """A later durable read must re-prove original fields rather than invent defaults.
+
+    Given: A source grid accepted by the initial complete-window proof.
+    When: One field changes before the historical derivation re-reads storage.
+    Then: No historical write or live output occurs and pending work remains.
+    """
+    publisher = _publisher()
+    publisher._candle_aggregator = CandleAggregator(["5m"])
+    rows = [_row(i) for i in range(25, 30)]
+    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    assert len(complete_repair_windows(rows, START, START.replace(minute=30), ["5m"])) == 1
+    key = _CandleRepairKey("BTC-USD", "5m", START)
+    minutes = frozenset(row["open_at"] for row in rows)
+    publisher._schedule_seeded_incomplete_candle_repair_key(key, minutes, historical_only=True)
+    changed: dict[str, object] = dict(rows[0])
+    changed[field] = value
+    rows[0] = cast(CandleRow, changed)
+    repository = MagicMock(spec=Repository)
+    repository.get_candles = AsyncMock(return_value=rows)
+    publisher.repository = repository
+    publisher._publish_message = AsyncMock()
+    await publisher._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert key in publisher._pending_candle_repairs
+    repository.upsert_historical_synthesized_candles.assert_not_awaited()
+    publisher._publish_message.assert_not_awaited()
+    assert publisher._candle_write_queue.empty()
+
+
+def _trusted_closed_trade_minute(minute_number: int = 34, clock: datetime = NOW) -> CandleUpdate:
+    """Complete a real builder minute after its independent live cold-start fence."""
+    builder = TradeCandleBuilder()
+    minute = NOW.replace(minute=minute_number, second=0)
+    for offset in (-1, 0):
+        observed = minute + timedelta(minutes=offset, seconds=1)
+        builder.update(
+            TradeUpdate("BTC-USD", "buy", 3.0, 10.0, "market", observed),
+            observed_at=observed,
+        )
+    completed = builder.pop_completed(clock)
+    assert len(completed) == 1
+    assert completed[0].interval_begin == minute
+    return completed[0]
+
+
+async def _enqueue_trusted_live_minute(
+    publisher: KrakenMarketDataPublisher, candle: CandleUpdate, author: datetime
+) -> CandleUpsertRow:
+    """Use the actual publisher and finalizer before the independently scheduled writer."""
+    with patch("snapper.messaging.publishers.base.datetime") as clock:
+        clock.now.return_value = author
+        assert await publisher._handle_candle_stream_item(
+            candle, ExchangeEnum.KRAKEN, "kraken", "1m"
+        )
+    finalizer = publisher._native_finalizer
+    assert finalizer is not None
+    publisher._enqueue_finalized_candles(finalizer.flush(author), ExchangeEnum.KRAKEN, "kraken")
+    return publisher._candle_write_queue.get_nowait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ordering", ["live_then_catchup", "catchup_then_live", "live_advanced_then_catchup"]
+)
+async def test_native_catchup_and_trusted_live_share_the_stored_minute_identity(
+    tmp_path: Path, ordering: str
+) -> None:
+    """A legitimate live minute must retain one ID across native missing-only insertion.
+
+    Given: A fully trusted builder minute and independently scheduled native catchup.
+    When: Catchup commits before either the live emission or its queued durable write.
+    Then: The published minute identity equals the actual committed logical identity.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'native-live-id.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    publisher._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-000000000501")
+    publisher._publish_message = AsyncMock()
+    publisher._native_finalizer = NativeCandleFinalizer(
+        persist_intermediate=False, flush_grace_seconds=12
+    )
+    candle = _trusted_closed_trade_minute()
+    advanced = ordering == "live_advanced_then_catchup"
+    catchup_at = NOW + timedelta(minutes=1) if advanced else NOW
+    client = MagicMock(spec=KrakenExchangeClient)
+    client.get_closed_1m_candles = AsyncMock(return_value=[candle])
+    worker = KrakenCandleCatchup(
+        repository,
+        client,
+        CatchupCallbacks(
+            lambda: ["BTC-USD"],
+            publisher._ensure_instrument,
+            AsyncMock(),
+            lambda: True,
+            publisher._tracker,
+            lambda: catchup_at,
+            insert_missing=publisher._insert_catchup_candle_rows,
+        ),
+    )
+    try:
+        if ordering != "catchup_then_live":
+            queued = await _enqueue_trusted_live_minute(
+                publisher, candle, NOW - timedelta(seconds=1)
+            )
+            if advanced:
+                await _enqueue_trusted_live_minute(
+                    publisher,
+                    _trusted_closed_trade_minute(35, catchup_at),
+                    catchup_at - timedelta(seconds=1),
+                )
+                publisher._candle_write_queue.task_done()
+            await worker._reconcile_symbol("BTC-USD", candle.interval_begin, NOW)
+        else:
+            await worker._reconcile_symbol("BTC-USD", candle.interval_begin, NOW)
+            queued = await _enqueue_trusted_live_minute(
+                publisher, candle, NOW + timedelta(seconds=1)
+            )
+        changed = await repository.upsert_candles([queued])
+        publisher._candle_write_queue.task_done()
+        assert changed == (1 if ordering == "catchup_then_live" else 0)
+        async with repository.session() as session:
+            stored_id = (
+                await session.execute(
+                    select(Candle.public_id).where(
+                        Candle.open_at == candle.interval_begin, Candle.known_to == KNOWN_TO_MAX
+                    )
+                )
+            ).scalar_one()
+        assert publisher._publish_message.await_count == (2 if advanced else 1)
+        published = publisher._publish_message.await_args_list[0].args[1]
+        assert published.public_id == stored_id
+        if advanced:
+            assert publisher._candle_id_cache[(queued["instrument_public_id"], "1m")][0] == (
+                candle.interval_begin + timedelta(minutes=1)
+            )
+    finally:
+        await repository.engine.dispose()
+
+
+def _identity_publisher() -> tuple[KrakenMarketDataPublisher, MagicMock]:
+    """Provide explicit canonical absence without substituting a mock object for an ID."""
+    publisher = _publisher()
+    repository = MagicMock(spec=Repository)
+    repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
+    repository.insert_missing_candles = AsyncMock(return_value=[])
+    publisher.repository = repository
+    return publisher, repository
+
+
+async def _resolve_test_identity(publisher: KrakenMarketDataPublisher, offset: int = 0) -> str:
+    """Exercise the actual gated resolver on one fixed test-only natural key."""
+    return await publisher._resolve_live_candle_public_id(
+        "instrument", "1m", START + timedelta(minutes=offset), "BTC-USD"
+    )
+
+
+def _native_identity_row(publisher: KrakenMarketDataPublisher) -> CandleUpsertRow:
+    """Build a real native candidate without assigning any logical identity."""
+    fixture = _Fixture()
+    callbacks = CatchupCallbacks(
+        lambda: ["BTC-USD"],
+        fixture.resolve,
+        fixture.committed,
+        lambda: True,
+        publisher._tracker,
+        lambda: NOW,
+    )
+    worker = KrakenCandleCatchup(fixture.repository, fixture.client, callbacks)
+    return worker._row(_candle(), "instrument", NOW)
+
+
+@pytest.mark.asyncio
+async def test_identity_selection_serializes_native_commit_but_not_rest_acquisition() -> None:
+    """REST acquisition remains independent while ID selection owns the commit gate.
+
+    Given: A live canonical lookup paused before its first UUID selection.
+    When: Native acquisition completes and requests its quiet commit.
+    Then: REST completes, commit waits, and the selected live UUID is reused.
+    """
+    publisher, repository = _identity_publisher()
+    entered, released, fetched = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def canonical(*args: object) -> None:
+        entered.set()
+        await released.wait()
+
+    repository.get_canonical_candle_public_id.side_effect = canonical
+    client = MagicMock(spec=KrakenExchangeClient)
+
+    async def fetch(*args: object) -> list[CandleUpdate]:
+        fetched.set()
+        return [_candle()]
+
+    client.get_closed_1m_candles = AsyncMock(side_effect=fetch)
+    callbacks = CatchupCallbacks(
+        lambda: ["BTC-USD"],
+        AsyncMock(return_value="instrument"),
+        AsyncMock(),
+        lambda: True,
+        publisher._tracker,
+        lambda: NOW,
+        publisher._insert_catchup_candle_rows,
+    )
+    worker = KrakenCandleCatchup(repository, client, callbacks)
+    live = asyncio.create_task(_resolve_test_identity(publisher))
+    await entered.wait()
+    native = asyncio.create_task(worker._reconcile_symbol("BTC-USD", START, NOW))
+    await fetched.wait()
+    repository.insert_missing_candles.assert_not_awaited()
+    released.set()
+    public_id = await live
+    await native
+    assert repository.insert_missing_candles.await_args.args[0][0]["public_id"] == public_id
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["noop", "failed", "cancelled", "unknown"])
+async def test_quiet_commit_fate_preserves_unresolved_identity_and_releases_local_gate(
+    fault: str,
+) -> None:
+    """Uncertain outcomes neither lose a published UUID nor leave the local gate locked.
+
+    Given: An unresolved live UUID followed by a quiet native operation.
+    When: The operation skips, fails, is cancelled or loses its commit acknowledgement.
+    Then: The reservation survives cache advancement and the gate is released safely.
+    """
+    publisher, repository = _identity_publisher()
+    public_id = await _resolve_test_identity(publisher)
+    await _resolve_test_identity(publisher, 1)
+    entered = asyncio.Event()
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        entered.set()
+        if fault == "cancelled":
+            await asyncio.Event().wait()
+        if fault != "noop":
+            raise ConnectionError("quiet commit outcome unavailable")
+        return []
+
+    repository.insert_missing_candles.side_effect = insert
+    task = asyncio.create_task(
+        publisher._insert_catchup_candle_rows([_native_identity_row(publisher)])
+    )
+    await entered.wait()
+    if fault == "cancelled":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif fault == "noop":
+        await task
+    else:
+        with pytest.raises(ConnectionError):
+            await task
+    assert not publisher._candle_identity_gate.locked()
+    assert await _resolve_test_identity(publisher) == public_id
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_commit_requires_fenced_lookup_before_any_new_identity() -> None:
+    """A released local gate cannot justify guessing an unknown database outcome.
+
+    Given: A native commit with an unknown acknowledgement and no local live reservation.
+    When: The database participation fence refuses its canonical identity lookup.
+    Then: No UUID, latest cache entry or live event is created.
+    """
+    publisher, repository = _identity_publisher()
+    repository.insert_missing_candles.side_effect = ConnectionError("unknown commit")
+    with pytest.raises(ConnectionError):
+        await publisher._insert_catchup_candle_rows([_native_identity_row(publisher)])
+    repository.get_canonical_candle_public_id.side_effect = TimeoutError("writer fence busy")
+    with pytest.raises(TimeoutError):
+        await _resolve_test_identity(publisher)
+    assert publisher._pending_candle_identities == {}
+    assert publisher._candle_id_cache == {}
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+async def test_reservations_follow_writer_capacity_and_never_evict_unacknowledged_keys() -> None:
+    """Writer-derived capacity refuses new identities while retaining unresolved ones.
+
+    Given: A one-row queue and one-row in-flight batch with two unresolved UUIDs.
+    When: A third key arrives, and later an exact writer commit is acknowledged.
+    Then: It is first refused without eviction and admitted only after the real ACK.
+    """
+    publisher, _repository = _identity_publisher()
+    publisher._candle_write_queue = asyncio.Queue(maxsize=1)
+    publisher._candle_batch_max_rows = 1
+    first = await _resolve_test_identity(publisher)
+    second = await _resolve_test_identity(publisher, 1)
+    with pytest.raises(RuntimeError, match="bounded writer capacity"):
+        await _resolve_test_identity(publisher, 2)
+    assert len(publisher._pending_candle_identities) == 2
+    assert await _resolve_test_identity(publisher) == first
+    row = _native_identity_row(publisher)
+    row["public_id"] = first
+    publisher._mark_candle_writes_committed([row])
+    assert await _resolve_test_identity(publisher, 2) not in {first, second}
+    assert len(publisher._pending_candle_identities) == 2
+
+
+@pytest.mark.asyncio
+async def test_nonpersisted_live_events_require_no_durable_identity_reservation() -> None:
+    """Read-only streamed symbols do not fill reservations that can never receive an ACK.
+
+    Given: A symbol whose candle events are excluded by the persistence policy.
+    When: Its ordinary live identity is selected.
+    Then: Cache reuse works without database reads or unresolved durable reservations.
+    """
+    publisher, repository = _identity_publisher()
+    with patch.object(publisher, "_should_persist_row", return_value=False):
+        first = await _resolve_test_identity(publisher)
+        assert await _resolve_test_identity(publisher) == first
+    repository.get_canonical_candle_public_id.assert_not_awaited()
+    assert publisher._pending_candle_identities == {}
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_and_older_canonical_ids_preserve_the_latest_cache_boundary() -> None:
+    """Committed historical IDs remain usable without rewinding the latest live window.
+
+    Given: An acknowledged first window followed by an unresolved newer live window.
+    When: A quiet candidate reuses the first ID and a later old-window read adopts it.
+    Then: Both use the stored ID while the latest-window cache remains on the newer bar.
+    """
+    publisher, repository = _identity_publisher()
+    first = await _resolve_test_identity(publisher)
+    original = _native_identity_row(publisher)
+    original["public_id"] = first
+    publisher._mark_candle_writes_committed([original])
+    assert await _resolve_test_identity(publisher) == first
+    source = _native_identity_row(publisher)
+    prepared = publisher._bind_pending_candle_identities([source])
+    assert prepared[0]["public_id"] == first
+    assert "public_id" not in source
+    second = await _resolve_test_identity(publisher, 1)
+    repository.get_canonical_candle_public_id.return_value = first
+    assert await _resolve_test_identity(publisher) == first
+    assert publisher._candle_id_cache[("instrument", "1m")] == (
+        START + timedelta(minutes=1),
+        second,
+    )
+
+
+@pytest.mark.asyncio
+async def test_nonpositive_identity_capacity_refuses_before_any_event_allocation() -> None:
+    """A malformed writer capacity never turns reservation storage into an unbounded map.
+
+    Given: No positive queue or in-flight writer capacity.
+    When: A new unresolved natural key requires an event identity.
+    Then: Selection fails closed with no reservation or latest cache entry.
+    """
+    publisher, _repository = _identity_publisher()
+    publisher._candle_write_queue = asyncio.Queue(maxsize=0)
+    publisher._candle_batch_max_rows = 0
+    with pytest.raises(RuntimeError, match="bounded writer capacity"):
+        await _resolve_test_identity(publisher)
+    assert publisher._pending_candle_identities == {}
+    assert publisher._candle_id_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_default_historical_boundary_uses_guarded_repository_without_events() -> None:
+    """The generic historical hook keeps its direct guarded persistence contract.
+
+    Given: A full historical candidate owned by a publisher without custom coordination.
+    When: The base implementation persists that candidate.
+    Then: It delegates to the guarded historical repository and emits no market event.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    await MarketDataPublisherService._persist_historical_candle_rows(publisher, [row])
+    repository.upsert_historical_synthesized_candles.assert_awaited_once_with([row])
