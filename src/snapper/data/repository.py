@@ -20527,6 +20527,10 @@ class SQLAlchemyRepository(Repository):
         See the abstract declaration for bounded candidate evidence and the
         as-of denomination proof layered over mechanical author-time ownership.
 
+        Historical metadata drives candidate enumeration. Candle existence
+        retains the exact author-time bands without expanding every matching
+        candle into the outer distinct-plane result.
+
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to discover.
             start: Inclusive lower candle-open bound.
@@ -20538,6 +20542,22 @@ class SQLAlchemyRepository(Repository):
         """
         if not pairs:
             return []
+        candle_evidence = (
+            exists()
+            .where(
+                Candle.instrument_public_id == Instrument.public_id,
+                Instrument.timestamp <= Candle.timestamp,
+                Instrument.known_to > Candle.timestamp,
+                Symbol.timestamp <= Candle.timestamp,
+                Symbol.known_to > Candle.timestamp,
+                Candle.timeframe == "1m",
+                Candle.open_at >= start,
+                Candle.open_at <= end,
+                Candle.complete.is_(True),
+                *where_active(Candle, as_of),
+            )
+            .correlate(Instrument, Symbol)
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(
@@ -20545,31 +20565,12 @@ class SQLAlchemyRepository(Repository):
                     Symbol.quote,
                     Instrument.exchange,
                 )
-                .select_from(Candle)
-                .join(
-                    Instrument,
-                    and_(
-                        Candle.instrument_public_id == Instrument.public_id,
-                        Instrument.timestamp <= Candle.timestamp,
-                        Instrument.known_to > Candle.timestamp,
-                    ),
-                )
-                .join(
-                    Symbol,
-                    and_(
-                        Instrument.symbol_public_id == Symbol.public_id,
-                        Symbol.timestamp <= Candle.timestamp,
-                        Symbol.known_to > Candle.timestamp,
-                    ),
-                )
+                .select_from(Instrument)
+                .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
                 .where(
                     tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
                     *_pnl_fx_symbol_proof_filters(as_of),
-                    Candle.timeframe == "1m",
-                    Candle.open_at >= start,
-                    Candle.open_at <= end,
-                    Candle.complete.is_(True),
-                    *where_active(Candle, as_of),
+                    candle_evidence,
                 )
                 .distinct()
                 .order_by(Symbol.base.asc(), Symbol.quote.asc(), Instrument.exchange.asc())
