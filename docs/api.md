@@ -81,6 +81,29 @@ permission. The `viewer` set contains none of those mutation permissions, and
 an intentionally narrowed version-two viewer scope does not inherit the version-3
 read permissions.
 
+### Legacy iOS role presentation
+
+Released iOS build `3.1.0.30` accepts additional JSON fields but rejects the
+new `auditor` role value. For its verified `Snapper/30` User-Agent with numeric
+CFNetwork and Darwin versions, login, refresh, current-profile and readable
+user-list responses present auditor profiles as `viewer`. Other role values,
+browser clients and other app builds retain their canonical representation.
+The HTTP `X-Snapper-Canonical-Role` header identifies the authenticated session's
+actual role; these responses use `Cache-Control: no-store` and vary by User-Agent.
+
+This is a response compatibility contract, not an authorization decision.
+The persisted account, authenticated principal, signed JWT role, effective
+permissions and scope ceilings remain unchanged. An auditor still has its
+20 read permissions and no mutations; locale or notification-device writes
+remain forbidden. A client hint cannot grant privileges. The legacy app may
+show a viewer badge and its existing read-only screens.
+
+The same client-specific presentation applies to WebSocket
+`auth_complete.user_role` after canonical authorization and allowed topics
+have been computed. Topics and token expiry are preserved. Future clients
+should tolerate additional fields and unknown role values without treating
+an unfamiliar display value as authority.
+
 ### POST /api/auth/login
 
 Authenticate and create a session. Sets `access_token`, `refresh_token`,
