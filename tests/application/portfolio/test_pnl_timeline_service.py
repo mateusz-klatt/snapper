@@ -2200,19 +2200,10 @@ class TestCrossCurrencyPrices:
             )
             for source in result.rate_sources
         ] == [("PLN", "EUR", "EUR", "PLN", "walutomat")]
-        assert repo.fx_candidate_pair_calls == [
-            [("EUR", "PLN"), ("PLN", "EUR")],
-            [("EUR", "PLN"), ("PLN", "EUR")],
-        ]
+        assert repo.fx_candidate_pair_calls == []
         assert repo.fx_plane_calls == [
-            [
-                ("EUR", "PLN", "polygon"),
-                ("EUR", "PLN", "walutomat"),
-            ],
-            [
-                ("EUR", "PLN", "polygon"),
-                ("EUR", "PLN", "walutomat"),
-            ],
+            [("EUR", "PLN", "walutomat")],
+            [("EUR", "PLN", "walutomat")],
         ]
 
     async def test_identity_plane_uses_held_orientation_when_reverse_is_also_complete(
@@ -3422,10 +3413,7 @@ class TestCrossCurrencyPrices:
             ("EUR", "PLN", "polygon"),
             ("EUR", "PLN", "walutomat"),
         ]
-        assert repo.fx_candidate_pair_calls == [
-            [("EUR", "PLN"), ("PLN", "EUR")],
-            [("EUR", "PLN"), ("PLN", "EUR")],
-        ]
+        assert repo.fx_candidate_pair_calls == []
 
     @pytest.mark.parametrize(
         "valuation_ccy,fx_rows,expected_sources",
