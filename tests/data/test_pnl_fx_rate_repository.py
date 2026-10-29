@@ -492,6 +492,53 @@ class TestGetPnlFxRateCandlesAt:
 class TestGetPnlFxRateCandles:
     """Cover the pinned FX rate candle read."""
 
+    async def test_sparse_intervals_intersect_bounds_and_keep_one_proven_query(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Sparse predicates narrow one query without weakening FX truth filters.
+
+        Given: Direct, inverse, rival, perpetual, unfinalized, and other-timeframe rows.
+        When: Two intervals include the original window and an out-of-bounds later row.
+        Then: One query returns only proven original-window spot closes in stable order.
+        """
+        statements: list[str] = []
+
+        def capture(*args: object) -> None:
+            """Record actual statement count without substituting database results."""
+            statement = args[2]
+            assert isinstance(statement, str)
+            statements.append(statement)
+
+        event.listen(repository.engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            rows = await repository.get_pnl_fx_rate_candles(
+                [
+                    ("EUR", "USD", "kraken"),
+                    ("EUR", "USD", "walutomat"),
+                    ("USD", "EUR", "kraken"),
+                    ("EUR", "USD", "kraken_futures"),
+                ],
+                _M - timedelta(minutes=1),
+                _M + timedelta(minutes=1),
+                _NOW + timedelta(days=1),
+                open_intervals=(
+                    (_M - timedelta(minutes=1), _M + timedelta(minutes=1)),
+                    (_M + timedelta(hours=3), _M + timedelta(hours=3)),
+                ),
+            )
+        finally:
+            event.remove(repository.engine.sync_engine, "before_cursor_execute", capture)
+        assert len(statements) == 1
+        assert [
+            (row["open_at"], row["base"], row["quote"], row["exchange"], row["close"])
+            for row in rows
+        ] == [
+            (_M - timedelta(minutes=1), "EUR", "USD", "kraken", 1.20),
+            (_M, "EUR", "USD", "kraken", 1.25),
+            (_M, "EUR", "USD", "walutomat", 1.30),
+            (_M, "USD", "EUR", "kraken", 0.8),
+        ]
+
     async def test_matches_exact_currency_legs_and_exchange(
         self, repository: SQLAlchemyRepository
     ) -> None:
@@ -574,10 +621,16 @@ class TestGetPnlFxRateCandles:
         )
         assert [row["open_at"] for row in rows] == sorted(row["open_at"] for row in rows)
 
+    @pytest.mark.parametrize("sparse", [False, True])
     async def test_rate_candle_requires_as_of_denomination_unanimity(
-        self, repository: SQLAlchemyRepository
+        self, repository: SQLAlchemyRepository, sparse: bool
     ) -> None:
-        """A known quote conflict withholds both labels while metadata churn passes."""
+        """Quote conflicts withhold both labels with or without interval pruning.
+
+        Given: Known denomination disagreement and separate denomination-preserving churn.
+        When: Original or interval-filtered candle reads use horizons before and after revision.
+        Then: Both disputed labels are refused while proven historical metadata remains usable.
+        """
         revised_at = _M + timedelta(minutes=30)
         crypto_at = _M - timedelta(seconds=20)
         forex_at = _M + timedelta(seconds=20)
@@ -629,6 +682,7 @@ class TestGetPnlFxRateCandles:
             )
             await session.commit()
         before_revision = revised_at - timedelta(seconds=1)
+        intervals = ((_M, _M),) if sparse else ()
         before_planes = await repository.get_pnl_fx_rate_exchanges(
             [("GBP", "PLN"), ("GBP", "USD")],
             _M,
@@ -640,6 +694,7 @@ class TestGetPnlFxRateCandles:
             _M,
             _M,
             before_revision,
+            open_intervals=intervals,
         )
         assert before_planes == [("GBP", "PLN", "walutomat")]
         assert [(row["base"], row["quote"], row["close"]) for row in before_rows] == [
@@ -649,17 +704,17 @@ class TestGetPnlFxRateCandles:
             [("GBP", "PLN"), ("GBP", "USD")], _M, _M, _NOW
         )
         old_label_rows = await repository.get_pnl_fx_rate_candles(
-            [("GBP", "PLN", "walutomat")], _M, _M, _NOW
+            [("GBP", "PLN", "walutomat")], _M, _M, _NOW, open_intervals=intervals
         )
         new_label_rows = await repository.get_pnl_fx_rate_candles(
-            [("GBP", "USD", "walutomat")], _M, _M, _NOW
+            [("GBP", "USD", "walutomat")], _M, _M, _NOW, open_intervals=intervals
         )
         assert after_planes == []
         assert old_label_rows == []
         assert new_label_rows == []
         churn_planes = await repository.get_pnl_fx_rate_exchanges([("AUD", "USD")], _M, _M, _NOW)
         churn_rows = await repository.get_pnl_fx_rate_candles(
-            [("AUD", "USD", "walutomat")], _M, _M, _NOW
+            [("AUD", "USD", "walutomat")], _M, _M, _NOW, open_intervals=intervals
         )
         assert churn_planes == [("AUD", "USD", "walutomat")]
         assert [(row["base"], row["quote"], row["close"]) for row in churn_rows] == [
