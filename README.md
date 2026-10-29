@@ -806,7 +806,7 @@ commit there before updating the parent repository's frontend gitlink.
 
 Original code and documentation are licensed under the
 [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
-Third-party components, including the vendored CCXT wheel, retain their own
+Third-party components, including the official CCXT distribution, retain their own
 licenses. Each submodule has its own licensing terms; cached market data is not
 covered by this license.
 

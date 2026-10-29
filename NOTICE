@@ -6,7 +6,7 @@ License, Version 2.0. See LICENSE.
 
 Third-party components retain their own licenses and copyright notices.
 
-The vendored CCXT wheel under vendor/ccxt retains its upstream MIT license,
-including the license text inside the wheel. Companion repositories and data
+CCXT retains its upstream MIT license and notices in its installed distribution.
+Companion repositories and data
 submodules have their own licensing terms. The agent-console third-party CLI
 licenses and notices remain in integrations/snapper-agent-console/licenses/.
