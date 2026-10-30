@@ -83,6 +83,9 @@ from snapper.application.portfolio.pnl_anchor_identity import (
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_read_timing import pnl_read_core
+from snapper.application.portfolio.pnl_read_timing import pnl_read_count
+from snapper.application.portfolio.pnl_read_timing import pnl_read_fx_window
+from snapper.application.portfolio.pnl_read_timing import pnl_read_phase
 from snapper.application.portfolio.pnl_read_timing import pnl_read_stage
 from snapper.application.portfolio.pnl_timeline import MarkIncompletenessReasonMap
 from snapper.application.portfolio.pnl_timeline import MarkMap
@@ -3000,11 +3003,15 @@ async def _load_fx_candidate_rows(
     """
     bounds = _fx_requirement_range(requirements)
     if bounds is None:
+        if sparse_requirements is not None:
+            pnl_read_fx_window("no_requirements")
         return []
     planes: set[PnlFxRatePlane] = set()
     for pair in requirements:
         planes.update(candidate_planes.get(pair, set()))
     if not planes:
+        if sparse_requirements is not None:
+            pnl_read_fx_window("no_candidate_planes")
         return []
     intervals = (
         _sparse_event_fx_intervals(sparse_requirements) if sparse_requirements is not None else ()
@@ -3044,6 +3051,7 @@ def _sparse_event_fx_intervals(
         At most sixteen disjoint intervals, or an empty tuple for the original read.
     """
     if current_fx_shadow_context() is not None:
+        pnl_read_fx_window("shadow_dense")
         return ()
     minutes = sorted({minute for pair_minutes in requirements.values() for minute in pair_minutes})
     intervals: list[tuple[datetime, datetime]] = []
@@ -3054,7 +3062,9 @@ def _sparse_event_fx_intervals(
         else:
             intervals.append((start, minute))
         if len(intervals) > _FX_SPARSE_EVENT_INTERVAL_LIMIT:
+            pnl_read_fx_window("interval_limit_dense", intervals)
             return ()
+    pnl_read_fx_window("constructed", intervals)
     return tuple(intervals) if len(intervals) > 1 else ()
 
 
@@ -3384,45 +3394,54 @@ async def _load_request_fx_rates(
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
     if general_requirements:
-        mark_candidates = await _discover_fx_candidates(
-            repo,
-            mark_pair_requirements,
-            as_of,
-        )
-        event_candidates = await _discover_fx_candidates(
-            repo,
-            event_pair_requirements,
-            as_of,
-        )
+        with pnl_read_phase("fx_discovery_mark"):
+            mark_candidates = await _discover_fx_candidates(
+                repo,
+                mark_pair_requirements,
+                as_of,
+            )
+        pnl_read_count("fx_mark_candidate_planes", mark_candidates)
+        with pnl_read_phase("fx_discovery_event"):
+            event_candidates = await _discover_fx_candidates(
+                repo,
+                event_pair_requirements,
+                as_of,
+            )
+        pnl_read_count("fx_event_candidate_planes", event_candidates)
     candidate_planes = _candidate_planes(
         [*mark_candidates, *event_candidates],
         identity_planes,
     )
-    mark_rows = await _load_fx_candidate_rows(
-        repo,
-        mark_pair_requirements,
-        candidate_planes,
-        as_of,
-    )
-    event_rows = await _load_fx_candidate_rows(
-        repo,
-        event_pair_requirements,
-        candidate_planes,
-        as_of,
-        sparse_requirements=requirements,
-    )
+    with pnl_read_phase("fx_load_mark"):
+        mark_rows = await _load_fx_candidate_rows(
+            repo,
+            mark_pair_requirements,
+            candidate_planes,
+            as_of,
+        )
+    pnl_read_count("fx_mark_rows", mark_rows)
+    with pnl_read_phase("fx_load_event"):
+        event_rows = await _load_fx_candidate_rows(
+            repo,
+            event_pair_requirements,
+            candidate_planes,
+            as_of,
+            sparse_requirements=requirements,
+        )
+    pnl_read_count("fx_event_rows", event_rows)
     rows = [*mark_rows, *event_rows]
-    shared_planes = _resolve_fx_planes(
-        general_requirements,
-        candidate_planes,
-        rows,
-        valuation_ccy,
-    )
-    resolved_identity_planes = _resolve_identity_fx_planes(
-        instrument_requirements,
-        identity_planes,
-        rows,
-    )
+    with pnl_read_phase("fx_election"):
+        shared_planes = _resolve_fx_planes(
+            general_requirements,
+            candidate_planes,
+            rows,
+            valuation_ccy,
+        )
+        resolved_identity_planes = _resolve_identity_fx_planes(
+            instrument_requirements,
+            identity_planes,
+            rows,
+        )
     planes_by_instrument = _fx_planes_by_instrument(
         instrument_requirements,
         shared_planes,
@@ -3438,7 +3457,9 @@ async def _load_request_fx_rates(
     selected_rows = [
         row for row in rows if (row["base"], row["quote"], row["exchange"]) in selected_planes
     ]
-    rates = build_fx_rates(selected_rows)
+    pnl_read_count("fx_selected_rows", selected_rows)
+    with pnl_read_phase("fx_fold_final"):
+        rates = build_fx_rates(selected_rows)
     shadow_context = current_fx_shadow_context()
     if shadow_context is not None:
         shadow_context.collect(

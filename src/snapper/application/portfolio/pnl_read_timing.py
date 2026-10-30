@@ -8,6 +8,9 @@ Absent spans remain unobserved, and invalid clocks or nesting stay explicit.
 
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Iterator
+from collections.abc import Sized
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field
@@ -21,7 +24,32 @@ from loguru import logger
 
 type PnlReadKind = Literal["series", "timeline"]
 type PnlReadStage = Literal["series", "prefix", "fx", "timeline"]
-type _MeasuredStage = Literal["handler", "series", "prefix", "fx", "core", "timeline"]
+type PnlFxPhase = Literal[
+    "fx_discovery_mark",
+    "fx_discovery_event",
+    "fx_load_mark",
+    "fx_load_event",
+    "fx_election",
+    "fx_fold_final",
+]
+type PnlFxCount = Literal[
+    "fx_mark_candidate_planes",
+    "fx_event_candidate_planes",
+    "fx_mark_rows",
+    "fx_event_rows",
+    "fx_selected_rows",
+]
+type PnlFxReadMode = Literal[
+    "no_requirements",
+    "no_candidate_planes",
+    "shadow_dense",
+    "empty_requirements",
+    "single_interval_dense",
+    "interval_limit_dense",
+    "sparse",
+]
+type _MeasuredStage = Literal["handler", "series", "prefix", "fx", "core", "timeline"] | PnlFxPhase
+type _MeasuredCount = PnlFxCount | Literal["fx_event_intervals_observed"]
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -33,6 +61,8 @@ class _ReadTiming:
 
     kind: PnlReadKind
     spans: dict[_MeasuredStage, int] = field(default_factory=dict)
+    counts: dict[_MeasuredCount, int] = field(default_factory=dict)
+    event_read_mode: PnlFxReadMode | Literal["mixed"] | None = None
 
 
 _current_timing: ContextVar[_ReadTiming | None] = ContextVar("pnl_read_timing", default=None)
@@ -81,12 +111,98 @@ def _timeline_extra(timing: _ReadTiming) -> int | None:
     return total - series - prefix
 
 
+def _count_text(count: int | None) -> str:
+    """Retain unobserved and invalid cardinalities separately from observed zero."""
+    if count is None:
+        return "unobserved"
+    return "invalid" if count < 0 else str(count)
+
+
+def _record_count(timing: _ReadTiming, name: _MeasuredCount, values: Sized) -> int | None:
+    """Sum already-materialized cardinalities without letting observation fail work."""
+    previous = timing.counts.get(name, 0)
+    try:
+        observed = len(values)
+    except Exception:
+        timing.counts[name] = -1
+        return None
+    timing.counts[name] = -1 if previous < 0 else previous + observed
+    return observed
+
+
+def pnl_read_count(name: PnlFxCount, values: Sized) -> None:
+    """Record a fixed aggregate count only while an API collector is active.
+
+    Args:
+        name: Closed engineering cardinality independent of business identities.
+        values: Existing materialized values whose length is observed lazily.
+    """
+    timing = _current_timing.get()
+    if timing is not None:
+        _record_count(timing, name, values)
+
+
+def pnl_read_fx_window(
+    mode: PnlFxReadMode | Literal["constructed"], intervals: Sized | None = None
+) -> None:
+    """Accumulate actual selector prefixes and preserve different observed modes.
+
+    Args:
+        mode: Closed reason recorded at the existing read-selection boundary.
+        intervals: Constructed prefix, absent when selection was bypassed.
+    """
+    timing = _current_timing.get()
+    if timing is None:
+        return
+    observed = (
+        _record_count(timing, "fx_event_intervals_observed", intervals)
+        if intervals is not None
+        else None
+    )
+    if mode == "constructed":
+        if observed is None:
+            return
+        mode = (
+            "sparse"
+            if observed > 1
+            else "single_interval_dense" if observed else "empty_requirements"
+        )
+    previous = timing.event_read_mode
+    timing.event_read_mode = mode if previous is None or previous == mode else "mixed"
+
+
+@contextmanager
+def pnl_read_phase(phase: PnlFxPhase) -> Iterator[None]:
+    """Measure one existing synchronous or awaited phase without moving its work.
+
+    Args:
+        phase: Fixed FX boundary recorded in the current handler.
+
+    Yields:
+        Control to the unchanged phase body.
+    """
+    timing = _current_timing.get()
+    if timing is None:
+        yield
+        return
+    started = _clock()
+    try:
+        yield
+    finally:
+        _record_elapsed(timing, phase, started)
+
+
 def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
     """Render every field in the message because configured sinks omit extras."""
     try:
         logger.info(
             "PnlReadTiming kind={} outcome={} handler_ms={} series_ms={} prefix_ms={} "
-            "fx_ms={} core_ms={} timeline_extra_ms={}",
+            "fx_ms={} core_ms={} timeline_extra_ms={} "
+            "fx_discovery_mark_ms={} fx_discovery_event_ms={} fx_load_mark_ms={} "
+            "fx_load_event_ms={} fx_election_ms={} fx_fold_final_ms={} "
+            "fx_mark_candidate_planes={} fx_event_candidate_planes={} fx_mark_rows={} "
+            "fx_event_rows={} fx_selected_rows={} fx_event_read_mode={} "
+            "fx_event_intervals_observed={}",
             timing.kind,
             "success" if succeeded else "failure",
             _elapsed_text(timing.spans.get("handler")),
@@ -95,6 +211,19 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             _elapsed_text(timing.spans.get("fx")),
             _elapsed_text(timing.spans.get("core")),
             _elapsed_text(_timeline_extra(timing)),
+            _elapsed_text(timing.spans.get("fx_discovery_mark")),
+            _elapsed_text(timing.spans.get("fx_discovery_event")),
+            _elapsed_text(timing.spans.get("fx_load_mark")),
+            _elapsed_text(timing.spans.get("fx_load_event")),
+            _elapsed_text(timing.spans.get("fx_election")),
+            _elapsed_text(timing.spans.get("fx_fold_final")),
+            _count_text(timing.counts.get("fx_mark_candidate_planes")),
+            _count_text(timing.counts.get("fx_event_candidate_planes")),
+            _count_text(timing.counts.get("fx_mark_rows")),
+            _count_text(timing.counts.get("fx_event_rows")),
+            _count_text(timing.counts.get("fx_selected_rows")),
+            timing.event_read_mode or "unobserved",
+            _count_text(timing.counts.get("fx_event_intervals_observed")),
         )
     except Exception:
         return

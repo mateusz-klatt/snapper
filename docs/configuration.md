@@ -528,6 +528,15 @@ through the Settings API/UI:
 | `zmq_heartbeat_interval_ms` | `1000` | ZMQ heartbeat interval |
 | `recon_balance_threshold` | `1.0` | Absolute balance mismatch threshold for reconciliation warnings |
 
+Kraken Futures startup uses a fixed public `load_markets` discovery policy: at most
+three attempts for completed HTTP `503` GET responses, with asynchronous waits of
+one then two seconds. Each attempt uses the existing egress selector and releases
+its route before waiting. The connect owner fences late callbacks that have not
+entered the routed call and drains its admitted worker before cancellation cleanup.
+This policy is independent of the DB-backed `rest_retry_*` settings and retains the
+current CCXT timeout and CORE startup budget. Authentication failures, other HTTP
+statuses, programming errors and ambiguous dispatch errors propagate without retry.
+
 The trade runtime always uses the durable (outbox-driven) dispatch
 path. The engine writes `TradeCommand` rows to the database; the
 `OutboxDispatcher` picks them up and publishes to ZMQ. Stale `CREATED`

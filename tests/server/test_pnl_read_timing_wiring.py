@@ -223,6 +223,22 @@ async def test_actual_handler_and_service_stage_wiring(
     else:
         assert fields["fx_ms"] == "unobserved"
     assert repo.anchor_calls == 1
+    for name in (
+        "fx_discovery_mark_ms",
+        "fx_discovery_event_ms",
+        "fx_load_mark_ms",
+        "fx_load_event_ms",
+        "fx_election_ms",
+        "fx_fold_final_ms",
+        "fx_mark_candidate_planes",
+        "fx_event_candidate_planes",
+        "fx_mark_rows",
+        "fx_event_rows",
+        "fx_selected_rows",
+        "fx_event_read_mode",
+        "fx_event_intervals_observed",
+    ):
+        assert fields[name] == "unobserved"
     assert repo.prefix_calls == int(
         state != "missing" and (kind == "timeline" or state == "normal")
     )
