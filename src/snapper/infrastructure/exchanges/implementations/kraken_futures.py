@@ -117,6 +117,7 @@ from snapper.infrastructure.exchanges.kraken_futures_balance_stream import (
     KrakenFuturesBalanceStream,
 )
 from snapper.infrastructure.exchanges.kraken_futures_balance_stream import futures_balance_channel
+from snapper.infrastructure.exchanges.kraken_futures_discovery import load_futures_public_markets
 from snapper.infrastructure.exchanges.kraken_futures_private_receive import (
     bind_owned_futures_private_callback,
 )
@@ -552,12 +553,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._reopen_rest_pool()
         try:
-            self._record_rest_call()
-            await self._dispatch_routed_rest(
-                operation="load_markets",
-                kind="public_read",
-                target=ccxt_proxy_target(self._ccxt_client),
-                sync_call=self._ccxt_client.load_markets,
+            await load_futures_public_markets(
+                dispatch=self._dispatch_blocking,
+                sync_call=self._load_public_markets_sync,
+                record_call=self._record_rest_call,
             )
             self._market_client = Market(sandbox=self.sandbox)
             logger.info("Kraken Futures REST connection established")
@@ -568,6 +567,17 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     self._ccxt_client.session.close()
             logger.error(f"Failed to connect to Kraken Futures: {e}")
             raise
+
+    def _load_public_markets_sync(self) -> None:
+        """Run public discovery with the existing route, proxy and release guards."""
+        route_kraken_rest_sync_call(
+            exchange=str(self.exchange_name),
+            operation="load_markets",
+            kind="public_read",
+            target=ccxt_proxy_target(self._ccxt_client),
+            proxy_lock=self._rest_egress_proxy_lock,
+            sync_call=self._ccxt_client.load_markets,
+        )
 
     async def disconnect(self) -> None:
         """Close all Kraken Futures connections.

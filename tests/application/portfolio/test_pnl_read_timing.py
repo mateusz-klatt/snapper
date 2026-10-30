@@ -90,7 +90,13 @@ async def test_nested_stage_summary_has_exact_inclusive_durations(
     assert messages == [
         (
             "PnlReadTiming kind=timeline outcome=success handler_ms=110.000 series_ms=50.000 "
-            "prefix_ms=10.000 fx_ms=10.000 core_ms=10.000 timeline_extra_ms=30.000"
+            "prefix_ms=10.000 fx_ms=10.000 core_ms=10.000 timeline_extra_ms=30.000 "
+            "fx_discovery_mark_ms=unobserved fx_discovery_event_ms=unobserved "
+            "fx_load_mark_ms=unobserved fx_load_event_ms=unobserved "
+            "fx_election_ms=unobserved fx_fold_final_ms=unobserved "
+            "fx_mark_candidate_planes=unobserved fx_event_candidate_planes=unobserved "
+            "fx_mark_rows=unobserved fx_event_rows=unobserved fx_selected_rows=unobserved "
+            "fx_event_read_mode=unobserved fx_event_intervals_observed=unobserved"
         )
     ]
     assert pnl_read_timing._current_timing.get() is None
