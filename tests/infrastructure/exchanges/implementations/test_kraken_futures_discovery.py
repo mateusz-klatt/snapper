@@ -76,6 +76,147 @@ def _http_responder(status: int) -> MagicMock:
     return MagicMock(side_effect=request)
 
 
+@pytest.mark.parametrize("original_cancelled", [False, True])
+async def test_terminal_worker_and_dispatcher_race_preserves_cancellation_priority(
+    original_cancelled: bool,
+) -> None:
+    """A cancellation at the final completion boundary propagates after both settle.
+
+    Given: an actual worker and its dispatcher are draining an original failure,
+    When: another cancellation arrives exactly as both become terminal,
+    Then: the original cancellation retains identity or supersedes the prior failure.
+    """
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+
+    def sync_call() -> None:
+        """Keep the actual worker alive until completion is explicitly admitted."""
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(timeout=5):
+            raise RuntimeError("test worker was not released")
+
+    attempt = discovery._PublicDiscoveryAttempt(sync_call)
+    dispatcher: asyncio.Future[None] = loop.create_future()
+    original: BaseException = (
+        asyncio.CancelledError("original cancellation")
+        if original_cancelled
+        else RestPoolDispatchError("original dispatcher failure")
+    )
+    original_cause = RuntimeError("original cancellation cause")
+    if original_cancelled:
+        original.__cause__ = original_cause
+    worker = threading.Thread(target=attempt.run)
+    worker.start()
+    await started.wait()
+    drain = asyncio.create_task(attempt._close_and_drain(dispatcher, original))
+
+    def finish_dispatcher_and_cancel(_completed: asyncio.Future[None]) -> None:
+        """Cancel the owner before its shield continuation observes terminal states."""
+        dispatcher.set_exception(RuntimeError("terminal dispatcher failure"))
+        drain.cancel("terminal cancellation")
+
+    attempt._terminal.add_done_callback(finish_dispatcher_and_cancel)
+    try:
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await drain
+        if original_cancelled:
+            assert caught.value is original
+            assert caught.value.args == ("original cancellation",)
+            assert caught.value.__cause__ is original_cause
+        else:
+            assert caught.value.__cause__ is original
+            assert caught.value.args == ("terminal cancellation",)
+        assert attempt._terminal.done()
+        assert dispatcher.done()
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        if not dispatcher.cancelled() and dispatcher.done():
+            dispatcher.exception()
+        if not drain.done():
+            drain.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await drain
+    assert not worker.is_alive()
+
+
+async def test_dispatcher_cleanup_failure_cannot_replace_original_cancellation() -> None:
+    """The owned caller cancellation survives a dispatcher's failing final cleanup.
+
+    Given: an unstarted discovery dispatcher is still waiting when its owner cancels,
+    When: stopping that dispatcher raises a separate cleanup error,
+    Then: discovery consumes that terminal error and preserves the original cancellation.
+    """
+    started = asyncio.Event()
+
+    async def dispatch() -> None:
+        """Model a dispatcher whose final teardown fails after cancellation admission."""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise RuntimeError("dispatcher teardown failed")
+
+    attempt = discovery._PublicDiscoveryAttempt(MagicMock())
+    task = asyncio.create_task(dispatch())
+    await started.wait()
+    original = asyncio.CancelledError("original owner cancellation")
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await attempt._close_and_drain(task, original)
+    assert caught.value is original
+    assert task.done()
+    assert not task.cancelled()
+    assert isinstance(task.exception(), RuntimeError)
+
+
+async def test_repeated_owner_cancellation_cannot_interrupt_dispatcher_finalizer() -> None:
+    """The dispatcher receives one cancellation while its owner keeps draining.
+
+    Given: dispatcher cancellation starts an event-controlled asynchronous finalizer,
+    When: its discovery owner is cancelled repeatedly before that finalizer completes,
+    Then: no repeated dispatcher cancellation interrupts its exact terminal cleanup.
+    """
+    started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def dispatch() -> None:
+        """Expose a finalizer that must finish despite later owner cancellations."""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await cleanup_release.wait()
+            cleanup_finished.set()
+
+    attempt = discovery._PublicDiscoveryAttempt(MagicMock())
+    task = asyncio.create_task(dispatch())
+    await started.wait()
+    original = asyncio.CancelledError("original owner cancellation")
+    drain = asyncio.create_task(attempt._close_and_drain(task, original))
+    try:
+        await cleanup_started.wait()
+        for _ in range(3):
+            drain.cancel("repeated owner cancellation")
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert not drain.done()
+            assert not cleanup_finished.is_set()
+    finally:
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await drain
+    assert caught.value is original
+    assert cleanup_finished.is_set()
+    assert task.done()
+    assert task.cancelled()
+
+
 @pytest.mark.parametrize("cancellations", [1, 3])
 @pytest.mark.parametrize("terminal_status", [None, 503])
 async def test_cancelled_discovery_keeps_session_until_real_worker_terminal(

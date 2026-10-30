@@ -5,6 +5,7 @@ import threading
 from asyncio import sleep
 from collections.abc import Awaitable
 from collections.abc import Callable
+from typing import Never
 
 from ccxt.base.errors import ExchangeNotAvailable
 from requests import HTTPError
@@ -52,10 +53,7 @@ class _PublicDiscoveryAttempt:
         try:
             await asyncio.shield(task)
         except BaseException as error:
-            cancelled = await self._close_and_drain(task)
-            if cancelled and not isinstance(error, asyncio.CancelledError):
-                raise asyncio.CancelledError from error
-            raise
+            await self._close_and_drain(task, error)
 
     def retryable_503(self, error: ExchangeNotAvailable) -> bool:
         """Recognize a completed public GET 503 from the pinned CCXT HTTP boundary.
@@ -77,35 +75,63 @@ class _PublicDiscoveryAttempt:
             and response.request.method == "GET"
         )
 
-    async def _close_and_drain(self, task: asyncio.Future[None]) -> bool:
-        """Close unstarted admission or await real completion despite repeated cancel.
+    async def _close_and_drain(self, task: asyncio.Future[None], error: BaseException) -> Never:
+        """Drain owned completion before directly propagating failure or cancellation.
 
         Args:
             task: Dispatcher future, which may fail before its real worker ends.
+            error: Original failure whose cancellation identity has precedence.
 
-        Returns:
-            Whether another caller cancellation arrived while draining.
+        Raises:
+            BaseException: Original failure, or cancellation received while draining.
         """
         with self._lock:
             self._closed = True
             started = self._started
         cancelled = False
-        if started:
-            while not self._terminal.done():
-                try:
-                    await asyncio.shield(self._terminal)
-                except asyncio.CancelledError:
-                    cancelled = True
-        if not task.done():
-            task.cancel()
-        while not task.done():
+        dispatcher_cancel_requested = False
+        while not self._completed(task, started):
             try:
-                await asyncio.shield(task)
-            except (asyncio.CancelledError, Exception):
+                completion, dispatcher_cancel_requested = self._next_completion(
+                    task, started, dispatcher_cancel_requested
+                )
+                await asyncio.shield(completion)
+            except asyncio.CancelledError as cancellation:
                 cancelled = True
+                if self._completed(task, started):
+                    self._consume_failure(task)
+                    cancellation = (
+                        error if isinstance(error, asyncio.CancelledError) else cancellation
+                    )
+                    raise cancellation from (
+                        cancellation.__cause__ if cancellation is error else error
+                    )
+            except Exception:
+                cancelled = True
+        self._consume_failure(task)
+        if cancelled and not isinstance(error, asyncio.CancelledError):
+            raise asyncio.CancelledError from error
+        raise error
+
+    def _completed(self, task: asyncio.Future[None], started: bool) -> bool:
+        """Require the actual routed worker and dispatcher to be terminal."""
+        return (not started or self._terminal.done()) and task.done()
+
+    def _next_completion(
+        self, task: asyncio.Future[None], started: bool, dispatcher_cancel_requested: bool
+    ) -> tuple[asyncio.Future[None], bool]:
+        """Wait for the worker before cancelling any still-pending dispatcher."""
+        if started and not self._terminal.done():
+            return self._terminal, dispatcher_cancel_requested
+        if not dispatcher_cancel_requested:
+            task.cancel()
+        return task, True
+
+    @staticmethod
+    def _consume_failure(task: asyncio.Future[None]) -> None:
+        """Retrieve a terminal dispatcher failure without replacing its original owner."""
         if not task.cancelled():
             task.exception()
-        return cancelled
 
 
 async def load_futures_public_markets(
