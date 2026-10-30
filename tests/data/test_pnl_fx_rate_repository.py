@@ -11,6 +11,7 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import and_
@@ -18,6 +19,10 @@ from sqlalchemy import create_engine
 from sqlalchemy import event
 from sqlalchemy import select
 from sqlalchemy import tuple_
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Result
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Executable
 from sqlalchemy.sql import Select
 
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
@@ -291,6 +296,72 @@ async def _original_planes(
 class TestDiscoveryCandleExistence:
     """Preserve candidate evidence while avoiding candle-row expansion before DISTINCT."""
 
+    async def test_postgresql_prefilter_uses_one_typed_array_expression(
+        self, repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PostgreSQL receives an array operand rather than another semijoin.
+
+        Given: The real query builder under the PostgreSQL dialect branch.
+        When: Its actual statement is captured before any database connection.
+        Then: One typed UUID array limits scan keys inside the original EXISTS.
+        """
+        statements: list[Select[tuple[str, str, str]]] = []
+        result = Mock(spec=Result)
+        result.all.return_value = []
+
+        def dialect(_repository: SQLAlchemyRepository) -> str:
+            """Select the real PostgreSQL expression path without opening a DB."""
+            return "postgresql"
+
+        async def capture(
+            _session: AsyncSession, statement: Executable
+        ) -> Result[tuple[str, str, str]]:
+            """Retain the real SQLAlchemy statement at its driver boundary."""
+            assert isinstance(statement, Select)
+            statements.append(statement)
+            return cast(Result[tuple[str, str, str]], result)
+
+        monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", property(dialect))
+        monkeypatch.setattr(AsyncSession, "execute", capture)
+        assert await repository.get_pnl_fx_rate_exchanges([("EUR", "USD")], _M, _M, _NOW) == []
+        assert len(statements) == 1
+        compiled = str(statements[0].compile(dialect=postgresql.dialect()))
+        assert "= ANY (CAST((SELECT array_agg(" in compiled
+        assert "AS UUID[]" in compiled
+        assert "EXISTS (SELECT *" in compiled
+
+    async def test_candle_scan_prefilters_distinct_eligible_instruments(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Discard unrelated scan keys inside the same discovery statement.
+
+        Given: Forex and unrelated perpetual instruments share the candle table.
+        When: Discovery asks for one pair under its original historical proof.
+        Then: One statement prefilters distinct instrument IDs and preserves planes.
+        """
+        statements: list[str] = []
+
+        def capture(*args: object) -> None:
+            """Record executed SQL without changing the repository or its rows."""
+            statement = args[2]
+            assert isinstance(statement, str)
+            statements.append(" ".join(statement.split()))
+
+        event.listen(repository.engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            actual = await repository.get_pnl_fx_rate_exchanges([("EUR", "USD")], _M, _M, _NOW)
+        finally:
+            event.remove(repository.engine.sync_engine, "before_cursor_execute", capture)
+        assert len(statements) == 1
+        assert "WITH pnl_fx_candidate_instruments AS" in statements[0]
+        assert "SELECT DISTINCT instruments.public_id AS public_id" in statements[0]
+        assert (
+            "candles.instrument_public_id IN (SELECT pnl_fx_candidate_instruments.public_id"
+            in statements[0]
+        )
+        assert "EXISTS (SELECT * FROM candles" in statements[0]
+        assert actual == await _original_planes(repository, ("EUR", "USD"), _M, _NOW)
+
     async def test_executes_metadata_driven_candle_existence_query(
         self, repository: SQLAlchemyRepository
     ) -> None:
@@ -369,6 +440,35 @@ class TestDiscoveryCandleExistence:
             await session.commit()
         assert await _original_planes(repository, ("AUD", "CAD"), _M, _NOW) == []
         assert await repository.get_pnl_fx_rate_exchanges([("AUD", "CAD")], _M, _M, _NOW) == []
+
+    async def test_distinct_scan_key_retains_both_historical_author_planes(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Deduplicating scan keys cannot elect one metadata version early.
+
+        Given: One logical instrument has two author bands with in-band candles.
+        When: One broad discovery window includes both historical venues.
+        Then: Both planes survive the shared instrument-ID prefilter.
+        """
+        changed_at = _M + timedelta(minutes=1)
+        later_minute = _M + timedelta(minutes=2)
+        earlier = _instrument("ins-two-bands", "sym-two-bands", "walutomat")
+        earlier.known_to = changed_at
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol("sym-two-bands", "GBP-X", "GBP", "USD", known_to=changed_at),
+                    _symbol("sym-two-bands", "GBP-X", "GBP", "USD", "crypto", timestamp=changed_at),
+                    earlier,
+                    _instrument("ins-two-bands", "sym-two-bands", "kraken", timestamp=changed_at),
+                    _candle("ins-two-bands", _M, 1.2),
+                    _candle("ins-two-bands", later_minute, 1.3),
+                ]
+            )
+            await session.commit()
+        assert await repository.get_pnl_fx_rate_exchanges(
+            [("GBP", "USD")], _M, later_minute, _NOW
+        ) == [("GBP", "USD", "kraken"), ("GBP", "USD", "walutomat")]
 
     @pytest.mark.parametrize(
         ("authored_offset", "retired_offset", "eligible"),

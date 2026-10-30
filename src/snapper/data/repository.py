@@ -102,6 +102,7 @@ from uuid import uuid5
 from uuid import uuid7
 
 from loguru import logger
+from sqlalchemy import ARRAY
 from sqlalchemy import ColumnElement
 from sqlalchemy import Insert
 from sqlalchemy import Row
@@ -110,6 +111,7 @@ from sqlalchemy import Table
 from sqlalchemy import TableClause
 from sqlalchemy import Text
 from sqlalchemy import and_
+from sqlalchemy import any_
 from sqlalchemy import case
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import delete
@@ -20533,7 +20535,9 @@ class SQLAlchemyRepository(Repository):
 
         Historical metadata drives candidate enumeration. Candle existence
         retains the exact author-time bands without expanding every matching
-        candle into the outer distinct-plane result.
+        candle into the outer distinct-plane result. A same-statement distinct
+        instrument-ID set bounds the candle scan keys; the original metadata
+        versions and their author-time bands still decide plane eligibility.
 
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to discover.
@@ -20546,10 +20550,34 @@ class SQLAlchemyRepository(Repository):
         """
         if not pairs:
             return []
+        candidate_instruments = (
+            select(Instrument.public_id)
+            .select_from(Instrument)
+            .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+            .where(
+                tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
+                *_pnl_fx_symbol_proof_filters(as_of),
+            )
+            .distinct()
+            .correlate(None)
+            .cte("pnl_fx_candidate_instruments")
+            .prefix_with("MATERIALIZED", dialect="postgresql")
+        )
+        candidate_filter: ColumnElement[bool] = Candle.instrument_public_id.in_(
+            select(candidate_instruments.c.public_id)
+        )
+        if self.dialect_name == "postgresql":
+            instrument_ids = (
+                select(func.array_agg(candidate_instruments.c.public_id))
+                .scalar_subquery()
+                .cast(ARRAY(Instrument.public_id.type))
+            )
+            candidate_filter = Candle.instrument_public_id == any_(instrument_ids)
         candle_evidence = (
             exists()
             .where(
                 Candle.instrument_public_id == Instrument.public_id,
+                candidate_filter,
                 Instrument.timestamp <= Candle.timestamp,
                 Instrument.known_to > Candle.timestamp,
                 Symbol.timestamp <= Candle.timestamp,
