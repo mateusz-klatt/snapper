@@ -116,6 +116,47 @@ class _Harness:
             await asyncio.gather(self.sidecar._retry_task, return_exceptions=True)
 
 
+def _startup_task_state[T](task: asyncio.Task[T]) -> str:
+    """Describe task state and suspended code locations without exception payloads."""
+    if task.cancelled():
+        return "cancelled"
+    if task.done():
+        failure = task.exception()
+        return "completed" if failure is None else f"failed:{type(failure).__name__}"
+    stack = ">".join(
+        f"{frame.f_code.co_name}:{frame.f_lineno}" for frame in task.get_stack(limit=3)
+    )
+    return f"pending[{stack}]"
+
+
+def _startup_state(harness: _Harness) -> str:
+    """Capture worker readiness and owner state before harness cleanup changes them."""
+    workers = ",".join(_startup_task_state(task) for task in harness.sidecar._workers)
+    return (
+        f"receive={harness.receive.entered.is_set()} retry={harness.retry.entered.is_set()} "
+        f"owner={_startup_task_state(harness.start)} workers={workers or 'none'}"
+    )
+
+
+async def _await_worker_entry(harness: _Harness, worker: _Worker, name: str) -> None:
+    """Race readiness against owner termination within the existing one-second budget."""
+    entered = asyncio.create_task(worker.entered.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {entered, harness.start}, timeout=1, return_when=asyncio.FIRST_COMPLETED
+        )
+        if harness.start in done:
+            harness.start.result()
+            raise AssertionError(f"Notify sidecar owner completed before {name} entry")
+        if entered not in done:
+            raise TimeoutError(
+                f"Notify sidecar {name} entry exceeded 1s: {_startup_state(harness)}"
+            )
+    finally:
+        entered.cancel()
+        await asyncio.gather(entered, return_exceptions=True)
+
+
 @asynccontextmanager
 async def _running(
     *, gated_cleanup: bool = False, receive_exits: bool = False
@@ -130,8 +171,8 @@ async def _running(
     if receive_exits:
         harness.sidecar._receive_loop = harness.receive.run
     try:
-        await asyncio.wait_for(harness.receive.entered.wait(), 1)
-        await asyncio.wait_for(harness.retry.entered.wait(), 1)
+        await _await_worker_entry(harness, harness.receive, "receive")
+        await _await_worker_entry(harness, harness.retry, "retry")
         yield harness
     finally:
         await harness.cleanup(baseline)
@@ -141,6 +182,76 @@ async def _completed(task: asyncio.Task[None]) -> bool:
     """Bound a missing lifecycle reaction without using sleeps for synchronization."""
     done, _ = await asyncio.wait({task}, timeout=0.25)
     return task in done
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True], ids=["failure", "cancellation"])
+async def test_startup_rendezvous_preserves_owner_failure(
+    monkeypatch: pytest.MonkeyPatch, cancelled: bool
+) -> None:
+    """Observe the owner outcome before a worker-entry timeout can hide it.
+
+    Given the start owner fails before creating either worker,
+    When the harness waits for worker entry,
+    Then the original failure or cancellation survives harness cleanup.
+    """
+    failure = (
+        asyncio.CancelledError("startup cancelled") if cancelled else RuntimeError("startup failed")
+    )
+    monkeypatch.setattr(NotifySidecar, "start", AsyncMock(side_effect=failure))
+    with pytest.raises(type(failure)) as caught:
+        async with _running():
+            pytest.fail("The harness admitted an owner that failed before startup")
+    assert caught.value is failure
+
+
+@pytest.mark.asyncio
+async def test_startup_rendezvous_rejects_completed_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal early owner exit is distinct from a worker-entry timeout.
+
+    Given the start owner returns without creating workers,
+    When the harness waits for receive entry,
+    Then it identifies the completed owner instead of reporting a timeout.
+    """
+    monkeypatch.setattr(NotifySidecar, "start", AsyncMock(return_value=None))
+    with pytest.raises(AssertionError, match="owner completed before receive entry"):
+        async with _running():
+            pytest.fail("The harness admitted an owner that returned before startup")
+
+
+@pytest.mark.asyncio
+async def test_startup_timeout_records_pending_owner_before_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing entry reports the pending owner before cleanup cancels it.
+
+    Given startup is blocked before either worker is created,
+    When the existing one-second entry budget expires,
+    Then the diagnostic records pending startup and cleanup still joins it.
+    """
+    release = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def blocked_start(_self: NotifySidecar) -> None:
+        """Hold actual startup at its worker boundary until harness cleanup."""
+        try:
+            await release.wait()
+        finally:
+            finalized.set()
+
+    monkeypatch.setattr(NotifySidecar, "_run_workers", blocked_start)
+    with pytest.raises(TimeoutError) as caught:
+        async with _running():
+            pytest.fail("The harness admitted workers that never entered")
+    message = str(caught.value)
+    assert "receive entry exceeded 1s" in message
+    assert "receive=False retry=False" in message
+    assert "owner=pending" in message
+    assert "start:" in message
+    assert "workers=none" in message
+    assert finalized.is_set()
 
 
 @pytest.mark.asyncio
