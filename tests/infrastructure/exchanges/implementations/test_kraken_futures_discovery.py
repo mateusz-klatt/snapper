@@ -413,7 +413,7 @@ async def test_completed_public_503_retries_through_installed_ccxt_and_real_rout
     When: Futures connects through the actual bounded worker and public router,
     Then: discovery succeeds with two separately balanced route reservations.
     """
-    assert ccxt.__version__ == "4.5.91"
+    assert ccxt.__version__ == "4.5.92"
     client = KrakenFuturesExchangeClient()
     statuses = iter([503, 200])
     observed: list[int] = []
