@@ -20,8 +20,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from scripts.repair_kraken_candles import archive_instruments
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import CandleUpsertRow
 
@@ -797,3 +801,150 @@ async def test_canonical_identity_postgres_fence_precedes_bounded_all_history_lo
         session.commit.assert_not_awaited()
     finally:
         await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_repair_retains_nulls_and_never_mutates_any_history(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Preserve exact native payloads and all existing knowledge versions.
+
+    Given current and closed candles plus an absent archive minute,
+    When native repair runs in dry-run and write modes twice,
+    Then only the absent minute is inserted at actual load time with null VWAP.
+    """
+    current, closed, absent = _row(), _row(1), _row(2)
+    closed["known_to"] = _ACQUIRED + timedelta(days=1)
+    async with repository.session() as session:
+        session.add_all([Candle(**current), Candle(**closed)])
+        await session.commit()
+    before = await _stored(repository)
+    candidates = [current, closed | {"known_to": KNOWN_TO_MAX}, absent | {"vwap": None}]
+    since = datetime.now(UTC)
+    preview = await repository.insert_missing_native_candles(candidates, dry_run=True)
+    assert [row["open_at"] for row in preview] == [absent["open_at"]]
+    assert await _stored(repository) == before
+    inserted = await repository.insert_missing_native_candles(candidates)
+    assert len(inserted) == 1
+    assert inserted[0]["vwap"] is None
+    assert inserted[0]["trades"] == 7
+    assert inserted[0]["timestamp"] >= since
+    assert (await _stored(repository))[:2] == before
+    assert await repository.insert_missing_native_candles(candidates) == []
+    assert candidates[2]["timestamp"] == _ACQUIRED
+    futures = _row(3) | {"vwap": None, "trades": None}
+    assert len(await repository.insert_missing_native_candles([futures])) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_repair_rejects_unsafe_batches_and_current_minutes(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Keep malformed repair batches outside a write transaction.
+
+    Given empty, oversized, open-minute and numerically invalid batches,
+    When native repair validates them,
+    Then empty is a no-op and all unsafe batches raise without inserting.
+    """
+    assert await repository.insert_missing_native_candles([]) == []
+    with pytest.raises(ValueError, match="100"):
+        await repository.insert_missing_native_candles([_row()] * 101)
+    current = _row() | {"open_at": datetime.now(UTC).replace(second=0, microsecond=0)}
+    for row in [
+        current,
+        _row() | {"vwap": float("nan")},
+        _row() | {"trades": 1.5},
+        _row() | {"trades": 2147483648},
+    ]:
+        with pytest.raises(ValueError):
+            await repository.insert_missing_native_candles([cast(CandleUpsertRow, row)])
+    assert await _stored(repository) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [("DOGE-USD", "XDGUSD"), ("BTC-USD", "XXBTZUSD")])
+async def test_archive_alias_join_excludes_active_bitnomial_relays(
+    repository: SQLAlchemyRepository,
+    identity: tuple[str, str],
+) -> None:
+    """Require actual active Kraken REST aliases instead of shared underlying currencies.
+
+    Given a REST-mapped spot symbol and an active BTC-USD-BTNL relay without a REST alias,
+    When archive pairs are resolved against SQLite metadata,
+    Then only the spot instrument receives the direct or normalized pair identity.
+    """
+    native, alias = identity
+    symbol_id = "00000000-0000-4000-8000-000000000901"
+    relay_id = "00000000-0000-4000-8000-000000000902"
+    common = {"timestamp": _ACQUIRED, "session_id": _SESSION, "sequence_id": 1}
+    async with repository.session() as session:
+        for public_id, name in [(symbol_id, native), (relay_id, "BTC-USD-BTNL")]:
+            session.add(
+                Symbol(
+                    public_id=public_id,
+                    native_symbol=name,
+                    base="BTC",
+                    quote="USD",
+                    created_at=_ACQUIRED,
+                    **common,
+                )
+            )
+            session.add(
+                Instrument(
+                    public_id=_INSTRUMENT if public_id == symbol_id else _SESSION,
+                    symbol_public_id=public_id,
+                    exchange="kraken",
+                    **common,
+                )
+            )
+        session.add(
+            SymbolAlias(
+                symbol_public_id=symbol_id,
+                exchange="kraken",
+                channel="rest",
+                exchange_symbol=alias,
+                created_at=_ACQUIRED,
+                **common,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                symbol_public_id=relay_id,
+                exchange="kraken",
+                channel="ws",
+                exchange_symbol="BTC/USD-BTNL",
+                created_at=_ACQUIRED,
+                **common,
+            )
+        )
+        await session.commit()
+    pair = "XDGUSD" if native == "DOGE-USD" else "XBTUSD"
+    assert await archive_instruments(repository, {pair}) == {pair: (native, _INSTRUMENT)}
+
+
+@pytest.mark.asyncio
+async def test_repair_lock_modes_do_not_change_existing_reconciliation_modes(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use nonblocking writer participation only for the closed insert-only repair paths.
+
+    Given native repair, insert-only synthesis and both existing reconciliation methods,
+    When their transactions begin,
+    Then only the repair paths request ROW EXCLUSIVE while the existing fences stay stronger.
+    """
+    begin = AsyncMock(wraps=repository._begin_candle_reconciliation_write)
+    monkeypatch.setattr(repository, "_begin_candle_reconciliation_write", begin)
+    await repository.insert_missing_native_candles([_row()])
+    synthesized = _row() | {"timeframe": "5m", "source": "synthesized"}
+    await repository.insert_missing_synthesized_candles([synthesized])
+    await repository.insert_missing_candles([_row(1)])
+    await repository.upsert_historical_synthesized_candles([synthesized])
+    assert [
+        call.kwargs.get("lock_mode", "SHARE ROW EXCLUSIVE") for call in begin.await_args_list
+    ] == [
+        "ROW EXCLUSIVE",
+        "ROW EXCLUSIVE",
+        "SHARE ROW EXCLUSIVE",
+        "SHARE ROW EXCLUSIVE",
+    ]

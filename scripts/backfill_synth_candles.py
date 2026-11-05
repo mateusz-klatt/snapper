@@ -4,7 +4,7 @@ Usage:
     PYTHONPATH=src:proprietary/src .venv/bin/python scripts/backfill_synth_candles.py \
         [--exchanges kraken,kraken_equities,kraken_futures,polygon,walutomat] \
         [--timeframes 5m,15m,30m,1h,4h,1d] \
-        [--since-days 90] [--batch-size 2000] [--dry-run] \
+        [--start UTC --end UTC --insert-only] [--since-days 90] [--batch-size 100] [--dry-run] \
         [--limit-instruments N] [--progress-file PATH]
 
 Replays each instrument's current 1m candles in ascending ``open_at`` order and
@@ -13,8 +13,10 @@ fold as the live ``CandleAggregator`` (open=first, close=last, high=max,
 low=min, volume/trades summed, vwap = sum(vwap_i * volume_i) / sum(volume_i)).
 One ``source='synthesized'`` bar is emitted per CLOSED historical window that
 holds at least one real 1m candle; the still-open current window is skipped.
-Bars persist through the idempotent SCD2 :meth:`Repository.upsert_candles`, so
-re-runs only fill gaps (an exact-match row is a no-op) and the job is resumable.
+Bars persist through :meth:`Repository.upsert_historical_synthesized_candles`.
+Bounded --start/--end runs require --insert-only and never revise any history.
+They ignore the legacy progress log. Reruns cannot improve existing bars after
+minute corrections. Legacy lookback runs retain the guarded revision writer.
 
 The window boundary and rollup intentionally mirror
 ``snapper.messaging.publishers.candle_aggregator`` (UTC-floored windows, 1d at
@@ -35,9 +37,11 @@ from collections.abc import Callable
 from collections.abc import Coroutine
 from collections.abc import Iterator
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from functools import partial
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -46,8 +50,10 @@ from typing import cast
 from uuid import uuid7
 
 from loguru import logger
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 
+from snapper.application.updaters.historical.repair_batch import retry_batch
+from snapper.application.updaters.historical.repair_window import Window
 from snapper.config.settings import get_settings
 from snapper.core.types import AllExchange
 from snapper.data.repository import Repository
@@ -74,10 +80,6 @@ _DEFAULT_EXCHANGES: tuple[str, ...] = (
     "walutomat",
 )
 
-_UPSERT_RETRIES: int = 3
-
-_UPSERT_RETRY_BACKOFF_S: float = 0.25
-
 
 @dataclass
 class _Bucket:
@@ -93,8 +95,8 @@ class _Bucket:
     low: float
     close: float
     volume: float
-    trades: int
-    vwap_sum: float
+    trades: int | None
+    vwap_sum: float | None
 
 
 @dataclass
@@ -107,6 +109,7 @@ class _Totals:
     windows: int = 0
     written: int = 0
     errors: int = 0
+    abort: bool = False
 
 
 _InstrumentWorker = Callable[[str, str, str], Coroutine[Any, Any, None]]
@@ -181,6 +184,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="Comma-separated native symbols to restrict to (default: all on the exchange).",
     )
+    parser.add_argument(
+        "--start", type=datetime.fromisoformat, help="Inclusive UTC minute boundary."
+    )
+    parser.add_argument("--end", type=datetime.fromisoformat, help="Exclusive UTC minute boundary.")
+    parser.add_argument(
+        "--insert-only",
+        action="store_true",
+        help="Insert only keys with no history; required with --start/--end.",
+    )
     parser.add_argument("--since-days", type=int, default=90, help="Lookback window in days.")
     parser.add_argument(
         "--settle-minutes",
@@ -188,7 +200,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=120,
         help="Skip windows that closed within the last N minutes (left to the live writer; avoids racing it).",
     )
-    parser.add_argument("--batch-size", type=int, default=2000, help="Rows per upsert call.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        choices=range(1, 101),
+        default=100,
+        help="Rows per short guarded write (1..100).",
+    )
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -399,8 +417,7 @@ def _fold_minute(
 
     Rows are replayed in ascending ``open_at`` order, so a bucket's ``open`` is
     fixed when the window is first seen and ``close`` is overwritten by every
-    later minute. A missing ``vwap`` falls back to the minute's close and a
-    missing ``trades`` counts as zero, matching the live aggregator's fold.
+    later minute. Unknown VWAP and trade counts propagate to the output.
 
     Args:
         buckets: Running state keyed by ``(timeframe, window start)``, mutated
@@ -410,8 +427,8 @@ def _fold_minute(
     """
     ot = int(row["open_at"].timestamp())
     close = row["close"]
-    vwap = row["vwap"] if row["vwap"] is not None else close
-    trades = row["trades"] or 0
+    vwap = row["vwap"]
+    trades = row["trades"]
     volume = row["volume"]
     for tf, width in tf_secs.items():
         begin_ts = (ot // width) * width
@@ -425,7 +442,7 @@ def _fold_minute(
                 close=close,
                 volume=volume,
                 trades=trades,
-                vwap_sum=vwap * volume,
+                vwap_sum=vwap * volume if vwap is not None else None,
             )
             continue
         if row["high"] > bucket.high:
@@ -434,19 +451,27 @@ def _fold_minute(
             bucket.low = row["low"]
         bucket.close = close
         bucket.volume += volume
-        bucket.trades += trades
-        bucket.vwap_sum += vwap * volume
+        bucket.trades = (
+            bucket.trades + trades if bucket.trades is not None and trades is not None else None
+        )
+        bucket.vwap_sum = (
+            bucket.vwap_sum + vwap * volume
+            if bucket.vwap_sum is not None and vwap is not None
+            else None
+        )
 
 
 def _roll_up(
-    rows: list[CandleRow], tf_secs: dict[str, int], close_before_ts: int
+    rows: list[CandleRow],
+    tf_secs: dict[str, int],
+    close_before_ts: int,
+    start: datetime | None = None,
 ) -> dict[str, list[tuple[int, _Bucket]]]:
     """Roll 1m rows up into closed higher-timeframe buckets per timeframe.
 
     Single ascending pass updating every timeframe's open window. A window is
-    emitted only once a 1m at or after its end exists in the data AND its end is
-    older than ``close_before_ts``. The data-watermark gate mirrors the live
-    aggregator (never publish a window with no following minute); the
+    emitted only once an observed minute closes at or after its end AND its end
+    is older than ``close_before_ts``. The
     ``close_before_ts`` gate leaves the live writer's hot recent windows alone so
     the backfill never races it for the same ``(instrument, timeframe, open_at)``
     current row. The effective cutoff is the smaller of the two.
@@ -455,6 +480,7 @@ def _roll_up(
         rows: Current 1m candles for one instrument, ascending by ``open_at``
             (non-empty; the caller skips empty instruments).
         tf_secs: Mapping of timeframe label to width in seconds.
+        start: Optional inclusive lower bound; discard leading partial windows.
         close_before_ts: Only emit windows whose end is at or before this UNIX
             second (the settle cutoff: ``now - settle_minutes``).
 
@@ -462,12 +488,14 @@ def _roll_up(
         Mapping of timeframe label to its list of closed buckets with the
         window-start UNIX second attached as ``(begin_ts, bucket)`` pairs.
     """
-    watermark = min(int(rows[-1]["open_at"].timestamp()), close_before_ts)
+    watermark = min(int(rows[-1]["open_at"].timestamp()) + 60, close_before_ts)
     buckets: dict[tuple[str, int], _Bucket] = {}
     for c in rows:
         _fold_minute(buckets, c, tf_secs)
     closed: dict[str, list[tuple[int, _Bucket]]] = {tf: [] for tf in tf_secs}
     for (tf, begin_ts), bucket in buckets.items():
+        if start is not None and begin_ts < int(start.timestamp()):
+            continue
         if begin_ts + tf_secs[tf] > watermark:
             continue
         closed[tf].append((begin_ts, bucket))
@@ -490,21 +518,19 @@ def _build_rows(
         seq: Monotonic sequence-id generator (values > 0).
         session_id: One backfill-run session id stamped on every row.
 
-    A window carrying no volume at all falls back to its close rather than to
-    ``0.0``. Zero is not a cheaper answer, it is a false statement about price:
-    the bar's own OHLC still names a real level, so a reader joining on VWAP
-    would see a valid bar priced at zero. This must stay identical to
-    ``CandleAggregator._to_candle_update``, because this script and the live
-    publisher write to the same durable plane and a reconstruction that
-    disagreed with the live path would be worse than no reconstruction.
+    Missing input VWAP or trade counts remain unknown in the synthesized
+    output. For known input statistics, zero-volume windows retain the original
+    close-price VWAP convention. Unknown input VWAP always remains null.
 
     Returns:
-        The synthesized rows ready for :meth:`Repository.upsert_candles`.
+        The rows ready for :meth:`Repository.upsert_historical_synthesized_candles`.
     """
     out: list[CandleUpsertRow] = []
     for tf, items in closed.items():
         for begin_ts, bucket in items:
-            vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else bucket.close
+            vwap = None
+            if bucket.vwap_sum is not None:
+                vwap = bucket.vwap_sum / bucket.volume if bucket.volume > 0 else bucket.close
             out.append(
                 CandleUpsertRow(
                     instrument_public_id=instrument_public_id,
@@ -528,60 +554,48 @@ def _build_rows(
 
 
 async def _upsert_with_retry(repo: Repository, batch: list[CandleUpsertRow]) -> int:
-    """Upsert a candle batch, retrying transient conflicts then deferring hot rows.
-
-    The live feed publisher and this backfill can both target the same
-    ``(instrument, timeframe, open_at)`` current row for a freshly settled
-    window. A transient unique conflict is retried — the re-read resolves to a
-    clean no-op or supersede. A conflict that survives the retry budget means the
-    live writer actively owns that window with fresher data, so the batch falls
-    back to a per-row pass that skips only the contended rows. Either way a
-    re-run never errors and never overwrites live data.
+    """Retry a legacy guarded batch and raise instead of silently skipping conflicts.
 
     Args:
-        repo: Repository handle.
-        batch: Synthesized candle rows to upsert.
+        repo: Repository owning each short transaction.
+        batch: Validated synthesized candidates.
 
     Returns:
-        The number of rows written (contended rows deferred to the live writer).
+        Acknowledged changed count; exhausted retries propagate to the run's error counter.
     """
-    attempt = 0
-    while True:
-        try:
-            return await repo.upsert_candles(batch)
-        except IntegrityError:
-            attempt += 1
-            if attempt > _UPSERT_RETRIES:
-                return await _upsert_skipping_contended(repo, batch)
-            await asyncio.sleep(_UPSERT_RETRY_BACKOFF_S * attempt)
+    return await retry_batch(partial(repo.upsert_historical_synthesized_candles, batch))
 
 
-async def _upsert_skipping_contended(repo: Repository, batch: list[CandleUpsertRow]) -> int:
-    """Upsert a persistently-conflicting batch row by row, deferring hot windows.
-
-    Falls out of :func:`_upsert_with_retry` when a batch keeps losing the unique
-    race. Each row is upserted on its own so a single window the live writer is
-    actively versioning is skipped (logged) rather than aborting the whole
-    instrument; every other row is still written. The skipped window stays owned
-    by the live writer and is reconciled on a later run.
+async def _write_batch(repo: Repository, batch: list[CandleUpsertRow], insert_only: bool) -> int:
+    """Route repair writes exclusively through all-version insert-only absence checks.
 
     Args:
-        repo: Repository handle.
-        batch: The batch whose single-shot upsert hit a persistent conflict.
+        repo: Repository with owned short transactions.
+        batch: Closed synthesized candidates.
+        insert_only: Whether every source and every knowledge version is protected.
 
     Returns:
-        The number of rows written, excluding the deferred contended rows.
+        Acknowledged inserted or changed row count.
     """
-    written = 0
-    for row in batch:
-        try:
-            written += await repo.upsert_candles([row])
-        except IntegrityError:
-            logger.warning(
-                f"deferred contended window to live writer: "
-                f"timeframe={row.get('timeframe')} open_at={row.get('open_at')}"
-            )
-    return written
+    if insert_only:
+        inserted = await retry_batch(partial(repo.insert_missing_synthesized_candles, batch))
+        return len(inserted)
+    return await _upsert_with_retry(repo, batch)
+
+
+@dataclass(frozen=True)
+class _ReplayOptions:
+    """Share fixed bounded replay settings across instrument workers."""
+
+    tf_secs: dict[str, int]
+    cutoff: datetime
+    end: datetime
+    close_before_ts: int
+    batch_size: int
+    session_id: str
+    dry_run: bool
+    insert_only: bool = False
+    totals: _Totals = field(default_factory=_Totals)
 
 
 async def _process_instrument(
@@ -589,46 +603,99 @@ async def _process_instrument(
     exchange: str,
     symbol: str,
     instrument_public_id: str,
-    tf_secs: dict[str, int],
-    cutoff: datetime,
-    now: datetime,
-    close_before_ts: int,
-    batch_size: int,
-    session_id: str,
-    dry_run: bool,
+    options: _ReplayOptions,
 ) -> tuple[int, int, int]:
-    """Synthesize and persist higher-TF candles for one instrument.
+    """Synthesize whole windows through the guarded historical writer.
 
     Args:
         repo: Repository handle.
-        exchange: Exchange the instrument resolves under.
+        exchange: Exchange owning the instrument.
         symbol: Native symbol.
-        instrument_public_id: Resolved Instrument id for the synthesized rows.
-        tf_secs: Timeframe to width-seconds mapping.
-        cutoff: Earliest ``open_at`` to read.
-        now: Run start (write-time and 1m read upper bound).
-        close_before_ts: Settle cutoff; windows ending after it are skipped.
-        batch_size: Rows per upsert call.
-        session_id: Backfill-run session id.
-        dry_run: When True, compute counts but do not write.
+        instrument_public_id: Exact active instrument identity.
+        options: Fixed bounds, requested timeframes and persistence limits.
 
     Returns:
-        ``(n_1m, n_windows, n_written)`` for this instrument.
+        Source minute count, emitted window count and changed row count.
     """
     rows = await repo.get_candles(
-        symbol, "1m", cutoff, now, cast(AllExchange, exchange), now, order="asc"
+        symbol,
+        "1m",
+        options.cutoff,
+        options.end,
+        cast(AllExchange, exchange),
+        datetime.now(UTC),
+        order="asc",
     )
+    rows = [
+        row for row in rows if options.cutoff <= row["open_at"] < options.end and row["complete"]
+    ]
     if not rows:
         return 0, 0, 0
-    closed = _roll_up(rows, tf_secs, close_before_ts)
-    synth_rows = _build_rows(closed, instrument_public_id, now, count(1), session_id)
+    closed = _roll_up(rows, options.tf_secs, options.close_before_ts, options.cutoff)
+    synth_rows = _build_rows(
+        closed, instrument_public_id, datetime.now(UTC), count(1), options.session_id
+    )
     if not synth_rows:
         return len(rows), 0, 0
     written = 0
-    if not dry_run:
-        for offset in range(0, len(synth_rows), batch_size):
-            written += await _upsert_with_retry(repo, synth_rows[offset : offset + batch_size])
+    if not options.dry_run:
+        for offset in range(0, len(synth_rows), min(options.batch_size, 100)):
+            changed = await _write_batch(
+                repo,
+                synth_rows[offset : offset + min(options.batch_size, 100)],
+                options.insert_only,
+            )
+            written += changed
+            options.totals.written += changed
     return len(rows), len(synth_rows), written
+
+
+def _requested_window(args: argparse.Namespace, acquired: datetime) -> Window:
+    """Validate paired explicit bounds or derive the legacy lookback range.
+
+    Args:
+        args: Operator arguments with optional explicit start and end.
+        acquired: Actual run time, independent of the requested candle range.
+
+    Returns:
+        The validated half-open historical minute range.
+    """
+    start = cast(datetime | None, getattr(args, "start", None))
+    end = cast(datetime | None, getattr(args, "end", None))
+    if (start is None) != (end is None):
+        raise ValueError("--start and --end must be supplied together")
+    if start is not None and not getattr(args, "insert_only", False):
+        raise ValueError("--insert-only is required with --start/--end")
+    if args.batch_size < 1 or args.settle_minutes < 0:
+        raise ValueError("batch-size must be positive and settle-minutes nonnegative")
+    if start is None or end is None:
+        end = acquired.replace(second=0, microsecond=0)
+        start = end - timedelta(days=args.since_days)
+    return Window(start, end)
+
+
+async def _run_progress(args: argparse.Namespace) -> tuple[set[tuple[str, str]], TextIO | None]:
+    """Read legacy progress only when the run has no explicit repair bounds.
+
+    Args:
+        args: Parsed lookback, bounded-run and progress-file options.
+
+    Returns:
+        Completed instrument keys and an optional owned progress log handle.
+    """
+    progress_file = resolve_operator_file(
+        Path(args.progress_file),
+        must_exist=False,
+    )
+    done = (
+        set()
+        if getattr(args, "start", None) is not None
+        else await asyncio.to_thread(_load_done, progress_file)
+    )
+    progress_handle = await _prepare_progress_log(
+        progress_file, args.dry_run or getattr(args, "start", None) is not None
+    )
+    return done, progress_handle
 
 
 async def run(args: argparse.Namespace) -> _Totals:
@@ -643,21 +710,18 @@ async def run(args: argparse.Namespace) -> _Totals:
     timeframes, tf_secs = _requested_timeframes(args.timeframes)
     exchanges = [ex.strip() for ex in args.exchanges.split(",") if ex.strip()]
     symbol_filter = _requested_symbols(args.symbols)
-    now = datetime.now(UTC)
-    cutoff = now - timedelta(days=args.since_days)
-    close_before_ts = int(now.timestamp()) - args.settle_minutes * 60
-    progress_file = resolve_operator_file(
-        Path(args.progress_file),
-        must_exist=False,
+    acquired = datetime.now(UTC)
+    window = _requested_window(args, acquired)
+    close_before_ts = min(
+        int(window.end.timestamp()), int(acquired.timestamp()) - args.settle_minutes * 60
     )
-    done = await asyncio.to_thread(_load_done, progress_file)
-    progress_handle = await _prepare_progress_log(progress_file, args.dry_run)
+    done, progress_handle = await _run_progress(args)
     session_id = str(uuid7())
     totals = _Totals()
     mode = "DRY-RUN" if args.dry_run else "WRITE"
     logger.info(
         f"[{mode}] exchanges={exchanges} timeframes={timeframes} concurrency={args.concurrency} "
-        f"window={cutoff.isoformat()}..{now.isoformat()} resume_skip={len(done)} session={session_id}"
+        f"window={window.start.isoformat()}..{window.end.isoformat()} resume_skip={len(done)} session={session_id}"
     )
     repo = await _repository_after_progress_preflight(
         args.db_host_rewrite,
@@ -669,29 +733,35 @@ async def run(args: argparse.Namespace) -> _Totals:
     async def worker(exchange: str, symbol: str, instrument_public_id: str) -> None:
         """Process one instrument under the concurrency gate and record results."""
         async with semaphore:
+            if totals.abort:
+                return
             try:
                 n_1m, n_windows, n_written = await _process_instrument(
                     repo,
                     exchange,
                     symbol,
                     instrument_public_id,
-                    tf_secs,
-                    cutoff,
-                    now,
-                    close_before_ts,
-                    args.batch_size,
-                    session_id,
-                    args.dry_run,
+                    _ReplayOptions(
+                        tf_secs,
+                        window.start,
+                        window.end,
+                        close_before_ts,
+                        args.batch_size,
+                        session_id,
+                        args.dry_run,
+                        insert_only=getattr(args, "insert_only", False),
+                        totals=totals,
+                    ),
                 )
             except Exception as exc:
                 async with bookkeeping:
                     totals.errors += 1
+                    totals.abort |= isinstance(exc, DBAPIError)
                 logger.exception(f"[{exchange}] {symbol}: FAILED: {exc}")
                 return
         async with bookkeeping:
             totals.instruments += 1
             totals.windows += n_windows
-            totals.written += n_written
             if n_1m == 0:
                 totals.skipped_no_1m += 1
             logger.info(f"[{exchange}] {symbol}: 1m={n_1m} windows={n_windows} wrote={n_written}")
@@ -700,7 +770,7 @@ async def run(args: argparse.Namespace) -> _Totals:
 
     scheduler = _ExchangeScheduler(
         repository=repo,
-        now=now,
+        now=acquired,
         symbol_filter=symbol_filter,
         limit_instruments=args.limit_instruments,
         done=done,
@@ -710,6 +780,8 @@ async def run(args: argparse.Namespace) -> _Totals:
     try:
         for exchange in exchanges:
             await scheduler.process(exchange)
+            if totals.abort:
+                break
     finally:
         try:
             engine = getattr(repo, "engine", None)

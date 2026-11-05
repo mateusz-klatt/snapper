@@ -1125,6 +1125,130 @@ snapper kraken-futures-backfill-candles [OPTIONS]
 | `-d, --days` | int | `90` | Days back to fetch |
 | `--resume` / `--no-resume` | bool | `--resume` | Resume from latest stored candle |
 
+### Bounded insert-only Kraken minute repair
+
+Use `scripts/repair_kraken_candles.py` for holes inside an explicit historical
+window. The existing `kraken-futures-backfill-candles` command retains its original
+resume and upsert behavior; its newest-candle resume cannot repair an older hole.
+The repair script has no `--resume`: rerun the same bounds to resume safely.
+
+Run from the checkout on the host with a host-reachable `DB_URL` environment
+variable, for example a PostgreSQL URL using `postgresql+asyncpg` and `127.0.0.1`.
+The script uses configured settings when `DB_URL` is unset. It does not create
+instruments or database partitions. Existing daily candle partitions must cover
+the requested range.
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--source` | `archive` | `archive` for spot OHLCVT; `futures` for Futures trade charts |
+| `--archive` | Required for archive | Official quarterly ZIP; not applicable to Futures |
+| `--start` | Required | Inclusive ISO timestamp with explicit UTC timezone |
+| `--end` | Required | Exclusive ISO timestamp with explicit UTC timezone |
+| `--symbol` | All active instruments | Exact native symbol, for example `BTC-USD` or `BTC-USD-PERP` |
+| `--batch-size` | `100` | Rows per transaction, from `1` to `100` |
+| `--dry-run` | `false` | Read and count absent keys without writes or writer locks |
+| `--allow-unmapped` | `false` | Acknowledge skipped in-window rows of unmapped archive pairs |
+| `--allow-invalid` | `false` | Acknowledge skipped invalid records |
+
+Both bounds must be minute-aligned. The end must be at or before the current
+minute's opening. Rows at the end, before the start, or in the current open minute
+are never inserted. Counts include rows in the requested window, absent rows,
+already-present rows, invalid records, written rows, matched one-minute members,
+in-window unmapped row counts and exact unmapped pairs. The summary also names
+skipped Futures symbols without CCXT aliases and symbols whose fetch failed.
+
+Unmapped in-window archive rows and invalid records produce a nonzero exit
+unless explicitly acknowledged with `--allow-unmapped` and `--allow-invalid`,
+respectively. Names and counts remain in the summary even when acknowledged.
+An archive with zero matched one-minute members or zero in-window records always
+fails, including with both acknowledgements. A fatal scan or database error also
+always fails, reporting the batches whose commits were acknowledged.
+Dry-run absence counts are a read-time observation; concurrent inserts may reduce
+the subsequent write count.
+
+The [official quarterly OHLCVT archive](https://support.kraken.com/articles/360047124832-downloadable-historical-ohlcvt-open-high-low-close-volume-trades-data)
+is sparse: no-trade minutes are absent and remain absent. ZIP members named
+`PAIR_1.csv` at the root or under one leading directory are streamed; nothing is extracted. Single-line records are
+limited to 4096 characters. The seven headerless columns are Unix seconds, open,
+high, low, close, volume and integer trade count. Invalid records are logged and
+skipped. Identity comes exclusively from active `symbol_aliases` rows with
+`exchange='kraken'` and `channel='rest'`, joined to active symbols and instruments.
+Direct equality with an archive pair takes priority, for example `XDGUSD` maps to
+`DOGE-USD`. Only when a REST name is absent from the archive pair set, one legacy
+normalization removes the X/Z prefixes from two four-character asset codes:
+`XXBTZUSD` becomes `XBTUSD`, `XETHXXBT` becomes `ETHXBT`, and `XXDGXXBT` becomes
+`XDGXBT`. Normalized collisions fail rather than choosing an instrument. Bitnomial
+`-BTNL` relay instruments without a Kraken REST alias cannot receive archive rows.
+Native VWAP remains null because the archive does not supply it.
+
+The Futures mode pages `fetch_ohlcv` through the existing Kraken Futures client,
+using the official [trade charts endpoint](https://docs.kraken.com/api-reference/candles/market-candles).
+Requests cover at most 500 minutes, including empty slices, and stop at the
+exclusive end. Charts provide neither VWAP nor trade counts; both remain null.
+A short page resumes after its last returned minute. A symbol without an exact
+CCXT alias is skipped and named without failing the run; dated contracts are
+never attempted through a guessed alias. A per-symbol fetch failure is named and
+counted, scanning continues, and the final exit is nonzero. Database failures
+follow the bounded batch retry policy below. Reruns can pass over symbols that
+still have no CCXT alias. No foreign or synthesized prices are tagged as native.
+
+Archive preview and insert:
+
+```bash
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/repair_kraken_candles.py \
+    --archive /mnt/d/projects/snapper-market-repair-20261105/kraken/Kraken_OHLCVT_2026Q3.zip \
+    --start 2026-09-14T13:57:00Z --end 2026-09-30T19:28:00Z --batch-size 100 --dry-run
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/repair_kraken_candles.py \
+    --archive /mnt/d/projects/snapper-market-repair-20261105/kraken/Kraken_OHLCVT_2026Q3.zip \
+    --start 2026-09-14T13:57:00Z --end 2026-09-30T19:28:00Z --batch-size 100
+```
+
+Futures preview and insert:
+
+```bash
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/repair_kraken_candles.py \
+    --source futures --start 2026-09-14T13:57:00Z --end 2026-09-30T19:28:00Z --batch-size 100 --dry-run
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/repair_kraken_candles.py \
+    --source futures --start 2026-09-14T13:57:00Z --end 2026-09-30T19:28:00Z --batch-size 100
+```
+
+The native repository repair checks absence across **all knowledge versions**,
+including closed older rows, and never updates or closes a row. Inserts are
+complete native `1m` rows stamped with actual load time, a run session and a
+positive sequence. OHLC geometry, finite numbers, alignment and closure are
+validated before writing.
+
+After reviewing the skipped pair names and invalid counts, an operator may
+explicitly acknowledge both categories. This still fails on an empty selection
+or a scan/database error:
+
+```bash
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/repair_kraken_candles.py \
+    --archive /mnt/d/projects/snapper-market-repair-20261105/kraken/Kraken_OHLCVT_2026Q3.zip \
+    --start 2026-09-14T13:57:00Z --end 2026-09-30T19:28:00Z --batch-size 100 \
+    --allow-unmapped --allow-invalid --dry-run
+```
+
+Run **one repair at a time**, including native loading and insert-only synthesis.
+Both closed-window repair writers request PostgreSQL `ROW EXCLUSIVE` through the
+existing reconciliation lock helper. Live writers only touch current windows;
+the all-version absence statement protects prior history, and the active partial
+unique index arbitrates an unexpected concurrent insert. This mode participates
+in normal table/partition maintenance locking without excluding live row writers.
+It does not serialize two repair operators. The existing `insert_missing_candles`
+and `upsert_historical_synthesized_candles` keep their original stronger lock mode.
+
+The default batch is 100 rows, which is also the hard repair batch limit. Each
+batch owns its transaction, commits and releases its locks before the next batch.
+The existing lock acquisition limit remains at most one second. Lock timeouts,
+unique conflicts and transient database errors retry the same idempotent batch
+at most three times after the initial attempt, with 0.25, 0.5 and 0.75 seconds of
+backoff outside the transaction. Permanent errors or exhausted retries abort
+with a nonzero exit and acknowledged committed progress in the summary. An
+uncertain commit acknowledgement may undercount a batch; an idempotent rerun
+checks durable absence again. No conflict-exhausted row is silently treated as a
+successful repair.
+
 ### `kraken-equities-backfill-candles`
 
 Backfills historical OHLCV candles for Kraken Equities (TradFi FCM)
@@ -1187,6 +1311,48 @@ snapper backfill-synthesized-candles --exchange EXCHANGE --start START --end END
 | `--all` | bool | `false` | Backfill all active symbols on the exchange |
 | `--timeframes` | str | `5m,15m,30m,1h,4h,1d` | Comma-separated higher timeframes to synthesize |
 | `--cut-date` | str | None | UTC date (`YYYY-MM-DD`) where synthesized `1d` ownership begins |
+
+For operator repairs, `scripts/backfill_synth_candles.py` is the maintained
+bounded synthesis path. Paired `--start` and `--end` require `--insert-only`.
+It also accepts `--dry-run`, `--exchanges`, `--symbols`, `--timeframes`,
+`--batch-size` (1–100, default 100) and
+`--settle-minutes` (default 120). Without explicit bounds it retains its lookback
+and progress-log workflow. Explicit bounds ignore the legacy progress log so a
+wider rerun recomputes each instrument.
+
+The script reads current complete 1m candles as known at acquisition time. It
+emits only whole UTC-aligned higher-timeframe windows contained in `[start, end)`
+and at or before the settle cutoff and observed-minute closure watermark. Sparse
+windows require at least one observed minute; wholly empty windows are omitted.
+The bounded insert-only mode uses `insert_missing_synthesized_candles` and the
+same all-version absence statement as native repair. It cannot reach
+`_upsert_historical_synthesized_row`. No existing row of any source is changed,
+including synthesized rows and closed older versions. **A rerun after correcting
+1m data does not improve existing higher-timeframe bars.** Such corrections
+require a separate, explicitly scoped revision workflow. Legacy lookback runs
+without explicit bounds retain the guarded revision path.
+
+Unknown input VWAP and trade counts propagate as null for new bars. When input
+VWAP is known, a zero-volume window retains the fold's original close-price VWAP
+convention. If any input VWAP is null, the result stays null even at zero volume.
+This repair path does not require the live finalizer's non-null VWAP gate and
+does not change live feed behavior.
+
+After loading native minutes, preview and rebuild a wider bounded range:
+
+```bash
+REPAIR_END=$(date -u +%Y-%m-%dT%H:%M:00Z)
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/backfill_synth_candles.py \
+    --exchanges kraken,kraken_futures --start 2026-09-01T00:00:00Z --end "$REPAIR_END" --insert-only \
+    --timeframes 5m,15m,30m,1h,4h,1d --batch-size 100 --concurrency 1 --dry-run
+PYTHONPATH=src:proprietary/src .venv/bin/python scripts/backfill_synth_candles.py \
+    --exchanges kraken,kraken_futures --start 2026-09-01T00:00:00Z --end "$REPAIR_END" --insert-only \
+    --timeframes 5m,15m,30m,1h,4h,1d --batch-size 100 --concurrency 1
+```
+
+The default settle delay leaves recent windows to the live writer. Use
+`--settle-minutes 0` to include all observed closed windows up to the fixed end.
+These commands do not reconstruct missing Walutomat or Kraken Equities minutes.
 
 ### `build-continuous`
 
