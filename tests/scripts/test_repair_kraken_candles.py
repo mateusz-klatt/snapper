@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock
 from zipfile import ZipFile
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import OperationalError
 
 from scripts import repair_kraken_candles as repair
@@ -36,6 +38,7 @@ def _args(**overrides: object) -> argparse.Namespace:
                 "end": _END,
                 "source": "archive",
                 "archive": Path("unused.zip"),
+                "timeframe": "1m",
                 "symbol": None,
                 "batch_size": 2,
                 "dry_run": False,
@@ -363,7 +366,7 @@ async def test_futures_resolves_active_instruments_and_disconnects(
     client.disconnect.assert_awaited_once()
 
 
-@pytest.mark.parametrize("source", ["archive", "futures"])
+@pytest.mark.parametrize("source", ["archive", "futures", "equities"])
 async def test_run_prints_counts_and_disposes_repository(
     source: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -514,7 +517,7 @@ async def test_futures_missing_ccxt_alias_is_named_and_skipped(
     client = MagicMock(get_ohlcv=AsyncMock())
     monkeypatch.setattr(repair, "native_to_ccxt", MagicMock(side_effect=ValueError("no alias")))
     await repair.futures_symbol(client, ("BTC-USD-20261225", "iid"), writer, Window(_START, _END))
-    assert writer.totals.skipped_ccxt == {"BTC-USD-20261225"}
+    assert writer.totals.skipped_symbols == {"BTC-USD-20261225"}
     client.get_ohlcv.assert_not_awaited()
     assert repair.exit_status(_args(source="futures"), writer.totals) == 0
 
@@ -638,3 +641,147 @@ def test_legacy_rest_form_without_archive_pair_stays_unmapped() -> None:
     Then the alias is returned unchanged so the caller reports it as unmapped.
     """
     assert repair.archive_pair("XXBTZUSD", {"ETHUSD"}) == "XXBTZUSD"
+
+
+def _bar(offset_hours: int = 0) -> OhlcvSnapshot:
+    """Return one hourly venue bar counted from the first whole hour of the outage."""
+    opening = datetime(2026, 9, 14, 14, tzinfo=UTC) + timedelta(hours=offset_hours)
+    return OhlcvSnapshot(opening.timestamp(), 10, 12, 9, 11, 3)
+
+
+_BAR_WINDOW = Window(datetime(2026, 9, 14, 14, tzinfo=UTC), datetime(2026, 9, 14, 16, tzinfo=UTC))
+
+
+async def test_equities_symbol_stores_only_in_window_native_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the venue bar size and unknown statistics inside the window.
+
+    Given the venue returns bars around the bounds and one misaligned bar,
+    When one contract is repaired,
+    Then only aligned in-window bars are stored and the misaligned bar is counted.
+    """
+    monkeypatch.setattr(repair, "native_to_kraken_equities_ws", lambda symbol: symbol)
+    monkeypatch.setattr(repair.asyncio, "sleep", AsyncMock())
+    client = MagicMock(
+        get_ohlcv=AsyncMock(
+            return_value=[
+                _bar(-1),
+                _bar(0),
+                replace(_bar(0), timestamp=_bar(0).timestamp + 60),
+                _bar(1),
+                _bar(2),
+            ]
+        )
+    )
+    repo = _repo()
+    writer = repair.Writer(cast(Repository, repo), 2, False, timeframe="1h")
+    await repair.equities_symbol(client, ("ESZ6-CME", "iid"), writer, _BAR_WINDOW)
+    assert writer.totals.in_window == 3
+    assert writer.totals.invalid == 1
+    assert writer.totals.written == 2
+    rows = [
+        row for call in repo.insert_missing_native_candles.await_args_list for row in call[0][0]
+    ]
+    assert {row["timeframe"] for row in rows} == {"1h"}
+    assert {row["vwap"] for row in rows} == {None}
+    assert {row["trades"] for row in rows} == {None}
+    client.get_ohlcv.assert_awaited_once_with(
+        "ESZ6-CME", "1h", since=int(_BAR_WINDOW.start.timestamp() * 1000)
+    )
+
+
+async def test_equities_symbol_reports_delisted_contract_as_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not call the venue for a contract it no longer lists.
+
+    Given a contract without an Equities alias,
+    When it is repaired,
+    Then it is named as skipped and no bar is requested.
+    """
+
+    def unknown(symbol: str) -> str:
+        """Raise like the mapper does for a delisted contract."""
+        raise ValueError(symbol)
+
+    monkeypatch.setattr(repair, "native_to_kraken_equities_ws", unknown)
+    client = MagicMock(get_ohlcv=AsyncMock())
+    writer = repair.Writer(cast(Repository, _repo()), 2, False, timeframe="1h")
+    await repair.equities_symbol(client, ("CLV6-NYMEX", "iid"), writer, _BAR_WINDOW)
+    assert writer.totals.skipped_symbols == {"CLV6-NYMEX"}
+    client.get_ohlcv.assert_not_awaited()
+
+
+@pytest.mark.parametrize("symbol", [None, "MISSING"])
+async def test_load_equities_keeps_unmapped_and_failed_symbols_visible(
+    symbol: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report symbols that could not be repaired without stopping the others.
+
+    Given one mapped contract failing upstream and one unmapped symbol,
+    When Equities are loaded,
+    Then the unmapped symbol is named and the failure is counted.
+    """
+    repo = _repo()
+    repo.get_exchange_instruments = AsyncMock(return_value=["ESZ6-CME", "MISSING"])
+    repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"ESZ6-CME": "iid"})
+    monkeypatch.setattr(repair, "KrakenEquitiesExchangeClient", MagicMock)
+    monkeypatch.setattr(repair, "equities_symbol", AsyncMock(side_effect=RuntimeError("down")))
+    writer = repair.Writer(cast(Repository, repo), 2, False, timeframe="1h")
+    await repair.load_equities(_args(symbol=symbol), writer, _BAR_WINDOW)
+    assert writer.totals.unmapped == {"MISSING"}
+    assert writer.totals.failed_symbols == (set() if symbol else {"ESZ6-CME"})
+    assert writer.totals.errors == (0 if symbol else 1)
+
+
+async def test_load_equities_stops_on_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort instead of counting a database failure against one symbol.
+
+    Given the database fails while storing a contract,
+    When Equities are loaded,
+    Then the error reaches the run level.
+    """
+    repo = _repo()
+    repo.get_exchange_instruments = AsyncMock(return_value=["ESZ6-CME"])
+    repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"ESZ6-CME": "iid"})
+    monkeypatch.setattr(repair, "KrakenEquitiesExchangeClient", MagicMock)
+    failure = DBAPIError("insert", {}, RuntimeError("down"))
+    monkeypatch.setattr(repair, "equities_symbol", AsyncMock(side_effect=failure))
+    writer = repair.Writer(cast(Repository, repo), 2, False, timeframe="1h")
+    with pytest.raises(DBAPIError):
+        await repair.load_equities(_args(), writer, _BAR_WINDOW)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--source", "equities"],
+        ["--source", "futures", "--timeframe", "1h"],
+        ["--source", "equities", "--timeframe", "1h", "--archive", "a.zip"],
+    ],
+)
+def test_parse_args_rejects_mismatched_equities_bar_size(arguments: list[str]) -> None:
+    """Refuse a bar size outside its source before opening a repository.
+
+    Given a source and bar size that do not belong together,
+    When arguments are parsed,
+    Then the command exits with a usage error.
+    """
+    bounds = ["--start", _START.isoformat(), "--end", _END.isoformat()]
+    with pytest.raises(SystemExit):
+        repair.parse_args([*bounds, *arguments])
+
+
+def test_parse_args_accepts_equities_bar_size() -> None:
+    """Accept an Equities repair with an explicit higher bar size.
+
+    Given the Equities source and a venue bar size,
+    When arguments are parsed,
+    Then both are kept.
+    """
+    bounds = ["--start", _START.isoformat(), "--end", _END.isoformat()]
+    args = repair.parse_args([*bounds, "--source", "equities", "--timeframe", "15m"])
+    assert (args.source, args.timeframe) == ("equities", "15m")

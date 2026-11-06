@@ -11455,7 +11455,7 @@ class SQLAlchemyRepository(Repository):
         Missing statistics remain null and knowledge time is actual load time.
 
         Args:
-            rows: At most 100 closed official native minute candidates.
+            rows: At most 100 closed official native candidates.
             dry_run: Inspect absence without changing any row.
 
         Returns:
@@ -11567,7 +11567,9 @@ class SQLAlchemyRepository(Repository):
             or original.keys() - CandleUpsertRow.__annotations__.keys()
         ):
             raise ValueError("missing candle insert requires its complete typed fields")
-        seconds = cls._reconciled_candle_seconds(original["timeframe"], source)
+        seconds = cls._reconciled_candle_seconds(
+            original["timeframe"], source, venue_bars=allow_unknown_statistics
+        )
         if original["source"] != source or original["complete"] is not True:
             raise ValueError("candle reconciliation requires its complete source-owned rows")
         row = original.copy()
@@ -11588,12 +11590,19 @@ class SQLAlchemyRepository(Repository):
         return row
 
     @staticmethod
-    def _reconciled_candle_seconds(timeframe: str, source: Literal["native", "synthesized"]) -> int:
-        """Restrict native catchup to one minute and synthesis to supported closed windows."""
+    def _reconciled_candle_seconds(
+        timeframe: str, source: Literal["native", "synthesized"], *, venue_bars: bool = False
+    ) -> int:
+        """Restrict live native catchup to one minute and others to supported closed windows.
+
+        Only the bounded insert-only repair sets ``venue_bars``: a venue that keeps no
+        minutes for an old range still publishes higher native bars for it.
+        """
         supported = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
-        seconds = (
-            (60 if timeframe == "1m" else None) if source == "native" else supported.get(timeframe)
-        )
+        if source == "synthesized" or venue_bars:
+            seconds = 60 if venue_bars and timeframe == "1m" else supported.get(timeframe)
+        else:
+            seconds = 60 if timeframe == "1m" else None
         if seconds is None:
             raise ValueError("candle reconciliation timeframe is not supported for its source")
         return seconds
@@ -18289,7 +18298,8 @@ class SQLAlchemyRepository(Repository):
                     partition_key
                     for native_symbol in candidate.allowed_native_symbols
                     if (
-                        partition_key := SQLAlchemyRepository._pnl_timeline_order_partition_for_alias(
+                        partition_key
+                        := SQLAlchemyRepository._pnl_timeline_order_partition_for_alias(
                             scope_key,
                             exchange_order_id,
                             native_symbol,

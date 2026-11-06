@@ -1,4 +1,4 @@
-"""Repair bounded Kraken native minutes from quarterly archives or Futures charts.
+"""Repair bounded Kraken native candles from archives, Futures charts or Equities bars.
 
 No archive member is extracted. Records and database batches have fixed bounds;
 missing VWAP and charts trade counts stay null. Reruns inspect all knowledge
@@ -37,10 +37,16 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.implementations.kraken_equities import (
+    KrakenEquitiesExchangeClient,
+)
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.symbols.functions import native_to_ccxt
+from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
+
+_BAR_SECONDS: dict[str, int] = {"1m": 60, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}
 
 
 @dataclass
@@ -55,7 +61,7 @@ class Totals:
     unmapped: set[str] = field(default_factory=set)
     unmapped_rows: int = 0
     members: int = 0
-    skipped_ccxt: set[str] = field(default_factory=set)
+    skipped_symbols: set[str] = field(default_factory=set)
     failed_symbols: set[str] = field(default_factory=set)
     errors: int = 0
 
@@ -69,6 +75,7 @@ class Writer:
     dry_run: bool
     totals: Totals = field(default_factory=Totals)
     pending: list[CandleUpsertRow] = field(default_factory=list)
+    timeframe: str = "1m"
     session_id: str = field(default_factory=lambda: str(uuid7()))
     sequence: int = 0
 
@@ -85,17 +92,17 @@ class Writer:
             instrument: Exact active instrument public identity.
 
         Returns:
-            Validated native one-minute candidate with acquisition provenance.
+            Validated native candidate with acquisition provenance.
         """
         opening = datetime.fromtimestamp(int(values[0]), UTC)
-        if opening.second or opening.microsecond:
-            raise ValueError("native opening must be minute aligned")
+        if int(values[0]) % _BAR_SECONDS[self.timeframe]:
+            raise ValueError("native opening must be aligned to its bar")
         self.sequence += 1
         row: CandleUpsertRow = {
             "instrument_public_id": instrument,
             "open_at": opening,
             "timestamp": datetime.now(UTC),
-            "timeframe": "1m",
+            "timeframe": self.timeframe,
             "open": float(values[1]),
             "high": float(values[2]),
             "low": float(values[3]),
@@ -340,7 +347,7 @@ async def futures_symbol(
     try:
         symbol = native_to_ccxt(identity[0])
     except ValueError:
-        writer.totals.skipped_ccxt.add(identity[0])
+        writer.totals.skipped_symbols.add(identity[0])
         return
     cursor = int(window.start.timestamp() * 1000)
     end = int(window.end.timestamp() * 1000)
@@ -409,6 +416,89 @@ async def load_futures(args: argparse.Namespace, writer: Writer, window: Window)
         await client.disconnect()
 
 
+async def append_equities_snapshot(
+    candle: OhlcvSnapshot, instrument: str, writer: Writer, window: Window
+) -> None:
+    """Queue one in-window venue bar, counting and skipping an invalid one.
+
+    Args:
+        candle: Official FCM bar, with its VWAP and trade count left unknown.
+        instrument: Exact active instrument public identity.
+        writer: Shared bounded persistence state.
+        window: Requested half-open historical range.
+    """
+    try:
+        values = snapshot_values(candle)
+        if not window.contains(datetime.fromtimestamp(int(values[0]), UTC)):
+            return
+        writer.totals.in_window += 1
+        row = writer.build(values, instrument)
+    except (ValueError, OverflowError, OSError) as error:
+        writer.totals.invalid += 1
+        logger.warning(f"Skipped invalid Equities record: {error}")
+        return
+    await writer.append(row)
+
+
+async def equities_symbol(
+    client: KrakenEquitiesExchangeClient,
+    identity: tuple[str, str],
+    writer: Writer,
+    window: Window,
+) -> None:
+    """Store one contract's bars from the single bounded window the venue serves.
+
+    Args:
+        client: Equities client; the endpoint needs no connection or credentials.
+        identity: Exact native symbol and active instrument identity.
+        writer: Shared bounded persistence state.
+        window: Explicit half-open range, independent of the newest stored candle.
+    """
+    try:
+        native_to_kraken_equities_ws(identity[0])
+    except ValueError:
+        writer.totals.skipped_symbols.add(identity[0])
+        return
+    candles = await client.get_ohlcv(
+        identity[0], writer.timeframe, since=int(window.start.timestamp() * 1000)
+    )
+    for candle in candles:
+        await append_equities_snapshot(candle, identity[1], writer, window)
+    await writer.flush()
+    await asyncio.sleep(1)
+
+
+async def load_equities(args: argparse.Namespace, writer: Writer, window: Window) -> None:
+    """Repair selected active FCM contracts; delisted ones have no venue bars.
+
+    Args:
+        args: Optional native symbol filter.
+        writer: Shared bounded insertion state, carrying the requested bar size.
+        window: Requested half-open historical range.
+    """
+    now = datetime.now(UTC)
+    symbols = await writer.repository.get_exchange_instruments("kraken_equities", now)
+    if args.symbol:
+        symbols = [args.symbol]
+    mapping = await writer.repository.get_instrument_public_ids_by_symbols(
+        set(symbols), "kraken_equities", now
+    )
+    client = KrakenEquitiesExchangeClient()
+    for symbol in symbols:
+        if symbol not in mapping:
+            writer.totals.unmapped.add(symbol)
+            continue
+        try:
+            await equities_symbol(client, (symbol, mapping[symbol]), writer, window)
+        except DBAPIError:
+            raise
+        except Exception as error:
+            writer.totals.failed_symbols.add(symbol)
+            writer.totals.errors += 1
+            logger.error(f"Equities repair failed for {symbol}: {error}")
+            writer.pending.clear()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """Validate operator bounds and source options before opening a repository.
 
@@ -419,8 +509,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         Parsed and validated repair arguments.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", choices=("archive", "futures"), default="archive")
+    parser.add_argument("--source", choices=("archive", "futures", "equities"), default="archive")
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--timeframe", choices=tuple(_BAR_SECONDS), default="1m")
     parser.add_argument("--start", type=datetime.fromisoformat, required=True)
     parser.add_argument("--end", type=datetime.fromisoformat, required=True)
     parser.add_argument("--symbol")
@@ -437,8 +528,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.source == "archive" and args.archive is None:
         parser.error("--archive is required for archive repairs")
-    if args.source == "futures" and args.archive is not None:
-        parser.error("--archive is not applicable to Futures charts")
+    if args.source != "archive" and args.archive is not None:
+        parser.error("--archive is only applicable to archive repairs")
+    if (args.source == "equities") == (args.timeframe == "1m"):
+        parser.error("--timeframe above 1m is required for equities and only applies there")
     Window(args.start, args.end)
     return args
 
@@ -454,12 +547,14 @@ async def run(args: argparse.Namespace) -> Totals:
     """
     window = Window(args.start, args.end)
     repository = get_repository(get_settings().db_url)
-    writer = Writer(repository, args.batch_size, args.dry_run)
+    writer = Writer(repository, args.batch_size, args.dry_run, timeframe=args.timeframe)
     try:
         if args.source == "archive":
             await load_archive(args, writer, window)
-        else:
+        elif args.source == "futures":
             await load_futures(args, writer, window)
+        else:
+            await load_equities(args, writer, window)
         await writer.flush()
     except Exception as error:
         writer.totals.errors += 1
@@ -473,8 +568,8 @@ async def run(args: argparse.Namespace) -> Totals:
         f"written={totals.written} members={totals.members} errors={totals.errors} "
         f"unmapped_rows={totals.unmapped_rows} unmapped_pairs={len(totals.unmapped)} "
         f"unmapped={','.join(sorted(totals.unmapped))} "
-        f"skipped_ccxt_count={len(totals.skipped_ccxt)} "
-        f"skipped_ccxt={','.join(sorted(totals.skipped_ccxt))} "
+        f"skipped_count={len(totals.skipped_symbols)} "
+        f"skipped_symbols={','.join(sorted(totals.skipped_symbols))} "
         f"failed_symbols={','.join(sorted(totals.failed_symbols))}"
     )
     return totals

@@ -1140,8 +1140,9 @@ the requested range.
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--source` | `archive` | `archive` for spot OHLCVT; `futures` for Futures trade charts |
-| `--archive` | Required for archive | Official quarterly ZIP; not applicable to Futures |
+| `--source` | `archive` | `archive` for spot OHLCVT; `futures` for Futures trade charts; `equities` for FCM venue bars |
+| `--archive` | Required for archive | Official quarterly ZIP; not applicable to other sources |
+| `--timeframe` | `1m` | Bar size; `equities` requires `15m`, `30m`, `1h` or `1d` and other sources stay on `1m` |
 | `--start` | Required | Inclusive ISO timestamp with explicit UTC timezone |
 | `--end` | Required | Exclusive ISO timestamp with explicit UTC timezone |
 | `--symbol` | All active instruments | Exact native symbol, for example `BTC-USD` or `BTC-USD-PERP` |
@@ -1156,6 +1157,12 @@ are never inserted. Counts include rows in the requested window, absent rows,
 already-present rows, invalid records, written rows, matched one-minute members,
 in-window unmapped row counts and exact unmapped pairs. The summary also names
 skipped Futures symbols without CCXT aliases and symbols whose fetch failed.
+
+The Equities source serves a rolling venue window per bar size: about 4 days of
+`1m`, 19 days of `5m`, 60 days of `15m`, 120 days of `30m` and 8 months of `1h`,
+measured on 2026-11-06, so `1m` and `5m` cannot repair an older outage. It reads
+only contracts the venue still lists, reports delisted ones as skipped and stores
+native bars with unknown VWAP and trade count.
 
 Unmapped in-window archive rows and invalid records produce a nonzero exit
 unless explicitly acknowledged with `--allow-unmapped` and `--allow-invalid`,

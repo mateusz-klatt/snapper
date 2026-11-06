@@ -8,6 +8,7 @@ from datetime import timedelta
 from datetime import timezone
 from datetime import tzinfo
 from pathlib import Path
+from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -948,3 +949,41 @@ async def test_repair_lock_modes_do_not_change_existing_reconciliation_modes(
         "SHARE ROW EXCLUSIVE",
         "SHARE ROW EXCLUSIVE",
     ]
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "source", "venue_bars", "seconds"),
+    [
+        ("1m", "native", False, 60),
+        ("1h", "native", True, 3600),
+        ("1m", "native", True, 60),
+        ("1h", "synthesized", False, 3600),
+    ],
+)
+def test_reconciled_candle_seconds_accepts_repair_venue_bars(
+    timeframe: str,
+    source: Literal["native", "synthesized"],
+    venue_bars: bool,
+    seconds: int,
+) -> None:
+    """Allow higher native bars only for the bounded repair path.
+
+    Given a timeframe, source and repair mode,
+    When the reconciliation size is resolved,
+    Then it matches the bar.
+    """
+    assert (
+        SQLAlchemyRepository._reconciled_candle_seconds(timeframe, source, venue_bars=venue_bars)
+        == seconds
+    )
+
+
+def test_reconciled_candle_seconds_keeps_live_native_on_minutes() -> None:
+    """Keep live catchup restricted to one-minute native candles.
+
+    Given a higher native bar outside the repair path,
+    When the reconciliation size is resolved,
+    Then it is rejected.
+    """
+    with pytest.raises(ValueError, match="not supported"):
+        SQLAlchemyRepository._reconciled_candle_seconds("1h", "native")
