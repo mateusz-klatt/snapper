@@ -401,6 +401,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._reconnect_timestamps: deque[float] = deque(maxlen=_RECONNECT_LIMIT * 2)
         self._restart_lock = asyncio.Lock()
         self._force_ws_restart_task: asyncio.Task[None] | None = None
+        self._startup_liveness_armed = False
         self._candle_catchup: KrakenCandleCatchup | None = None
         self._candle_identity_gate = asyncio.Lock()
         self._pending_candle_identities: dict[tuple[str, str, datetime], str] = {}
@@ -729,6 +730,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         publisher restarts.
         """
         token = _CURRENT_PUBLISHER.set(self)
+        self._startup_liveness_armed = False
         try:
             await super().start()
         finally:
@@ -823,6 +825,28 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await super().stop()
+
+    def _check_feed_liveness(self) -> None:
+        """Arm the Spot liveness guard only once live consumers exist.
+
+        Startup seeds every higher timeframe from the database before any
+        trade subscription is sent, which takes minutes for a wildcard roster.
+        Counting that preparation as feed silence restarted an empty socket
+        every minute and discarded the warming trade builder. The first check
+        after the tick consumer is scheduled rebases both silence clocks;
+        later checks keep the unchanged thresholds, so a socket that never
+        delivers a message is still recovered.
+        """
+        if self._tick_consumer_task is None:
+            self._startup_liveness_armed = False
+            return
+        if not self._startup_liveness_armed:
+            now = time.monotonic()
+            self._last_message_at = now
+            self._last_candle_msg_at = now
+            self._startup_liveness_armed = True
+            return
+        super()._check_feed_liveness()
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
         """Recover stale market data by forcing a WS restart.
