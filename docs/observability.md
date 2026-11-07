@@ -66,7 +66,9 @@ runs `MarketDataWatchdog`
 (`application/market_data_watchdog/watchdog.py`), which every
 `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` (default 60) queries the
 database for the newest candle per live feed exchange (`kraken`,
-`kraken_futures`, `kraken_equities`, `walutomat`). When an exchange's
+`kraken_futures`, `kraken_equities`, `walutomat`). The query reads only
+the last three days of candle partitions and re-reads the full history
+only for an exchange with no candle in that window. When an exchange's
 silence — measured from its newest candle minute END — exceeds
 `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` (default 600, floor 120), the
 watchdog publishes a synthetic 3-frame WARNING heartbeat burst on
