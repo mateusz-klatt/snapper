@@ -161,6 +161,7 @@ help:
 ifeq ($(OS),Windows_NT)
   SHELL      := cmd.exe
   .SHELLFLAGS := /c
+  export PYTHONUTF8 := 1
   PYTHON   := python
   VENV_PY  := .venv\Scripts\python
   DEVNULL  := NUL
@@ -180,7 +181,13 @@ IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 
-PYTEST_TIMEOUT := --timeout=15
+ifeq ($(OS),Windows_NT)
+  PYTEST_TIMEOUT := --timeout=60
+  BRIDGE_TEST := npm run test -- --testTimeout=30000
+else
+  PYTEST_TIMEOUT := --timeout=15
+  BRIDGE_TEST := npm run test
+endif
 ROOT_DIR := $(CURDIR)
 SERVER_PORT ?= 8000
 UI_DIR := frontend
@@ -189,6 +196,7 @@ DOCKER_BASE := docker run --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/d
 DOCKER_RUN := $(DOCKER_BASE) --rm $(IMAGE_NAME):$(IMAGE_TAG)
 GENSCRIPT := @$(VENV_PY) scripts/generate_types.py
 PNPM := @cd $(UI_DIR) && pnpm
+export SKIP_INSTALL_SIMPLE_GIT_HOOKS := 1
 PRETTIER := $(PNPM) exec prettier --write
 PYTEST_PARALLEL := $(shell $(PYTHON) -c "import math,os; cpus = os.cpu_count() or 1; print('' if cpus <= 1 else '-n ' + str(min(6, max(1, math.ceil(cpus / 2)))))")
 PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests) $(wildcard integrations/snapper-delegate/src) $(wildcard integrations/snapper-delegate/tests)
@@ -219,7 +227,7 @@ setup:
 	$(VENV_PY) scripts/pin_locked_charset_normalizer.py
 	$(PYRUN) pip install --upgrade poetry
 	$(PYRUN) poetry install --with dev --with cloud
-	$(PYRUN) pre_commit install
+	$(VENV_PY) scripts/install_pre_commit.py
 	$(info Setup completed!)
 
 setup-full: system-deps setup
@@ -668,13 +676,13 @@ ts-bridge:
 
 bridge-regen: ts-bridge
 	$(info Running bridge stack against freshly-regenerated working tree...)
-	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && npm run test && npm run stdout-gate
+	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && $(BRIDGE_TEST) && npm run stdout-gate
 
 bridge-check:
 	$(info Verifying bridge wire-contract working-tree file is consistent with current backend schemas...)
 	@$(VENV_PY) -m scripts.bridge_check.check_drift
 	@$(VENV_PY) -m scripts.bridge_check.check_oss_prose
-	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && npm run test && npm run stdout-gate
+	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && $(BRIDGE_TEST) && npm run stdout-gate
 
 docs-pdf:
 	$(VENV_PY) scripts/build_docs_pdf.py

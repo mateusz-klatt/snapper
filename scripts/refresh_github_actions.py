@@ -56,6 +56,9 @@ EXTRACT_MAJOR_RE: Final = re.compile(r"^v(\d+)")
 def _gh_api(path: str) -> JsonValue:
     """Run ``gh api <path>`` and return the parsed JSON payload.
 
+    Decode GitHub's UTF-8 response explicitly so release prose is independent
+    of the host's default encoding, including legacy Windows code pages.
+
     Args:
         path: GitHub API path (e.g. ``repos/owner/repo/releases/latest``).
 
@@ -71,6 +74,7 @@ def _gh_api(path: str) -> JsonValue:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     parsed: JsonValue = json.loads(result.stdout)
     return parsed
@@ -88,6 +92,7 @@ def ensure_gh_authenticated() -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
     except FileNotFoundError as exc:
         raise SystemExit(

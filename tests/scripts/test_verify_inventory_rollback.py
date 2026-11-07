@@ -5,6 +5,7 @@ import json
 import os
 import runpy
 import sqlite3
+import ssl
 import subprocess
 import sys
 from contextlib import closing
@@ -125,6 +126,25 @@ async def test_actual_application_initializes_and_reads_while0066_inventory_stay
     assert SettingsService._instance._msg_publisher is None
     with pytest.raises(FileExistsError):
         await probe.prepare_fixture(rollback_fixture)
+
+
+def test_isolation_keeps_system_ssl_working_without_application_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preserve OS trust-store initialization while excluding inherited application configuration.
+
+    Given: An OS environment and an unrelated private application setting,
+    When: The rollback probe isolates its synthetic fixture environment,
+    Then: SSL context creation succeeds, the private setting is absent and the environment restores.
+    """
+    monkeypatch.setenv("UNRELATED_PRIVATE_SETTING", "synthetic-not-forwarded")
+    original = dict(os.environ)
+    url = f"sqlite+aiosqlite:///{tmp_path / 'inventory.db'}"
+    with probe._isolated_environment(tmp_path, url):
+        ssl.create_default_context()
+        assert "UNRELATED_PRIVATE_SETTING" not in os.environ
+        assert os.environ["DB_URL"] == url
+    assert dict(os.environ) == original
 
 
 @pytest.mark.parametrize("kind", ("missing", "symlink"))
@@ -318,6 +338,42 @@ def test_main_guard_probes_actual_fixture_with_real_installed_application(
     assert exit_status.value.code == 0
 
 
+def _assert_private_fixture_files(directory: Path) -> None:
+    """Verify POSIX modes or Windows ACLs, including Python's OWNER RIGHTS entries."""
+    if os.name != "nt":
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert (directory / "inventory.db").stat().st_mode & 0o777 == 0o600
+        return
+    targets = ", ".join(
+        "'" + str(path).replace("'", "''") + "'" for path in (directory, directory / "inventory.db")
+    )
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$owners = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, "
+        "'S-1-5-18', 'S-1-5-32-544'); "
+        "$allowed = $owners + @('S-1-3-4'); "
+        f"foreach ($path in @({targets})) {{ "
+        "$acl = Get-Acl -LiteralPath $path; "
+        "if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $owners) "
+        "{ throw 'Fixture has an unexpected owner' }; "
+        "$rules = @($acl.Access | "
+        "Where-Object { $_.AccessControlType -eq 'Allow' }); "
+        "if ($rules.Count -eq 0) { throw 'No explicit private access rules' }; "
+        "foreach ($rule in $rules) { "
+        "$sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; "
+        "if ($sid -notin $allowed) { throw 'Fixture grants access outside its owner and system' } "
+        "} }"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        env={key: value for key, value in os.environ.items() if key != "PSMODULEPATH"},
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+
+
 def test_fresh_process_prepare_and_installed_probe_work_without_preloaded_test_modules(
     tmp_path: Path,
 ) -> None:
@@ -330,8 +386,11 @@ def test_fresh_process_prepare_and_installed_probe_work_without_preloaded_test_m
     root = Path(probe.__file__).resolve().parents[1]
     directory = tmp_path / "standalone-fixture"
     environment = {
-        key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "LANG"}
+        key: value
+        for key, value in os.environ.items()
+        if key in {"PATH", "HOME", "LANG", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
     }
+    environment["PYTHONUTF8"] = "1"
     preparation_environment = dict(environment)
     preparation_environment["PYTHONPATH"] = os.pathsep.join(
         str(root / relative)
@@ -343,9 +402,11 @@ def test_fresh_process_prepare_and_installed_probe_work_without_preloaded_test_m
         env=preparation_environment,
         text=True,
         capture_output=True,
-        check=True,
+        encoding="utf-8",
+        check=False,
         timeout=30,
     )
+    assert prepared.returncode == 0, prepared.stderr
     probed = subprocess.run(
         [
             sys.executable,
@@ -357,9 +418,10 @@ def test_fresh_process_prepare_and_installed_probe_work_without_preloaded_test_m
         env=environment,
         text=True,
         capture_output=True,
-        check=True,
+        encoding="utf-8",
+        check=False,
         timeout=30,
     )
+    assert probed.returncode == 0, probed.stderr
     assert json.loads(prepared.stdout)["snapshot"] == json.loads(probed.stdout)["snapshot"]
-    assert directory.stat().st_mode & 0o777 == 0o700
-    assert (directory / "inventory.db").stat().st_mode & 0o777 == 0o600
+    _assert_private_fixture_files(directory)

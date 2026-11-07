@@ -21,8 +21,8 @@ allowing true parallelism and isolation from the main server process.
 The async target is driven on a uvloop event loop where uvloop is
 available so a ``mode=PROCESS`` publisher gets the same libuv IO
 speedup the FastAPI server enjoys (``uvicorn --loop uvloop``). Windows
-workers fall back to ``asyncio.run`` because uvloop is not published
-for that platform.
+workers use ``asyncio.run`` with an explicit selector loop because uvloop is
+not published for that platform and ZeroMQ requires ``add_reader`` support.
 
 AI Review fast-path: subprocess
 strategies that invoke ``create_ai_review_and_await`` register an
@@ -145,7 +145,7 @@ def _run_event_loop[Result](awaitable: Awaitable[Result]) -> Result:
         Result returned by the awaited operation.
     """
     if _use_asyncio_runner():
-        return asyncio.run(_await_result(awaitable))
+        return asyncio.run(_await_result(awaitable), loop_factory=asyncio.SelectorEventLoop)
     event_loop_module = importlib.import_module("uvloop")
     run_event_loop = cast(
         Callable[[Awaitable[Result]], Result],

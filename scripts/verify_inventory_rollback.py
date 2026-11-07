@@ -168,7 +168,11 @@ def fixture_snapshot(directory: Path) -> InventoryRollbackSnapshot:
 def _isolated_environment(directory: Path, url: str) -> Iterator[None]:
     """Exclude inherited application settings and dotenv files before importing application code."""
     original = dict(os.environ)
-    safe = {key: value for key, value in original.items() if key in {"PATH", "HOME", "LANG"}}
+    safe = {
+        key: value
+        for key, value in original.items()
+        if key in {"PATH", "HOME", "LANG", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
+    }
     safe.update(
         SNAPPER_ENV="testing",
         DB_URL=url,
