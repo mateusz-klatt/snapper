@@ -46,7 +46,8 @@ RUN python -m venv /opt/poetry \
     --only-binary :all: \
     --no-deps \
     --no-compile \
-    snapper==0.1.0
+    snapper==0.1.0 \
+ && /opt/appenv/bin/python -m compileall -q -j 0 --invalidation-mode unchecked-hash /opt/appenv
 
 FROM python:3.14-slim AS runtime
 LABEL org.opencontainers.image.title="snapper"
