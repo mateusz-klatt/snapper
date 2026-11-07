@@ -36877,6 +36877,12 @@ class SQLAlchemyRepository(Repository):
           shares its ``open_at`` with its successor, so supersession
           can never move the per-instrument maximum.
 
+        The first pass reads only the last three days, so daily partitions
+        are pruned; an unbounded scan of every partition per instrument took
+        two minutes on production with 161 partitions. Only exchanges with
+        no candle in that window are re-read without a bound, so a long
+        silence is still reported with its true newest candle.
+
         Args:
             exchanges: Exchange identifiers to aggregate; exchanges
                 without active instruments produce no row.
@@ -36891,9 +36897,40 @@ class SQLAlchemyRepository(Repository):
             for any of the exchange's active instruments.
         """
         reference = now if now is not None else datetime.now(UTC)
+        recent = await self._latest_candle_open_at_rows(
+            exchanges, reference, reference - timedelta(days=3)
+        )
+        silent = [row["exchange"] for row in recent if row["latest_open_at"] is None]
+        if not silent:
+            return recent
+        unbounded = {
+            row["exchange"]: row
+            for row in await self._latest_candle_open_at_rows(silent, reference, None)
+        }
+        return [unbounded.get(row["exchange"], row) for row in recent]
+
+    async def _latest_candle_open_at_rows(
+        self, exchanges: Sequence[str], reference: datetime, since: datetime | None
+    ) -> list[MarketDataFreshnessRow]:
+        """Aggregate per-instrument newest candles, optionally from ``since`` onward.
+
+        A lower bound lets PostgreSQL prune daily candle partitions; without
+        it every partition is descended once per active instrument.
+
+        Args:
+            exchanges: Exchange identifiers to aggregate.
+            reference: Instant for the active-instrument predicate.
+            since: Inclusive lower ``open_at`` bound, or None for all history.
+
+        Returns:
+            One row per exchange with at least one active instrument.
+        """
+        conditions = [Candle.instrument_public_id == Instrument.public_id]
+        if since is not None:
+            conditions.append(Candle.open_at >= since)
         latest_per_instrument = (
             select(func.max(Candle.open_at))
-            .where(Candle.instrument_public_id == Instrument.public_id)
+            .where(*conditions)
             .correlate(Instrument)
             .scalar_subquery()
         )
