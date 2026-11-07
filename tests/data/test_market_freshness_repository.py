@@ -246,3 +246,54 @@ class TestLatestCandleOpenAtByExchange:
         )
         rows = await _repo.get_latest_candle_open_at_by_exchange(exchanges=("kraken",))
         assert [row["exchange"] for row in rows] == ["kraken"]
+
+
+class TestBoundedFreshnessFallback:
+    """The three-day first pass must not hide an older newest candle."""
+
+    @pytest.mark.asyncio
+    async def test_silent_exchange_falls_back_to_full_history(
+        self, _repo: SQLAlchemyRepository
+    ) -> None:
+        """An exchange silent for longer than the window keeps its true maximum.
+
+        Given: A kraken instrument with a candle two minutes old and a
+            walutomat instrument whose newest candle is ten days old,
+        When: The freshness query runs over both exchanges,
+        Then: Each exchange reports its own newest candle, in order.
+        """
+        await _add_instrument(_repo, public_id="i-k1", exchange="kraken")
+        await _add_instrument(_repo, public_id="i-w1", exchange="walutomat")
+        await _add_candle(
+            _repo, public_id="c-k", instrument_public_id="i-k1", open_at=_NOW - timedelta(minutes=2)
+        )
+        await _add_candle(
+            _repo, public_id="c-w", instrument_public_id="i-w1", open_at=_NOW - timedelta(days=10)
+        )
+        rows = await _repo.get_latest_candle_open_at_by_exchange(
+            exchanges=("kraken", "walutomat"), now=_NOW
+        )
+        assert rows == [
+            {"exchange": "kraken", "latest_open_at": _NOW - timedelta(minutes=2)},
+            {"exchange": "walutomat", "latest_open_at": _NOW - timedelta(days=10)},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_window_prefers_recent_candle_over_older_history(
+        self, _repo: SQLAlchemyRepository
+    ) -> None:
+        """A recent candle wins without consulting the older history.
+
+        Given: One kraken instrument with candles ten days and one hour old,
+        When: The freshness query runs,
+        Then: The one-hour-old candle is reported.
+        """
+        await _add_instrument(_repo, public_id="i-k1", exchange="kraken")
+        await _add_candle(
+            _repo, public_id="c-old", instrument_public_id="i-k1", open_at=_NOW - timedelta(days=10)
+        )
+        await _add_candle(
+            _repo, public_id="c-new", instrument_public_id="i-k1", open_at=_NOW - timedelta(hours=1)
+        )
+        rows = await _repo.get_latest_candle_open_at_by_exchange(exchanges=("kraken",), now=_NOW)
+        assert rows == [{"exchange": "kraken", "latest_open_at": _NOW - timedelta(hours=1)}]
