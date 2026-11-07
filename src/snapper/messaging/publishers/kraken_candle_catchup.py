@@ -42,6 +42,7 @@ class CatchupPolicy:
     interval_seconds: float = 60.0
     minimum_spacing_seconds: float = 5.0
     priority_symbols: tuple[str, ...] = ("BTC-USD", "ETH-USD", "EUR-USD")
+    sweep_spacing_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         """Reject policies that would remove a resource or pacing bound."""
@@ -52,6 +53,7 @@ class CatchupPolicy:
             self.pass_seconds,
             self.interval_seconds,
             self.minimum_spacing_seconds,
+            self.sweep_spacing_seconds,
         )
         if any(not math.isfinite(value) or value <= 0 for value in values):
             raise ValueError("Kraken catchup budgets must be positive and finite")
@@ -173,6 +175,7 @@ class KrakenCandleCatchup:
         self._fair_size = 0
         self._initial = True
         self._requested = asyncio.Event()
+        self._sweep_requested = True
 
     @staticmethod
     def _rotate(symbols: list[str], cursor: int, count: int) -> list[str]:
@@ -209,7 +212,8 @@ class KrakenCandleCatchup:
             self._fair_cursor = (self._fair_cursor + 1) % self._fair_size
 
     def request(self) -> None:
-        """Coalesce reconnect notifications into one bounded reconciliation pass."""
+        """Coalesce reconnect notifications into one full roster sweep."""
+        self._sweep_requested = True
         self._requested.set()
 
     async def run(self) -> None:
@@ -221,8 +225,10 @@ class KrakenCandleCatchup:
         await asyncio.sleep(0)
         while self._callbacks.active():
             self._requested.clear()
+            sweep = self._sweep_requested
+            self._sweep_requested = False
             try:
-                await self.run_pass()
+                await (self.run_sweep() if sweep else self.run_pass())
             except Exception as error:
                 logger.warning("Kraken candle catchup pass unresolved: {}", type(error).__name__)
             await asyncio.sleep(self._policy.minimum_spacing_seconds)
@@ -231,6 +237,32 @@ class KrakenCandleCatchup:
                     self._requested.wait(),
                     self._policy.interval_seconds - self._policy.minimum_spacing_seconds,
                 )
+
+    async def run_sweep(self) -> None:
+        """Visit every permitted symbol once, paced, after startup or a feed break.
+
+        A fair pass reaches only a few symbols per minute, so most symbols would
+        never be revisited inside the history window after a restart. The sweep
+        gives each symbol its own closed-minute horizon, so minutes lost while
+        the publisher was down or reconnecting are repaired for the whole roster
+        within one REST request per symbol. A request during the sweep schedules
+        another sweep, because symbols already visited missed that break.
+        """
+        for symbol in sorted(set(self._callbacks.symbols())):
+            if not self._callbacks.active():
+                return
+            end = _floor(self._callbacks.clock(), 60)
+            start = end - timedelta(minutes=self._policy.history_minutes)
+            try:
+                async with asyncio.timeout(self._policy.attempt_seconds):
+                    await self._reconcile_symbol(symbol, start, end)
+            except Exception as error:
+                logger.warning(
+                    "Kraken candle catchup sweep unresolved: symbol={} error={}",
+                    symbol,
+                    type(error).__name__,
+                )
+            await asyncio.sleep(self._policy.sweep_spacing_seconds)
 
     async def run_pass(self) -> None:
         """Visit a bounded fair slice of persisted symbols without inline retries."""
