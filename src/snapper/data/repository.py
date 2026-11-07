@@ -11599,10 +11599,12 @@ class SQLAlchemyRepository(Repository):
         minutes for an old range still publishes higher native bars for it.
         """
         supported = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
-        if source == "synthesized" or venue_bars:
-            seconds = 60 if venue_bars and timeframe == "1m" else supported.get(timeframe)
+        if source == "synthesized":
+            seconds = supported.get(timeframe)
+        elif timeframe == "1m":
+            seconds = 60
         else:
-            seconds = 60 if timeframe == "1m" else None
+            seconds = supported.get(timeframe) if venue_bars else None
         if seconds is None:
             raise ValueError("candle reconciliation timeframe is not supported for its source")
         return seconds

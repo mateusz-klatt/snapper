@@ -958,6 +958,7 @@ async def test_repair_lock_modes_do_not_change_existing_reconciliation_modes(
         ("1h", "native", True, 3600),
         ("1m", "native", True, 60),
         ("1h", "synthesized", False, 3600),
+        ("1h", "synthesized", True, 3600),
     ],
 )
 def test_reconciled_candle_seconds_accepts_repair_venue_bars(
@@ -987,3 +988,14 @@ def test_reconciled_candle_seconds_keeps_live_native_on_minutes() -> None:
     """
     with pytest.raises(ValueError, match="not supported"):
         SQLAlchemyRepository._reconciled_candle_seconds("1h", "native")
+
+
+def test_reconciled_candle_seconds_keeps_synthesis_above_minutes() -> None:
+    """Refuse synthesized minutes on the repair path as well.
+
+    Given a one-minute synthesized candidate during a repair,
+    When the reconciliation size is resolved,
+    Then it is rejected.
+    """
+    with pytest.raises(ValueError, match="not supported"):
+        SQLAlchemyRepository._reconciled_candle_seconds("1m", "synthesized", venue_bars=True)
