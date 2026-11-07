@@ -266,3 +266,57 @@ async def test_each_supported_historical_window_preserves_full_fields(
     stored = await _snapshot(repository)
     assert len(stored) == 1
     assert all(stored[0][field] == value for field, value in candidate.items())
+
+
+@pytest.mark.asyncio
+async def test_guarded_synthesis_preserves_unknown_archive_statistics(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Store honest synthesized statistics when official minutes lack them.
+
+    Given a complete synthesized window with unknown VWAP and trade count,
+    When the guarded historical writer persists and replays it,
+    Then nulls are preserved and the replay creates no new version.
+    """
+    candidate = _row()
+    candidate.update({"vwap": None, "trades": None})
+    assert await repository.upsert_historical_synthesized_candles([candidate]) == 1
+    stored = await _snapshot(repository)
+    assert stored[0]["vwap"] is None
+    assert stored[0]["trades"] is None
+    assert await repository.upsert_historical_synthesized_candles([candidate]) == 0
+    assert await _snapshot(repository) == stored
+
+
+@pytest.mark.asyncio
+async def test_insert_only_synthesis_preserves_every_source_and_closed_version(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Protect all existing natural keys, including previously synthesized bars.
+
+    Given current and closed native, calculated and synthesized rows,
+    When insert-only synthesis previews, inserts and reruns changed candidates,
+    Then only the absent key inserts and every prior physical row remains unchanged.
+    """
+    existing = [_row(offset) for offset in range(6)]
+    for offset, row in enumerate(existing):
+        row["source"] = ("native", "calculated", "synthesized")[offset % 3]
+        if offset >= 3:
+            row["known_to"] = _AUTHOR + timedelta(days=1)
+    async with repository.session() as session:
+        session.add_all([Candle(**row) for row in existing])
+        await session.commit()
+    before = await _snapshot(repository)
+    candidates = [_row(offset) for offset in range(7)]
+    for candidate in candidates:
+        candidate.update({"close": 10.5, "vwap": None, "trades": None})
+    preview = await repository.insert_missing_synthesized_candles(candidates, dry_run=True)
+    assert [row["open_at"] for row in preview] == [candidates[-1]["open_at"]]
+    assert await _snapshot(repository) == before
+    inserted = await repository.insert_missing_synthesized_candles(candidates)
+    assert len(inserted) == 1
+    after = await _snapshot(repository)
+    assert after[:6] == before
+    assert after[6]["vwap"] is None and after[6]["trades"] is None
+    assert await repository.insert_missing_synthesized_candles(candidates) == []
+    assert await _snapshot(repository) == after

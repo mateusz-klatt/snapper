@@ -117,7 +117,14 @@ class _FakeRepo:
             raise RuntimeError("boom")
         return self._candles.get(instrument, [])
 
-    async def upsert_candles(
+    async def insert_missing_synthesized_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Record only insert-only writes for bounded replay tests."""
+        await self.upsert_historical_synthesized_candles(rows)
+        return rows
+
+    async def upsert_historical_synthesized_candles(
         self, rows: list[CandleUpsertRow], session: object | None = None
     ) -> int:
         """Record an upsert batch, failing the first calls or any contended row."""
@@ -145,6 +152,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "dry_run": False,
         "progress_file": "",
         "db_host_rewrite": "",
+        "insert_only": False,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -282,12 +290,12 @@ def test_roll_up_folds_window_and_excludes_open() -> None:
     assert bucket.trades == 6
 
 
-def test_roll_up_vwap_none_uses_close() -> None:
-    """Verify a missing 1m vwap folds the close instead.
+def test_roll_up_vwap_none_stays_unknown() -> None:
+    """Verify missing native VWAP stays unknown.
 
     Given: A closed-window row whose vwap is None,
     When: _roll_up runs,
-    Then: The bucket's vwap_sum uses the close price.
+    Then: The bucket's vwap_sum remains unknown.
     """
     rows = [
         _row(_at(0), close=50.0, volume=2.0, vwap=None),
@@ -295,7 +303,7 @@ def test_roll_up_vwap_none_uses_close() -> None:
     ]
     closed = backfill._roll_up(rows, {"5m": 300}, close_before_ts=4_000_000_000)
     _begin, bucket = closed["5m"][0]
-    assert bucket.vwap_sum == 100.0
+    assert bucket.vwap_sum is None
 
 
 def test_roll_up_settle_cutoff_excludes_all() -> None:
@@ -311,7 +319,7 @@ def test_roll_up_settle_cutoff_excludes_all() -> None:
 
 
 def test_build_rows_handles_zero_and_nonzero_volume() -> None:
-    """Verify vwap is weighted for traded windows and the close for empty ones.
+    """Verify VWAP is weighted only when it is defined.
 
     Given: Two closed buckets, one with volume and one with zero volume,
     When: _build_rows projects them,
@@ -344,7 +352,11 @@ async def test_process_instrument_no_rows() -> None:
     """
     repo = _FakeRepo(candles={})
     result = await backfill._process_instrument(
-        repo, "kraken", "X", "iid", {"5m": 300}, _at(0), _at(10), 4_000_000_000, 2000, "sess", False
+        repo,
+        "kraken",
+        "X",
+        "iid",
+        backfill._ReplayOptions({"5m": 300}, _at(0), _at(10), 4000000000, 2000, "sess", False),
     )
     assert result == (0, 0, 0)
 
@@ -358,7 +370,11 @@ async def test_process_instrument_all_windows_open() -> None:
     """
     repo = _FakeRepo(candles={"X": [_row(_at(0)), _row(_at(5))]})
     result = await backfill._process_instrument(
-        repo, "kraken", "X", "iid", {"5m": 300}, _at(0), _at(10), 0, 2000, "sess", False
+        repo,
+        "kraken",
+        "X",
+        "iid",
+        backfill._ReplayOptions({"5m": 300}, _at(0), _at(10), 0, 2000, "sess", False),
     )
     assert result == (2, 0, 0)
 
@@ -372,7 +388,11 @@ async def test_process_instrument_dry_run_skips_upsert() -> None:
     """
     repo = _FakeRepo(candles={"X": [_row(_at(0)), _row(_at(5))]})
     n_1m, n_windows, n_written = await backfill._process_instrument(
-        repo, "kraken", "X", "iid", {"5m": 300}, _at(0), _at(10), 4_000_000_000, 2000, "sess", True
+        repo,
+        "kraken",
+        "X",
+        "iid",
+        backfill._ReplayOptions({"5m": 300}, _at(0), _at(10), 4000000000, 2000, "sess", True),
     )
     assert (n_1m, n_windows, n_written) == (2, 1, 0)
     assert repo.upserts == []
@@ -388,7 +408,11 @@ async def test_process_instrument_writes_in_batches() -> None:
     rows = [_row(_at(0)), _row(_at(5)), _row(_at(10)), _row(_at(15))]
     repo = _FakeRepo(candles={"X": rows})
     n_1m, n_windows, n_written = await backfill._process_instrument(
-        repo, "kraken", "X", "iid", {"5m": 300}, _at(0), _at(20), 4_000_000_000, 1, "sess", False
+        repo,
+        "kraken",
+        "X",
+        "iid",
+        backfill._ReplayOptions({"5m": 300}, _at(0), _at(20), 4000000000, 1, "sess", False),
     )
     assert n_windows == n_written
     assert len(repo.upserts) == n_windows
@@ -423,33 +447,22 @@ async def test_upsert_with_retry_recovers_after_conflict() -> None:
     sleep.assert_awaited_once()
 
 
-async def test_upsert_with_retry_falls_back_to_per_row() -> None:
-    """Verify exhausting the retry budget triggers the per-row fallback.
+async def test_upsert_with_retry_exhaustion_is_an_error() -> None:
+    """Reject silent row skipping after bounded conflict retries.
 
-    Given: A repo that fails every batch attempt within the budget but accepts
-        per-row upserts,
-    When: _upsert_with_retry runs with the backoff sleep patched out,
-    Then: It defers to the per-row pass and writes every row without raising.
+    Given a repository that keeps rejecting a batch,
+    When all four attempts fail,
+    Then the error propagates and no per-row fallback claims success.
     """
-    repo = _FakeRepo(upsert_fail_times=backfill._UPSERT_RETRIES + 1)
-    with patch.object(backfill.asyncio, "sleep", new=AsyncMock()) as sleep:
-        written = await backfill._upsert_with_retry(repo, [_urow(), _urow()])
-    assert written == 2
-    assert sleep.await_count == backfill._UPSERT_RETRIES
-
-
-async def test_upsert_skipping_contended_defers_hot_row() -> None:
-    """Verify the per-row fallback skips a contended window and writes the rest.
-
-    Given: A batch in which one window is contended by the live writer,
-    When: _upsert_skipping_contended runs,
-    Then: The contended row is skipped and the remaining rows are written.
-    """
-    repo = _FakeRepo(conflict_open_ats={_at(0)})
-    written = await backfill._upsert_skipping_contended(repo, [_urow(_at(0)), _urow(_at(5))])
-    assert written == 1
-    assert len(repo.upserts) == 1
-    assert repo.upserts[0][0]["open_at"] == _at(5)
+    repo = _FakeRepo(upsert_fail_times=4)
+    with (
+        patch.object(backfill.asyncio, "sleep", new=AsyncMock()) as sleep,
+        pytest.raises(IntegrityError),
+    ):
+        await backfill._upsert_with_retry(repo, [_urow(), _urow()])
+    assert repo.upsert_calls == 4
+    assert sleep.await_count == 3
+    assert repo.upserts == []
 
 
 async def test_run_write_mode_full(tmp_path: Path) -> None:
@@ -472,6 +485,7 @@ async def test_run_write_mode_full(tmp_path: Path) -> None:
         candles={"GOOD": good, "FX": good, "EMPTY": []},
     )
     args = _args(
+        since_days=365,
         exchanges="kraken,walut,",
         timeframes="5m,15m,",
         progress_file=str(progress),
@@ -732,3 +746,142 @@ def test_main_returns_one_on_errors() -> None:
         patch("sys.argv", ["backfill"]),
     ):
         assert backfill.main() == 1
+
+
+def test_requested_window_rejects_unpaired_bounds_and_unsafe_limits() -> None:
+    """Validate bounded synthesis before filesystem or database access.
+
+    Given an unpaired bound, nonpositive batch or negative settle delay,
+    When the request window is resolved,
+    Then the invalid configuration raises.
+    """
+    for args in [
+        _args(start=_at(0)),
+        _args(end=_at(10)),
+        _args(batch_size=0),
+        _args(settle_minutes=-1),
+    ]:
+        with pytest.raises(ValueError):
+            backfill._requested_window(args, _at(20))
+
+
+def test_roll_up_drops_leading_partial_windows_and_unknown_statistics() -> None:
+    """Exclude windows whose source range starts before the requested bound.
+
+    Given an unaligned lower bound and minutes with unknown statistics,
+    When bounded rollup runs,
+    Then it emits only wholly enclosed windows and keeps statistics unknown.
+    """
+    unknown = _row(_at(6), vwap=None)
+    unknown["trades"] = None
+    rows = [_row(_at(1)), _row(_at(5)), unknown, _row(_at(9)), _row(_at(10))]
+    closed = backfill._roll_up(rows, {"5m": 300}, int(_at(10).timestamp()), _at(1))
+    assert [opening for opening, _ in closed["5m"]] == [int(_at(5).timestamp())]
+    assert closed["5m"][0][1].vwap_sum is None
+    assert closed["5m"][0][1].trades is None
+
+
+async def test_explicit_window_ignores_progress_and_reads_at_acquisition(
+    tmp_path: Path,
+) -> None:
+    """Make wider reruns independent of previous per-instrument progress.
+
+    Given a completed legacy progress entry and explicit historical bounds,
+    When bounded synthesis runs,
+    Then it recomputes the range through the guarded writer and preserves the log.
+    """
+    progress = tmp_path / "done.jsonl"
+    original = "kraken\tX\n"
+    progress.write_text(original)
+    repo = _FakeRepo(
+        instruments={"kraken": ["X"]},
+        ipids={"kraken": {"X": "iid"}},
+        candles={
+            "X": [
+                _row(_at(0)),
+                _row(_at(1)),
+                _row(_at(4)),
+                _row(_at(5)),
+                _row(_at(9)),
+                _row(_at(10)),
+            ]
+        },
+    )
+    args = _args(start=_at(1), end=_at(10), insert_only=True, progress_file=str(progress))
+    with patch.object(backfill, "get_repository", return_value=repo):
+        totals = await backfill.run(args)
+    assert totals.instruments == 1
+    assert totals.windows == 1
+    assert repo.upserts[0][0]["open_at"] == _at(5)
+    assert repo.upserts[0][0]["timestamp"] > _at(10)
+    assert progress.read_text() == original
+
+
+def test_bounded_synthesis_requires_insert_only_mode() -> None:
+    """Make immutable repair behavior explicit at the operator boundary.
+
+    Given explicit historical bounds without the insert-only flag,
+    When the range is validated,
+    Then the run is rejected before opening a repository.
+    """
+    with pytest.raises(ValueError, match="--insert-only"):
+        backfill._requested_window(_args(start=_at(0), end=_at(10)), _at(20))
+    parsed = backfill._parse_args(
+        ["--start", _at(0).isoformat(), "--end", _at(10).isoformat(), "--insert-only"]
+    )
+    assert parsed.insert_only and parsed.batch_size == 100
+
+
+async def test_bounded_synthesis_exhaustion_reports_error_and_committed_progress(
+    tmp_path: Path,
+) -> None:
+    """Abort a failed instrument without losing previously acknowledged repair writes.
+
+    Given two closed windows with the second batch repeatedly conflicting,
+    When bounded insert-only synthesis runs,
+    Then it reports the first commit and an error without reaching the revision writer.
+    """
+    repo = _FakeRepo(
+        instruments={"kraken": ["X"]},
+        ipids={"kraken": {"X": "iid"}},
+        candles={"X": [_row(_at(0)), _row(_at(4)), _row(_at(5)), _row(_at(9))]},
+    )
+    conflict = IntegrityError("write", None, Exception("unique conflict"))
+    insertion = AsyncMock(side_effect=[[{}], conflict, conflict, conflict, conflict])
+    repo._instruments["kraken"].append("Y")
+    repo._ipids["kraken"]["Y"] = "other"
+    args = _args(
+        start=_at(0),
+        end=_at(10),
+        insert_only=True,
+        concurrency=1,
+        exchanges="kraken,later",
+        batch_size=1,
+        progress_file=str(tmp_path / "unused.tsv"),
+    )
+    with (
+        patch.object(repo, "insert_missing_synthesized_candles", insertion),
+        patch.object(backfill, "get_repository", return_value=repo),
+        patch.object(backfill.asyncio, "sleep", AsyncMock()),
+    ):
+        totals = await backfill.run(args)
+    assert totals.written == 1 and totals.errors == 1
+    assert insertion.await_count == 5
+    assert repo.upsert_calls == 0
+
+
+def test_zero_volume_known_statistics_keep_original_close_convention() -> None:
+    """Preserve the original zero-volume fold while retaining unknown input statistics.
+
+    Given zero-volume windows with known and unknown input VWAP,
+    When synthesized rows are built,
+    Then known statistics use the close convention and unknown VWAP remains null.
+    """
+    rows = [_row(_at(0), volume=0, vwap=100), _row(_at(4), volume=0, vwap=100)]
+    closed = backfill._roll_up(rows, {"5m": 300}, int(_at(5).timestamp()), _at(0))
+    built = backfill._build_rows(closed, "iid", _at(20), count(1), "session")
+    assert built[0]["vwap"] == 100
+    rows[0]["vwap"] = None
+    closed = backfill._roll_up(rows, {"5m": 300}, int(_at(5).timestamp()), _at(0))
+    built = backfill._build_rows(closed, "iid", _at(20), count(1), "session")
+    assert built[0]["vwap"] is None

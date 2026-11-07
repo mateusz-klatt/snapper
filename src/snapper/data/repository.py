@@ -3775,6 +3775,36 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def insert_missing_native_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Repair at most 100 absent native minutes, retaining unknown statistics.
+
+        Args:
+            rows: Official native OHLCV rows with real trades or an unavailable count.
+            dry_run: Return absent candidates without acquiring a writer fence or writing.
+
+        Returns:
+            Absent candidates in dry-run, otherwise committed inserted rows.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_missing_synthesized_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Insert absent synthesized windows without closing or replacing any history.
+
+        Args:
+            rows: At most 100 closed higher-timeframe candidates.
+            dry_run: Return absent candidates without writing.
+
+        Returns:
+            Absent candidates or acknowledged inserted rows.
+        """
+        ...
+
+    @abstractmethod
     async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
         """Commit bounded historical synthesis without replacing authoritative source winners.
 
@@ -11414,16 +11444,91 @@ class SQLAlchemyRepository(Repository):
             await owned.commit()
             return inserted
 
+    async def insert_missing_native_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Insert closed official minutes without blocking current-window live writers.
+
+        Closed repair windows use ROW EXCLUSIVE, an all-version absence check
+        and the active partial unique index. Live writers only touch current
+        windows. Run one repair at a time; this is not a concurrent repair fence.
+        Missing statistics remain null and knowledge time is actual load time.
+
+        Args:
+            rows: At most 100 closed official native candidates.
+            dry_run: Inspect absence without changing any row.
+
+        Returns:
+            Absent candidates or acknowledged inserted rows.
+        """
+        return await self._repair_missing_candles(rows, "native", dry_run)
+
+    async def insert_missing_synthesized_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Insert only absent closed synthesized windows with ROW EXCLUSIVE participation.
+
+        Live writers only touch current windows. Closed windows, all-version
+        absence and the active partial unique index permit this weaker lock.
+        Run one repair at a time. No existing row of any source is ever closed
+        or replaced, including synthesized rows and closed-only history.
+
+        Args:
+            rows: At most 100 complete closed higher-timeframe candidates.
+            dry_run: Inspect absence without writing or locking the table.
+
+        Returns:
+            Absent candidates or acknowledged inserted rows.
+        """
+        return await self._repair_missing_candles(rows, "synthesized", dry_run)
+
+    async def _repair_missing_candles(
+        self, rows: list[CandleUpsertRow], source: Literal["native", "synthesized"], dry_run: bool
+    ) -> list[CandleUpsertRow]:
+        """Validate and insert one short closed-window repair transaction."""
+        if not rows:
+            return []
+        if len(rows) > 100:
+            raise ValueError("repair batch exceeds 100 rows")
+        now = datetime.now(UTC)
+        candidates = [row | {"timestamp": now} for row in rows]
+        normalized = self._normalize_reconciled_candle_rows(
+            candidates, source, allow_unknown_statistics=True
+        )
+        async with self.session() as session:
+            if dry_run:
+                keys = [self._candle_natural_key(row) for row in normalized]
+                result = await session.execute(
+                    select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
+                        tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                            keys
+                        )
+                    )
+                )
+                existing = set(result.all())
+                return [row for row in normalized if self._candle_natural_key(row) not in existing]
+            inserted = await self._insert_missing_candles_in_session(
+                session, normalized, lock_mode="ROW EXCLUSIVE"
+            )
+            await session.commit()
+            return inserted
+
     @classmethod
     def _normalize_reconciled_candle_rows(
-        cls, rows: list[CandleUpsertRow], source: Literal["native", "synthesized"]
+        cls,
+        rows: list[CandleUpsertRow],
+        source: Literal["native", "synthesized"],
+        *,
+        allow_unknown_statistics: bool = False,
     ) -> list[CandleUpsertRow]:
         """Validate the full batch and copy caller data without choosing duplicate winners."""
         normalized: list[CandleUpsertRow] = []
         seen: set[_CandleNaturalKey] = set()
         acquired_before = datetime.now(UTC)
         for original in rows:
-            row = cls._normalize_reconciled_candle_row(original, acquired_before, source)
+            row = cls._normalize_reconciled_candle_row(
+                original, acquired_before, source, allow_unknown_statistics
+            )
             key = cls._candle_natural_key(row)
             if key in seen:
                 raise ValueError("missing candle insert batch has duplicate natural keys")
@@ -11437,6 +11542,7 @@ class SQLAlchemyRepository(Repository):
         original: CandleUpsertRow,
         acquired_before: datetime,
         source: Literal["native", "synthesized"],
+        allow_unknown_statistics: bool = False,
     ) -> CandleUpsertRow:
         """Require a coherent closed source-owned candle and preserve acquisition provenance."""
         required = {
@@ -11461,7 +11567,9 @@ class SQLAlchemyRepository(Repository):
             or original.keys() - CandleUpsertRow.__annotations__.keys()
         ):
             raise ValueError("missing candle insert requires its complete typed fields")
-        seconds = cls._reconciled_candle_seconds(original["timeframe"], source)
+        seconds = cls._reconciled_candle_seconds(
+            original["timeframe"], source, venue_bars=allow_unknown_statistics
+        )
         if original["source"] != source or original["complete"] is not True:
             raise ValueError("candle reconciliation requires its complete source-owned rows")
         row = original.copy()
@@ -11473,7 +11581,7 @@ class SQLAlchemyRepository(Repository):
             raise ValueError(
                 "missing candle knowledge time must follow closure and precede acquisition validation"
             )
-        cls._validate_missing_candle_business(row)
+        cls._validate_missing_candle_business(row, allow_unknown_statistics)
         if row.get("known_to", KNOWN_TO_MAX) != KNOWN_TO_MAX:
             raise ValueError("missing candle insert cannot create a closed historical version")
         row.setdefault("public_id", str(uuid7()))
@@ -11482,12 +11590,21 @@ class SQLAlchemyRepository(Repository):
         return row
 
     @staticmethod
-    def _reconciled_candle_seconds(timeframe: str, source: Literal["native", "synthesized"]) -> int:
-        """Restrict native catchup to one minute and synthesis to supported closed windows."""
+    def _reconciled_candle_seconds(
+        timeframe: str, source: Literal["native", "synthesized"], *, venue_bars: bool = False
+    ) -> int:
+        """Restrict live native catchup to one minute and others to supported closed windows.
+
+        Only the bounded insert-only repair sets ``venue_bars``: a venue that keeps no
+        minutes for an old range still publishes higher native bars for it.
+        """
         supported = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
-        seconds = (
-            (60 if timeframe == "1m" else None) if source == "native" else supported.get(timeframe)
-        )
+        if source == "synthesized":
+            seconds = supported.get(timeframe)
+        elif timeframe == "1m":
+            seconds = 60
+        else:
+            seconds = supported.get(timeframe) if venue_bars else None
         if seconds is None:
             raise ValueError("candle reconciliation timeframe is not supported for its source")
         return seconds
@@ -11500,9 +11617,13 @@ class SQLAlchemyRepository(Repository):
         return value.astimezone(UTC)
 
     @staticmethod
-    def _validate_missing_candle_business(row: CandleUpsertRow) -> None:
+    def _validate_missing_candle_business(
+        row: CandleUpsertRow, allow_unknown_statistics: bool = False
+    ) -> None:
         """Reject incomplete numeric data, incoherent geometry or missing writer provenance."""
         numbers = [row["open"], row["high"], row["low"], row["close"], row["volume"], row["vwap"]]
+        if allow_unknown_statistics and row["vwap"] is None:
+            numbers.pop()
         if not all(
             isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
             for value in numbers
@@ -11514,8 +11635,10 @@ class SQLAlchemyRepository(Repository):
             or row["low"] > min(row["open"], row["close"], row["high"])
         ):
             raise ValueError("missing candle OHLCV geometry is invalid")
-        if type(row["trades"]) is not int or row["trades"] < 0:
-            raise ValueError("missing candle trade count must be a nonnegative integer")
+        if not (allow_unknown_statistics and row["trades"] is None) and (
+            type(row["trades"]) is not int or not 0 <= row["trades"] <= 2147483647
+        ):
+            raise ValueError("missing candle trade count must fit a nonnegative database integer")
         if (
             not row["instrument_public_id"]
             or not row["session_id"]
@@ -11525,10 +11648,16 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("missing candle acquisition writer provenance is invalid")
 
     async def _insert_missing_candles_in_session(
-        self, session: AsyncSession, rows: list[CandleUpsertRow]
+        self,
+        session: AsyncSession,
+        rows: list[CandleUpsertRow],
+        *,
+        lock_mode: Literal["ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"] = "SHARE ROW EXCLUSIVE",
     ) -> list[CandleUpsertRow]:
         """Serialize absent-key proof and insert-only writes in one short transaction."""
-        await self._begin_candle_reconciliation_write(session, sqlite_write_lock=False)
+        await self._begin_candle_reconciliation_write(
+            session, sqlite_write_lock=False, lock_mode=lock_mode
+        )
         inserted: list[CandleUpsertRow] = []
         for row in rows:
             result = await session.execute(self._missing_candle_insert_statement(row))
@@ -11598,7 +11727,9 @@ class SQLAlchemyRepository(Repository):
             return 0
         if len(rows) > 720:
             raise ValueError("historical synthesis batch exceeds 720 rows")
-        normalized = self._normalize_reconciled_candle_rows(rows, "synthesized")
+        normalized = self._normalize_reconciled_candle_rows(
+            rows, "synthesized", allow_unknown_statistics=True
+        )
         async with self.session() as session:
             await self._begin_candle_reconciliation_write(session, sqlite_write_lock=True)
             changed = 0
