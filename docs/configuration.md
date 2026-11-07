@@ -606,7 +606,9 @@ effective persisted universe.
 
 In Kraken Spot `trade_built` mode, a supervised history worker starts alongside
 the live consumers and reconciles the last 120 closed minutes for persisted,
-subscribed instruments. Each pass visits at most three symbols fairly, with a
+subscribed instruments. A publisher running as its own process receives no
+injected persistence policy; its live writes then persist every row, and the
+worker covers the whole subscribed roster to match. Each pass visits at most three symbols fairly, with a
 five-second attempt bound and a twenty-second pass bound. The typed
 `CatchupPolicy.priority_symbols` defaults to `BTC-USD`, `ETH-USD` and `EUR-USD`,
 restricted to the actual persisted subscription roster. Its first pass visits

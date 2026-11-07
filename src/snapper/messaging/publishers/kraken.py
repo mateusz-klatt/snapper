@@ -572,11 +572,14 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             subscribed: Actual explicit roster or wildcard of this live publisher.
 
         Returns:
-            Canonical persisted Spot symbols, empty without a resolved policy.
+            Canonical persisted Spot symbols. Without an injected policy, as in
+            every subprocess-mode publisher, live writes persist every row, so
+            catchup covers the whole subscribed roster too.
         """
         policy = self._persist_policy
         if policy is None:
-            return []
+            roster = get_available_kraken_symbols() if "*" in subscribed else subscribed
+            return sorted(set(roster))
         selected = {
             symbol
             for exchange, symbol in policy.iter_persisted_instruments("candles")
