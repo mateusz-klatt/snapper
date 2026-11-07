@@ -137,6 +137,12 @@ class _ShadowClient:
             yield candle
 
 
+def _arm_liveness(publisher: KrakenMarketDataPublisher) -> None:
+    """Represent a publisher whose live consumers run and whose guard is armed."""
+    publisher._tick_consumer_task = cast(asyncio.Task[None], MagicMock())
+    publisher._startup_liveness_armed = True
+
+
 def _shadow_candle(symbol: str = "BTC-USD") -> CandleUpdate:
     """Build one completed trade-built candle update.
 
@@ -316,6 +322,7 @@ class TestKrakenMarketDataPublisher:
         assert publisher._last_candle_msg_at == 700.0
         publisher._last_message_at = 999.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 999.0)
+        _arm_liveness(publisher)
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_not_called()
 
@@ -344,6 +351,7 @@ class TestKrakenMarketDataPublisher:
         publisher._last_message_at = 1000.0
         publisher._last_candle_msg_at = 699.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        _arm_liveness(publisher)
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_not_called()
 
@@ -371,6 +379,7 @@ class TestKrakenMarketDataPublisher:
         publisher._last_message_at = 1072.0
         publisher._last_candle_msg_at = 1000.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1072.0)
+        _arm_liveness(publisher)
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_not_called()
 
@@ -398,6 +407,7 @@ class TestKrakenMarketDataPublisher:
         publisher._last_message_at = 900.0
         publisher._last_candle_msg_at = 900.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        _arm_liveness(publisher)
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_called_once()
         assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_messages_for_100s"
@@ -427,6 +437,7 @@ class TestKrakenMarketDataPublisher:
         publisher._last_message_at = 1000.0
         publisher._last_candle_msg_at = 699.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        _arm_liveness(publisher)
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_called_once()
         assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_candles_for_301s"
@@ -1099,3 +1110,106 @@ class TestKrakenReconnectWatchdog:
             await pub.start()
         assert observed["during"] is pub
         assert _CURRENT_PUBLISHER.get() is None
+
+
+class TestKrakenStartupLiveness:
+    """Startup preparation is not feed silence; live silence still recovers."""
+
+    @staticmethod
+    def _publisher() -> KrakenMarketDataPublisher:
+        """Build a trade-built Spot publisher with an observable recovery hook."""
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._consumes_native_candles = True
+        publisher._spawn_recovery = MagicMock()
+        return publisher
+
+    def test_preparation_never_recovers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No recovery while the database seed delays the live consumers.
+
+        Given a publisher whose silence clocks are 400 s old and whose tick
+        consumer has not been scheduled yet,
+        When the liveness guard runs,
+        Then nothing is spawned and the guard stays disarmed.
+        """
+        publisher = self._publisher()
+        publisher._last_message_at = 100.0
+        publisher._last_candle_msg_at = 100.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 500.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+        assert publisher._startup_liveness_armed is False
+
+    def test_first_check_after_consumers_rebases_both_clocks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arming starts a fresh silence window instead of recovering.
+
+        Given stale clocks and a newly scheduled tick consumer,
+        When the guard runs,
+        Then both clocks move to now, the guard is armed and nothing is spawned.
+        """
+        publisher = self._publisher()
+        publisher._last_message_at = 100.0
+        publisher._last_candle_msg_at = 100.0
+        publisher._tick_consumer_task = cast(asyncio.Task[None], MagicMock())
+        monkeypatch.setattr("snapper.messaging.publishers.kraken.time.monotonic", lambda: 500.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+        assert (publisher._last_message_at, publisher._last_candle_msg_at) == (500.0, 500.0)
+        assert publisher._startup_liveness_armed is True
+
+    @pytest.mark.parametrize(("now", "recovers"), [(560.0, False), (561.0, True)])
+    def test_socket_silent_after_arming_still_recovers(
+        self, now: float, recovers: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A socket that never delivers keeps the existing 60 s threshold.
+
+        Given a guard armed at 500 s and no message since,
+        When the guard runs at exactly 60 s and just beyond it,
+        Then recovery is spawned only beyond the threshold.
+        """
+        publisher = self._publisher()
+        _arm_liveness(publisher)
+        publisher._last_message_at = 500.0
+        publisher._last_candle_msg_at = 500.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: now)
+        publisher._check_feed_liveness()
+        assert publisher._spawn_recovery.called is recovers
+
+    def test_shutdown_and_restart_require_fresh_arming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clearing the tick consumer disarms the guard for the next start.
+
+        Given an armed publisher whose tick consumer was cleared by shutdown,
+        When the guard runs,
+        Then it is disarmed and stale clocks spawn nothing.
+        """
+        publisher = self._publisher()
+        _arm_liveness(publisher)
+        publisher._tick_consumer_task = None
+        publisher._last_message_at = 0.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+        assert publisher._startup_liveness_armed is False
+
+    @pytest.mark.asyncio
+    async def test_start_resets_arming(self) -> None:
+        """Each start begins disarmed, even after a previous run armed it.
+
+        Given an armed publisher whose base start is stubbed,
+        When start runs,
+        Then the guard is disarmed when the base start begins.
+        """
+        publisher = self._publisher()
+        publisher._startup_liveness_armed = True
+        observed: list[bool] = []
+
+        async def base_start(_: MarketDataPublisherService) -> None:
+            observed.append(publisher._startup_liveness_armed)
+
+        with patch.object(MarketDataPublisherService, "start", base_start):
+            await publisher.start()
+        assert observed == [False]
