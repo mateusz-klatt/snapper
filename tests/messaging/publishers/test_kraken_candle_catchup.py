@@ -457,15 +457,30 @@ def _publisher() -> KrakenMarketDataPublisher:
     return publisher
 
 
-def test_catchup_roster_is_persisted_subscribed_and_fail_closed() -> None:
-    """Catchup cannot expand unresolved or excluded persistence policy.
+def test_catchup_roster_without_policy_matches_live_persistence() -> None:
+    """Catchup covers what live writes persist when no policy was injected.
+
+    Given: A subprocess-mode publisher without an injected persistence policy.
+    When: Catchup resolves its roster for wildcard and explicit subscriptions.
+    Then: It returns every available or subscribed symbol, deduplicated and sorted.
+    """
+    publisher = _publisher()
+    with patch(
+        "snapper.messaging.publishers.kraken.get_available_kraken_symbols",
+        return_value=["ETH-USD", "BTC-USD"],
+    ):
+        assert publisher._catchup_symbols(["*"]) == ["BTC-USD", "ETH-USD"]
+    assert publisher._catchup_symbols(["SOL-USD", "BTC-USD", "SOL-USD"]) == ["BTC-USD", "SOL-USD"]
+
+
+def test_catchup_roster_is_persisted_subscribed_and_excludes_policy_denials() -> None:
+    """Catchup cannot expand an injected or excluded persistence policy.
 
     Given: Wildcard persistence, an excluded pair and an explicit subscription.
     When: Catchup resolves its permitted roster.
     Then: Only subscribed persisted Spot instruments are returned.
     """
     publisher = _publisher()
-    assert publisher._catchup_symbols(["*"]) == []
     policy = MagicMock()
     policy.iter_persisted_instruments.return_value = [
         (ExchangeEnum.KRAKEN, "*"),
