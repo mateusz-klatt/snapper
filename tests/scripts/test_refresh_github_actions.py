@@ -39,6 +39,7 @@ class TestEnsureGhAuthenticated:
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
             )
 
     def test_aborts_with_install_hint_when_gh_missing(self) -> None:
@@ -198,17 +199,18 @@ class TestGhApi:
         """
         with patch("scripts.refresh_github_actions.subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
-                ["gh", "api", "x"], 0, stdout='{"tag_name": "v1"}', stderr=""
+                ["gh", "api", "x"], 0, stdout='{"tag_name": "v1", "body": "Release 🚀"}', stderr=""
             )
 
             payload = _gh_api("repos/actions/checkout/releases/latest")
 
-            assert payload == {"tag_name": "v1"}
+            assert payload == {"tag_name": "v1", "body": "Release 🚀"}
             mock_run.assert_called_once_with(
                 ["gh", "api", "repos/actions/checkout/releases/latest"],
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
             )
 
 

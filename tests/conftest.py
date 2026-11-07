@@ -46,7 +46,10 @@ import types
 import weakref
 from collections import Counter
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from collections.abc import Generator
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -853,12 +856,12 @@ def cleanup_session_resources() -> Generator[None]:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Configure resource tracking and the platform's event loop policy."""
+    """Configure resource tracking for test clients and sockets."""
     TestClient.__del__ = _close_test_client_on_gc
     _install_zmq_context_tracking()
     _install_sqlite_connection_tracking()
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        _install_windows_test_client_loop_factory()
     try:
 
         def safe_del(self: zmq.Context) -> None:
@@ -868,6 +871,31 @@ def pytest_configure(config: pytest.Config) -> None:
         zmq.Context.__del__ = safe_del
     except (ImportError, AttributeError):
         """Intentionally suppressed: zmq may not be installed."""
+
+
+def _install_windows_test_client_loop_factory() -> None:
+    """Give AnyIO TestClient portals the same ZMQ-compatible loop as async tests."""
+    original_init = TestClient.__init__
+    constructor = signature(original_init)
+
+    @wraps(original_init)
+    def initialize(self: TestClient, *args: Any, **kwargs: Any) -> None:
+        """Preserve the external constructor signature and explicit backend options."""
+        bound = constructor.bind(self, *args, **kwargs)
+        if bound.arguments.get("backend", "asyncio") == "asyncio":
+            options = dict(bound.arguments.get("backend_options") or {})
+            options.setdefault("loop_factory", asyncio.SelectorEventLoop)
+            bound.arguments["backend_options"] = options
+        original_init(*bound.args, **bound.kwargs)
+
+    TestClient.__init__ = initialize
+
+
+def pytest_asyncio_loop_factories() -> dict[str, Callable[[], asyncio.AbstractEventLoop]]:
+    """Use selector loops for Windows ZMQ without deprecated global policies."""
+    if sys.platform == "win32":
+        return {"selector": asyncio.SelectorEventLoop}
+    return {"default": asyncio.new_event_loop}
 
 
 @pytest_asyncio.fixture(autouse=True)

@@ -65,6 +65,31 @@ and pre-commit hooks. The Python refresh also reinstalls the current project
 so its installed dependency metadata matches the updated manifest and lock file.
 `make update` additionally refreshes Docker build-tool pins.
 
+On native Windows, Make runs Python commands in UTF-8 mode. Frontend formatting
+preserves each file's existing line endings (`endOfLine: auto`), allowing Windows,
+Linux, and macOS checkouts to use their local Git line-ending settings.
+
+Make's test and coverage targets allow 60 seconds per test on native Windows
+and 15 seconds on POSIX hosts. This includes fixture setup: cold subprocess
+startup and the session's complete SQLite migration chain exceed 15 seconds on
+Windows. Explicit per-test timeout markers still take precedence.
+Bridge tests allow 30 seconds on Windows for filesystem operations and retain
+their 10-second default on POSIX hosts.
+
+Container entrypoint execution tests require a POSIX host; their complete
+syscall trace proof runs on Linux and is enforced by Linux CI. A missing or
+unusable `strace` still fails that Linux proof. Other platforms retain the
+entrypoint content, trace-parser and provenance checks.
+
+Vendored license payloads are kept byte-for-byte with Git's `-text` attribute
+so platform line-ending conversion cannot invalidate their recorded SHA-256
+digests. This does not prescribe line endings for application source files.
+
+`make setup` preserves an installed Iris guard while refreshing its chained
+pre-commit quality hook. Dependency installs from Make do not reinstall
+`simple-git-hooks`, so bridge checks and dependency refreshes keep repository
+guards intact.
+
 CCXT uses the official PyPI release. Explicit minimum versions for urllib3,
 multidict, and certifi retain the security fixes that previously required a
 vendored metadata patch. The [CCXT dependency note](../vendor/ccxt/README.md)

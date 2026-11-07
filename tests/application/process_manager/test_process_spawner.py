@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import Final
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,8 @@ import pytest
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+
+_PROCESS_EXIT_TIMEOUT_SECONDS: Final[float] = 10.0 if os.name == "nt" else 5.0
 
 
 class CrashingProcess:
@@ -80,9 +83,9 @@ def _release_ready_targets(
 ) -> None:
     """Release real children only after every target enters its method.
 
-    The existing overall pytest timeout still bounds startup. The unchanged
-    post-release termination deadlines measure target behavior rather than
-    cold interpreter imports. Each test owns fresh temporary marker paths.
+    The existing overall pytest timeout still bounds startup. The
+    post-release termination deadlines measure target exit and interpreter
+    teardown, with a separate Windows grace. Each test owns fresh temporary marker paths.
 
     Args:
         spawner: Real spawner whose child statuses are observed.
@@ -220,7 +223,7 @@ class TestProcessIsolation:
         parent_pid = os.getpid()
         assert info.pid != parent_pid
         _release_ready_targets(spawner, {"crash_exception": ready_path}, release_path)
-        max_wait = 5.0
+        max_wait = _PROCESS_EXIT_TIMEOUT_SECONDS
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_exception")
@@ -258,7 +261,7 @@ class TestProcessIsolation:
         assert info.pid > 0
         parent_pid = os.getpid()
         _release_ready_targets(spawner, {"crash_exit": ready_path}, release_path)
-        max_wait = 5.0
+        max_wait = _PROCESS_EXIT_TIMEOUT_SECONDS
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_exit")
@@ -296,7 +299,7 @@ class TestProcessIsolation:
         assert info.pid > 0
         parent_pid = os.getpid()
         _release_ready_targets(spawner, {"crash_signal": ready_path}, release_path)
-        max_wait = 5.0
+        max_wait = _PROCESS_EXIT_TIMEOUT_SECONDS
         wait_time = 0.1
         elapsed = 0.0
         status = spawner.get_status("crash_signal")
@@ -468,7 +471,9 @@ class TestProcessSpawner:
         assert status.running is True
         assert status.exit_code is None
         _release_ready_targets(spawner, {"status_test": ready_path}, release_path)
-        status = _wait_until_not_running(spawner, "status_test", timeout=5.0)
+        status = _wait_until_not_running(
+            spawner, "status_test", timeout=_PROCESS_EXIT_TIMEOUT_SECONDS
+        )
         assert status.running is False
         assert status.exit_code == 0
 
@@ -624,7 +629,9 @@ class TestProcessSpawner:
             },
         )
         _release_ready_targets(spawner, {"exitcode_test": ready_path}, release_path)
-        status = _wait_until_not_running(spawner, "exitcode_test", timeout=5.0)
+        status = _wait_until_not_running(
+            spawner, "exitcode_test", timeout=_PROCESS_EXIT_TIMEOUT_SECONDS
+        )
         assert status.running is False
         assert status.exit_code == 0
 

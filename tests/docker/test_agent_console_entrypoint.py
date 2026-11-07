@@ -65,7 +65,7 @@ ever loses a record becomes a loud failure naming the record it lost.
 refused for the same reason: each would let a record read as absent or as
 shorter than what really ran.
 
-An absent ``strace`` is treated as the same kind of hole. The proof layer does
+On Linux an absent ``strace`` is treated as the same kind of hole. The proof layer does
 not skip by default: with no usable ``strace`` the two tracing tests call
 ``pytest.fail``, so a run that never executed the proof cannot end up calling
 itself successful. A developer on a machine without ``strace`` waives the
@@ -74,6 +74,10 @@ turns the hard failure into a skip — a decision that someone had to make, that
 is greppable, and that a typo cannot produce by accident. A guard test refuses
 that waiver on any host where ``strace`` does work, so it cannot be left set
 in CI and quietly disarm the layer there.
+
+The PATH harness requires a POSIX host, and the syscall proof requires Linux.
+Native Windows and macOS gates do not claim Linux syscall evidence: the Linux
+CI gate executes that proof and still refuses a missing or unusable strace.
 
 Neither harness sees work that never reaches ``execve``: a rewriter written
 purely with shell builtins and a redirection performs no exec at all. That case
@@ -91,6 +95,7 @@ import shlex
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -687,6 +692,7 @@ def _expected_prologue(sandbox: _Sandbox, script: Path) -> tuple[_Execution, ...
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="The container PATH harness requires a POSIX host")
 def test_delegate_mode_execs_strict_pid1_and_never_rewrites_user_config(tmp_path: Path) -> None:
     """Running the real script in delegate mode yields one strict PID1 exec.
 
@@ -711,6 +717,7 @@ def test_delegate_mode_execs_strict_pid1_and_never_rewrites_user_config(tmp_path
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="The container PATH harness requires a POSIX host")
 def test_idle_mode_never_invokes_python_and_never_rewrites_user_config(tmp_path: Path) -> None:
     """Running the real script without a mode parks it without any interpreter.
 
@@ -752,6 +759,7 @@ def test_exec_trace_proof_is_never_waived_where_it_could_run() -> None:
     )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux CI enforces the container syscall proof")
 def test_delegate_mode_execve_trace_holds_no_preflight_by_any_path(tmp_path: Path) -> None:
     """Every program delegate mode starts is accounted for, PATH or not.
 
@@ -782,6 +790,7 @@ def test_delegate_mode_execve_trace_holds_no_preflight_by_any_path(tmp_path: Pat
     )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux CI enforces the container syscall proof")
 def test_idle_mode_execve_trace_holds_no_interpreter_by_any_path(tmp_path: Path) -> None:
     """Every program idle mode starts is accounted for, PATH or not.
 

@@ -259,10 +259,11 @@ def test_run_event_loop_uses_asyncio_when_uvloop_is_unavailable(
 
     Given the subprocess runner is on a platform without uvloop support,
     When an awaitable is executed through the event-loop helper,
-    Then asyncio drives the awaitable without importing uvloop.
+    Then a selector loop supports ZeroMQ readers without importing uvloop.
     """
 
     async def _target() -> str:
+        assert isinstance(asyncio.get_running_loop(), asyncio.SelectorEventLoop)
         return "ok"
 
     def _import_module(name: str) -> object:
