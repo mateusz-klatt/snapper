@@ -114,6 +114,7 @@ class _Fixture:
         ("attempt_seconds", float("inf")),
         ("pass_seconds", float("nan")),
         ("minimum_spacing_seconds", 61.0),
+        ("sweep_spacing_seconds", 0.0),
     ],
 )
 def test_policy_rejects_unbounded_or_unpaced_workers(field: str, value: float) -> None:
@@ -293,7 +294,11 @@ async def test_supervisor_coalesces_requests_and_survives_a_failed_pass() -> Non
     Then: Requests coalesce and the following pass still executes.
     """
     fixture = _Fixture()
-    worker = fixture.worker(CatchupPolicy(interval_seconds=0.003, minimum_spacing_seconds=0.001))
+    worker = fixture.worker(
+        CatchupPolicy(
+            interval_seconds=0.003, minimum_spacing_seconds=0.001, sweep_spacing_seconds=0.001
+        )
+    )
     calls = 0
 
     async def run_pass() -> None:
@@ -1560,3 +1565,97 @@ async def test_quiet_retirement_deduplicates_only_affected_pending_keys_and_rech
     assert set(publisher._pending_candle_identities) == {
         ("instrument", "1m", START + timedelta(minutes=2))
     }
+
+
+@pytest.mark.asyncio
+async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None:
+    """A restart sweep reaches the whole roster, not a fair slice of it.
+
+    Given: Four permitted symbols, one of whose acquisitions fails.
+    When: One sweep runs.
+    Then: Every symbol is requested once over the full history window, the
+        three others are committed, and spacing follows each attempt.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["XRP-USD", "BTC-USD", "ETH-USD", "SOL-USD"]
+
+    async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
+        if symbol == "ETH-USD":
+            raise RuntimeError("temporary venue failure")
+        return [_candle(symbol)]
+
+    fixture.client.get_closed_1m_candles.side_effect = acquire
+    worker = fixture.worker(CatchupPolicy(symbols_per_pass=2, sweep_spacing_seconds=0.001))
+    with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+        await worker.run_sweep()
+    requested = [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list]
+    assert requested == ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
+    end = NOW.replace(second=0)
+    assert {call.args[1:] for call in fixture.client.get_closed_1m_candles.await_args_list} == {
+        (end - timedelta(minutes=120), end)
+    }
+    assert [call.args[0] for call in fixture.committed.await_args_list] == [
+        "BTC-USD",
+        "SOL-USD",
+        "XRP-USD",
+    ]
+    assert sleep.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_sweep_stops_when_the_publisher_stops() -> None:
+    """Shutdown ends a sweep before its next acquisition.
+
+    Given: Two permitted symbols and a publisher that stops after the first.
+    When: One sweep runs.
+    Then: Only the first symbol is requested.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["BTC-USD", "ETH-USD"]
+
+    async def stop(_: float) -> None:
+        fixture.running = False
+
+    worker = fixture.worker(CatchupPolicy(sweep_spacing_seconds=0.001))
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop)):
+        await worker.run_sweep()
+    assert [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list] == [
+        "BTC-USD"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_sweeps_at_start_and_after_each_feed_break() -> None:
+    """Startup and every reconnect run a full sweep; other wakeups run fair passes.
+
+    Given: A supervisor whose second unit of work receives a reconnect request.
+    When: It runs four units of work.
+    Then: The order is sweep, pass, sweep, pass.
+    """
+    fixture = _Fixture()
+    worker = fixture.worker(
+        CatchupPolicy(
+            interval_seconds=0.003, minimum_spacing_seconds=0.001, sweep_spacing_seconds=0.001
+        )
+    )
+    order: list[str] = []
+
+    async def record(kind: str) -> None:
+        order.append(kind)
+        if len(order) == 2:
+            worker.request()
+        if len(order) == 4:
+            fixture.running = False
+
+    async def sweep() -> None:
+        await record("sweep")
+
+    async def fair_pass() -> None:
+        await record("pass")
+
+    with (
+        patch.object(worker, "run_sweep", side_effect=sweep),
+        patch.object(worker, "run_pass", side_effect=fair_pass),
+    ):
+        await worker.run()
+    assert order == ["sweep", "pass", "sweep", "pass"]

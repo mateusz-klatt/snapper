@@ -618,11 +618,17 @@ spaced sixty seconds apart; reconnect notifications coalesce and retain at
 least five seconds of spacing. These are finite source policy bounds, not
 additional database settings.
 
-This fixed budget does not certify continuity across a large wildcard roster.
-For example, 1,500 nonpriority instruments require at least 1,500 ordinary
-passes for a complete rotation, which exceeds the 120-minute history window.
-Older unobserved intervals remain unavailable and need separately reviewed
-recovery. Priority scheduling keeps the default dashboard pairs prompt without
+Fair passes alone do not cover a large wildcard roster: 1,500 nonpriority
+instruments need at least 1,500 passes, far beyond the 120-minute history
+window. The worker therefore starts with a sweep, and runs another after
+every reconnect notification. A sweep visits every persisted, subscribed
+symbol once, in name order, pausing one second
+(`CatchupPolicy.sweep_spacing_seconds`) after each attempt. Each symbol uses
+its own 120-minute window ending at the current closed minute. With 1,853
+spot symbols a sweep takes about 31 minutes, so minutes lost to a restart or
+reconnect are repaired for the whole roster while still inside the window. A
+reconnect during a sweep schedules a new sweep after it. Intervals older than
+the window remain unavailable and need separately reviewed recovery. Priority scheduling keeps the default dashboard pairs prompt without
 silently expanding the request budget or claiming all wildcard gaps healed.
 
 The worker reads the full native REST OHLC fields, including VWAP and trade
