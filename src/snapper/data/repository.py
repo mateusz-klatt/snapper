@@ -18298,8 +18298,7 @@ class SQLAlchemyRepository(Repository):
                     partition_key
                     for native_symbol in candidate.allowed_native_symbols
                     if (
-                        partition_key
-                        := SQLAlchemyRepository._pnl_timeline_order_partition_for_alias(
+                        partition_key := SQLAlchemyRepository._pnl_timeline_order_partition_for_alias(
                             scope_key,
                             exchange_order_id,
                             native_symbol,
