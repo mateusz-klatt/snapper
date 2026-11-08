@@ -67,7 +67,7 @@ class CatchupPolicy:
 
 @dataclass(frozen=True)
 class CatchupCallbacks:
-    """Publisher-owned identity, scheduling and committed repair boundaries."""
+    """Publisher boundaries with inserted rows gating committed repair scheduling."""
 
     symbols: Callable[[], list[str]]
     resolve: Callable[[str], Awaitable[str | None]]
@@ -75,7 +75,9 @@ class CatchupCallbacks:
     active: Callable[[], bool]
     tracker: SequenceTracker
     clock: Callable[[], datetime] = _now
-    insert_missing: Callable[[list[CandleUpsertRow]], Awaitable[None]] | None = None
+    insert_missing: Callable[[list[CandleUpsertRow]], Awaitable[list[CandleUpsertRow]]] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -288,7 +290,7 @@ class KrakenCandleCatchup:
                     )
 
     async def _reconcile_symbol(self, symbol: str, start: datetime, end: datetime) -> None:
-        """Insert absent native keys, then reconcile repairs from a committed read.
+        """Insert absent native keys and reconcile repairs only when new rows commit.
 
         Args:
             symbol: Canonical native symbol selected by persistence policy.
@@ -308,10 +310,11 @@ class KrakenCandleCatchup:
         author = self._callbacks.clock()
         rows = [self._row(candle, instrument, author) for candle in candles]
         if self._callbacks.insert_missing is None:
-            await self._repository.insert_missing_candles(rows)
+            inserted = await self._repository.insert_missing_candles(rows)
         else:
-            await self._callbacks.insert_missing(rows)
-        await self._callbacks.committed(symbol, start, end)
+            inserted = await self._callbacks.insert_missing(rows)
+        if inserted:
+            await self._callbacks.committed(symbol, start, end)
 
     def _row(self, candle: CandleUpdate, instrument: str, author: datetime) -> CandleUpsertRow:
         """Preserve venue fields with actual knowledge time and producer provenance.

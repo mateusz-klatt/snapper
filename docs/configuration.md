@@ -646,18 +646,21 @@ bars or synthetic trade counts are introduced. The live builder resets its
 observation boundary on connection breaks and keeps refusing unproven leading
 minutes, including a late first event received after its minute elapsed.
 
-Recovered history is not published as fresh live strategy input. Affected
-higher-timeframe repairs require every committed complete minute in their
-canonical window and await an owned guarded transaction's COMMIT acknowledgement
-before pending work clears. That transaction inserts an absent target or versions
+Recovered history is not published as fresh live strategy input. A symbol's
+catchup schedules higher-timeframe repairs only when its missing-only insert
+commits at least one new minute; an empty insert schedules no repairs, while
+identity reservation retirement still runs. Repairs require every committed
+complete minute in their canonical window and await an owned guarded
+transaction's COMMIT acknowledgement before pending work clears. That
+transaction inserts an absent target or versions
 an existing synthesized target; native and calculated targets remain unchanged,
 and unchanged synthesized business values do not acquire a new version.
 Whole-window reads expand to enclosing UTC days but remain
 bounded to 2,880 source rows per symbol. Historical-only repairs use the normal
 settle grace and require an exact full minute grid even before a new live
-aggregator frontier exists. A later bounded pass can rediscover committed inputs
-after an uncertain insertion acknowledgement. Older gaps and incorrect
-existing rows require a separate reviewed recovery.
+aggregator frontier exists. After an uncertain insertion acknowledgement, a later
+bounded pass schedules repairs only if it inserts another missing minute.
+Older gaps and incorrect existing rows require a separate reviewed recovery.
 
 ### Publisher Micro-Batch
 

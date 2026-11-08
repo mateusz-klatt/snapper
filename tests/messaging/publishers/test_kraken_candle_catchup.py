@@ -162,6 +162,48 @@ async def test_startup_preserves_native_fields_author_and_committed_repair_order
         "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
     )
     assert observations == ["committed", "repair"]
+    fixture.committed.assert_awaited_once_with(
+        "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publisher_callback", [False, True])
+@pytest.mark.parametrize("insert_count", [0, 1])
+async def test_repairs_require_newly_inserted_rows(
+    publisher_callback: bool, insert_count: int
+) -> None:
+    """Both insertion paths gate repairs on actual inserts rather than acquired rows.
+
+    Given: Two acquired minutes with either no insert or one newly inserted row.
+    When: Reconciliation uses the publisher callback or the repository fallback.
+    Then: Only a nonempty insertion schedules one repair over the original window.
+
+    Args:
+        publisher_callback: Whether to use the publisher's identity-aware insertion callback.
+        insert_count: Number of acquired rows the repository actually inserts.
+    """
+    fixture = _Fixture()
+    fixture.client.get_closed_1m_candles.return_value = [_candle(), _candle(minute=26)]
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        assert len(rows) == 2
+        return rows[:insert_count]
+
+    fixture.repository.insert_missing_candles.side_effect = insert
+    worker = fixture.worker()
+    if publisher_callback:
+        publisher = _publisher()
+        publisher.repository = fixture.repository
+        worker._callbacks = replace(
+            worker._callbacks, insert_missing=publisher._insert_catchup_candle_rows
+        )
+    await worker._reconcile_symbol("BTC-USD", START, NOW)
+    fixture.repository.insert_missing_candles.assert_awaited_once()
+    if insert_count:
+        fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
+    else:
+        fixture.committed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -188,7 +230,7 @@ async def test_symbol_budget_is_round_robin_and_survives_one_failed_symbol() -> 
 
     Given: Four symbols, a two-symbol budget and one acquisition failure.
     When: Two bounded passes complete.
-    Then: Every symbol is visited once and successful symbols reconcile.
+    Then: Every symbol is visited once and empty responses schedule no repairs.
     """
     fixture = _Fixture()
     fixture.symbols = ["D", "C", "B", "A", "A"]
@@ -202,7 +244,8 @@ async def test_symbol_budget_is_round_robin_and_survives_one_failed_symbol() -> 
         "C",
         "D",
     ]
-    assert fixture.committed.await_count == 3
+    assert fixture.repository.insert_missing_candles.await_count == 3
+    fixture.committed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -261,11 +304,11 @@ async def test_pass_deadline_propagates_without_exceeding_selected_budget() -> N
 
 @pytest.mark.asyncio
 async def test_unknown_commit_ack_reconciles_existing_rows_on_the_next_pass() -> None:
-    """Later reconciliation discovers an uncertain committed insertion.
+    """An empty replay after an uncertain commit schedules no repairs.
 
     Given: Durable insertion succeeded but its acknowledgement was lost.
     When: The next independent pass finds the existing key.
-    Then: No row is rewritten and committed repair reconciliation resumes.
+    Then: No row is rewritten and no repair notification is sent.
     """
     fixture = _Fixture()
     durable: list[CandleUpsertRow] = []
@@ -282,7 +325,7 @@ async def test_unknown_commit_ack_reconciles_existing_rows_on_the_next_pass() ->
     fixture.committed.assert_not_awaited()
     await worker.run_pass()
     assert len(durable) == 1
-    fixture.committed.assert_awaited_once()
+    fixture.committed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1452,7 +1495,7 @@ async def test_native_replay_after_real_commit_and_lost_ack_retires_live_identit
             return result
 
         with patch.object(repository, "insert_missing_candles", new=replay):
-            await publisher._insert_catchup_candle_rows([row])
+            assert await publisher._insert_catchup_candle_rows([row]) == []
         assert await repository.get_canonical_candle_public_id(*key) == public_id
         assert key not in publisher._pending_candle_identities
     finally:
@@ -1600,6 +1643,11 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
         return [_candle(symbol)]
 
     fixture.client.get_closed_1m_candles.side_effect = acquire
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        return rows
+
+    fixture.repository.insert_missing_candles.side_effect = insert
     worker = fixture.worker(CatchupPolicy(symbols_per_pass=2, sweep_spacing_seconds=0.001))
     with patch("asyncio.sleep", new=AsyncMock()) as sleep:
         await worker.run_sweep()
