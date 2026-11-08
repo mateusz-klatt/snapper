@@ -657,10 +657,11 @@ async def test_historical_commit_keeps_pending_on_uncertainty_or_new_generation(
         if fault == "unknown":
             raise ConnectionError("commit acknowledgement unavailable")
         if fault == "replacement":
-            publisher._pending_candle_repairs[key] = _PendingCandleRepair(
-                expected_source_minutes=minutes, historical_only=True
+            publisher._set_pending_candle_repair(
+                key, _PendingCandleRepair(expected_source_minutes=minutes, historical_only=True)
             )
         else:
+            publisher._replace_candle_write_sequence_reference(None, 123)
             publisher._pending_candle_repairs[key].required_sequence = 123
         return 0
 
@@ -848,7 +849,7 @@ def test_settled_historical_windows_are_ready_without_a_live_frontier(
         clock.now.return_value = NOW
         assert publisher._candle_repair_window_ready(key, pending, aggregator)
         publisher._candle_aggregator = aggregator
-        publisher._pending_candle_repairs[key] = pending
+        publisher._set_pending_candle_repair(key, pending)
         assert ("BTC-USD", begin) in publisher._due_candle_repair_groups()
 
 
@@ -891,8 +892,8 @@ async def test_historical_derivation_rechecks_actual_committed_source_grid(fault
     publisher._candle_aggregator = CandleAggregator(["5m"])
     key = _CandleRepairKey("BTC-USD", "5m", START)
     minutes = frozenset(START.replace(minute=i) for i in range(25, 30))
-    publisher._pending_candle_repairs[key] = _PendingCandleRepair(
-        expected_source_minutes=minutes, historical_only=True
+    publisher._set_pending_candle_repair(
+        key, _PendingCandleRepair(expected_source_minutes=minutes, historical_only=True)
     )
     rows = [_row(i) for i in range(25, 30)]
     expected: frozenset[datetime] | None = minutes

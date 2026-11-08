@@ -830,6 +830,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._next_candle_write_sequence: int = 0
         self._candle_write_sequence_by_row_id: dict[int, _TrackedCandleWrite] = {}
         self._committed_candle_write_sequences: set[int] = set()
+        self._candle_write_sequence_references: dict[int, int] = {}
         self._candle_repair_output_keys: dict[int, _CandleRepairKey] = {}
 
     def _initialize_trade_pipeline_state(self) -> None:
@@ -2975,12 +2976,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not late_keys and not repair_keys:
             return
         for repair_key in repair_keys:
-            pending_repair = self._pending_candle_repairs.pop(repair_key, None)
+            pending_repair = self._pop_pending_candle_repair(repair_key)
             if pending_repair is not None:
                 self._forget_candle_repair_output(pending_repair)
             self._repair_drop_key_by_repair_key.pop(repair_key, None)
         for late_key in late_keys:
-            self._pending_late_candle_drops.pop(late_key, None)
+            self._pop_pending_late_candle_drop(late_key)
         for pending in self._pending_late_candle_drops.values():
             pending.repair_keys.difference_update(repair_keys)
         self._committed_candle_write_sequences.discard(sequence)
@@ -3104,7 +3105,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"dropped oldest late signal symbol={dropped.symbol} "
                     f"minute={dropped.minute.isoformat()}"
                 )
-            self._pending_late_candle_drops[key] = _PendingLateCandleDrop()
+            self._set_pending_late_candle_drop(key, _PendingLateCandleDrop())
 
     def _record_seeded_incomplete_window_repairs(
         self, windows: list[SeededIncompleteWindow]
@@ -3135,6 +3136,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             pending = self._pending_late_candle_drops.get(late_key)
             if pending is None:
                 continue
+            self._replace_candle_write_sequence_reference(pending.write_sequence, item.sequence)
             pending.write_sequence = item.sequence
             self._schedule_late_candle_repairs(late_key, item.sequence)
 
@@ -3201,10 +3203,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 f"dropped oldest key symbol={dropped.symbol} "
                 f"timeframe={dropped.timeframe} window={dropped.window_begin.isoformat()}"
             )
-        self._pending_candle_repairs[key] = _PendingCandleRepair(
-            expected_minute_count=len(counted_minutes),
-            expected_source_minutes=counted_minutes,
-            historical_only=historical_only,
+        self._set_pending_candle_repair(
+            key,
+            _PendingCandleRepair(
+                expected_minute_count=len(counted_minutes),
+                expected_source_minutes=counted_minutes,
+                historical_only=historical_only,
+            ),
         )
         self._candle_repair_event.set()
 
@@ -3221,14 +3226,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         pending = self._pending_candle_repairs.get(key)
         if pending is not None:
             if pending.required_sequence is None or pending.required_sequence < required_sequence:
-                old_sequence = pending.required_sequence
                 self._unlink_repair_from_late_drop(key)
+                self._replace_candle_write_sequence_reference(
+                    pending.required_sequence, required_sequence
+                )
                 pending.required_sequence = required_sequence
                 self._forget_candle_repair_output(pending)
                 pending.attempts = 0
                 self._link_repair_to_late_drop(key, late_key)
-                if old_sequence is not None:
-                    self._cleanup_committed_candle_write_sequence(old_sequence)
             self._candle_repair_event.set()
             return
         if len(self._pending_candle_repairs) >= _CANDLE_REPAIR_PENDING_MAX:
@@ -3239,7 +3244,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 f"dropped oldest key symbol={dropped.symbol} "
                 f"timeframe={dropped.timeframe} window={dropped.window_begin.isoformat()}"
             )
-        self._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence)
+        self._set_pending_candle_repair(key, _PendingCandleRepair(required_sequence))
         self._link_repair_to_late_drop(key, late_key)
         self._candle_repair_event.set()
 
@@ -3271,7 +3276,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         pending_drop.repair_keys.discard(key)
         if not pending_drop.repair_keys and pending_drop.write_sequence is not None:
-            del self._pending_late_candle_drops[late_key]
+            self._pop_pending_late_candle_drop(late_key)
 
     def _drop_pending_candle_repair(self, key: _CandleRepairKey) -> None:
         """Drop one pending repair and unlink its late-drop owner.
@@ -3279,13 +3284,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Args:
             key: Repair key to remove.
         """
-        sequences = self._sequences_for_repair_key(key)
-        pending = self._pending_candle_repairs.pop(key, None)
+        pending = self._pop_pending_candle_repair(key)
         if pending is not None:
             self._forget_candle_repair_output(pending)
         self._unlink_repair_from_late_drop(key)
-        for sequence in sequences:
-            self._cleanup_committed_candle_write_sequence(sequence)
 
     def _forget_candle_repair_output(self, pending: _PendingCandleRepair) -> None:
         """Unlink an obsolete output while its writer row keeps its own lifecycle."""
@@ -3299,43 +3301,67 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Args:
             late_key: Late-drop key to remove.
         """
-        pending_drop = self._pending_late_candle_drops.pop(late_key, None)
+        pending_drop = self._pop_pending_late_candle_drop(late_key)
         if pending_drop is None:
             return
-        sequences: set[int] = set()
-        if pending_drop.write_sequence is not None:
-            sequences.add(pending_drop.write_sequence)
         for repair_key in tuple(pending_drop.repair_keys):
-            pending_repair = self._pending_candle_repairs.get(repair_key)
-            if pending_repair is not None and pending_repair.required_sequence is not None:
-                sequences.add(pending_repair.required_sequence)
+            pending_repair = self._pop_pending_candle_repair(repair_key)
             if pending_repair is not None:
                 self._forget_candle_repair_output(pending_repair)
-            self._pending_candle_repairs.pop(repair_key, None)
             self._repair_drop_key_by_repair_key.pop(repair_key, None)
-        for sequence in sequences:
-            self._cleanup_committed_candle_write_sequence(sequence)
 
-    def _sequences_for_repair_key(self, key: _CandleRepairKey) -> set[int]:
-        """Collect committed-ack candidates referenced by one repair key.
+    def _replace_candle_write_sequence_reference(
+        self, previous: int | None, current: int | None
+    ) -> None:
+        """Transfer one pending dependency and release an unreferenced commit ack."""
+        if previous == current:
+            return
+        references = self._candle_write_sequence_references
+        if current is not None:
+            references[current] = references.get(current, 0) + 1
+        if previous is not None:
+            remaining = references[previous] - 1
+            if remaining:
+                references[previous] = remaining
+            else:
+                del references[previous]
+                self._cleanup_committed_candle_write_sequence(previous)
 
-        Args:
-            key: Repair key whose sequence references should be collected.
+    def _set_pending_candle_repair(
+        self, key: _CandleRepairKey, pending: _PendingCandleRepair
+    ) -> None:
+        """Store a repair while accounting for its exact input dependency."""
+        previous = self._pending_candle_repairs.get(key)
+        self._replace_candle_write_sequence_reference(
+            None if previous is None else previous.required_sequence, pending.required_sequence
+        )
+        self._pending_candle_repairs[key] = pending
 
-        Returns:
-            Sequence values that may become unreferenced after the key is dropped.
-        """
-        sequences: set[int] = set()
-        pending_repair = self._pending_candle_repairs.get(key)
-        if pending_repair is not None and pending_repair.required_sequence is not None:
-            sequences.add(pending_repair.required_sequence)
-        late_key = self._repair_drop_key_by_repair_key.get(key)
-        if late_key is None:
-            return sequences
-        pending_drop = self._pending_late_candle_drops.get(late_key)
-        if pending_drop is not None and pending_drop.write_sequence is not None:
-            sequences.add(pending_drop.write_sequence)
-        return sequences
+    def _pop_pending_candle_repair(self, key: _CandleRepairKey) -> _PendingCandleRepair | None:
+        """Remove a repair and release its exact input dependency."""
+        pending = self._pending_candle_repairs.pop(key, None)
+        if pending is not None:
+            self._replace_candle_write_sequence_reference(pending.required_sequence, None)
+        return pending
+
+    def _set_pending_late_candle_drop(
+        self, key: _LateCandleDropKey, pending: _PendingLateCandleDrop
+    ) -> None:
+        """Store a late drop while accounting for its correction dependency."""
+        previous = self._pending_late_candle_drops.get(key)
+        self._replace_candle_write_sequence_reference(
+            None if previous is None else previous.write_sequence, pending.write_sequence
+        )
+        self._pending_late_candle_drops[key] = pending
+
+    def _pop_pending_late_candle_drop(
+        self, key: _LateCandleDropKey
+    ) -> _PendingLateCandleDrop | None:
+        """Remove a late drop and release its correction dependency."""
+        pending = self._pending_late_candle_drops.pop(key, None)
+        if pending is not None:
+            self._replace_candle_write_sequence_reference(pending.write_sequence, None)
+        return pending
 
     def _cleanup_committed_candle_write_sequence(self, sequence: int | None) -> None:
         """Forget an exact commit ack once no pending repair needs it.
@@ -3346,15 +3372,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         if sequence is None:
             return
-        if any(
-            pending.required_sequence == sequence
-            for pending in self._pending_candle_repairs.values()
-        ):
-            return
-        if any(
-            pending.write_sequence == sequence
-            for pending in self._pending_late_candle_drops.values()
-        ):
+        if self._candle_write_sequence_references.get(sequence, 0) > 0:
             return
         self._committed_candle_write_sequences.discard(sequence)
 
@@ -3496,6 +3514,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._pending_late_candle_drops.clear()
         self._repair_drop_key_by_repair_key.clear()
         self._committed_candle_write_sequences.clear()
+        self._candle_write_sequence_references.clear()
         self._candle_repair_output_keys.clear()
         self._candle_write_sequence_by_row_id.clear()
 
