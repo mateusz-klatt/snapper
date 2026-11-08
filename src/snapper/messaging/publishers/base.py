@@ -337,9 +337,9 @@ class _WriterSessionLostError(Exception):
 
     The writer loop catches this to dispose the dead session and
     re-enter ``_open_*_writer_session()`` so a fresh connection is
-    acquired. Connection failures and serialization aborts use this
-    retry path; row-dependent and statement-shaped failures have
-    separate dispositions.
+    acquired. Connection failures, serialization aborts and candle lock
+    acquisition failures use this retry path; row-dependent and
+    statement-shaped failures have separate dispositions.
     """
 
 
@@ -387,6 +387,11 @@ def _database_sqlstate(exc: Exception) -> str | None:
         if sqlstate is not None:
             return sqlstate
     return None
+
+
+def _candle_write_needs_recovery(exc: Exception) -> bool:
+    """Retain connection failures and PostgreSQL lock-aborted candle writes for retry."""
+    return _is_disconnect_error(exc) or _database_sqlstate(exc) == "55P03"
 
 
 def _driver_sqlstate(source: object) -> str | None:
@@ -827,6 +832,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     def _initialize_candle_write_tracking(self) -> None:
         """Initialize exact candle write identities and derived-output acknowledgement ownership."""
+        self._candle_writer_backoff_s: float = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         self._next_candle_write_sequence: int = 0
         self._candle_write_sequence_by_row_id: dict[int, _TrackedCandleWrite] = {}
         self._committed_candle_write_sequences: set[int] = set()
@@ -2917,9 +2923,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     def _mark_candle_writes_committed(self, rows: list[CandleUpsertRow]) -> None:
         """Mark queued candle rows as durably committed by exact sequence.
 
+        Each successful commit resets candle recovery, including partial
+        progress during row-by-row fallback and writes without sequence tracking.
+
         Args:
             rows: Candle rows successfully committed by the writer.
         """
+        self._candle_writer_backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         committed = False
         for row in rows:
             sequence = self._pop_candle_write_sequence(row)
@@ -3798,7 +3808,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         now makes the drop-oldest eviction discard REAL bars faster.
         """
         state = _WriterBatchState[CandleUpsertRow]([])
-        backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
+        self._candle_writer_backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         while True:
             try:
                 async with self._open_candle_writer_session() as writer_session:
@@ -3817,8 +3827,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             except _WriterSessionLostError as exc:
                 if self._writer_recovery_finished(self._candle_write_queue, state):
                     return
-                backoff_s = await self._writer_recovery_backoff(
-                    "candle", backoff_s, len(state.batch), exc
+                self._candle_writer_backoff_s = await self._writer_recovery_backoff(
+                    "candle", self._candle_writer_backoff_s, len(state.batch), exc
                 )
 
     @contextlib.asynccontextmanager
@@ -5177,6 +5187,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         session without acquiring a fresh DBAPI connection per
         flush, and this method commits explicitly afterwards.
 
+        PostgreSQL lock acquisition failures (SQLSTATE ``55P03``) retain
+        the exact batch and dependent repairs through writer recovery.
+        Other non-disconnect failures retain their existing disposition.
+
         Args:
             batch: List of candle rows to persist.
         """
@@ -5205,8 +5219,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if writer_session is not None:
                 with contextlib.suppress(Exception):
                     await writer_session.rollback()
-            if _is_disconnect_error(e):
-                raise _WriterSessionLostError(str(e)) from e
+            if _candle_write_needs_recovery(e):
+                raise _WriterSessionLostError(f"SQLSTATE={_database_sqlstate(e)}: {e}") from e
             self._forget_candle_writes(batch)
 
     async def _flush_single_candle_row(self, row: CandleUpsertRow) -> bool:
@@ -5221,7 +5235,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         Raises:
             _WriterSessionLostError: If the row failure indicates a lost
-                writer session.
+                writer session or PostgreSQL lock acquisition failure.
         """
         repository = self._require_repository()
         writer_session = self._candle_writer_session
@@ -5249,8 +5263,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if writer_session is not None:
                 with contextlib.suppress(Exception):
                     await writer_session.rollback()
-            if _is_disconnect_error(e):
-                raise _WriterSessionLostError(str(e)) from e
+            if _candle_write_needs_recovery(e):
+                raise _WriterSessionLostError(f"SQLSTATE={_database_sqlstate(e)}: {e}") from e
             self._forget_candle_write_sequence(row)
             return True
 
@@ -5292,7 +5306,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         acknowledgement. Doing the bookkeeping there keeps this
         helper safe to call directly from tests / ad-hoc flushes.
 
-        Generic non-disconnect errors (statement timeout on a
+        PostgreSQL lock acquisition failures retain the unresolved suffix
+        through the same recovery path as a disconnect. Other generic
+        non-disconnect errors (statement timeout on a
         still-live session, etc.) are logged + rolled back per row
         and the failed row is dropped silently — this matches the
         legacy pre-2026-05-28 behavior here and is a known limitation
