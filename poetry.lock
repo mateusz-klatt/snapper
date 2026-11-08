@@ -7269,14 +7269,14 @@ shellingham = ">=1.3.0"
 
 [[package]]
 name = "types-markdown"
-version = "3.11.2.20261107"
+version = "3.11.3.20261108"
 description = "Typing stubs for Markdown"
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "types_markdown-3.11.2.20261107-py3-none-any.whl", hash = "sha256:5ff026b9b364f7440c3ce5347f986170a4cf02eeb7e6bf96125833137df14a1c"},
-    {file = "types_markdown-3.11.2.20261107.tar.gz", hash = "sha256:73043f9aecc4936b4530ce583eb443568cf33e9ed06b9d946f807a18bdf8c8ad"},
+    {file = "types_markdown-3.11.3.20261108-py3-none-any.whl", hash = "sha256:f906be98f35c745906ce2b88bd803f5e2af78d2f2f146d700110152ac20ffc38"},
+    {file = "types_markdown-3.11.3.20261108.tar.gz", hash = "sha256:eac0188fc8dacbf9bbbea68a0aee98c7d3b0008f8b1def1a141cd669dd7c708a"},
 ]
 
 [[package]]
@@ -8232,4 +8232,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "da701f3504e4fc363d567ed71c2f00d17f7bd15c660464c0deb577fcffa3198e"
+content-hash = "aaee06591bbdb2c843525e9458a8a32cdbc3f46c0626e5f73e38087519e275b6"
