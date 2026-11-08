@@ -3,6 +3,7 @@
 import json
 import os
 from collections.abc import AsyncIterator
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC
@@ -199,8 +200,11 @@ class _DiscoveryRepository:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[tuple[str, str, str]]:
         """Expose partial Binance and complete Kraken candidate planes."""
+        del open_intervals
         self.horizons.append(as_of)
         planes: list[tuple[str, str, str]] = []
         if ("EUR", "USD") in pairs or ("USD", "EUR") in pairs:
@@ -215,6 +219,8 @@ class _DiscoveryRepository:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRateRow]:
         """Make Binance partial while Kraken covers the true electorate."""
         self.horizons.append(as_of)
@@ -229,6 +235,10 @@ class _DiscoveryRepository:
             for row in rows
             if (row["base"], row["quote"], row["exchange"]) in planes
             and start <= row["open_at"] <= end
+            and (
+                not open_intervals
+                or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
+            )
         ]
 
     async def get_latest_visible_fx_conversion_artifact(

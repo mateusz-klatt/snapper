@@ -2934,6 +2934,8 @@ async def _discover_fx_candidates(
     repo: Repository,
     requirements: Mapping[FxPairKey, set[datetime]],
     as_of: datetime,
+    *,
+    open_intervals: Sequence[tuple[datetime, datetime]] = (),
 ) -> list[PnlFxRatePlane]:
     """Discover every spot-FX plane with evidence in one bounded rate window.
 
@@ -2941,6 +2943,7 @@ async def _discover_fx_candidates(
         repo: Repository providing bounded forex-plane discovery.
         requirements: Exact pair minutes in this mark or event window.
         as_of: Knowledge horizon threading the repository read.
+        open_intervals: Optional inclusive candle-open intervals shared with the load.
 
     Returns:
         Concrete oriented venue planes with evidence in this window.
@@ -2954,6 +2957,7 @@ async def _discover_fx_candidates(
         bounds[0] - _FX_CARRY_WINDOW,
         bounds[1],
         as_of,
+        open_intervals=open_intervals,
     )
 
 
@@ -2986,7 +2990,7 @@ async def _load_fx_candidate_rows(
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     as_of: datetime,
     *,
-    sparse_requirements: Mapping[FxPairKey, set[datetime]] | None = None,
+    open_intervals: Sequence[tuple[datetime, datetime]] = (),
 ) -> list[PnlFxRateRow]:
     """Load eligible exact oriented planes in one bounded window.
 
@@ -2995,41 +2999,50 @@ async def _load_fx_candidate_rows(
         requirements: Exact pair minutes in this mark or event window.
         candidate_planes: Eligible discovered and identity planes by pair.
         as_of: Knowledge horizon threading the repository read.
-        sparse_requirements: All causal mark and event minutes to retain in an
-            event read, including cross-read conflict evidence at mark-only minutes.
+        open_intervals: Precomputed inclusive candle-open intervals shared with
+            discovery, including conflict evidence at mark-only minutes.
 
     Returns:
         Candidate rows used to resolve shared and instrument-owned planes.
     """
     bounds = _fx_requirement_range(requirements)
     if bounds is None:
-        if sparse_requirements is not None:
-            pnl_read_fx_window("no_requirements")
         return []
     planes: set[PnlFxRatePlane] = set()
     for pair in requirements:
         planes.update(candidate_planes.get(pair, set()))
     if not planes:
-        if sparse_requirements is not None:
-            pnl_read_fx_window("no_candidate_planes")
         return []
-    intervals = (
-        _sparse_event_fx_intervals(sparse_requirements) if sparse_requirements is not None else ()
-    )
-    if intervals:
-        return await repo.get_pnl_fx_rate_candles(
-            sorted(planes),
-            bounds[0] - _FX_CARRY_WINDOW,
-            bounds[1],
-            as_of,
-            open_intervals=intervals,
-        )
     return await repo.get_pnl_fx_rate_candles(
         sorted(planes),
         bounds[0] - _FX_CARRY_WINDOW,
         bounds[1],
         as_of,
+        open_intervals=open_intervals,
     )
+
+
+def _event_fx_open_intervals(
+    event_requirements: Mapping[FxPairKey, set[datetime]],
+    requirements: Mapping[FxPairKey, set[datetime]],
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Plan event discovery and loading once, including their diagnostic mode.
+
+    No event minutes means neither read needs a selector. Otherwise the same
+    conservative union scopes both reads even when discovery finds no plane;
+    candidate cardinality cannot change or duplicate this planned mode.
+
+    Args:
+        event_requirements: Exact event minutes grouped by pair.
+        requirements: Merged causal mark and event minutes grouped by pair.
+
+    Returns:
+        Shared sparse intervals, or an empty tuple for the original range.
+    """
+    if _fx_requirement_range(event_requirements) is None:
+        pnl_read_fx_window("no_requirements")
+        return ()
+    return _sparse_event_fx_intervals(requirements)
 
 
 def _sparse_event_fx_intervals(
@@ -3366,9 +3379,12 @@ async def _load_request_fx_rates(
     and venue is discarded. Each instrument uses one plane per pair for its
     marks, execution prices, fees, and accruals at every minute.
     Wholly owned requirements read their canonical planes directly. Any general
-    consumer retains both original discovery calls and their complete phase
-    inputs. Non-shadow event rows may be pruned only outside all causal mark
-    and event carry intervals, inside the unchanged event bounds.
+    consumer retains both discovery calls and their complete phase pairs.
+    Non-shadow event discovery and loading share one conservative interval
+    union over every causal mark and event minute, inside the unchanged event
+    bounds. A plane absent from this evidence and the unchanged mark window
+    has zero usable coverage and cannot be elected. Shadow mode retains full
+    discovery and row provenance; dense requirements retain the original range.
 
     Args:
         repo: Repository providing bounded FX plane and candle reads.
@@ -3390,6 +3406,7 @@ async def _load_request_fx_rates(
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
         return {}, {}, set()
+    event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
     general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
@@ -3406,6 +3423,7 @@ async def _load_request_fx_rates(
                 repo,
                 event_pair_requirements,
                 as_of,
+                open_intervals=event_open_intervals,
             )
         pnl_read_count("fx_event_candidate_planes", event_candidates)
     candidate_planes = _candidate_planes(
@@ -3426,7 +3444,7 @@ async def _load_request_fx_rates(
             event_pair_requirements,
             candidate_planes,
             as_of,
-            sparse_requirements=requirements,
+            open_intervals=event_open_intervals,
         )
     pnl_read_count("fx_event_rows", event_rows)
     rows = [*mark_rows, *event_rows]

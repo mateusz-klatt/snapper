@@ -5057,6 +5057,8 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRatePlane]:
         """Discover spot-FX venue planes with evidence in a bounded window.
 
@@ -5073,6 +5075,8 @@ class Repository(ABC):
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
             as_of: Snapshot time selecting candle versions known at the horizon.
+            open_intervals: Optional inclusive intervals intersected with the
+                outer bounds. Empty input retains the complete bounded range.
 
         Returns:
             Distinct ``(base, quote, exchange)`` planes in lexical order.
@@ -20668,29 +20672,49 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRatePlane]:
         """Discover bounded spot-FX venue planes in one query.
 
         See the abstract declaration for bounded candidate evidence and the
         as-of denomination proof layered over mechanical author-time ownership.
 
-        Historical metadata drives candidate enumeration. Candle existence
-        retains the exact author-time bands without expanding every matching
-        candle into the outer distinct-plane result. A same-statement distinct
-        instrument-ID set bounds the candle scan keys; the original metadata
-        versions and their author-time bands still decide plane eligibility.
+        Historical metadata drives candidate enumeration. A same-statement
+        distinct instrument-ID set bounds the candle scan keys; the original
+        metadata versions and their author-time bands decide plane eligibility.
+
+        EXISTS lets PostgreSQL choose a hash semi-join over the bounded candle
+        evidence. Scalar LIMIT 1 probes were rejected after the 2026-11-08
+        warm-cache production plan exceeded its sixty-second timeout: about
+        2,864 instrument/symbol version pairs each probed a Merge Append over
+        121 partitions, and versions without a match scanned the whole range.
+        Sparse inclusive open intervals restrict that shared candle scan while
+        every original author band still decides plane eligibility.
+
+        JIT is disabled in the session's automatically begun transaction: the
+        original production plan spent about 10.8 seconds compiling partition
+        scans. Closing the session rolls back this transaction-local setting.
 
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to discover.
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
             as_of: Snapshot time threading the temporal predicates.
+            open_intervals: Optional inclusive intervals intersected with the
+                outer bounds. Empty input retains the complete bounded range.
 
         Returns:
             Distinct planes in ``(base, quote, exchange)`` order.
         """
         if not pairs:
             return []
+        minute_filter = and_(Candle.open_at >= start, Candle.open_at <= end)
+        if open_intervals:
+            minute_filter = and_(
+                minute_filter,
+                or_(*(Candle.open_at.between(lower, upper) for lower, upper in open_intervals)),
+            )
         candidate_instruments = (
             select(Instrument.public_id)
             .select_from(Instrument)
@@ -20724,14 +20748,15 @@ class SQLAlchemyRepository(Repository):
                 Symbol.timestamp <= Candle.timestamp,
                 Symbol.known_to > Candle.timestamp,
                 Candle.timeframe == "1m",
-                Candle.open_at >= start,
-                Candle.open_at <= end,
+                minute_filter,
                 Candle.complete.is_(True),
                 *where_active(Candle, as_of),
             )
             .correlate(Instrument, Symbol)
         )
         async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL jit = off"))
             result = await s.execute(
                 select(
                     Symbol.base,

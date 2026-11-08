@@ -841,7 +841,7 @@ logging failure leaves the handler result unchanged.
 | `core_ms` | Synchronous pure timeline construction at the service boundary |
 | `timeline_extra_ms` | Timeline service time remaining after its observed prefix and series intervals |
 | `fx_discovery_mark_ms` / `fx_discovery_event_ms` | Separate mark/event candidate discovery calls |
-| `fx_load_mark_ms` / `fx_load_event_ms` | Separate candidate-row loads, including local interval planning, repository waits and materialization |
+| `fx_load_mark_ms` / `fx_load_event_ms` | Separate candidate-row loads, including local preparation, repository waits and materialization |
 | `fx_election_ms` | Both shared and identity resolution calls, including coverage calculations and their internal observation folds |
 | `fx_fold_final_ms` | Final rate-map fold after selected-row filtering |
 
@@ -857,22 +857,31 @@ The fixed aggregate counts `fx_mark_candidate_planes`,
 `fx_event_candidate_planes`, `fx_mark_rows`, `fx_event_rows` and
 `fx_selected_rows` sum the lengths of already materialized results across all
 FX calls in one handler. A skipped call remains `unobserved`; an attempted call
-returning no rows records zero. Counts contain no instrument, wallet, currency,
-price or amount breakdown. Background callers do not read lengths for these
-observations, and observation failures leave handler results unchanged.
+returning no rows records zero. Event discovery and candle loading share the
+same sparse intervals over all causal mark and event minutes, including carry
+and closing-bar offsets. `fx_event_candidate_planes` counts planes with evidence
+inside those intervals and the event's outer bounds, or anywhere in the full
+event range when dense, fragmented, or shadow requirements retain that fallback.
+Mark discovery keeps its original window. Counts contain no instrument, wallet,
+currency, price or amount breakdown. Background callers do not read lengths for
+these observations, and observation failures leave handler results unchanged.
 
 `fx_event_read_mode` records only a closed read-selection reason: sparse,
 single-interval dense, interval-limit dense, shadow dense, empty requirements,
-missing requirements or missing candidate planes. Different observed modes in
-one handler produce absorbing `mixed`; skipped work does not create a mode.
+or missing requirements. Each event read is planned once before discovery, and
+that plan remains observed even if discovery finds no candidates. Missing event
+minutes record missing requirements without constructing intervals. Different
+observed modes in one handler produce absorbing `mixed`; skipped work does not
+create a mode.
 `fx_event_intervals_observed` sums only prefixes actually constructed by the
-selector. Each capped call contributes its observed prefix of seventeen after
+selector, once for the plan shared by discovery and loading. Each capped call
+contributes its observed prefix of seventeen after
 reaching the existing limit of sixteen. The aggregate alone cannot prove a cap
 was reached: two sparse calls with eight and nine intervals also sum to
 seventeen. It identifies neither a per-call cardinality nor total fragmentation;
-the read mode provides separate evidence. A shadow bypass or an early return
-before selection leaves that count unobserved; an actually constructed empty
-list records zero.
+the read mode provides separate evidence. A shadow bypass or missing event
+requirements leaves that count unobserved; an actually constructed empty list
+records zero.
 
 The six FX subspans accumulate across repeated calls and remain inside inclusive
 `fx_ms`; they must not be added to that parent span. Election time includes its

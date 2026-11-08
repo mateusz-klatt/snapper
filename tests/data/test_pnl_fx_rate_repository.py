@@ -296,16 +296,22 @@ async def _original_planes(
 class TestDiscoveryCandleExistence:
     """Preserve candidate evidence while avoiding candle-row expansion before DISTINCT."""
 
+    @pytest.mark.parametrize("sparse", [False, True])
     async def test_postgresql_prefilter_uses_one_typed_array_expression(
-        self, repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+        self, repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch, sparse: bool
     ) -> None:
         """PostgreSQL receives an array operand rather than another semijoin.
 
         Given: The real query builder under the PostgreSQL dialect branch.
         When: Its actual statement is captured before any database connection.
-        Then: One typed UUID array limits scan keys inside the original EXISTS.
+        Then: One typed UUID array bounds correlated candle existence with JIT disabled.
         """
         statements: list[Select[tuple[str, str, str]]] = []
+        settings: list[str] = []
+        intervals = (
+            (_M - timedelta(minutes=2), _M - timedelta(minutes=1)),
+            (_M, _M + timedelta(minutes=1)),
+        )
         result = Mock(spec=Result)
         result.all.return_value = []
 
@@ -317,18 +323,55 @@ class TestDiscoveryCandleExistence:
             _session: AsyncSession, statement: Executable
         ) -> Result[tuple[str, str, str]]:
             """Retain the real SQLAlchemy statement at its driver boundary."""
-            assert isinstance(statement, Select)
+            if not isinstance(statement, Select):
+                settings.append(str(statement.compile(dialect=postgresql.dialect())))
+                return cast(Result[tuple[str, str, str]], result)
+            assert settings == ["SET LOCAL jit = off"]
             statements.append(statement)
             return cast(Result[tuple[str, str, str]], result)
 
         monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", property(dialect))
         monkeypatch.setattr(AsyncSession, "execute", capture)
-        assert await repository.get_pnl_fx_rate_exchanges([("EUR", "USD")], _M, _M, _NOW) == []
+        assert (
+            await repository.get_pnl_fx_rate_exchanges(
+                [("EUR", "USD")],
+                _M - timedelta(minutes=3),
+                _M + timedelta(minutes=3),
+                _NOW,
+                open_intervals=intervals if sparse else (),
+            )
+            == []
+        )
         assert len(statements) == 1
+        assert settings == ["SET LOCAL jit = off"]
         compiled = str(statements[0].compile(dialect=postgresql.dialect()))
         assert "= ANY (CAST((SELECT array_agg(" in compiled
         assert "AS UUID[]" in compiled
+        assert "pnl_fx_candidate_instruments AS MATERIALIZED" in compiled
         assert "EXISTS (SELECT *" in compiled
+        literal_sql = " ".join(
+            str(
+                statements[0].compile(
+                    dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+                )
+            ).split()
+        )
+        assert "EXISTS (SELECT * FROM candles WHERE" in literal_sql
+        assert "SELECT true" not in literal_sql
+        assert " LIMIT " not in literal_sql
+        assert ") IS NOT NULL" not in literal_sql
+        evidence = literal_sql.split("EXISTS (SELECT * FROM candles WHERE", 1)[1].split(
+            " AND candles.complete IS true", 1
+        )[0]
+        assert "candles.instrument_public_id = instruments.public_id" in evidence
+        assert (
+            f"candles.open_at >= '{_M - timedelta(minutes=3)}' "
+            f"AND candles.open_at <= '{_M + timedelta(minutes=3)}'"
+        ) in evidence
+        union = " OR ".join(
+            f"candles.open_at BETWEEN '{lower}' AND '{upper}'" for lower, upper in intervals
+        )
+        assert (f"AND ({union})" in evidence) is sparse
 
     async def test_candle_scan_prefilters_distinct_eligible_instruments(
         self, repository: SQLAlchemyRepository

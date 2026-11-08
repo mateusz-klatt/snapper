@@ -1,7 +1,9 @@
 """Observe real FX boundaries without changing evidence, payloads or private data."""
 
 import asyncio
+from collections.abc import Sequence
 from collections.abc import Sized
+from datetime import datetime
 from itertools import count
 from typing import cast
 from unittest.mock import AsyncMock
@@ -11,17 +13,37 @@ import pytest
 from snapper.application.portfolio import pnl_read_timing
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
+from snapper.application.portfolio.fx_rates import FxPairKey
+from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline_service import _load_request_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import _sparse_event_fx_intervals
 from snapper.data.repository import Repository
+from snapper.data.repository_types import PnlFxRatePlane
 from tests.application.portfolio.test_pnl_timeline_service import FakeRepo
 from tests.application.portfolio.test_pnl_timeline_service import _fx_row
 from tests.application.portfolio.test_pnl_timeline_service import _m
 
 _PAIR = currency_pair_key("EUR", "PLN")
 _PLANE = ("EUR", "PLN", "walutomat")
+
+
+class _UnboundedDiscoveryRepo(FakeRepo):
+    """Keep the original discovery range while leaving sparse candle loads active."""
+
+    async def get_pnl_fx_rate_exchanges(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
+    ) -> list[PnlFxRatePlane]:
+        """Ignore only the discovery interval predicate for the equivalence oracle."""
+        del open_intervals
+        return await super().get_pnl_fx_rate_exchanges(pairs, start, end, as_of)
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -351,15 +373,15 @@ async def test_failure_after_first_discovery_preserves_partial_counts_and_except
 
 
 @pytest.mark.parametrize("owned", [False, True])
-async def test_skipped_selector_counts_stay_unobserved(
+async def test_event_plan_is_observed_even_without_candidate_planes(
     monkeypatch: pytest.MonkeyPatch,
     owned: bool,
 ) -> None:
-    """Identity-only and missing-plane paths do not invent selector observations.
+    """Record the planned event selector once before candidate discovery.
 
-    Given: Either one canonical mark or requirements with no candidate plane.
-    When: The actual loader skips discovery or cannot reach event selection.
-    Then: Skipped metadata remains absent while real empty row counts are zero.
+    Given: Either one canonical mark or event requirements with no candidate plane.
+    When: The actual loader plans the event read before attempting discovery.
+    Then: Missing event minutes bypass selection and empty candidates retain their plan.
     """
     messages = _capture(monkeypatch)
     _ticks(monkeypatch)
@@ -381,9 +403,65 @@ async def test_skipped_selector_counts_stay_unobserved(
     fields = _fields(messages[0])
     assert fields["fx_mark_candidate_planes"] == ("unobserved" if owned else "0")
     assert fields["fx_event_candidate_planes"] == ("unobserved" if owned else "0")
-    assert fields["fx_event_read_mode"] == ("no_requirements" if owned else "no_candidate_planes")
-    assert fields["fx_event_intervals_observed"] == "unobserved"
+    assert fields["fx_event_read_mode"] == ("no_requirements" if owned else "sparse")
+    assert fields["fx_event_intervals_observed"] == ("unobserved" if owned else "2")
     assert fields["fx_event_rows"] == "0"
+
+
+@pytest.mark.parametrize("with_coverage", [False, True])
+async def test_sparse_discovery_counts_only_causal_planes_without_changing_finances(
+    monkeypatch: pytest.MonkeyPatch,
+    with_coverage: bool,
+) -> None:
+    """Drop uncovered candidates while preserving selected planes and financial rates.
+
+    Given: Kraken has evidence only between windows, with optional usable Walutomat rows.
+    When: The same real loader runs bounded and original full-range discovery.
+    Then: Only discovery counts change, and the shared event plan is observed once.
+    """
+    messages = _capture(monkeypatch)
+    _ticks(monkeypatch)
+    rows = [_fx_row("EUR", "PLN", -500, 4.0, "kraken")]
+    if with_coverage:
+        rows.extend(_fx_row("EUR", "PLN", minute, 4.0, "walutomat") for minute in (-1000, -100, 0))
+    bounded_repo = FakeRepo(fx_rows=rows)
+    original_repo = _UnboundedDiscoveryRepo(fx_rows=rows)
+
+    @observe_pnl_read("series")
+    async def handler(
+        repository: FakeRepo,
+    ) -> tuple[
+        FxRateMap,
+        dict[str, dict[FxPairKey, PnlFxRatePlane]],
+        set[tuple[FxPairKey, PnlFxRatePlane]],
+    ]:
+        """Compare actual discovery, loads, elections and final folds under observation."""
+        return await _load_request_fx_rates(
+            cast(Repository, repository),
+            {"owner": {_PAIR: {_m(0)}}},
+            {"owner": {_PAIR: {_m(-1000), _m(-100)}}},
+            {},
+            _m(200),
+            "EUR",
+        )
+
+    original = await handler(original_repo)
+    bounded = await handler(bounded_repo)
+    assert bounded == original
+    assert bounded[1] == {"owner": {_PAIR: _PLANE} if with_coverage else {}}
+    assert bounded[2] == ({(_PAIR, _PLANE)} if with_coverage else set())
+    original_fields, bounded_fields = [_fields(message) for message in messages]
+    assert original_fields["fx_event_candidate_planes"] == ("2" if with_coverage else "1")
+    assert bounded_fields["fx_event_candidate_planes"] == ("1" if with_coverage else "0")
+    assert bounded_fields["fx_mark_candidate_planes"] == ("1" if with_coverage else "0")
+    assert bounded_fields["fx_event_rows"] == ("2" if with_coverage else "0")
+    assert bounded_fields["fx_selected_rows"] == ("3" if with_coverage else "0")
+    assert original_fields["fx_event_read_mode"] == bounded_fields["fx_event_read_mode"] == "sparse"
+    assert original_fields["fx_event_intervals_observed"] == "3"
+    assert bounded_fields["fx_event_intervals_observed"] == "3"
+    assert len(bounded_repo.fx_candidate_interval_calls[1]) == 3
+    if with_coverage:
+        assert bounded_repo.fx_candidate_interval_calls[1] is bounded_repo.fx_interval_calls[1]
 
 
 async def test_concurrent_handlers_keep_phase_counts_and_modes_independent(

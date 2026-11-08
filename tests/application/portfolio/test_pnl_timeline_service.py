@@ -610,7 +610,9 @@ class FakeRepo:
         self.fx_plane_calls: list[list[PnlFxRatePlane]] = []
         self.fx_candidate_pair_calls: list[list[tuple[str, str]]] = []
         self.fx_candidate_range_calls: list[tuple[datetime, datetime]] = []
+        self.fx_candidate_interval_calls: list[Sequence[tuple[datetime, datetime]]] = []
         self.fx_range_calls: list[tuple[datetime, datetime]] = []
+        self.fx_interval_calls: list[Sequence[tuple[datetime, datetime]]] = []
         self.symbol_ref_calls: list[list[str]] = []
         self.candle_calls: list[
             tuple[list[InstrumentSymbolRefRow], datetime, datetime, datetime]
@@ -909,23 +911,32 @@ class FakeRepo:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRatePlane]:
         """Discover venue-qualified FX planes with bounded canned evidence."""
         self.fx_candidate_pair_calls.append(list(pairs))
         self.fx_candidate_range_calls.append((start, end))
+        self.fx_candidate_interval_calls.append(open_intervals)
         if self._fx_repository is not None:
             return await self._fx_repository.get_pnl_fx_rate_exchanges(
                 pairs,
                 start,
                 end,
                 as_of,
+                open_intervals=open_intervals,
             )
         requested = set(pairs)
         return sorted(
             {
                 (row["base"], row["quote"], row["exchange"])
                 for row in self._fx_rows
-                if (row["base"], row["quote"]) in requested and start <= row["open_at"] <= end
+                if (row["base"], row["quote"]) in requested
+                and start <= row["open_at"] <= end
+                and (
+                    not open_intervals
+                    or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
+                )
             }
         )
 
@@ -961,6 +972,7 @@ class FakeRepo:
         self.fx_plane_calls.append(plane_list)
         self.fx_pair_calls.append([(base, quote) for base, quote, _ in plane_list])
         self.fx_range_calls.append((start, end))
+        self.fx_interval_calls.append(open_intervals)
         if self._fx_repository is not None:
             return await self._fx_repository.get_pnl_fx_rate_candles(
                 planes,
