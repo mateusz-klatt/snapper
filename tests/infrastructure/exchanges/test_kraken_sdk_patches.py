@@ -1244,14 +1244,17 @@ class TestPhaseBPrimeShim:
         def fake_connect(*args: object, **kwargs: object) -> MagicMock:
             return MagicMock()
 
-        with patch(
-            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
-            return_value=fake_pool,
-        ), egress_identity(
-            exchange="kraken",
-            traffic_class="private",
-            owner="executor",
-            operation="order_ws",
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+                return_value=fake_pool,
+            ),
+            egress_identity(
+                exchange="kraken",
+                traffic_class="private",
+                owner="executor",
+                operation="order_ws",
+            ),
         ):
             shim_cls = _wrap_connect_factory(fake_connect)
             shim_cls("wss://kraken")
@@ -2250,14 +2253,17 @@ class TestPhaseBPrimeGetReconnectWait:
         fake_pool.size.return_value = 1
         fake_pool.has_available.return_value = False
         fake_pool.earliest_release_in_seconds.return_value = 12.5
-        with patch(
-            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
-            return_value=fake_pool,
-        ), egress_identity(
-            exchange="kraken",
-            traffic_class="private",
-            owner="executor",
-            operation="order_ws",
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+                return_value=fake_pool,
+            ),
+            egress_identity(
+                exchange="kraken",
+                traffic_class="private",
+                owner="executor",
+                operation="order_ws",
+            ),
         ):
             wait = _patched_get_reconnect_wait(connector, 1)
 
@@ -2550,6 +2556,55 @@ class TestApplyKrakenAlreadySubscribedFilter:
 class TestPatchedManageSubscriptions:
     """``_patched_manage_subscriptions`` must downgrade benign races but keep real errors visible."""
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            pytest.param(
+                {"channel": "ticker", "data": [{"symbol": "BTC/USD", "bid": 1.0}]},
+                id="ticker",
+            ),
+            pytest.param(
+                {"channel": "trade", "data": [{"symbol": "BTC/USD", "price": 1.0}]},
+                id="trade",
+            ),
+            pytest.param({"channel": "heartbeat"}, id="heartbeat"),
+            pytest.param(
+                {
+                    "method": "subscribe",
+                    "success": True,
+                    "result": {"channel": "ticker", "symbol": "BTC/USD"},
+                },
+                id="subscribe-ack",
+            ),
+            pytest.param(
+                {
+                    "method": "unsubscribe",
+                    "success": True,
+                    "result": {"channel": "ticker", "symbol": "BTC/USD"},
+                },
+                id="unsubscribe-ack",
+            ),
+        ],
+    )
+    def test_unlogged_messages_skip_redaction(self, message: JsonObject) -> None:
+        """Spec — messages without subscription logs bypass every redaction helper.
+
+        Given a market-data frame, heartbeat, or successful subscription ACK,
+        When the subscription manager handles it,
+        Then no payload traversal, token collection, or text redaction occurs.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        with (
+            patch.object(kraken_sdk_patches, "_redact_ws_log_payload") as redact_payload,
+            patch.object(kraken_sdk_patches, "_collect_ws_log_tokens") as collect_tokens,
+            patch.object(kraken_sdk_patches, "_redact_ws_log_text") as redact_text,
+        ):
+            _patched_manage_subscriptions(connector, message)
+
+        redact_payload.assert_not_called()
+        collect_tokens.assert_not_called()
+        redact_text.assert_not_called()
+
     def test_already_subscribed_logged_as_debug(self, caplog: pytest.LogCaptureFixture) -> None:
         """Spec — benign race is downgraded.
 
@@ -2600,24 +2655,36 @@ class TestPatchedManageSubscriptions:
             _logger.remove(handler_id)
         assert any(r.levelname == "WARNING" for r in caplog.records)
 
-    def test_subscribe_error_log_redacts_token_payload(
+    @pytest.mark.parametrize(
+        ("method", "error", "level"),
+        [
+            ("subscribe", "Invalid token", "WARNING"),
+            ("subscribe", "Already subscribed", "DEBUG"),
+            ("unsubscribe", "Not subscribed", "WARNING"),
+        ],
+    )
+    def test_subscription_error_log_redacts_token_payload(
         self,
         caplog: pytest.LogCaptureFixture,
+        method: str,
+        error: str,
+        level: str,
     ) -> None:
-        """Spec — failed subscribe payload logging never exposes tokens.
+        """Spec — subscription failure and race logging never exposes tokens.
 
-        Given an SDK subscribe failure with a token key and a token-shaped
-        value echoed inside the error string,
+        Given an SDK subscription failure or race with a token key and a
+        token-shaped value echoed inside a detail string,
         When ``_patched_manage_subscriptions`` logs the failure,
-        Then neither sensitive value appears in the emitted record.
+        Then neither sensitive value appears and the log level is preserved.
         """
         connector = MagicMock(spec=ConnectSpotWebsocket)
         known_token = "short-active-token"
         token_like_value = "S" * 43
         message: JsonObject = {
-            "method": "subscribe",
+            "method": method,
             "success": False,
-            "error": f"Invalid token {known_token} echoed {token_like_value}",
+            "error": error,
+            "detail": f"Invalid token {known_token} echoed {token_like_value}",
             "params": {
                 "token": known_token,
                 "symbol": ["CLM6.NYMEX"],
@@ -2632,6 +2699,7 @@ class TestPatchedManageSubscriptions:
         assert known_token not in logged
         assert token_like_value not in logged
         assert "***REDACTED***" in logged
+        assert [record.levelname for record in caplog.records] == [level]
 
     def test_redact_ws_log_payload_handles_tuple_values(self) -> None:
         """Spec — SDK payload redaction recurses through tuple values."""
