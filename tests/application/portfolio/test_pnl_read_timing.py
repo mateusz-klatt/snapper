@@ -96,7 +96,10 @@ async def test_nested_stage_summary_has_exact_inclusive_durations(
             "fx_election_ms=unobserved fx_fold_final_ms=unobserved "
             "fx_mark_candidate_planes=unobserved fx_event_candidate_planes=unobserved "
             "fx_mark_rows=unobserved fx_event_rows=unobserved fx_selected_rows=unobserved "
-            "fx_event_read_mode=unobserved fx_event_intervals_observed=unobserved"
+            "fx_event_read_mode=unobserved fx_event_intervals_observed=unobserved "
+            "series_anchor_ms=unobserved series_replay_ms=unobserved "
+            "series_market_data_ms=unobserved series_requirements_ms=unobserved "
+            "series_valuation_ms=unobserved series_overlay_ms=unobserved"
         )
     ]
     assert pnl_read_timing._current_timing.get() is None

@@ -844,6 +844,12 @@ logging failure leaves the handler result unchanged.
 | `fx_load_mark_ms` / `fx_load_event_ms` | Separate candidate-row loads, including local preparation, repository waits and materialization |
 | `fx_election_ms` | Both shared and identity resolution calls, including coverage calculations and their internal observation folds |
 | `fx_fold_final_ms` | Final rate-map fold after selected-row filtering |
+| `series_anchor_ms` | Wallet normalization, initial work-budget check and anchor load or permitted creation, including creation's non-preloaded execution-prefix and opening FX work and empty or preactivation result construction |
+| `series_replay_ms` | Execution prefix, fill-gap, lineage and accrual reads; suffix filtering, replay metadata, ordered instrument identities and pool work-budget check |
+| `series_market_data_ms` | Symbol-reference read, price-trust partitioning, currency maps and mark-candle reads |
+| `series_requirements_ms` | Trusted replay filtering, display identities and mark/event FX-minute requirements, including identity-plane preparation |
+| `series_valuation_ms` | Mark, execution and accrual conversion, pure timeline construction, withholding, display attachment and rate-source construction; includes `core_ms` |
+| `series_overlay_ms` | Final wallet result assembly, including the live complete-sample equity read/fold and optional overlay-specific currency conversion |
 
 The intervals can be nested; adding them does not produce a request total.
 `unobserved` identifies an absent stage or a derived interval whose required
@@ -890,6 +896,26 @@ fold. Row-load times include local preparation and conversion from repository
 results, so they do not identify SQL execution time alone. The same single
 message-text summary carries these fields through existing sinks; no response
 fields, request identifiers, query text or financial values are added.
+
+The six series phases accumulate across repeated series calls in one handler.
+They are sequential portions of inclusive `series_ms`. When the anchor already
+exists, the request's `fx_ms` stage runs between requirements and valuation,
+outside these phases; their sum plus `fx_ms` then accounts for series work apart
+from timing-boundary overhead. Permitted anchor creation instead performs any
+non-preloaded execution-prefix and its opening FX work inside
+`series_anchor_ms`. That opening FX work also accumulates in the existing
+`fx_ms` stage, so adding all six phases to `fx_ms` would double-count it.
+`series_valuation_ms` includes the nested `core_ms`; preactivation construction
+instead nests `core_ms` inside `series_anchor_ms`. Early returns leave later
+phases `unobserved`. The timeline's shared `prefix_ms` is preloaded outside
+series. A direct series call with an existing anchor reads its prefix inside
+`series_replay_ms`; a direct series call creating an anchor reads its request and
+activation prefix bundle inside `series_anchor_ms`.
+Overlay-specific currency conversion remains inside `series_overlay_ms` and
+outside the existing `fx_ms` stage. Repository phases include local preparation,
+awaits and materialization rather than SQL execution time alone. Serialization
+occurs after the handler and is excluded from every series phase. These six
+fields are appended after all existing message fields to preserve their order.
 
 ### P&L FX event reads
 
