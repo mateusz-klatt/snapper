@@ -28,6 +28,7 @@ from snapper.messaging.publishers import kraken as kraken_module
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
 
 
 class _ShadowSettings:
@@ -169,6 +170,66 @@ def _shadow_candle(symbol: str = "BTC-USD") -> CandleUpdate:
 
 class TestKrakenMarketDataPublisher:
     """Tests for KrakenMarketDataPublisher functionality."""
+
+    def test_minute_sweep_waits_for_finalize_grace_and_scheduling_margin(self) -> None:
+        """Prevent minute completion from racing a genuine trade-built candle.
+
+        Given: A publisher whose trade builder finalizes twelve seconds after close.
+        When: The minute sweep computes its settle delay.
+        Then: It waits for the finalize grace plus the shared scheduling margin.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        settings = MagicMock(spec=AppSettings)
+        settings.trade_built_finalize_grace_seconds = 12
+        publisher.settings = settings
+        assert publisher._minute_sweep_settle_seconds() == 12 + MINUTE_SWEEP_MARGIN_S
+
+    def test_confirmed_trade_roster_requires_client_subscription_health(self) -> None:
+        """A subscribed symbol cannot be treated as confirmed before tracker evidence.
+
+        Given: A publisher without a client, then a client with no confirmed entries.
+        When: The minute completion roster is requested in each state.
+        Then: Both rosters are empty and the existing client is queried for evidence.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        assert publisher._confirmed_trade_roster() == set()
+        client = MagicMock(spec=KrakenExchangeClient)
+        client.subscription_health_snapshot.return_value = {}
+        publisher._exchange_client = client
+        assert publisher._confirmed_trade_roster() == set()
+        client.subscription_health_snapshot.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inserted_new_row", [False, True])
+    async def test_catchup_insert_returns_repository_inserted_rows(
+        self, inserted_new_row: bool
+    ) -> None:
+        """Expose the acknowledged insertion result to the catchup worker.
+
+        Given: A missing-only repository returning either no rows or a normalized row.
+        When: The publisher commits a native catchup candidate.
+        Then: The callback returns exactly the repository result after releasing its gate.
+
+        Args:
+            inserted_new_row: Whether the repository acknowledges a newly inserted row.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        row: CandleUpsertRow = {
+            "instrument_public_id": "instrument",
+            "timeframe": "1m",
+            "open_at": _shadow_candle().interval_begin,
+        }
+        normalized: CandleUpsertRow = {**row, "public_id": "committed-id"}
+        inserted = [normalized] if inserted_new_row else []
+        repository = MagicMock(spec=Repository)
+        repository.insert_missing_candles = AsyncMock(return_value=inserted)
+        publisher.repository = repository
+
+        result = await publisher._insert_catchup_candle_rows([row])
+
+        assert result is inserted
+        repository.insert_missing_candles.assert_awaited_once_with([row])
+        assert not publisher._candle_identity_gate.locked()
 
     def test_registered_restart_policy_is_always(self) -> None:
         """The kraken publisher restarts on any exit (live venue must never stop).

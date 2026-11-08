@@ -510,17 +510,23 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         super()._mark_candle_writes_committed(rows)
         self._release_committed_candle_identities(rows)
 
-    async def _insert_catchup_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
+    async def _insert_catchup_candle_rows(
+        self, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
         """Serialize quiet native commits with live identity choice after REST acquisition.
 
         Args:
             rows: Full closed native observations acquired outside the local gate.
+
+        Returns:
+            Newly inserted rows after acknowledgement and identity retirement, empty on replay.
         """
         async with self._candle_identity_gate:
             prepared = self._bind_pending_candle_identities(rows)
             inserted = await self._require_repository().insert_missing_candles(prepared)
             self._release_committed_candle_identities(inserted)
             await self._retire_acknowledged_candle_identities(prepared)
+            return inserted
 
     async def _persist_historical_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
         """Serialize quiet synthesized commits without touching current-window identity.
