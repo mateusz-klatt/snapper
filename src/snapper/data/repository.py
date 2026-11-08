@@ -20859,6 +20859,22 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PnlFxRateRow]:
         """Run the shared FX-plane candle read under one minute predicate.
 
+        The production EXPLAIN on 2026-11-08 at 12:02 UTC (JIT off) took
+        25,424 ms and read 261,366 buffers for 486 rows across eight planes and
+        sixteen sparse intervals. Pruning reached six daily leaves, but parallel
+        sequential scans had no candle index condition and fed about 87,700
+        candles from all instruments into the metadata hash join.
+
+        Materialize candidate instrument identities across all metadata versions
+        using only the requested currency legs and exchange. Every instrument
+        satisfying the author-time joins must occur in this broader set; no time
+        bands or symbol proof filters narrow it. The existing joins and filters
+        retain row multiplicity and temporal semantics. PostgreSQL receives one
+        UUID array so its (instrument_public_id, open_at) index can bound the
+        candle scan; SQLite uses an IN subquery. Disable PostgreSQL JIT locally,
+        as in discovery and the measured plan, to avoid compilation overhead
+        for this selective read.
+
         Args:
             planes: Pinned ``(base, quote, exchange)`` planes to load.
             as_of: Snapshot time threading the temporal predicates.
@@ -20867,7 +20883,33 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Unsorted rows for the caller to order.
         """
+        candidate_instruments = (
+            select(Instrument.public_id)
+            .select_from(Instrument)
+            .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+            .where(
+                tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
+                    list(dict.fromkeys(planes))
+                )
+            )
+            .distinct()
+            .correlate(None)
+            .cte("pnl_fx_load_candidate_instruments")
+            .prefix_with("MATERIALIZED", dialect="postgresql")
+        )
+        candidate_filter: ColumnElement[bool] = Candle.instrument_public_id.in_(
+            select(candidate_instruments.c.public_id)
+        )
+        if self.dialect_name == "postgresql":
+            instrument_ids = (
+                select(func.array_agg(candidate_instruments.c.public_id))
+                .scalar_subquery()
+                .cast(ARRAY(Instrument.public_id.type))
+            )
+            candidate_filter = Candle.instrument_public_id == any_(instrument_ids)
         async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL jit = off"))
             result = await s.execute(
                 select(
                     Symbol.base,
@@ -20902,6 +20944,7 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .where(
+                    candidate_filter,
                     tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
                         list(dict.fromkeys(planes))
                     ),
