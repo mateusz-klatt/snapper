@@ -1119,6 +1119,20 @@ before falling back to the boot-time `wallet_short` cache. This keeps
 rolling restarts and credential rotations from recovering old
 `.w{wallet_short}` checkpoints into an empty or stale wallet scope.
 
+Startup verifies execution aliases against every durable fill observation before
+initializing engine deduplication. Each alias must identify exactly one fill with
+consistent native identifiers, order lineage, scope, timestamps and economics.
+The checkpoint and replay must represent the same complete set of fills; unknown
+or ambiguous aliases, missing fills and either alias set reaching the 10,000-entry
+dedup bound refuse certification. Only after the exact economic and metadata
+digest also matches does recovery adopt replay's complete alias set. Live shadow
+writes resolve both native aliases from the committed fill in the same order and
+wallet scope before checkpointing, without adopting aliases of future fills.
+When a publication omits the native exec identifier, the engine uses a uniquely
+proven durable native alias before deduplication so restored trade-only fills
+cannot be booked twice. Watermark lookup retains the original publication.
+Missing durable evidence for a positive live fill also refuses certification.
+
 Recovery is also **gap-aware**. The executor commits a `fill_observed`
 venue event BEFORE publishing the fill and inserts the `executions`
 row only after a successful publish, so a fill recorded but never
