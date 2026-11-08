@@ -19,6 +19,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -55,6 +56,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
+from snapper.application.trade.fill_aliases import aliases_cover_same_fills
+from snapper.application.trade.fill_aliases import resolve_live_fill_event
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import FillProjection
@@ -1906,21 +1909,32 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id,
             checkpoint,
         )
-        if not self._fill_digest_matches(shard, projection, compare_cash=compare_cash):
+        aliases_certain = aliases_cover_same_fills(
+            shard.seen_exec_ids, projection["seen_exec_ids"], events
+        )
+        verified = replace(shard, seen_exec_ids=projection["seen_exec_ids"].copy())
+        if not aliases_certain or not self._fill_digest_matches(
+            verified, projection, compare_cash=compare_cash
+        ):
             logger.warning(
                 f"ZMQTrader: checkpoint {shard_key} restored fill state "
                 f"(pos={shard.position.position_qty}, "
                 f"cash={shard.cash}, "
                 f"realized={shard.position.realized_pnl}, "
-                f"turnover={shard.turnover}) CONTRADICTS the full replay of its "
+                f"turnover={shard.turnover}, "
+                f"aliases_certain={aliases_certain}, "
+                f"seen_exec_ids={sorted(shard.seen_exec_ids)}) "
+                f"CONTRADICTS the full replay of its "
                 f"durable venue events (pos={projection['position_qty']}, "
                 f"cash={projection['cash']}, "
                 f"realized={projection['realized_pnl']}, "
-                f"turnover={projection['turnover']}) — failing the whole "
+                f"turnover={projection['turnover']}, "
+                f"seen_exec_ids={sorted(projection['seen_exec_ids'])}) — failing the whole "
                 f"projection certification"
             )
             self._recovery_certification_failed = True
             return False
+        shard.seen_exec_ids = verified.seen_exec_ids
         return True
 
     async def _checkpoint_cash_is_fill_reconstructable(
@@ -4651,7 +4665,8 @@ class TraderCoordinator(RegisterableProcess):
             return
         if fill.status == FillStatusEnum.FILLED:
             self._retire_rearmable_cid(fill.client_order_id)
-        applied = engine.apply_fill(fill)
+        engine_fill = await self._engine_fill_with_durable_alias(fill, engine)
+        applied = engine.apply_fill(engine_fill)
         if applied:
             logger.info(
                 f"ZMQTrader: Fill applied - {fill.client_order_id} "
@@ -4991,14 +5006,59 @@ class TraderCoordinator(RegisterableProcess):
         """
         shard_key = engine._shard_key
         old_qty = self.trade_service.get_position(shard_key).position_qty
-        venue_event: VenueEventRow = {
+        venue_event = self._live_fill_event(fill, engine)
+        await self._resolve_live_fill_aliases(venue_event)
+        self.trade_service.apply_venue_event(venue_event)
+        await self._project_paired_execution_leg_fill(fill, venue_event)
+        pos = self.trade_service.get_position(shard_key)
+        new_qty = pos.position_qty
+        await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
+        await self._persist_checkpoint(shard_key, consumed_fill=fill)
+
+    async def _engine_fill_with_durable_alias(
+        self, fill: ExecutionData, engine: TradingEngineService
+    ) -> ExecutionData:
+        """Resolve a missing published exec identifier before engine deduplication.
+
+        A trade-only durable fill is checkpointed under its native trade identifier.
+        Use that identifier for engine dedup after recovery too. Keep the original
+        publication for shadow writes and their exec-id-specific watermark lookup.
+
+        Args:
+            fill: Original published fill, whose trade_id carries the venue exec id.
+            engine: Engine owning the fill's exact shard and wallet scope.
+
+        Returns:
+            An engine-only copy with a proven native alias, or the original fill.
+        """
+        if fill.trade_id or not isinstance(self.repository, SQLAlchemyRepository):
+            return fill
+        event = self._live_fill_event(fill, engine)
+        await self._resolve_live_fill_aliases(event)
+        native_alias = event["exec_id"] or event["trade_id"]
+        if native_alias:
+            return fill.model_copy(update={"trade_id": native_alias})
+        return fill
+
+    @staticmethod
+    def _live_fill_event(fill: ExecutionData, engine: TradingEngineService) -> VenueEventRow:
+        """Build the scoped live witness shared by engine and shadow alias resolution.
+
+        Args:
+            fill: Original published execution with delta economics.
+            engine: Engine owning the fill's shard, mode and wallet scope.
+
+        Returns:
+            Shadow venue event retaining the publication's identifiers and economics.
+        """
+        return {
             "id": int(time.monotonic_ns()),
             "public_id": "",
             "timestamp": datetime.now(UTC),
             "session_id": fill.session_id,
             "sequence_id": fill.sequence_id,
             "event_type": "fill_observed",
-            "shard_key": shard_key,
+            "shard_key": engine._shard_key,
             "command_public_id": None,
             "exchange": fill.exchange,
             "instrument": fill.instrument,
@@ -5018,13 +5078,38 @@ class TraderCoordinator(RegisterableProcess):
             "error": None,
             "venue_timestamp": fill.executed_at,
             "received_at": datetime.now(UTC),
+            "wallet_public_id": fill.wallet_public_id or engine.wallet_public_id,
         }
-        self.trade_service.apply_venue_event(venue_event)
-        await self._project_paired_execution_leg_fill(fill, venue_event)
-        pos = self.trade_service.get_position(shard_key)
-        new_qty = pos.position_qty
-        await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
-        await self._persist_checkpoint(shard_key, consumed_fill=fill)
+
+    async def _resolve_live_fill_aliases(self, event: VenueEventRow) -> None:
+        """Adopt both native aliases only from a uniquely proven durable live fill.
+
+        Args:
+            event: Shadow fill to enrich before TradeService dedup and checkpointing.
+
+        Raises:
+            ValueError: Durable alias evidence is ambiguous or contradicts the fill.
+            Exception: Durable lookup failures quarantine the projection and propagate.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        try:
+            events = await self.repository.get_fill_venue_events_for_order_identity(
+                client_order_id=event["client_order_id"] or "",
+                wallet_public_id=event.get("wallet_public_id") or "",
+                mode=event["mode"],
+                exchange=event["exchange"],
+                exchange_order_id=None,
+            )
+            durable = resolve_live_fill_event(event, events)
+            if durable is None and (event["fill_size"] or 0.0) > 0.0:
+                raise ValueError("live execution has no durable fill witness")
+        except Exception:
+            self._recovery_certification_failed = True
+            raise
+        if durable is not None:
+            event["exec_id"] = durable["exec_id"]
+            event["trade_id"] = durable["trade_id"]
 
     async def _project_paired_execution_leg_fill(
         self, fill: ExecutionData, venue_event: VenueEventRow
