@@ -430,7 +430,13 @@ class _FakeRepo:
         return self.position_versions
 
     async def get_pnl_fx_rate_exchanges(
-        self, pairs: Sequence[tuple[str, str]], start: datetime, end: datetime, as_of: datetime
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[tuple[str, str, str]]:
         """Discover venue-qualified forex planes from the canned fiat rows."""
         del as_of
@@ -439,7 +445,12 @@ class _FakeRepo:
             {
                 (row["base"], row["quote"], row["exchange"])
                 for row in self.fx_rows
-                if (row["base"], row["quote"]) in requested and start <= row["open_at"] <= end
+                if (row["base"], row["quote"]) in requested
+                and start <= row["open_at"] <= end
+                and (
+                    not open_intervals
+                    or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
+                )
             }
         )
 
@@ -449,6 +460,8 @@ class _FakeRepo:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[dict[str, Any]]:
         """Return the canned fiat candle rows for the requested venue planes."""
         del as_of
@@ -458,6 +471,10 @@ class _FakeRepo:
             for row in self.fx_rows
             if (row["base"], row["quote"], row["exchange"]) in requested
             and start <= row["open_at"] <= end
+            and (
+                not open_intervals
+                or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
+            )
         ]
 
     async def record_portfolio_pnl_samples(

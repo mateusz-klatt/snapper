@@ -80,6 +80,23 @@ class _SparseEventRepo(FakeRepo):
         return rows
 
 
+class _UnboundedDiscoveryRepo(_SparseEventRepo):
+    """Retain full-range discovery as an oracle while leaving event loading sparse."""
+
+    async def get_pnl_fx_rate_exchanges(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
+    ) -> list[PnlFxRatePlane]:
+        """Ignore only the proposed discovery bound, preserving original venue evidence."""
+        del open_intervals
+        return await super().get_pnl_fx_rate_exchanges(pairs, start, end, as_of)
+
+
 async def _publish_backdated_correction(repository: SQLAlchemyRepository) -> None:
     """Commit a real backdated FX correction after the mark read completes."""
     async with repository.session() as session:
@@ -175,6 +192,10 @@ async def test_sparse_event_sql_keeps_two_carry_windows_and_exact_series(
         [("EUR", "PLN"), ("PLN", "EUR")],
     ]
     assert repository.returned_fx_rows == [22, 10102 if shadow else 44]
+    intervals = () if shadow else ((_m(_OLD_MINUTE - 21), _m(_OLD_MINUTE)), (_m(-21), _m(0)))
+    assert repository.fx_candidate_interval_calls == [(), intervals]
+    assert repository.fx_interval_calls == [(), intervals]
+    assert repository.fx_candidate_interval_calls[1] is repository.fx_interval_calls[1]
     if context is not None:
         assert len(context.evaluations) == 1
         assert len(context.evaluations[0].rows) == 10124
@@ -206,6 +227,105 @@ async def test_mark_only_backdated_correction_between_reads_stays_withheld(
     assert [reason.reason for reason in point.incompleteness_reasons] == ["fx_conversion_unproven"]
     assert result.points[-1].net_pnl == 12.0
     assert repository.returned_fx_rows == [82, 10102 if shadow else 104]
+    intervals = () if shadow else ((_m(_OLD_MINUTE - 21), _m(_OLD_MINUTE)), (_m(-81), _m(0)))
+    assert repository.fx_candidate_interval_calls == [(), intervals]
+    assert repository.fx_candidate_interval_calls[1] is repository.fx_interval_calls[1]
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+async def test_outside_only_plane_preserves_complete_series_and_shadow_provenance(
+    dense_fx_repository: SQLAlchemyRepository,
+    shadow: bool,
+) -> None:
+    """Pruning an irrelevant venue preserves all financial output and durable evidence.
+
+    Given: Walutomat covers every causal minute and Kraken exists only between sparse windows.
+    When: Real discovery uses sparse intervals or its original full-range oracle.
+    Then: Complete series values and selected planes agree, and shadow provenance stays exact.
+    """
+    async with dense_fx_repository.session() as session:
+        session.add_all(
+            [
+                _instrument(
+                    "ins-sparse-outside",
+                    "sym-sparse-eurpln",
+                    "kraken",
+                    timestamp=_m(_OLD_MINUTE - 100),
+                ),
+                _fx_candle("ins-sparse-outside", _m(_OLD_MINUTE // 2), 9.0),
+            ]
+        )
+        await session.commit()
+    bounded = _SparseEventRepo(dense_fx_repository)
+    original = _UnboundedDiscoveryRepo(dense_fx_repository)
+    bounded_context = (
+        FxShadowPinContext(calculation_version="5B.2", evaluations=[]) if shadow else None
+    )
+    original_context = (
+        FxShadowPinContext(calculation_version="5B.2", evaluations=[]) if shadow else None
+    )
+    with activate_fx_shadow_context(bounded_context):
+        actual = await build_wallet_pnl_series(
+            cast(Repository, bounded), _W1, "live", _m(0), _m(0), "1m", _m(1), "PLN"
+        )
+    with activate_fx_shadow_context(original_context):
+        expected = await build_wallet_pnl_series(
+            cast(Repository, original), _W1, "live", _m(0), _m(0), "1m", _m(1), "PLN"
+        )
+    assert actual == expected
+    assert actual.points[0].net_pnl == 12.0
+    assert actual.points[0].valuation_status == "complete"
+    assert actual.points[0].incompleteness_reasons == ()
+    assert [
+        (source.base_currency, source.quote_currency, source.exchange)
+        for source in actual.rate_sources
+    ] == [("EUR", "PLN", "walutomat")]
+    intervals = bounded.fx_candidate_interval_calls[1]
+    bounded_candidates = await dense_fx_repository.get_pnl_fx_rate_exchanges(
+        [("EUR", "PLN")], _m(_OLD_MINUTE - 21), _m(0), _m(1), open_intervals=intervals
+    )
+    original_candidates = await dense_fx_repository.get_pnl_fx_rate_exchanges(
+        [("EUR", "PLN")], _m(_OLD_MINUTE - 21), _m(0), _m(1)
+    )
+    assert original_candidates == [("EUR", "PLN", "kraken"), ("EUR", "PLN", "walutomat")]
+    assert bounded_candidates == (original_candidates if shadow else [("EUR", "PLN", "walutomat")])
+    if bounded_context is not None and original_context is not None:
+        assert bounded_context.evaluations == original_context.evaluations
+        assert bounded_context.evaluations[0].candidate_planes == frozenset(original_candidates)
+
+
+@pytest.mark.parametrize(
+    ("minutes", "shadow"), [((0,), False), (tuple(range(0, 1020, 60)), False), ((0, 60), True)]
+)
+async def test_event_discovery_and_load_share_full_range_fallbacks(
+    minutes: tuple[int, ...],
+    shadow: bool,
+) -> None:
+    """Dense, fragmented, and shadow plans share an empty interval restriction.
+
+    Given: Event requirements form one interval, exceed sixteen intervals, or activate shadow.
+    When: Discovery and candle loading consume the same event plan.
+    Then: Both keep the full original range and the independent mark read stays unchanged.
+    """
+    pair = currency_pair_key("EUR", "PLN")
+    repository = FakeRepo(fx_rows=[_fx_row("EUR", "PLN", minute, 4.0) for minute in minutes])
+    context = FxShadowPinContext(calculation_version="5B.2", evaluations=[]) if shadow else None
+    with activate_fx_shadow_context(context):
+        await _load_request_fx_rates(
+            cast(Repository, repository),
+            {"owner": {pair: {_m(minutes[-1])}}},
+            {"owner": {pair: {_m(minute) for minute in minutes}}},
+            {},
+            _m(2000),
+            "PLN",
+        )
+    assert repository.fx_candidate_interval_calls == [(), ()]
+    assert repository.fx_interval_calls == [(), ()]
+    assert repository.fx_candidate_interval_calls[1] is repository.fx_interval_calls[1]
+    assert repository.fx_candidate_range_calls == [
+        (_m(minutes[-1] - 21), _m(minutes[-1])),
+        (_m(minutes[0] - 21), _m(minutes[-1])),
+    ]
 
 
 @pytest.mark.parametrize(
