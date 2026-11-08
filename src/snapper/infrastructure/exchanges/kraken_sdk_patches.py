@@ -1364,24 +1364,29 @@ def _patched_manage_subscriptions(self: ConnectSpotWebsocketBase, message: JsonO
     defined on the ``ConnectSpotWebsocket`` subclass, not the base, so
     the typed ``self`` annotation does not surface them statically.
     """
+    method = message.get("method")
+    if method not in ("subscribe", "unsubscribe"):
+        return
     transform: Any = getattr(self, "_ConnectSpotWebsocket__transform_subscription")
     append: Any = getattr(self, "_ConnectSpotWebsocket__append_subscription")
     remove: Any = getattr(self, "_ConnectSpotWebsocket__remove_subscription")
-    log_message = _redact_ws_log_payload(message)
-    if message.get("method") == "subscribe":
+    if method == "subscribe":
         if message.get("success") and message.get("result"):
             transformed = transform(subscription=message)
             append(subscription=transformed["result"])
         elif message.get("error") == _ALREADY_SUBSCRIBED_ERROR:
-            logger.debug("kraken-sdk subscribe race (already subscribed): {}", log_message)
+            logger.debug(
+                "kraken-sdk subscribe race (already subscribed): {}",
+                _redact_ws_log_payload(message),
+            )
         else:
-            logger.warning("kraken-sdk subscribe failed: {}", log_message)
-    elif message.get("method") == "unsubscribe":
+            logger.warning("kraken-sdk subscribe failed: {}", _redact_ws_log_payload(message))
+    else:
         if message.get("success") and message.get("result"):
             transformed = transform(subscription=message)
             remove(subscription=transformed["result"])
         else:
-            logger.warning("kraken-sdk unsubscribe failed: {}", log_message)
+            logger.warning("kraken-sdk unsubscribe failed: {}", _redact_ws_log_payload(message))
 
 
 def apply_kraken_already_subscribed_filter() -> None:
