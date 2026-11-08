@@ -1674,3 +1674,15 @@ async def test_supervisor_sweeps_at_start_and_after_each_feed_break() -> None:
     ):
         await worker.run()
     assert order == ["sweep", "pass", "sweep", "pass"]
+
+
+def test_default_sweep_fits_the_history_window_for_the_spot_roster() -> None:
+    """A full default sweep still reaches every restart gap inside the window.
+
+    Given: The default policy and the 1,853-symbol Kraken spot roster.
+    When: The paced sweep duration is compared with the history window.
+    Then: It leaves at least fifteen minutes for feed startup and the gap itself.
+    """
+    policy = CatchupPolicy()
+    sweep_minutes = 1853 * (policy.sweep_spacing_seconds + 0.1) / 60
+    assert sweep_minutes + 15 <= policy.history_minutes
