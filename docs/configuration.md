@@ -624,11 +624,14 @@ Fair passes alone do not cover a large wildcard roster: 1,500 nonpriority
 instruments need at least 1,500 passes, far beyond the 120-minute history
 window. The worker therefore starts with a sweep, and runs another after
 every reconnect notification. A sweep visits every persisted, subscribed
-symbol once, in name order, pausing one second
+symbol once, in name order, pausing three seconds
 (`CatchupPolicy.sweep_spacing_seconds`) after each attempt. Each symbol uses
 its own 120-minute window ending at the current closed minute. With 1,853
-spot symbols a sweep takes about 31 minutes, so minutes lost to a restart or
-reconnect are repaired for the whole roster while still inside the window. A
+spot symbols a sweep takes about 95 minutes, so minutes lost to a restart or
+reconnect are repaired for the whole roster while still inside the window.
+Each symbol commits in its own short transaction that shares the live writer's
+identity gate; a one-second pause measurably delayed live candles, so the
+pause trades sweep duration for live-write headroom. A
 reconnect during a sweep schedules a new sweep after it. Intervals older than
 the window remain unavailable and need separately reviewed recovery. Priority scheduling keeps the default dashboard pairs prompt without
 silently expanding the request budget or claiming all wildcard gaps healed.

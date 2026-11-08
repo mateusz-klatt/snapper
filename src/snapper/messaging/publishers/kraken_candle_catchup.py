@@ -42,7 +42,7 @@ class CatchupPolicy:
     interval_seconds: float = 60.0
     minimum_spacing_seconds: float = 5.0
     priority_symbols: tuple[str, ...] = ("BTC-USD", "ETH-USD", "EUR-USD")
-    sweep_spacing_seconds: float = 1.0
+    sweep_spacing_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         """Reject policies that would remove a resource or pacing bound."""
