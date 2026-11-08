@@ -1198,6 +1198,14 @@ doubling up to 30 s), and resumes draining — queued and in-flight rows
 survive session loss while the process remains alive, subject to queue overflow;
 a process crash loses in-memory queue and batch contents.
 
+Candle writers also retain batches after PostgreSQL lock acquisition failures
+identified by structured SQLSTATE `55P03`. Recovery preserves exact row identity,
+queue acknowledgement debt, and dependent repair gates until commit; row-by-row
+fallback retains only the unresolved suffix. Each successful candle commit,
+including a fallback row commit, resets the next recovery delay to 1 s. Recovery
+logs include the SQLSTATE. Other PostgreSQL error codes keep their existing
+dispositions.
+
 On shutdown (launcher cancellation or direct stop), remaining rows are
 flushed by the writer drain loops, which keep draining the queue and the
 in-flight batch after the running flag goes false until both are empty;

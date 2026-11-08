@@ -6289,6 +6289,269 @@ def _trade_integrity_error(sqlstate: str) -> IntegrityError:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rollback_fails", [False, True])
+async def test_candle_lock_timeout_retains_batch_and_queue_debt_until_commit(
+    rollback_fails: bool,
+) -> None:
+    """A lock-aborted write keeps its exact rows and queue obligations for recovery.
+
+    Given: an in-flight candle batch and a lock timeout with optional rollback failure,
+    When: the actual flush retries after writer recovery,
+    Then: rows and queue debt remain intact until the successful commit.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    session, commit, rollback = _publisher_writer_session()
+    if rollback_fails:
+        rollback.side_effect = RuntimeError("rollback connection lost")
+    upsert = AsyncMock(side_effect=[DBAPIError("INSERT", {}, _FakeTradePgError("55P03")), 2])
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert))
+    pub._candle_writer_session = session
+    rows = [_publisher_candle_row("c1"), _publisher_candle_row("c2", 1)]
+    for row in rows:
+        pub._candle_write_queue.put_nowait(row)
+    batch = [pub._candle_write_queue.get_nowait() for _ in rows]
+    original = [row.copy() for row in batch]
+
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_writer_batch(batch)
+
+    assert batch == original
+    assert pub._candle_write_queue._unfinished_tasks == 2
+    commit.assert_not_awaited()
+    rollback.assert_awaited_once()
+    rollback.side_effect = None
+    await pub._flush_candle_writer_batch(batch)
+    await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+    assert batch == []
+    commit.assert_awaited_once()
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_candle_lock_timeout_fallback_retries_only_uncommitted_suffix() -> None:
+    """Row fallback retains the blocked row and uncommitted suffix.
+
+    Given: a batch integrity failure followed by one committed fallback row,
+    When: the next fallback row encounters a structured lock timeout,
+    Then: only the uncommitted suffix and its queue debt survive for retry.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    session, commit, rollback = _publisher_writer_session()
+    upsert = AsyncMock(
+        side_effect=[
+            _trade_integrity_error("23505"),
+            1,
+            DBAPIError("INSERT", {}, _FakeTradePgError("55P03")),
+            2,
+        ]
+    )
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert))
+    pub._candle_writer_session = session
+    rows = [_publisher_candle_row(f"c{i}", i) for i in range(3)]
+    for row in rows:
+        pub._candle_write_queue.put_nowait(row)
+    batch = [pub._candle_write_queue.get_nowait() for _ in rows]
+    original = [row.copy() for row in rows]
+
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_writer_batch(batch)
+
+    assert batch == original[1:]
+    assert pub._candle_write_queue._unfinished_tasks == 2
+    assert commit.await_count == 1
+    assert rollback.await_count == 2
+    await pub._flush_candle_writer_batch(batch)
+    await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+    assert batch == []
+    assert commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_candle_lock_timeout_preserves_actual_pending_repair_output() -> None:
+    """A blocked synthesized replacement retains its exact dependent repair.
+
+    Given: a real pending repair with its synthesized output queued,
+    When: output persistence encounters a structured lock timeout,
+    Then: exact output ownership and references remain until that output commits.
+    """
+    pub, key = await _enqueued_ack_repair()
+    replacement = pub._candle_write_queue.get_nowait()
+    sequence = pub._pending_candle_repairs[key].output_sequence
+    references = pub._candle_write_sequence_references.copy()
+    batch = [replacement]
+    with (
+        patch.object(
+            pub.repository,
+            "upsert_candles",
+            new=AsyncMock(side_effect=DBAPIError("INSERT", {}, _FakeTradePgError("55P03"))),
+        ),
+        pytest.raises(_WriterSessionLostError),
+    ):
+        await pub._flush_candle_writer_batch(batch)
+
+    assert batch == [replacement]
+    assert pub._candle_write_queue._unfinished_tasks == 1
+    assert pub._pending_candle_repairs[key].output_sequence == sequence
+    assert pub._pending_candle_repairs[key].attempts == 0
+    assert pub._candle_write_sequence_references == references
+    await pub._flush_candle_writer_batch(batch)
+    await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+    assert key not in pub._pending_candle_repairs
+    assert pub._candle_repair_output_keys == {}
+    assert pub._candle_write_sequence_references == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["55P03", "57014", "40001", "40P01", None])
+async def test_candle_lock_timeout_scope_uses_structured_code_only(sqlstate: str | None) -> None:
+    """Only structured lock failures gain candle retention.
+
+    Given: a structured PostgreSQL error or an unstructured lock hint,
+    When: the candle writer classifies the failed batch,
+    Then: only SQLSTATE 55P03 retains the batch and queue debt for recovery.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    error = (
+        DBAPIError("INSERT", {}, _FakeTradePgError(sqlstate))
+        if sqlstate is not None
+        else RuntimeError("55P03 lock timeout text without a structured driver code")
+    )
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=AsyncMock(side_effect=error)))
+    row = _publisher_candle_row("c1")
+    pub._candle_write_queue.put_nowait(row)
+    batch = [pub._candle_write_queue.get_nowait()]
+    if sqlstate == "55P03":
+        with pytest.raises(_WriterSessionLostError):
+            await pub._flush_candle_writer_batch(batch)
+        assert batch == [row]
+        assert pub._candle_write_queue._unfinished_tasks == 1
+    else:
+        await pub._flush_candle_writer_batch(batch)
+        assert batch == []
+        await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+
+
+@pytest.mark.asyncio
+async def test_candle_lock_timeout_writer_reopens_and_drains_exact_rows_on_shutdown() -> None:
+    """The actual writer loop retains a blocked batch across reopen.
+
+    Given: queued candle rows and a first-write lock timeout,
+    When: the writer reopens its session and ingestion stops during recovery,
+    Then: exact rows commit once and graceful draining balances queue debt.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_batch_max_rows = 2
+    pub._batch_max_age_s = 0.01
+    attempts: list[list[CandleUpsertRow]] = []
+    transactions: list[tuple[AsyncMock, AsyncMock]] = []
+
+    @contextlib.asynccontextmanager
+    async def open_session() -> AsyncIterator[AsyncSession]:
+        """Provide distinct transaction boundaries on each writer recovery attempt."""
+        session, commit, rollback = _publisher_writer_session()
+        transactions.append((commit, rollback))
+        yield session
+
+    async def persist(rows: list[CandleUpsertRow], session: AsyncSession | None = None) -> int:
+        """Abort the first write, then stop ingestion before acknowledging recovery."""
+        assert session is not None
+        attempts.append([row.copy() for row in rows])
+        if len(attempts) == 1:
+            raise DBAPIError("INSERT", {}, _FakeTradePgError("55P03"))
+        pub.running = False
+        return len(rows)
+
+    pub.repository = cast(
+        Repository, SimpleNamespace(upsert_candles=AsyncMock(side_effect=persist))
+    )
+    rows = [_publisher_candle_row("c1"), _publisher_candle_row("c2", 1)]
+    for row in rows:
+        pub._candle_write_queue.put_nowait(row)
+    backoff = AsyncMock(return_value=2.0)
+    with (
+        patch.object(pub, "_open_candle_writer_session", new=open_session),
+        patch.object(pub, "_writer_recovery_backoff", new=backoff),
+    ):
+        await asyncio.wait_for(pub._candle_writer_loop(), 2)
+
+    await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+    assert attempts == [rows, rows]
+    assert len(transactions) == 2
+    transactions[0][0].assert_not_awaited()
+    transactions[0][1].assert_awaited_once()
+    transactions[1][0].assert_awaited_once()
+    backoff.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_commit", [False, True])
+async def test_candle_lock_timeout_backoff_resets_after_successful_commit(
+    partial_commit: bool,
+) -> None:
+    """A successful batch or fallback row resets the next lock recovery delay.
+
+    Given: three lock failures have increased the candle writer's backoff,
+    When: a commit succeeds before another lock failure in the same session,
+    Then: the next recovery sleeps for the initial delay and drains exactly once.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_batch_max_rows = 2
+    pub._batch_max_age_s = 0.01
+    rows = [_publisher_candle_row("c1"), _publisher_candle_row("c2", 1)]
+    for row in rows:
+        pub._candle_write_queue.put_nowait(row)
+    lock_error = DBAPIError("INSERT", {}, _FakeTradePgError("55P03"))
+    outcomes: list[Exception | int] = [lock_error] * 3
+    outcomes.extend(
+        [_trade_integrity_error("23505"), 1, lock_error, 1]
+        if partial_commit
+        else [2, lock_error, 1]
+    )
+    session, commit, rollback = _publisher_writer_session()
+    delays: list[float] = []
+
+    @contextlib.asynccontextmanager
+    async def open_session() -> AsyncIterator[AsyncSession]:
+        """Keep real flush transaction calls while replacing session acquisition."""
+        yield session
+
+    async def persist(rows: list[CandleUpsertRow], session: AsyncSession | None = None) -> int:
+        """Commit between lock failures through the actual batch or row fallback."""
+        assert session is not None
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if not partial_commit and outcomes:
+            pub._candle_write_queue.put_nowait(_publisher_candle_row("c3", 2))
+        if not outcomes:
+            pub.running = False
+        return outcome
+
+    async def record_sleep(delay: float) -> None:
+        """Observe the real exponential recovery policy without wall-clock waits."""
+        delays.append(delay)
+
+    pub.repository = cast(
+        Repository, SimpleNamespace(upsert_candles=AsyncMock(side_effect=persist))
+    )
+    with (
+        patch.object(pub, "_open_candle_writer_session", new=open_session),
+        patch("snapper.messaging.publishers.base.asyncio.sleep", new=record_sleep),
+        patch("snapper.messaging.publishers.base.logger.warning") as warning,
+    ):
+        await asyncio.wait_for(pub._candle_writer_loop(), 2)
+
+    await asyncio.wait_for(pub._candle_write_queue.join(), 1)
+    assert delays == [1.0, 2.0, 4.0, 1.0]
+    assert commit.await_count == 2
+    assert rollback.await_count == 4 + int(partial_commit)
+    assert all("SQLSTATE=55P03" in str(call) for call in warning.call_args_list)
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
 async def test_flush_candle_batch_commits_writer_session() -> None:
     """Verify candle flush commits the held writer session.
 
