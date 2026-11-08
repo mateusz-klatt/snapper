@@ -2,7 +2,7 @@
 
 The repository owns cursor durability, bounded sweep and worklog
 draining, and finding latching. This watchdog owns only recurrence,
-per-monitor timeout isolation, and publication through the existing
+per-monitor timeout isolation, adaptive page limits, and publication through the existing
 critical-system-error heartbeat path.
 
 M1 always runs before M2. Each repository call has its own timeout and
@@ -25,6 +25,8 @@ from typing import Final
 from typing import Protocol
 from uuid import uuid7
 
+from sqlalchemy.exc import DBAPIError
+
 from snapper.core.json_types import JsonArray
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatusEnum
@@ -44,6 +46,9 @@ DEFAULT_STARTUP_GRACE_SECONDS: Final = 0.0
 DEFAULT_SWEEP_LIMIT: Final = TRADE_INTEGRITY_SWEEP_LIMIT
 DEFAULT_WORKLOG_LIMIT: Final = TRADE_INTEGRITY_WORKLOG_LIMIT
 DEFAULT_MONITOR_TIMEOUT_SECONDS: Final = 30.0
+MIN_SWEEP_LIMIT: Final = 500
+MIN_WORKLOG_LIMIT: Final = 100
+PAGE_GROWTH_SUCCESS_COUNT: Final = 3
 
 WATCHDOG_HEARTBEAT_COMPONENT: Final = "trade_integrity"
 
@@ -100,6 +105,7 @@ class TradeIntegrityRepository(Protocol):
         now: datetime,
         sweep_limit: int,
         worklog_limit: int,
+        statement_timeout_seconds: float,
     ) -> TradeIntegrityRunResult:
         """Run one bounded monitor pass.
 
@@ -108,6 +114,7 @@ class TradeIntegrityRepository(Protocol):
             now: Shared evaluation timestamp.
             sweep_limit: Maximum recent-window rows requested.
             worklog_limit: Maximum durable worklog rows requested.
+            statement_timeout_seconds: PostgreSQL statement execution bound.
 
         Returns:
             Durable cursor, coverage, cost, and latched finding state.
@@ -131,6 +138,15 @@ class TradeIntegrityMonitorConfig:
     sweep_limit: int = DEFAULT_SWEEP_LIMIT
     worklog_limit: int = DEFAULT_WORKLOG_LIMIT
     monitor_timeout_seconds: float = DEFAULT_MONITOR_TIMEOUT_SECONDS
+
+
+@dataclass(slots=True)
+class _MonitorPageState:
+    """Effective page sizes and consecutive successful passes for one monitor."""
+
+    sweep_limit: int
+    worklog_limit: int
+    successful_passes: int = 0
 
 
 def _resolve_interval(env_value: str | None) -> float:
@@ -187,6 +203,10 @@ class TradeIntegrityWatchdog:
         self._repo = repo
         self._msg_publisher = msg_publisher
         self._config = config
+        self._pages = {
+            monitor: _MonitorPageState(config.sweep_limit, config.worklog_limit)
+            for monitor in _MONITORS
+        }
         self._sequences: dict[TradeIntegrityMonitor, int] = {}
         self._stopping = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
@@ -263,27 +283,83 @@ class TradeIntegrityWatchdog:
         Returns:
             Repository result, or ``None`` after a timeout or failure.
         """
+        page = self._pages[monitor]
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._repo.run_trade_integrity_monitor(
                     monitor=monitor,
                     now=now,
-                    sweep_limit=self._config.sweep_limit,
-                    worklog_limit=self._config.worklog_limit,
+                    sweep_limit=page.sweep_limit,
+                    worklog_limit=page.worklog_limit,
+                    statement_timeout_seconds=max(self._config.monitor_timeout_seconds - 2.0, 1.0),
                 ),
                 timeout=self._config.monitor_timeout_seconds,
             )
-        except TimeoutError:
-            logger.error(
-                "TradeIntegrityWatchdog %s timed out after %.1fs",
+        except Exception as error:
+            page.successful_passes = 0
+            if isinstance(error, TimeoutError) or (
+                isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "57014"
+            ):
+                self._shrink_page(monitor)
+            else:
+                logger.exception(
+                    "TradeIntegrityWatchdog %s failed; continuing with next monitor", monitor
+                )
+            return None
+        self._record_success(monitor)
+        return result
+
+    def _shrink_page(self, monitor: TradeIntegrityMonitor) -> None:
+        """Reduce retried work without acknowledging any rolled-back candidate.
+
+        Configured limits smaller than the adaptation floors remain authoritative.
+
+        Args:
+            monitor: Monitor whose time budget was exceeded.
+        """
+        page = self._pages[monitor]
+        previous = (page.sweep_limit, page.worklog_limit)
+        page.sweep_limit = max(
+            min(MIN_SWEEP_LIMIT, self._config.sweep_limit), page.sweep_limit // 2
+        )
+        page.worklog_limit = max(
+            min(MIN_WORKLOG_LIMIT, self._config.worklog_limit), page.worklog_limit // 2
+        )
+        logger.warning(
+            "TradeIntegrityWatchdog %s timed out within %.1fs budget; "
+            "effective sweep_limit %s -> %s, worklog_limit %s -> %s",
+            monitor,
+            self._config.monitor_timeout_seconds,
+            previous[0],
+            page.sweep_limit,
+            previous[1],
+            page.worklog_limit,
+        )
+
+    def _record_success(self, monitor: TradeIntegrityMonitor) -> None:
+        """Recover capacity gradually after consecutive committed monitor passes.
+
+        Args:
+            monitor: Monitor whose pass committed successfully.
+        """
+        page = self._pages[monitor]
+        page.successful_passes += 1
+        if page.successful_passes < PAGE_GROWTH_SUCCESS_COUNT:
+            return
+        page.successful_passes = 0
+        previous = (page.sweep_limit, page.worklog_limit)
+        page.sweep_limit = min(self._config.sweep_limit, page.sweep_limit * 2)
+        page.worklog_limit = min(self._config.worklog_limit, page.worklog_limit * 2)
+        if previous != (page.sweep_limit, page.worklog_limit):
+            logger.info(
+                "TradeIntegrityWatchdog %s recovered; "
+                "effective sweep_limit %s -> %s, worklog_limit %s -> %s",
                 monitor,
-                self._config.monitor_timeout_seconds,
+                previous[0],
+                page.sweep_limit,
+                previous[1],
+                page.worklog_limit,
             )
-        except Exception:
-            logger.exception(
-                "TradeIntegrityWatchdog %s failed; continuing with next monitor", monitor
-            )
-        return None
 
     async def _publish_result(
         self,
@@ -389,8 +465,10 @@ class TradeIntegrityWatchdog:
                 "lag_seconds": result.lag_seconds,
                 "lagged": result.lagged,
                 "pass_completed": result.pass_completed,
-                "sweep_limit": self._config.sweep_limit,
-                "worklog_limit": self._config.worklog_limit,
+                "sweep_limit": self._pages[result.monitor].sweep_limit,
+                "worklog_limit": self._pages[result.monitor].worklog_limit,
+                "configured_sweep_limit": self._config.sweep_limit,
+                "configured_worklog_limit": self._config.worklog_limit,
                 "monitor_timeout_seconds": self._config.monitor_timeout_seconds,
                 "evaluated_at": evaluated_at.isoformat(),
             }

@@ -3881,6 +3881,7 @@ class Repository(ABC):
         now: datetime,
         sweep_limit: int,
         worklog_limit: int,
+        statement_timeout_seconds: float = 28.0,
     ) -> TradeIntegrityRunResult:
         """Run one bounded, durable M1 or M2 pass.
 
@@ -3889,6 +3890,7 @@ class Repository(ABC):
             now: Reference instant for scan settlement and lag.
             sweep_limit: Maximum recent trades read.
             worklog_limit: Maximum outstanding restore identities read.
+            statement_timeout_seconds: PostgreSQL statement execution bound.
 
         Returns:
             Durable pass result with bounded findings and cursor state.
@@ -12247,8 +12249,13 @@ class SQLAlchemyRepository(Repository):
         now: datetime,
         sweep_limit: int,
         worklog_limit: int,
+        statement_timeout_seconds: float = 28.0,
     ) -> TradeIntegrityRunResult:
-        """Run one bounded M1 or M2 pass and commit its durable state."""
+        """Run one bounded M1 or M2 pass and commit its durable state.
+
+        PostgreSQL limits each statement inside this transaction so cancellation
+        releases database work before the watchdog's wall-clock timeout.
+        """
         request = TradeIntegrityPassRequest(
             monitor=monitor,
             now=now,
@@ -12256,6 +12263,9 @@ class SQLAlchemyRepository(Repository):
             worklog_limit=worklog_limit,
         )
         async with self.session() as session:
+            if self.dialect_name == "postgresql":
+                timeout_ms = max(1000, int(statement_timeout_seconds * 1000))
+                await session.execute(text(f"SET LOCAL statement_timeout = '{timeout_ms}ms'"))
             return await run_trade_integrity_monitor_pass(
                 session,
                 self.dialect_name,

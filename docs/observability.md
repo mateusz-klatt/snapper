@@ -108,16 +108,28 @@ First startup does not pre-credit the window: completed coverage starts
 at the overlap boundary and becomes current only after the full initial
 pass completes.
 
-Each monitor returns at most 25,000 recent sweep rows and 2,000 durable
-restore/import worklog rows per run, then performs only targeted
-index-backed identity probes for at most 27,000 distinct candidates;
-each probe reads at most two matching index entries. The repository
-rejects larger row limits. Each repository call has a 30-second timeout;
-one timeout does not prevent the other monitor from running.
-Across both monitors the scheduler therefore requests at most 50,000
-sweep rows and 4,000 worklog rows per tick. Under normal production
-load each monitor is expected to finish well inside its 30-second
-ceiling.
+Each monitor starts with limits of 25,000 recent sweep rows and 2,000
+durable restore/import worklog rows per run, then performs targeted
+index-backed identity probes for at most 27,000 distinct candidates.
+Each probe returns at most two matching rows, but partitioned tables
+can require index probes across every partition. The repository rejects
+larger row limits. Across both monitors the scheduler requests at most
+50,000 sweep rows and 4,000 worklog rows per tick.
+
+Each repository call has a 30-second wall-clock timeout. PostgreSQL also
+sets a transaction-local statement timeout two seconds below that bound
+(28 seconds by default, with a one-second minimum). A wall-clock timeout
+or PostgreSQL query cancellation halves that monitor's effective sweep
+and worklog limits, down to 500 and 100 rows respectively. Three
+consecutive successful passes double the limits, capped at the configured
+maximums. Explicitly configured limits below those floors remain capped
+at their configured values. Adaptive state is independent for M1 and M2,
+held in memory, and resets on restart. Shrinks log at WARNING and growth
+at INFO; heartbeat metadata exposes the next pass's effective `sweep_limit`
+and `worklog_limit`, alongside `configured_sweep_limit` and
+`configured_worklog_limit`. A cancelled transaction rolls back its cursor and worklog
+changes so the next pass retries the same candidates with smaller pages.
+One monitor's timeout does not prevent the other monitor from running.
 
 Findings or excessive completed-coverage lag publish three WARNING
 heartbeats, two seconds apart, on
@@ -131,7 +143,8 @@ with successful calls consuming their full timeout is about 94 seconds
 for M1 and 128 seconds for M2. The raw six-hour
 overlap contains about 1.68 million rows at the current ingestion rate;
 arrivals during pagination expand a steady pass to about 2.06 million
-rows, or roughly 82 minutes at 25,000 rows per minute. Including the
+rows, or roughly 82 minutes at the full 25,000-row page size per minute.
+Adaptive page reductions extend these coverage times. Including the
 five-minute settlement grace, cadence, and warning spacing, a newly
 settled cursor-only violation normally takes at most about 89 minutes
 to alert. If every successful database call consumes nearly all of its

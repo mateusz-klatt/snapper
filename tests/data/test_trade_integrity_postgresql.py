@@ -8,12 +8,16 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.data import repository as repository_module
 from snapper.data import trade_integrity as integrity_module
 from snapper.data.models import Trade
 from snapper.data.models import TradeIntegrityWorkItem
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeIntegrityFinding
+from snapper.data.repository_types import TradeIntegrityRunResult
 from snapper.data.trade_integrity import TradeIntegrityPassRequest
 from snapper.data.trade_integrity import _find_m1_postgresql
 from snapper.data.trade_integrity import _find_m1_sqlite
@@ -24,6 +28,69 @@ from snapper.data.trade_integrity import _M1Candidate
 from snapper.data.trade_integrity import run_trade_integrity_monitor
 
 _NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dialect", "timeout_seconds", "expected_timeout"),
+    [
+        ("postgresql", 28.0, "28000ms"),
+        ("postgresql", 1.234, "1234ms"),
+        ("postgresql", 0.0, "1000ms"),
+        ("sqlite", 28.0, None),
+    ],
+)
+async def test_repository_bounds_postgresql_statements_before_monitor_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    dialect: str,
+    timeout_seconds: float,
+    expected_timeout: str | None,
+) -> None:
+    """Apply transaction-local statement bounds only on PostgreSQL.
+
+    Given: A monitor repository with a selected database dialect and time budget.
+    When: The repository starts a monitor pass.
+    Then: PostgreSQL receives its millisecond timeout before any monitor work,
+        while SQLite runs the pass without a PostgreSQL setting.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    engine = MagicMock()
+    engine.url.get_dialect.return_value.name = dialect
+    repository = SQLAlchemyRepository.__new__(SQLAlchemyRepository)
+    repository.engine = cast(AsyncEngine, engine)
+    repository.session_factory = MagicMock(return_value=session)
+    pass_result = MagicMock(spec=TradeIntegrityRunResult)
+    monitor_pass = AsyncMock(return_value=pass_result)
+    operations = MagicMock()
+    operations.attach_mock(session.execute, "execute")
+    operations.attach_mock(monitor_pass, "run_pass")
+    monkeypatch.setattr(repository_module, "run_trade_integrity_monitor_pass", monitor_pass)
+    request = TradeIntegrityPassRequest(
+        monitor="m1",
+        now=_NOW,
+        sweep_limit=500,
+        worklog_limit=100,
+    )
+
+    result = await repository.run_trade_integrity_monitor(
+        monitor="m1",
+        now=_NOW,
+        sweep_limit=500,
+        worklog_limit=100,
+        statement_timeout_seconds=timeout_seconds,
+    )
+
+    assert result is pass_result
+    monitor_pass.assert_awaited_once_with(session, dialect, request)
+    if expected_timeout is None:
+        session.execute.assert_not_awaited()
+        assert [operation[0] for operation in operations.mock_calls] == ["run_pass"]
+    else:
+        session.execute.assert_awaited_once()
+        assert str(session.execute.await_args.args[0]) == (
+            f"SET LOCAL statement_timeout = '{expected_timeout}'"
+        )
+        assert [operation[0] for operation in operations.mock_calls] == ["execute", "run_pass"]
 
 
 def _session_with_rows(rows: list[dict[str, object]]) -> AsyncSession:
