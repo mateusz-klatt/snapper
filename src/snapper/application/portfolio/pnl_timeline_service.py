@@ -4730,6 +4730,54 @@ async def _finalize_wallet_pnl_series(
     )
 
 
+def _series_instrument_ids(
+    anchor: _ResolvedPnlAnchor,
+    replay: _SeriesReplayInputs,
+    from_time: datetime,
+    to_time: datetime,
+) -> tuple[list[str], list[str]]:
+    """Derive opening and combined instrument identities and enforce the work budget.
+
+    Args:
+        anchor: Parsed activation anchor with its opening pools.
+        replay: Loaded accounting evidence for the requested series.
+        from_time: Inclusive series window start.
+        to_time: Inclusive series window end.
+
+    Returns:
+        Opening instrument identities and the combined ordered identities.
+    """
+    replayed_execution_rows = replay.replayed_execution_rows
+    accrual_rows = replay.accrual_rows
+    execution_instrument_ids = list(
+        dict.fromkeys(row["instrument_public_id"] for row in replayed_execution_rows)
+    )
+    opening_instrument_ids = list(
+        dict.fromkeys(pool.instrument_public_id for pool in anchor.opening.pools)
+    )
+    instrument_ids = list(
+        dict.fromkeys(
+            opening_instrument_ids
+            + execution_instrument_ids
+            + [row["instrument_public_id"] for row in accrual_rows]
+        )
+    )
+    pool_keys = {(pool.instrument_public_id, pool.shard_key) for pool in anchor.opening.pools}
+    pool_keys.update(
+        (row["instrument_public_id"], row["shard_key"]) for row in replayed_execution_rows
+    )
+    pool_instruments = {instrument_public_id for instrument_public_id, _ in pool_keys}
+    accrual_only_instruments = {
+        row["instrument_public_id"] for row in accrual_rows
+    } - pool_instruments
+    _enforce_total_work_budget(
+        from_time,
+        to_time,
+        len(pool_keys) + len(accrual_only_instruments),
+    )
+    return opening_instrument_ids, instrument_ids
+
+
 @pnl_read_stage("series")
 async def build_wallet_pnl_series(
     repo: Repository,
@@ -4790,153 +4838,144 @@ async def build_wallet_pnl_series(
         ValueError: When ``granularity`` is not a supported value (surfaced by
             the pure builder).
     """
-    wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
-    _enforce_total_work_budget(from_time, to_time, 0)
-    anchor_load = await _load_or_create_anchor(
-        repo,
-        _AnchorLoadRequest(
-            scope=_AnchorScope(
-                wallet_public_id=wallet_public_id,
-                mode=mode,
-                valuation_ccy=valuation_ccy,
-                activation_time=as_of.replace(second=0, microsecond=0),
-                knowledge_horizon=as_of,
-                requested_horizon=None if policy.current_truth_horizon else as_of,
-                requested_activation_horizon=(
-                    None if policy.current_truth_horizon else as_of.replace(second=0, microsecond=0)
+    with pnl_read_phase("series_anchor"):
+        wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
+        _enforce_total_work_budget(from_time, to_time, 0)
+        anchor_load = await _load_or_create_anchor(
+            repo,
+            _AnchorLoadRequest(
+                scope=_AnchorScope(
+                    wallet_public_id=wallet_public_id,
+                    mode=mode,
+                    valuation_ccy=valuation_ccy,
+                    activation_time=as_of.replace(second=0, microsecond=0),
+                    knowledge_horizon=as_of,
+                    requested_horizon=None if policy.current_truth_horizon else as_of,
+                    requested_activation_horizon=(
+                        None
+                        if policy.current_truth_horizon
+                        else as_of.replace(second=0, microsecond=0)
+                    ),
                 ),
+                allow_anchor_creation=policy.allow_anchor_creation,
+                preloaded_evidence=options.preloaded_evidence,
             ),
-            allow_anchor_creation=policy.allow_anchor_creation,
-            preloaded_evidence=options.preloaded_evidence,
-        ),
-    )
-    anchor = anchor_load.anchor
-    if anchor is None:
-        return _empty_pnl_series(granularity, valuation_ccy)
-    if to_time < anchor.opening.t0:
-        return _preactivation_pnl_series(
+        )
+        anchor = anchor_load.anchor
+        if anchor is None:
+            return _empty_pnl_series(granularity, valuation_ccy)
+        if to_time < anchor.opening.t0:
+            return _preactivation_pnl_series(
+                anchor,
+                from_time,
+                to_time,
+                granularity,
+                valuation_ccy,
+            )
+    with pnl_read_phase("series_replay"):
+        replay = await _load_series_replay_inputs(
+            repo,
+            anchor_load.scope,
+            to_time,
             anchor,
+            anchor_load.execution_prefix,
+        )
+        loaded_execution_rows = replay.loaded_execution_rows
+        replayed_execution_rows = replay.replayed_execution_rows
+        accrual_rows = replay.accrual_rows
+        replay_metadata = (
+            _derive_series_replay_metadata(
+                loaded_execution_rows, options.baseline_watermarks, to_time
+            )
+            if options.baseline_watermarks is not None
+            else None
+        )
+        opening_instrument_ids, instrument_ids = _series_instrument_ids(
+            anchor, replay, from_time, to_time
+        )
+    with pnl_read_phase("series_market_data"):
+        refs = (
+            await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
+        )
+        suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
+            replayed_execution_rows,
+            refs,
+        )
+        opening_spans = {
+            instrument_public_id: (
+                anchor.opening.t0,
+                max(anchor.opening.t0, to_time),
+            )
+            for instrument_public_id in opening_instrument_ids
+        }
+        opening_refs, _ = _partition_series_price_refs(
+            opening_spans,
+            refs,
+        )
+        untrusted_price_reasons_by_instrument = {
+            instrument_public_id: set(reasons)
+            for instrument_public_id, reasons in untrusted_price_reasons_by_instrument.items()
+        }
+        trusted_ref_by_instrument = {
+            ref["instrument_public_id"]: ref for ref in [*opening_refs, *suffix_refs]
+        }
+        trusted_refs = [
+            trusted_ref_by_instrument[instrument_public_id]
+            for instrument_public_id in instrument_ids
+            if instrument_public_id in trusted_ref_by_instrument
+        ]
+        quote_by_instrument = {
+            ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
+        }
+        base_by_instrument = {
+            ref["instrument_public_id"]: ref["base_currency"] for ref in trusted_refs
+        }
+        mark_candles = await _load_mark_candles(
+            repo,
+            trusted_refs,
             from_time,
             to_time,
-            granularity,
+            as_of,
+        )
+    with pnl_read_phase("series_requirements"):
+        trusted_instruments = set(quote_by_instrument)
+        trusted_replayed_rows = [
+            row
+            for row in replayed_execution_rows
+            if row["instrument_public_id"] in trusted_instruments
+        ]
+        display_activity_spans = _series_display_activity_spans(
+            anchor.opening,
+            replayed_execution_rows,
+            accrual_rows,
+        )
+        display_identities = _instrument_display_identities(display_activity_spans, refs)
+        mark_requirements = _mark_fx_minutes(
+            mark_candles,
+            loaded_execution_rows,
+            base_by_instrument,
+            quote_by_instrument,
             valuation_ccy,
+            from_time,
+            to_time,
+            anchor.opening,
         )
-    replay = await _load_series_replay_inputs(
-        repo,
-        anchor_load.scope,
-        to_time,
-        anchor,
-        anchor_load.execution_prefix,
-    )
-    loaded_execution_rows = replay.loaded_execution_rows
-    replayed_execution_rows = replay.replayed_execution_rows
-    accrual_rows = replay.accrual_rows
-    replay_metadata = (
-        _derive_series_replay_metadata(loaded_execution_rows, options.baseline_watermarks, to_time)
-        if options.baseline_watermarks is not None
-        else None
-    )
-    execution_instrument_ids = list(
-        dict.fromkeys(row["instrument_public_id"] for row in replayed_execution_rows)
-    )
-    opening_instrument_ids = list(
-        dict.fromkeys(pool.instrument_public_id for pool in anchor.opening.pools)
-    )
-    instrument_ids = list(
-        dict.fromkeys(
-            opening_instrument_ids
-            + execution_instrument_ids
-            + [row["instrument_public_id"] for row in accrual_rows]
+        event_requirements = _event_fx_minutes(
+            trusted_replayed_rows,
+            accrual_rows,
+            base_by_instrument,
+            quote_by_instrument,
+            valuation_ccy,
+            anchor.opening,
         )
-    )
-    pool_keys = {(pool.instrument_public_id, pool.shard_key) for pool in anchor.opening.pools}
-    pool_keys.update(
-        (row["instrument_public_id"], row["shard_key"]) for row in replayed_execution_rows
-    )
-    pool_instruments = {instrument_public_id for instrument_public_id, _ in pool_keys}
-    accrual_only_instruments = {
-        row["instrument_public_id"] for row in accrual_rows
-    } - pool_instruments
-    _enforce_total_work_budget(
-        from_time,
-        to_time,
-        len(pool_keys) + len(accrual_only_instruments),
-    )
-    refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
-    suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
-        replayed_execution_rows,
-        refs,
-    )
-    opening_spans = {
-        instrument_public_id: (
-            anchor.opening.t0,
-            max(anchor.opening.t0, to_time),
+        instrument_requirements = _merge_instrument_fx_minutes(
+            mark_requirements,
+            event_requirements,
         )
-        for instrument_public_id in opening_instrument_ids
-    }
-    opening_refs, _ = _partition_series_price_refs(
-        opening_spans,
-        refs,
-    )
-    untrusted_price_reasons_by_instrument = {
-        instrument_public_id: set(reasons)
-        for instrument_public_id, reasons in untrusted_price_reasons_by_instrument.items()
-    }
-    trusted_ref_by_instrument = {
-        ref["instrument_public_id"]: ref for ref in [*opening_refs, *suffix_refs]
-    }
-    trusted_refs = [
-        trusted_ref_by_instrument[instrument_public_id]
-        for instrument_public_id in instrument_ids
-        if instrument_public_id in trusted_ref_by_instrument
-    ]
-    quote_by_instrument = {
-        ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
-    }
-    base_by_instrument = {ref["instrument_public_id"]: ref["base_currency"] for ref in trusted_refs}
-    mark_candles = await _load_mark_candles(
-        repo,
-        trusted_refs,
-        from_time,
-        to_time,
-        as_of,
-    )
-    trusted_instruments = set(quote_by_instrument)
-    trusted_replayed_rows = [
-        row for row in replayed_execution_rows if row["instrument_public_id"] in trusted_instruments
-    ]
-    display_activity_spans = _series_display_activity_spans(
-        anchor.opening,
-        replayed_execution_rows,
-        accrual_rows,
-    )
-    display_identities = _instrument_display_identities(display_activity_spans, refs)
-    mark_requirements = _mark_fx_minutes(
-        mark_candles,
-        loaded_execution_rows,
-        base_by_instrument,
-        quote_by_instrument,
-        valuation_ccy,
-        from_time,
-        to_time,
-        anchor.opening,
-    )
-    event_requirements = _event_fx_minutes(
-        trusted_replayed_rows,
-        accrual_rows,
-        base_by_instrument,
-        quote_by_instrument,
-        valuation_ccy,
-        anchor.opening,
-    )
-    instrument_requirements = _merge_instrument_fx_minutes(
-        mark_requirements,
-        event_requirements,
-    )
-    identity_planes = _identity_fx_planes(
-        trusted_refs,
-        instrument_requirements,
-    )
+        identity_planes = _identity_fx_planes(
+            trusted_refs,
+            instrument_requirements,
+        )
     rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
         repo,
         mark_requirements,
@@ -4945,92 +4984,94 @@ async def build_wallet_pnl_series(
         as_of,
         valuation_ccy,
     )
-    marks, mark_incompleteness_reasons = _build_marks_and_reasons_from_candles(
-        mark_candles,
-        quote_by_instrument,
-        valuation_ccy,
-        rates,
-        planes_by_instrument,
-    )
-    marks = dict(marks)
-    marks.update(anchor.marks)
-    executions = [
-        _to_timeline_execution(
-            row,
+    with pnl_read_phase("series_valuation"):
+        marks, mark_incompleteness_reasons = _build_marks_and_reasons_from_candles(
+            mark_candles,
+            quote_by_instrument,
             valuation_ccy,
             rates,
-            base_asset=base_by_instrument.get(row["instrument_public_id"]),
-            price_currency=quote_by_instrument.get(row["instrument_public_id"]),
-            venues=planes_by_instrument.get(row["instrument_public_id"], {}),
+            planes_by_instrument,
         )
-        for row in loaded_execution_rows
-    ]
-    accruals = [
-        _to_timeline_accrual(
-            row,
-            valuation_ccy,
-            rates,
-            planes_by_instrument.get(row["instrument_public_id"], {}),
+        marks = dict(marks)
+        marks.update(anchor.marks)
+        executions = [
+            _to_timeline_execution(
+                row,
+                valuation_ccy,
+                rates,
+                base_asset=base_by_instrument.get(row["instrument_public_id"]),
+                price_currency=quote_by_instrument.get(row["instrument_public_id"]),
+                venues=planes_by_instrument.get(row["instrument_public_id"], {}),
+            )
+            for row in loaded_execution_rows
+        ]
+        accruals = [
+            _to_timeline_accrual(
+                row,
+                valuation_ccy,
+                rates,
+                planes_by_instrument.get(row["instrument_public_id"], {}),
+            )
+            for row in accrual_rows
+        ]
+        window = TimelineWindow(
+            from_time=from_time,
+            to_time=to_time,
+            granularity=granularity,
+            valuation_ccy=valuation_ccy,
         )
-        for row in accrual_rows
-    ]
-    window = TimelineWindow(
-        from_time=from_time,
-        to_time=to_time,
-        granularity=granularity,
-        valuation_ccy=valuation_ccy,
-    )
-    result = _timed_build_pnl_timeline(
-        executions,
-        accruals,
-        marks,
-        window,
-        opening=anchor.opening,
-        lineage=replay.lineage,
-        untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
-        mark_incompleteness_reasons=mark_incompleteness_reasons,
-    )
-    for global_reason in (
-        replay.fill_gap_reason,
-        replay.late_pre_activation_reason,
-    ):
-        if global_reason is not None:
-            result = _withhold_series_for_global_reason(result, global_reason)
-    result = _with_instrument_display_identities(
-        result,
-        display_identities,
-    )
-    rate_sources = tuple(
-        PnlFxRateSource(
-            source_currency=second if first == valuation_ccy else first,
-            valuation_currency=valuation_ccy,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
-            exchange=exchange,
+        result = _timed_build_pnl_timeline(
+            executions,
+            accruals,
+            marks,
+            window,
+            opening=anchor.opening,
+            lineage=replay.lineage,
+            untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
+            mark_incompleteness_reasons=mark_incompleteness_reasons,
         )
-        for (first, second), (base_currency, quote_currency, exchange) in sorted(used_planes)
-    )
-    return await _finalize_wallet_pnl_series(
-        repo,
-        result,
-        _SeriesAssembly(
-            rate_sources=rate_sources,
-            replay_metadata=replay_metadata,
-            applied_annulments=replay.applied_annulments,
-            overlay_request=_EquityOverlayRequest(
-                wallet_public_id=wallet_public_id,
-                mode=mode,
-                valuation_ccy=valuation_ccy,
-                epoch_public_id=anchor.row["epoch_public_id"],
-                activation_t0=anchor.opening.t0,
-                from_time=from_time,
-                to_time=to_time,
-                current_truth=policy.current_truth,
-                as_of=as_of,
-                points=result.points,
+        for global_reason in (
+            replay.fill_gap_reason,
+            replay.late_pre_activation_reason,
+        ):
+            if global_reason is not None:
+                result = _withhold_series_for_global_reason(result, global_reason)
+        result = _with_instrument_display_identities(
+            result,
+            display_identities,
+        )
+        rate_sources = tuple(
+            PnlFxRateSource(
+                source_currency=second if first == valuation_ccy else first,
+                valuation_currency=valuation_ccy,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                exchange=exchange,
+            )
+            for (first, second), (base_currency, quote_currency, exchange) in sorted(used_planes)
+        )
+    with pnl_read_phase("series_overlay"):
+        return await _finalize_wallet_pnl_series(
+            repo,
+            result,
+            _SeriesAssembly(
+                rate_sources=rate_sources,
+                replay_metadata=replay_metadata,
+                applied_annulments=replay.applied_annulments,
+                overlay_request=_EquityOverlayRequest(
+                    wallet_public_id=wallet_public_id,
+                    mode=mode,
+                    valuation_ccy=valuation_ccy,
+                    epoch_public_id=anchor.row["epoch_public_id"],
+                    activation_t0=anchor.opening.t0,
+                    from_time=from_time,
+                    to_time=to_time,
+                    current_truth=policy.current_truth,
+                    as_of=as_of,
+                    points=result.points,
+                ),
             ),
-        ),
-    )
+        )
 
 
 def _fill_marker(

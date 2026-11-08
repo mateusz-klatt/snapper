@@ -4,6 +4,9 @@ Handler timing starts after FastAPI resolves dependencies and ends before later
 response serialization and transfer. Series, FX and core spans are inclusive;
 timeline extras exclude the separately measured shared prefix and series spans.
 Absent spans remain unobserved, and invalid clocks or nesting stay explicit.
+Series phases are inclusive: permitted anchor creation nests any non-preloaded
+execution prefix and its opening FX work inside the anchor phase, so phase and
+FX totals cannot universally be added together.
 """
 
 from collections.abc import Awaitable
@@ -32,6 +35,14 @@ type PnlFxPhase = Literal[
     "fx_election",
     "fx_fold_final",
 ]
+type PnlSeriesPhase = Literal[
+    "series_anchor",
+    "series_replay",
+    "series_market_data",
+    "series_requirements",
+    "series_valuation",
+    "series_overlay",
+]
 type PnlFxCount = Literal[
     "fx_mark_candidate_planes",
     "fx_event_candidate_planes",
@@ -48,7 +59,9 @@ type PnlFxReadMode = Literal[
     "interval_limit_dense",
     "sparse",
 ]
-type _MeasuredStage = Literal["handler", "series", "prefix", "fx", "core", "timeline"] | PnlFxPhase
+type _MeasuredStage = (
+    Literal["handler", "series", "prefix", "fx", "core", "timeline"] | PnlFxPhase | PnlSeriesPhase
+)
 type _MeasuredCount = PnlFxCount | Literal["fx_event_intervals_observed"]
 
 _P = ParamSpec("_P")
@@ -172,11 +185,11 @@ def pnl_read_fx_window(
 
 
 @contextmanager
-def pnl_read_phase(phase: PnlFxPhase) -> Iterator[None]:
+def pnl_read_phase(phase: PnlFxPhase | PnlSeriesPhase) -> Iterator[None]:
     """Measure one existing synchronous or awaited phase without moving its work.
 
     Args:
-        phase: Fixed FX boundary recorded in the current handler.
+        phase: Fixed FX or series boundary accumulated in the current handler.
 
     Yields:
         Control to the unchanged phase body.
@@ -202,7 +215,9 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             "fx_load_event_ms={} fx_election_ms={} fx_fold_final_ms={} "
             "fx_mark_candidate_planes={} fx_event_candidate_planes={} fx_mark_rows={} "
             "fx_event_rows={} fx_selected_rows={} fx_event_read_mode={} "
-            "fx_event_intervals_observed={}",
+            "fx_event_intervals_observed={} "
+            "series_anchor_ms={} series_replay_ms={} series_market_data_ms={} "
+            "series_requirements_ms={} series_valuation_ms={} series_overlay_ms={}",
             timing.kind,
             "success" if succeeded else "failure",
             _elapsed_text(timing.spans.get("handler")),
@@ -224,6 +239,12 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             _count_text(timing.counts.get("fx_selected_rows")),
             timing.event_read_mode or "unobserved",
             _count_text(timing.counts.get("fx_event_intervals_observed")),
+            _elapsed_text(timing.spans.get("series_anchor")),
+            _elapsed_text(timing.spans.get("series_replay")),
+            _elapsed_text(timing.spans.get("series_market_data")),
+            _elapsed_text(timing.spans.get("series_requirements")),
+            _elapsed_text(timing.spans.get("series_valuation")),
+            _elapsed_text(timing.spans.get("series_overlay")),
         )
     except Exception:
         return
