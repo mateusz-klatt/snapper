@@ -912,6 +912,17 @@ candidate-provenance inputs remain unchanged. This optimization narrows
 materialized evidence; production SQL cost and end-to-end latency still need
 measurement. It adds no public API fields or configuration.
 
+Range, sparse and exact-minute FX candle loads also prefilter instrument
+identities before the author-time joins. The candidate set includes all
+Instrument and Symbol metadata versions matching the requested currency legs
+and exchange; it does not restrict their time bands or apply the later symbol
+proof. This makes membership a superset of every valid original result.
+PostgreSQL materializes that set and uses a typed UUID array to bound the candle
+scan, with JIT disabled only inside the read transaction. SQLite uses an IN
+subquery. The original joins, denomination proof, finalized-candle rules,
+projection and row multiplicity remain unchanged. This scan optimization does
+not alter the sparse-versus-dense read decision or its fallback cases.
+
 ### ZMQ Logger
 
 ```bash

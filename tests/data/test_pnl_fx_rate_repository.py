@@ -10,6 +10,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 from typing import cast
 from unittest.mock import Mock
 
@@ -38,6 +39,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _pnl_fx_symbol_proof_filters
 from snapper.data.repository import where_active
 from snapper.data.repository_types import PnlFxRatePlane
+from snapper.data.repository_types import PnlFxRateRow
 
 _NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _TS = _NOW - timedelta(hours=6)
@@ -573,6 +575,178 @@ class TestDiscoveryCandleExistence:
         assert (
             await repository.get_pnl_fx_rate_exchanges([("NZD", "CHF")], _M, _M, _NOW) == expected
         )
+
+
+async def _original_candle_rows(
+    repository: SQLAlchemyRepository,
+    planes: list[PnlFxRatePlane],
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+) -> list[PnlFxRateRow]:
+    """Execute the original load without an instrument prefilter as a full-row oracle."""
+    statement = (
+        select(Candle, Instrument, Symbol)
+        .select_from(Candle)
+        .join(
+            Instrument,
+            and_(
+                Candle.instrument_public_id == Instrument.public_id,
+                Instrument.timestamp <= Candle.timestamp,
+                Instrument.known_to > Candle.timestamp,
+            ),
+        )
+        .join(
+            Symbol,
+            and_(
+                Instrument.symbol_public_id == Symbol.public_id,
+                Symbol.timestamp <= Candle.timestamp,
+                Symbol.known_to > Candle.timestamp,
+            ),
+        )
+        .where(
+            tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(planes),
+            *_pnl_fx_symbol_proof_filters(as_of),
+            Candle.timeframe == "1m",
+            Candle.open_at >= start,
+            Candle.open_at <= end,
+            Candle.complete.is_(True),
+            *where_active(Candle, as_of),
+        )
+    )
+    async with repository.session() as session:
+        result = await session.execute(statement)
+        return [
+            {
+                "base": symbol.base,
+                "quote": cast(str, symbol.quote),
+                "exchange": instrument.exchange,
+                "open_at": candle.open_at,
+                "close": candle.close,
+                "native_symbol": symbol.native_symbol,
+                "instrument_public_id": instrument.public_id,
+                "candle_id": candle.id,
+                "candle_public_id": candle.public_id,
+                "candle_session_id": candle.session_id,
+                "candle_sequence_id": candle.sequence_id,
+                "candle_timestamp": candle.timestamp,
+                "candle_known_to": candle.known_to,
+            }
+            for candle, instrument, symbol in result.all()
+        ]
+
+
+async def _seed_load_candidate_history(repository: SQLAlchemyRepository) -> None:
+    """Seed shared-plane authors, expired and future bands, and another venue."""
+    changed_at = _M + timedelta(minutes=1)
+    old_instrument = _instrument("ins-load-a", "sym-load-a", "polygon")
+    old_instrument.known_to = changed_at
+    old_venue = _instrument("ins-load-b", "sym-load-b", "polygon")
+    old_venue.known_to = changed_at
+    expired = _instrument("ins-load-expired", "sym-load-a", "polygon")
+    expired.known_to = _M
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _symbol("sym-load-a", "GBP-OLD", "GBP", "USD", known_to=changed_at),
+                _symbol("sym-load-a", "GBP-NEW", "GBP", "USD", timestamp=changed_at),
+                _symbol("sym-load-b", "GBP-SECOND", "GBP", "USD"),
+                _symbol("sym-load-future", "GBP-FUTURE", "GBP", "USD"),
+                old_instrument,
+                _instrument("ins-load-a", "sym-load-a", "polygon", timestamp=changed_at),
+                old_venue,
+                _instrument("ins-load-b", "sym-load-b", "kraken", timestamp=changed_at),
+                expired,
+                _instrument("ins-load-future", "sym-load-future", "polygon", timestamp=_NOW),
+                _instrument("ins-load-decoy", "sym-load-a", "walutomat"),
+                _candle("ins-load-a", _M, 1.2),
+                _candle("ins-load-a", _M + timedelta(minutes=2), 1.3),
+                _candle("ins-load-b", _M, 1.4),
+                _candle("ins-load-expired", _M, 7.0),
+                _candle("ins-load-future", _M, 8.0),
+                _candle("ins-load-decoy", _M, 9.0),
+            ]
+        )
+        await session.commit()
+
+
+class TestCandleLoadInstrumentPrefilter:
+    """Preserve every original load row while bounding candle scan instruments."""
+
+    @pytest.mark.parametrize("reader", ["range", "sparse", "exact"])
+    async def test_prefilter_preserves_full_rows_across_historical_authors(
+        self, repository: SQLAlchemyRepository, reader: Literal["range", "sparse", "exact"]
+    ) -> None:
+        """Candidate membership remains broader than every original author-time join.
+
+        Given: Several plane instruments, metadata versions, expired and future bands,
+        and a matching pair on another exchange.
+        When: Either caller loads the pinned plane, including sparse intervals.
+        Then: Every row field and multiplicity matches the prefilter-free query;
+        historical authors survive and out-of-band or rival authors do not.
+        """
+        await _seed_load_candidate_history(repository)
+        planes: list[PnlFxRatePlane] = [("GBP", "USD", "polygon")]
+        last = _M + timedelta(minutes=2)
+        expected = await _original_candle_rows(repository, planes, _M, last, _NOW)
+        if reader == "exact":
+            actual = await repository.get_pnl_fx_rate_candles_at(planes, [_M, last], _NOW)
+        else:
+            intervals = ((_M, _M), (last, last)) if reader == "sparse" else ()
+            actual = await repository.get_pnl_fx_rate_candles(
+                planes, _M, last, _NOW, open_intervals=intervals
+            )
+        assert sorted(actual, key=lambda row: row["candle_id"]) == sorted(
+            expected, key=lambda row: row["candle_id"]
+        )
+        assert sorted(
+            (row["instrument_public_id"], row["native_symbol"], row["close"]) for row in actual
+        ) == [
+            ("ins-load-a", "GBP-NEW", 1.3),
+            ("ins-load-a", "GBP-OLD", 1.2),
+            ("ins-load-b", "GBP-SECOND", 1.4),
+        ]
+        keys = [(row["open_at"], row["base"], row["quote"], row["exchange"]) for row in actual]
+        assert keys == sorted(keys)
+
+    @pytest.mark.parametrize("exact", [False, True])
+    async def test_postgresql_load_bounds_candles_with_typed_array_before_joins(
+        self, repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch, exact: bool
+    ) -> None:
+        """Both load entry points send a typed candidate array with JIT already off."""
+        statements: list[str] = []
+        result = Mock(spec=Result)
+        result.all.return_value = []
+
+        def dialect(_repository: SQLAlchemyRepository) -> str:
+            """Select PostgreSQL expression construction without connecting to it."""
+            return "postgresql"
+
+        async def capture(_session: AsyncSession, statement: Executable) -> Result[tuple[object]]:
+            """Compile the actual statements at their driver boundary in execution order."""
+            statements.append(
+                " ".join(str(statement.compile(dialect=postgresql.dialect())).split())
+            )
+            return cast(Result[tuple[object]], result)
+
+        monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", property(dialect))
+        monkeypatch.setattr(AsyncSession, "execute", capture)
+        planes: list[PnlFxRatePlane] = [("EUR", "USD", "kraken")]
+        if exact:
+            assert await repository.get_pnl_fx_rate_candles_at(planes, [_M], _NOW) == []
+        else:
+            assert await repository.get_pnl_fx_rate_candles(planes, _M, _M, _NOW) == []
+        assert len(statements) == 2
+        assert statements[0] == "SET LOCAL jit = off"
+        assert "candles.instrument_public_id = ANY (CAST((SELECT array_agg(" in statements[1]
+        assert "AS UUID[]" in statements[1]
+        assert "WITH pnl_fx_load_candidate_instruments AS MATERIALIZED" in statements[1]
+        assert "SELECT DISTINCT instruments.public_id AS public_id" in statements[1]
+        candidates = statements[1].split(") SELECT symbols.base", 1)[0]
+        assert "(symbols.base, symbols.quote, instruments.exchange) IN" in candidates
+        assert "timestamp" not in candidates
+        assert "known_to" not in candidates
+        assert "asset_type" not in candidates
 
 
 class TestGetPnlFxRateCandlesAt:
