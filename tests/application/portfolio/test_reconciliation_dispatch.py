@@ -462,29 +462,33 @@ async def test_kraken_position_observation_preserves_spot_reconciliation_policy(
     assert declared == baseline
 
 
-async def test_spot_boundary_present_evaluates_the_unanchored_account() -> None:
+@pytest.mark.parametrize("exchange", [ExchangeEnum.KRAKEN, ExchangeEnum.WALUTOMAT])
+async def test_spot_boundary_present_evaluates_the_unanchored_account(
+    exchange: ExchangeEnum,
+) -> None:
     """A genuine pre-balance boundary now reaches the real spot evaluator.
 
     Given: A cash spot account whose observer captured a pre-balance boundary
         and whose bundle reports the honest unanchored state.
     When: Dispatch evaluates the spot branch with that boundary threaded in.
-    Then: The evaluator itself classifies the state — an unanchored bundle
-        cannot certify its replay range, so the evaluator's own gate order
-        yields incomplete_replay_boundary; the old stub reason is gone.
+    Then: The evaluator reports missing_anchor even though the unanchored
+        bundle cannot certify its replay range, and keeps the outcome incomplete.
     """
     repository, signal_read, bundle_read = _repository()
     result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
         repository,
-        _account(),
-        _config("spot_execution_replay"),
+        _account(exchange=exchange),
+        _config("spot_execution_replay", exchange=exchange.value),
         CapabilityStatus.NOT_APPLICABLE,
         _NOW,
-        boundary=_boundary(),
+        boundary=_boundary(exchange=exchange.value),
     )
     assert result["method"] == "spot_execution_replay"
     assert result["evaluation_status"] == "incomplete"
-    assert result["error"] == "incomplete_replay_boundary"
-    signal_read.assert_awaited_once_with(_WALLET, "kraken", "live", _NOW)
+    assert result["error"] == "missing_anchor"
+    assert result["anchor_public_id"] is None
+    assert result["source_watermark"] is None
+    signal_read.assert_awaited_once_with(_WALLET, exchange.value, "live", _NOW)
     bundle_read.assert_not_awaited()
 
 

@@ -1473,6 +1473,79 @@ def test_anchor_scope_status_and_boundary_fail_closed(
     assert result["error"] == reason
 
 
+@pytest.mark.parametrize("anchor", [None, _changed_anchor(public_id="")])
+def test_missing_anchor_precedes_incomplete_replay_boundary(
+    anchor: SpotReconciliationAnchorRow | None,
+) -> None:
+    """An absent bootstrap explains why the replay cannot have a complete range.
+
+    Given: No persisted anchor identity and an incomplete replay boundary,
+    When: The authoritative cash account is evaluated,
+    Then: It remains incomplete with missing_anchor and no full lineage.
+    """
+    result = _evaluate(anchor=anchor, boundary=_boundary(range_complete=False))
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "missing_anchor"
+    assert result["anchor_public_id"] is None
+    assert result["source_watermark"] is None
+    assert result["expected_json"] is None
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        _changed_anchor(wallet_public_id="other"),
+        _changed_anchor(source_watermark=12),
+        _changed_anchor(provenance=""),
+        _changed_anchor(inventory_status="suspect_partial"),
+        _changed_anchor(margin_status="unknown"),
+        _changed_anchor(first_request_started_at=datetime(2026, 7, 14, 10, 0)),
+    ],
+)
+def test_incomplete_replay_boundary_still_precedes_invalid_anchor(
+    anchor: SpotReconciliationAnchorRow,
+) -> None:
+    """Only anchor absence changes the existing incomplete-range precedence.
+
+    Given: An identified anchor with invalid evidence and an incomplete range,
+    When: The account is evaluated,
+    Then: The existing incomplete_replay_boundary refusal retains precedence.
+    """
+    result = _evaluate(anchor=anchor, boundary=_boundary(range_complete=False))
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "incomplete_replay_boundary"
+
+
+@pytest.mark.parametrize("anchor", [None, _changed_anchor(public_id="")])
+@pytest.mark.parametrize(
+    ("boundary", "reason"),
+    [
+        (
+            _boundary(request_started_at=datetime(2026, 7, 14, 11, 0)),
+            "invalid_balance_request_boundary",
+        ),
+        (
+            _boundary(venue_cursor=None, venue_cursor_certified=True),
+            "invalid_venue_cursor_certificate",
+        ),
+    ],
+)
+def test_other_replay_boundary_refusals_still_precede_missing_anchor(
+    anchor: SpotReconciliationAnchorRow | None,
+    boundary: SpotReplayBoundary,
+    reason: str,
+) -> None:
+    """Independent clock and cursor defects keep their existing precedence.
+
+    Given: No anchor identity and a complete range with invalid boundary evidence,
+    When: The account is evaluated,
+    Then: The existing boundary refusal remains incomplete and unchanged.
+    """
+    result = _evaluate(anchor=anchor, boundary=boundary)
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == reason
+
+
 @pytest.mark.parametrize(
     ("boundary", "reason"),
     [

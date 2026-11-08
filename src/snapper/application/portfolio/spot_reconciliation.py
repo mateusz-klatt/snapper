@@ -406,14 +406,22 @@ def _evaluation_row(
     }
 
 
+def _require_anchor(
+    anchor: SpotReconciliationAnchorRow | None,
+) -> SpotReconciliationAnchorRow:
+    """Require a persisted anchor identity before diagnosing an incomplete range."""
+    if anchor is None or not anchor["public_id"]:
+        raise _IncompleteError("missing_anchor")
+    return anchor
+
+
 def _validate_anchor(
     anchor: SpotReconciliationAnchorRow | None,
     venue_account: PortfolioAccountState,
     boundary: SpotReplayBoundary,
 ) -> SpotReconciliationAnchorRow:
     """Require one persisted, in-scope, usable bootstrap anchor."""
-    if anchor is None or not anchor["public_id"]:
-        raise _IncompleteError("missing_anchor")
+    anchor = _require_anchor(anchor)
     if (
         anchor["wallet_public_id"] != venue_account.wallet_public_id
         or anchor["exchange"] != str(venue_account.exchange).lower()
@@ -461,14 +469,19 @@ def _validate_anchor(
     return anchor
 
 
-def _validate_boundary(boundary: SpotReplayBoundary, now: datetime) -> None:
-    """Require watermark-before-read ordering and a complete fixed range."""
+def _validate_boundary(
+    boundary: SpotReplayBoundary,
+    now: datetime,
+    anchor: SpotReconciliationAnchorRow | None,
+) -> None:
+    """Require a complete fixed range, naming an absent starting anchor first."""
     if (
         isinstance(boundary.source_watermark, bool)
         or boundary.source_watermark < 0
         or not boundary.range_complete
         or not boundary.watermark_captured_before_balance
     ):
+        _require_anchor(anchor)
         raise _IncompleteError("incomplete_replay_boundary")
     if (
         not isinstance(boundary.request_started_at, datetime)
@@ -988,7 +1001,7 @@ def evaluate(
     if not _account_is_full(venue_account, now):
         return _evaluation_row(venue_account, now, "incomplete", "incomplete_venue_account")
     try:
-        _validate_boundary(replay_boundary, now)
+        _validate_boundary(replay_boundary, now, anchor)
         valid_anchor = _validate_anchor(anchor, venue_account, replay_boundary)
         if replay is None:
             raise _IncompleteError("missing_replay")
