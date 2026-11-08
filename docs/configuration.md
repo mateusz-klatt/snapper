@@ -178,7 +178,7 @@ underlying snapshots and the retention window math.
 | `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` | `60` | Poll cadence for the per-exchange candle-freshness check (floor 5) |
 | `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` | `600` | Whole-exchange silence threshold before the `critical_system_error` alert path fires (floor 120) |
 | `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS` | unset | Per-exchange overrides as `exchange=seconds` CSV; `0` disables one exchange (e.g. `walutomat=1200,kraken_equities=900`) |
-| `TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS` | `60` | Coordinator-0 M1/M2 cadence, clamped to 30–60 seconds; row and timeout bounds are fixed in code |
+| `TRADE_INTEGRITY_MONITOR_INTERVAL_SECONDS` | `60` | Coordinator-0 M1/M2 cadence, clamped to 30–60 seconds; page limits adapt independently after timeouts within bounds fixed in code (see [trade-integrity monitors](observability.md#trade-integrity-monitors)) |
 | `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` | `60` | Notify-sidecar cadence for scanning current open drift episodes whose owning users lack the lifetime `drift.<episode_public_id>` page; malformed or non-positive values use the default |
 | `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 | `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |

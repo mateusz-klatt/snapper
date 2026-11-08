@@ -1,6 +1,7 @@
 """Tests for the incremental trade-integrity watchdog."""
 
 import asyncio
+import logging
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -10,6 +11,9 @@ from unittest.mock import MagicMock
 from unittest.mock import call
 
 import pytest
+from asyncpg.exceptions import QueryCanceledError
+from asyncpg.exceptions import UniqueViolationError
+from sqlalchemy.exc import DBAPIError
 
 from snapper.application.data_quality import trade_integrity as monitor_module
 from snapper.application.data_quality.trade_integrity import DEFAULT_INTERVAL_SECONDS
@@ -20,6 +24,9 @@ from snapper.application.data_quality.trade_integrity import DEFAULT_WORKLOG_LIM
 from snapper.application.data_quality.trade_integrity import ENV_VARS
 from snapper.application.data_quality.trade_integrity import MAX_INTERVAL_SECONDS
 from snapper.application.data_quality.trade_integrity import MIN_INTERVAL_SECONDS
+from snapper.application.data_quality.trade_integrity import MIN_SWEEP_LIMIT
+from snapper.application.data_quality.trade_integrity import MIN_WORKLOG_LIMIT
+from snapper.application.data_quality.trade_integrity import PAGE_GROWTH_SUCCESS_COUNT
 from snapper.application.data_quality.trade_integrity import TradeIntegrityMonitorConfig
 from snapper.application.data_quality.trade_integrity import TradeIntegrityRepository
 from snapper.application.data_quality.trade_integrity import TradeIntegrityWatchdog
@@ -242,12 +249,14 @@ async def test_clean_tick_publishes_one_healthy_frame_per_monitor() -> None:
             now=_NOW,
             sweep_limit=DEFAULT_SWEEP_LIMIT,
             worklog_limit=DEFAULT_WORKLOG_LIMIT,
+            statement_timeout_seconds=28.0,
         ),
         call(
             monitor="m2",
             now=_NOW,
             sweep_limit=DEFAULT_SWEEP_LIMIT,
             worklog_limit=DEFAULT_WORKLOG_LIMIT,
+            statement_timeout_seconds=28.0,
         ),
     ]
     assert publisher.send.await_count == 2
@@ -269,6 +278,8 @@ async def test_clean_tick_publishes_one_healthy_frame_per_monitor() -> None:
     assert first_frame.meta["lag_seconds"] == 0
     assert first_frame.meta["sweep_limit"] == DEFAULT_SWEEP_LIMIT
     assert first_frame.meta["worklog_limit"] == DEFAULT_WORKLOG_LIMIT
+    assert first_frame.meta["configured_sweep_limit"] == DEFAULT_SWEEP_LIMIT
+    assert first_frame.meta["configured_worklog_limit"] == DEFAULT_WORKLOG_LIMIT
     assert first_frame.meta["monitor_timeout_seconds"] == DEFAULT_MONITOR_TIMEOUT_SECONDS
 
 
@@ -452,6 +463,7 @@ async def test_monitor_timeout_does_not_prevent_next_monitor() -> None:
         now: datetime,
         sweep_limit: int,
         worklog_limit: int,
+        statement_timeout_seconds: float,
     ) -> TradeIntegrityRunResult:
         """Block M1 and return M2.
 
@@ -460,6 +472,7 @@ async def test_monitor_timeout_does_not_prevent_next_monitor() -> None:
             now: Shared evaluation time.
             sweep_limit: Bounded cursor page size.
             worklog_limit: Bounded durable worklog page size.
+            statement_timeout_seconds: PostgreSQL statement execution budget.
 
         Returns:
             Clean M2 result.
@@ -476,8 +489,196 @@ async def test_monitor_timeout_does_not_prevent_next_monitor() -> None:
     await watchdog._tick(now=_NOW)
 
     assert repo.run_trade_integrity_monitor.await_count == 2
+    assert repo.run_trade_integrity_monitor.await_args.kwargs["statement_timeout_seconds"] == 1.0
     publisher.send.assert_awaited_once()
     assert publisher.send.await_args.args[0] == "system.heartbeats.trade_integrity.m2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        DBAPIError("SELECT", None, QueryCanceledError("statement timeout")),
+    ],
+)
+async def test_timeout_retries_smaller_page_and_publishes_effective_limits(
+    failure: Exception,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retry timed-out work with smaller pages independently for each monitor.
+
+    Given: M1 exceeds either its client or PostgreSQL time budget while M2 succeeds.
+    When: A subsequent tick successfully retries M1.
+    Then: Only M1 halves its requested pages and publishes the effective limits,
+        and timeout logging has warning severity without a traceback.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(
+        side_effect=[failure, _result("m2"), _result("m1"), _result("m2")]
+    )
+    publisher = _make_publisher()
+    watchdog = _make_watchdog(repo, publisher)
+
+    await watchdog._tick(now=_NOW)
+    await watchdog._tick(now=_NOW)
+
+    requests = repo.run_trade_integrity_monitor.await_args_list
+    assert [request.kwargs["sweep_limit"] for request in requests] == [
+        DEFAULT_SWEEP_LIMIT,
+        DEFAULT_SWEEP_LIMIT,
+        DEFAULT_SWEEP_LIMIT // 2,
+        DEFAULT_SWEEP_LIMIT,
+    ]
+    assert requests[2].kwargs["worklog_limit"] == DEFAULT_WORKLOG_LIMIT // 2
+    assert requests[3].kwargs["worklog_limit"] == DEFAULT_WORKLOG_LIMIT
+    frame = publisher.send.await_args_list[1].args[1]
+    assert frame.meta["sweep_limit"] == DEFAULT_SWEEP_LIMIT // 2
+    assert frame.meta["worklog_limit"] == DEFAULT_WORKLOG_LIMIT // 2
+    assert frame.meta["configured_sweep_limit"] == DEFAULT_SWEEP_LIMIT
+    assert frame.meta["configured_worklog_limit"] == DEFAULT_WORKLOG_LIMIT
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert caplog.records[0].exc_info is None
+    assert "timed out" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("monitor", ["m1", "m2"])
+async def test_repeated_timeouts_reach_floors_then_allow_progress(
+    monitor: TradeIntegrityMonitor,
+) -> None:
+    """Keep retrying the same obligations at bounded minimum page sizes.
+
+    Given: One monitor repeatedly times out while its configured limits are large.
+    When: It retries ten times and then returns a committed result.
+    Then: Requests stop shrinking at the floors and the successful result survives.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(side_effect=TimeoutError())
+    watchdog = _make_watchdog(repo, None)
+    expected_sweep = DEFAULT_SWEEP_LIMIT
+    expected_worklog = DEFAULT_WORKLOG_LIMIT
+
+    for _attempt in range(10):
+        assert await watchdog._run_monitor(monitor, _NOW) is None
+        request = repo.run_trade_integrity_monitor.await_args.kwargs
+        assert request["sweep_limit"] == expected_sweep
+        assert request["worklog_limit"] == expected_worklog
+        expected_sweep = max(MIN_SWEEP_LIMIT, expected_sweep // 2)
+        expected_worklog = max(MIN_WORKLOG_LIMIT, expected_worklog // 2)
+
+    result = _result(monitor)
+    repo.run_trade_integrity_monitor.side_effect = None
+    repo.run_trade_integrity_monitor.return_value = result
+    assert await watchdog._run_monitor(monitor, _NOW) is result
+    assert repo.run_trade_integrity_monitor.await_args.kwargs["sweep_limit"] == MIN_SWEEP_LIMIT
+    assert repo.run_trade_integrity_monitor.await_args.kwargs["worklog_limit"] == MIN_WORKLOG_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_adaptation_respects_configured_limits_below_floors() -> None:
+    """Honor explicitly smaller configured page caps through timeout and recovery.
+
+    Given: Configured page caps are lower than the adaptive floors.
+    When: A pass times out and three subsequent passes succeed.
+    Then: Every request retains those smaller configured caps.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(
+        side_effect=[TimeoutError(), *[_result("m1")] * PAGE_GROWTH_SUCCESS_COUNT]
+    )
+    watchdog = TradeIntegrityWatchdog(
+        repo=cast(TradeIntegrityRepository, repo),
+        config=TradeIntegrityMonitorConfig(sweep_limit=123, worklog_limit=45),
+    )
+
+    for _attempt in range(PAGE_GROWTH_SUCCESS_COUNT + 1):
+        await watchdog._run_monitor("m1", _NOW)
+
+    for request in repo.run_trade_integrity_monitor.await_args_list:
+        assert request.kwargs["sweep_limit"] == 123
+        assert request.kwargs["worklog_limit"] == 45
+
+
+@pytest.mark.asyncio
+async def test_success_streak_doubles_pages_and_caps_recovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recover page capacity after each complete streak without exceeding caps.
+
+    Given: A timeout shrank odd configured limits to the adaptive floors.
+    When: Three consecutive passes succeed for each recovery step.
+    Then: Limits double, clip to configured caps, and stop growing at those caps.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(side_effect=TimeoutError())
+    watchdog = TradeIntegrityWatchdog(
+        repo=cast(TradeIntegrityRepository, repo),
+        config=TradeIntegrityMonitorConfig(sweep_limit=1001, worklog_limit=201),
+    )
+    await watchdog._run_monitor("m1", _NOW)
+    repo.run_trade_integrity_monitor.side_effect = None
+    repo.run_trade_integrity_monitor.return_value = _result("m1")
+
+    with caplog.at_level(logging.INFO):
+        for sweep_limit, worklog_limit in [(500, 100), (1000, 200), (1001, 201)]:
+            for _success in range(PAGE_GROWTH_SUCCESS_COUNT):
+                await watchdog._run_monitor("m1", _NOW)
+                request = repo.run_trade_integrity_monitor.await_args.kwargs
+                assert request["sweep_limit"] == sweep_limit
+                assert request["worklog_limit"] == worklog_limit
+
+    growth_records = [record for record in caplog.records if record.levelno == logging.INFO]
+    assert len(growth_records) == 2
+    assert all("recovered" in record.message for record in growth_records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        RuntimeError("repository unavailable"),
+        DBAPIError("SELECT", None, RuntimeError("connection lost")),
+        DBAPIError("SELECT", None, UniqueViolationError("constraint failure")),
+    ],
+)
+async def test_failures_reset_consecutive_successes(
+    failure: Exception,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Require a fresh success streak after every failed pass.
+
+    Given: A reduced monitor has two successful passes followed by another failure.
+    When: It completes two more successful passes and then a third.
+    Then: Growth waits for the third success and unexpected failures keep tracebacks.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(
+        side_effect=[TimeoutError(), _result("m1"), _result("m1"), failure]
+    )
+    watchdog = _make_watchdog(repo, None)
+    for _attempt in range(4):
+        await watchdog._run_monitor("m1", _NOW)
+    page = watchdog._pages["m1"]
+    reduced_limits = (page.sweep_limit, page.worklog_limit)
+    repo.run_trade_integrity_monitor.side_effect = None
+    repo.run_trade_integrity_monitor.return_value = _result("m1")
+
+    for _success in range(PAGE_GROWTH_SUCCESS_COUNT - 1):
+        await watchdog._run_monitor("m1", _NOW)
+        assert (page.sweep_limit, page.worklog_limit) == reduced_limits
+    await watchdog._run_monitor("m1", _NOW)
+
+    assert page.sweep_limit == reduced_limits[0] * 2
+    assert page.worklog_limit == reduced_limits[1] * 2
+    if isinstance(failure, TimeoutError):
+        assert caplog.records[-1].levelno == logging.WARNING
+        assert caplog.records[-1].exc_info is None
+    else:
+        assert caplog.records[-1].levelno == logging.ERROR
+        assert caplog.records[-1].exc_info is not None
 
 
 @pytest.mark.asyncio

@@ -7,11 +7,20 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 from typing import Protocol
+from unittest.mock import AsyncMock
 
 import pytest
+from asyncpg.exceptions import QueryCanceledError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
+from snapper.application.data_quality.trade_integrity import TradeIntegrityMonitorConfig
+from snapper.application.data_quality.trade_integrity import TradeIntegrityWatchdog
+from snapper.data import trade_integrity as integrity_module
+from snapper.data.models import Trade
+from snapper.data.models import TradeIntegrityMonitorCursor
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.trade_integrity import TradeIntegrityPassRequest
 
 _NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 _ACTIVE = "9999-12-31 23:59:59.000000"
@@ -436,6 +445,101 @@ async def test_cursor_survives_restart_and_advances_from_saved_page(tmp_path: Pa
     assert not first_result.pass_completed
     assert second_result.sweep_rows == 1
     await second_repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("monitor", ["m1", "m2"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        DBAPIError("SELECT", None, QueryCanceledError("statement timeout")),
+    ],
+)
+async def test_timeout_rolls_back_obligations_then_retry_commits_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    monitor: _Monitor,
+    failure: Exception,
+) -> None:
+    """Recover durable coverage and worklog progress after a cancelled transaction.
+
+    Given: A saved cursor, two remaining trades, and a pending historical obligation.
+    When: The pass fails after tentative acknowledgments and cursor mutations.
+    Then: Rollback preserves durable state and a smaller retry commits full coverage.
+    """
+    path = tmp_path / "timeout-retry.db"
+    _create_constraint_free_monitor_db(path)
+    for index in range(3):
+        _insert_trade(
+            path,
+            public_id=f"36000000-0000-0000-0000-{index + 1:012d}",
+            trade_id=f"retry-{index}",
+            executed_at=_NOW - timedelta(minutes=20 - index),
+            timestamp=_NOW - timedelta(minutes=10 - index),
+        )
+    repository, initial_result = await _run_monitor(path, monitor, sweep_limit=1)
+    _enqueue_work_item(
+        path,
+        public_id="36000000-0000-0000-0000-000000000003",
+        trade_id="retry-2",
+        executed_at=_NOW - timedelta(minutes=18),
+        monitor=monitor,
+    )
+    operation = AsyncMock(wraps=repository.run_trade_integrity_monitor)
+    monkeypatch.setattr(repository, "run_trade_integrity_monitor", operation)
+    watchdog = TradeIntegrityWatchdog(
+        repo=repository,
+        config=TradeIntegrityMonitorConfig(sweep_limit=1001, worklog_limit=201),
+    )
+    advance_cursor = integrity_module._advance_cursor
+
+    def fail_before_commit(
+        state: TradeIntegrityMonitorCursor,
+        sweep: list[Trade],
+        request: TradeIntegrityPassRequest,
+    ) -> bool:
+        """Raise after every tentative cursor and worklog change is applied."""
+        advance_cursor(state, sweep, request)
+        raise failure
+
+    with monkeypatch.context() as cancellation:
+        cancellation.setattr(integrity_module, "_advance_cursor", fail_before_commit)
+        assert await watchdog._run_monitor(monitor, _NOW) is None
+
+    async with repository.session() as session:
+        saved = await session.get(TradeIntegrityMonitorCursor, monitor)
+        assert saved is not None
+        assert (saved.scan_cursor_timestamp, saved.scan_cursor_id, saved.covered_through) == (
+            initial_result.cursor_timestamp,
+            initial_result.cursor_id,
+            initial_result.covered_through,
+        )
+        assert (
+            await session.execute(text("SELECT count(*) FROM trade_integrity_worklog"))
+        ).scalar_one() == 1
+
+    result = await watchdog._run_monitor(monitor, _NOW)
+
+    assert result is not None
+    assert result.sweep_rows == 2
+    assert result.worklog_rows == 1
+    assert result.covered_through > initial_result.covered_through
+    assert operation.await_args is not None
+    assert operation.await_args.kwargs["sweep_limit"] == 500
+    assert operation.await_args.kwargs["worklog_limit"] == 100
+    async with repository.session() as session:
+        saved = await session.get(TradeIntegrityMonitorCursor, monitor)
+        assert saved is not None
+        assert (saved.scan_cursor_timestamp, saved.scan_cursor_id, saved.covered_through) == (
+            result.cursor_timestamp,
+            result.cursor_id,
+            result.covered_through,
+        )
+        assert (
+            await session.execute(text("SELECT count(*) FROM trade_integrity_worklog"))
+        ).scalar_one() == 0
+    await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
