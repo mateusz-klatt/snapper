@@ -1144,9 +1144,12 @@ Startup retains historical internal spot rollover costs only under an exact,
 narrow proof: an untagged shard has one unique, durably proven spot buy, and its
 complete current accrual ledger consists of positive rollover rows for that
 unchanged position and quote currency. Each amount must equal its recorded
-notional times rate. The rows must share one ledger session and have an
-unambiguous sequence of boundaries and insertions after opening and before the
-checkpoint. Recovery forward-subtracts each charge from replay cash and realized
+notional times rate. Multiple ledger sessions are accepted only when every charge
+amount is bit-identical, finite and positive, so their subtraction order cannot
+change the result. Boundaries must be globally unique, and each nonempty session
+must have strictly increasing positive sequences and boundaries with nondecreasing
+insertion times after opening and no later than the checkpoint. Recovery
+forward-subtracts each charge from replay cash and realized
 P&L, then compares the entire digest exactly, including position, entry, fees,
 turnover, timestamps, watermark and execution aliases. It rechecks the complete
 ledger before granting accrual certainty. Any additional difference or incomplete
