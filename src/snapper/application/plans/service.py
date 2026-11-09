@@ -57,6 +57,7 @@ from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
@@ -785,6 +786,31 @@ class PlanExecutorService(RegisterableProcess):
             self._plan_locks[public_id] = lock
         return lock
 
+    async def _load_manual_plan_for_child(self, client_order_id: str) -> None:
+        """Index a manual plan created after startup before handling its child event.
+
+        REST persists manual commands independently of this process. Resolve
+        their durable child link on the first event so a fill or local dispatch
+        expiry cannot miss a plan absent from the startup recovery snapshot.
+        Manual evaluators carry no checkpoint state and emit no new commands.
+        """
+        if client_order_id in self._client_order_id_index:
+            return
+        now = datetime.now(UTC)
+        plan_public_id = await self.repository.get_plan_public_id_for_client_order_id(
+            client_order_id, as_of=now
+        )
+        if plan_public_id is None:
+            return
+        plan = await self.repository.get_execution_plan(plan_public_id, as_of=now)
+        if (
+            plan is None
+            or plan["plan_type"] != "manual_once"
+            or plan["status"] in _TERMINAL_STATUSES
+        ):
+            return
+        self._register_plan(plan, ManualOnceEvaluator())
+
     async def _transition_plan(
         self,
         plan_public_id: str,
@@ -1314,27 +1340,27 @@ class PlanExecutorService(RegisterableProcess):
         self,
         topic: str,
         payload: str,
-    ) -> ExecutionData | OrderData | TickData | None:
+    ) -> ExecutionData | OrderData | OrderEventData | TickData | None:
         """Parse one inbound payload into a typed message object."""
         try:
             parsed = parse_message(payload)
         except MessageParseError as exc:
             logger.debug("PlanExecutorService: cannot parse message on {}: {}", topic, exc)
             return None
-        if isinstance(parsed, (ExecutionData, OrderData, TickData)):
+        if isinstance(parsed, (ExecutionData, OrderData, OrderEventData, TickData)):
             return parsed
         return None
 
     async def _dispatch_incoming_message(
         self,
         topic: str,
-        msg: ExecutionData | OrderData | TickData,
+        msg: ExecutionData | OrderData | OrderEventData | TickData,
     ) -> None:
         """Route one parsed message to the appropriate plan handler."""
         try:
             if isinstance(msg, ExecutionData):
                 await self._handle_execution(msg)
-            elif isinstance(msg, OrderData):
+            elif isinstance(msg, (OrderData, OrderEventData)):
                 await self._handle_order_status(msg)
             elif isinstance(msg, TickData):
                 await self._handle_tick(topic, msg)
@@ -1372,6 +1398,7 @@ class PlanExecutorService(RegisterableProcess):
         Args:
             execution: Incoming execution event.
         """
+        await self._load_manual_plan_for_child(execution.client_order_id)
         execution_target = self._resolve_execution_target(execution)
         if execution_target is None:
             return
@@ -1416,7 +1443,22 @@ class PlanExecutorService(RegisterableProcess):
         if is_complete:
             self._unregister_plan(plan_public_id)
 
-    async def _handle_order_status(self, order: OrderData) -> None:
+    @staticmethod
+    def _order_plan_transition(
+        order: OrderData | OrderEventData,
+    ) -> tuple[str, str | None] | None:
+        """Map order terminals to plan terminals without failing rejected cancels."""
+        if isinstance(order, OrderEventData):
+            if order.event in (OrderEventEnum.CANCELLED, OrderEventEnum.EXPIRED):
+                return order.event, None
+            return None
+        if order.status in (OrderEventEnum.CANCELLED, OrderEventEnum.EXPIRED):
+            return order.status, None
+        if order.status in (OrderEventEnum.REJECTED, "error"):
+            return ExecutionPlanStatusEnum.FAILED, order.error or f"venue {order.status}"
+        return None
+
+    async def _handle_order_status(self, order: OrderData | OrderEventData) -> None:
         """Handle a non-fill order event (cancelled/rejected/expired).
 
         Terminal order-level statuses transition the plan accordingly.
@@ -1425,6 +1467,7 @@ class PlanExecutorService(RegisterableProcess):
         Args:
             order: Incoming order status event.
         """
+        await self._load_manual_plan_for_child(order.client_order_id)
         plan_public_id = self._client_order_id_index.get(order.client_order_id)
         if plan_public_id is None:
             return
@@ -1433,18 +1476,10 @@ class PlanExecutorService(RegisterableProcess):
             return
         if plan["status"] in _TERMINAL_STATUSES:
             return
-        status = order.status
-        new_status: str | None = None
-        last_error: str | None = None
-        if status == OrderEventEnum.CANCELLED:
-            new_status = ExecutionPlanStatusEnum.CANCELLED
-        elif status in (OrderEventEnum.REJECTED, "error"):
-            new_status = ExecutionPlanStatusEnum.FAILED
-            last_error = order.error or f"venue {status}"
-        elif status == OrderEventEnum.EXPIRED:
-            new_status = ExecutionPlanStatusEnum.EXPIRED
-        if new_status is None:
+        transition = self._order_plan_transition(order)
+        if transition is None:
             return
+        new_status, last_error = transition
         now = datetime.now(UTC)
         try:
             await self.repository.update_execution_plan_status(
@@ -1466,9 +1501,8 @@ class PlanExecutorService(RegisterableProcess):
             )
             return
         logger.info(
-            "PlanExecutorService: plan {} venue event {} → plan status {}",
+            "PlanExecutorService: plan {} → plan status {}",
             plan_public_id,
-            status,
             new_status,
         )
         self._unregister_plan(plan_public_id)

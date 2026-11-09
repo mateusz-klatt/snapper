@@ -230,9 +230,22 @@ The route writes that shard key to both `execution_plans` and
 `trade_commands`, inserts the command with `ownership=None` so any
 API worker may accept the request, and lets the trade coordinator
 outbox ownership filter decide which instance dispatches it. During
-outbox publish, the coordinator registers
+outbox publish, the coordinator creates or reuses an engine matching the
+command's exact shard and full wallet before registering
 `client_order_id -> shard_key`, so the N>1 CID guard accepts the
 venue ACK/fill/cancel events only on the owning coordinator.
+
+A fill without an owning engine quarantines new order execution and position
+projection for its exchange/instrument until restart recovery replays durable
+fills. Other instruments remain available. Contradictory shard or wallet
+ownership still fails global certification; cancels remain available for repair.
+Shards with a recorded startup recovery failure also refuse new execution;
+creating a manual owner cannot replace their uncertified position with flat state.
+Restart recovery can restore a filled manual spot position from persisted
+executions or fully attributed venue fill events. It does not submit another
+order, close the position, or replace missing or corrupt execution evidence.
+Plan recovery does not backfill a manual plan's status from previously missed
+fill or expiry events; position recovery and plan lifecycle recovery are separate.
 
 For manual orders, provide a wallet or omit the field to use the existing
 single-accessible-wallet resolution for the requested mode. Explicit blank

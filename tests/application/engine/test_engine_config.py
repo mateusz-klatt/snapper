@@ -39,6 +39,7 @@ from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderCancelData
+from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SignalData
 
@@ -1924,6 +1925,7 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._ensure_command_engine = AsyncMock()
     coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-1",
@@ -2086,6 +2088,7 @@ async def test_outbox_publish_submit_registers_order_shard_key() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._ensure_command_engine = AsyncMock()
     coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-submit",
@@ -2297,6 +2300,7 @@ async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._ensure_command_engine = AsyncMock()
     coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-lev",
@@ -3664,6 +3668,7 @@ async def test_outbox_publish_forwards_true_age_via_signaled_at() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._ensure_command_engine = AsyncMock()
     coord._order_shard_keys = {}
     created = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     cmd: dict[str, Any] = {
@@ -3703,6 +3708,7 @@ async def test_on_command_expired_releases_engine_intent() -> None:
         projecting the paired-execution leg EXPIRED.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
     engine = MagicMock()
     engine.clear_pending_intent = MagicMock(return_value=True)
     coord.engines = {"BTC-USD@kraken-live": engine}
@@ -3740,6 +3746,14 @@ async def test_on_command_expired_releases_engine_intent() -> None:
     leg_call = coord._project_paired_execution_leg_terminal.await_args
     assert leg_call is not None
     assert leg_call.args[0] == "cid-exp"
+
+    coord.msg_publisher.send.assert_awaited_once()
+    topic, event = coord.msg_publisher.send.await_args.args
+    assert topic == "orders.events.kraken.BTC-USD.expired"
+    assert isinstance(event, OrderData)
+    assert event.client_order_id == "cid-exp"
+    assert event.status == "expired"
+    assert event.reason == "expired by outbox dispatch TTL"
 
 
 def test_setup_trade_services_wires_dispatch_ttl_and_expiry() -> None:

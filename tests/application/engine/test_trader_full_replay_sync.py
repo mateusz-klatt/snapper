@@ -138,6 +138,79 @@ class TestFullReplaySync:
     """Full-replay recovery keeps engine and TradeService in lockstep."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("durable_lineage", [False, True])
+    async def test_restart_recovers_filled_manual_spot_position(
+        self, monkeypatch: pytest.MonkeyPatch, durable_lineage: bool
+    ) -> None:
+        """A completed manual buy recovers without an active order or checkpoint.
+
+        Given: A persisted manual XRP buy has no active order or checkpoint,
+            with exact venue-event lineage or historical live reconstruction.
+        When: Startup recovery rebuilds state from the effective execution ledger.
+        Then: It restores the wallet, engine, position projection, and open cycle
+            without issuing another order or failing global certification.
+        """
+        coord = _make_coord(monkeypatch)
+        wallet = "01975a8b-3c7d-7000-8000-0000000000a1"
+        shard_key = "kraken.XRP-EUR.live.w0000000000a1"
+        execution = _make_execution(
+            trade_id="manual-xrp",
+            side="buy",
+            size=4.07,
+            price=0.48,
+            instrument="XRP-EUR",
+            fee_asset="EUR",
+            wallet_public_id=wallet,
+        )
+        execution["operator_public_id"] = "manual-operator"
+        repo = _stub_repo(coord, [execution])
+        lineage = {"c-manual-xrp": (shard_key, wallet)} if durable_lineage else {}
+        repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(return_value=(lineage, set()))
+        repo.get_shard_keys_with_fills = AsyncMock(return_value=[])
+        repo.get_consumed_fill_venue_event_id = AsyncMock(
+            return_value=17 if durable_lineage else None
+        )
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="xrp-instrument")
+        repo.get_instrument_spec = AsyncMock(return_value=None)
+        repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
+        repo.insert_position_cycle = AsyncMock(return_value=(1, "manual-cycle"))
+        repo.resolve_source_instrument_public_id = AsyncMock(
+            return_value={
+                "is_paper": False,
+                "mapped": True,
+                "valuation_public_id": "xrp-instrument",
+            }
+        )
+        repo.get_active_market_snapshot_price = AsyncMock(return_value=None)
+        repo.get_active_position_identities = AsyncMock(return_value=[])
+
+        await coord._recover_engine_state()
+
+        engine = coord.engines["XRP-EUR@kraken-live-w0000000000a1"]
+        shard = coord.trade_service._shards[shard_key]
+        assert engine._shard_key == shard_key
+        assert engine.wallet_public_id == wallet
+        assert engine.operator_public_id == "manual-operator"
+        assert engine.position_qty == pytest.approx(4.07)
+        assert engine.entry_price == pytest.approx(0.48)
+        assert engine.portfolio.position_qty("XRP-EUR") == pytest.approx(4.07)
+        assert shard.position.position_qty == pytest.approx(4.07)
+        assert shard.position.entry_price == pytest.approx(0.48)
+        assert shard.active_cycle_public_id == "manual-cycle"
+        assert "manual-xrp" in engine.seen_exec_ids
+        assert shard_key in coord._trusted_recovery_shards
+        assert not coord._recovery_certification_failed
+        assert coord._certified_projection_components(("xrp-instrument", "live", wallet)) == [
+            shard_key
+        ]
+        repo.upsert_checkpoint.assert_awaited_once()
+        repo.upsert_position_projection.assert_awaited_once()
+        assert not engine.order_in_flight
+        assert coord.msg_publisher is not None
+        cast(MagicMock, coord.msg_publisher).send.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_full_replay_populates_trade_service(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

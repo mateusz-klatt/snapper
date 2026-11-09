@@ -599,10 +599,10 @@ async def create_order(
 ) -> ExecutionPlanResponse:
     """Create a manual order via a manual_once execution plan.
 
-    Creates the plan with status=pending, inserts the TradeCommand
-    then transitions to active. On command insert failure the plan
-    is marked failed. This two-step approach prevents orphaned
-    active plans without commands.
+    Creates the plan with status=pending and activates it before inserting
+    the dispatchable TradeCommand. A fill or local expiry can then transition
+    the plan without a later activation overwriting the terminal status.
+    On command insert failure the plan is marked failed.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
@@ -772,6 +772,14 @@ async def create_order(
                     detail="Failed to create order",
                 ) from exc
 
+            await repo.update_execution_plan_status(
+                public_id=plan_public_id,
+                new_status="active",
+                bus_time=ts,
+                session_id=sid,
+                sequence_id=tracker.next_sequence(_REST_STREAM),
+                started_at=now,
+            )
             cmd_seq = tracker.next_sequence(_REST_STREAM)
             try:
                 cmd_row: TradeCommandInsertRow = {
@@ -830,15 +838,6 @@ async def create_order(
             },
         ) from exc
     assert plan_public_id is not None
-
-    await repo.update_execution_plan_status(
-        public_id=plan_public_id,
-        new_status="active",
-        bus_time=ts,
-        session_id=sid,
-        sequence_id=tracker.next_sequence(_REST_STREAM),
-        started_at=now,
-    )
 
     plan = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if plan is None:
