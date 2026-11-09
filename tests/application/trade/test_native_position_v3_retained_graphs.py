@@ -345,19 +345,26 @@ async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history
         assert second.position.ledger_sequence == first.position.ledger_sequence + 1
         assert second.position.observed.quantity == 2
         before = await _facts(repository)
-        actual_material = family_history.get_native_financial_event_family
         actual_history = family_history.load_native_position_history_v2
 
         async def lose_predecessor_witness(
-            session: AsyncSession, public_id: str, known_at: datetime
-        ) -> NativeFinancialEventMaterialV2:
+            session: AsyncSession, scope: ExecutionAccountScope, instrument: str, known_at: datetime
+        ) -> tuple[BoundNativePositionEventV2, ...]:
             """Delegate actual SQL/source binding, then remove only the typed predecessor admission witness."""
-            material = await actual_material(session, public_id, known_at)
-            if public_id == first.position.public_id:
-                return NativeFinancialEventMaterialV2(
-                    material.row, material.payload, material.source
+            events = await actual_history(session, scope, instrument, known_at)
+            return tuple(
+                (
+                    replace(
+                        event,
+                        material=NativeFinancialEventMaterialV2(
+                            event.material.row, event.material.payload, event.material.source
+                        ),
+                    )
+                    if event.row.public_id == first.position.public_id
+                    else event
                 )
-            return material
+                for event in events
+            )
 
         async def omit_selected_result(
             session: AsyncSession, scope: ExecutionAccountScope, instrument: str, known_at: datetime
@@ -372,7 +379,7 @@ async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history
         with monkeypatch.context() as scoped:
             if handoff == "predecessor_admission":
                 scoped.setattr(
-                    family_history, "get_native_financial_event_family", lose_predecessor_witness
+                    family_history, "load_native_position_history_v2", lose_predecessor_witness
                 )
                 expected_error = "native_position_prior_admission_migration_required"
             else:

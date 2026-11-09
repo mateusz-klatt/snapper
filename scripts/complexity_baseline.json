@@ -1714,9 +1714,6 @@
       "test_server_runs_with_reload.fake_run": {
         "PLR0913": 10
       },
-      "test_server_runs_without_reload.fake_run": {
-        "PLR0913": 9
-      },
       "test_strategies_engine_degrades_without_publisher": {
         "C901": 13
       },

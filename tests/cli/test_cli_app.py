@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 import typer
 import uvicorn
+from fastapi import FastAPI
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
@@ -344,48 +345,136 @@ def _fake_settings(**overrides: Any) -> Any:
     return SimpleNamespace(**defaults)
 
 
+@pytest.mark.parametrize("concurrency", ["2", "3"])
+def test_server_refuses_multiple_workers_without_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    caplog: pytest.LogCaptureFixture,
+    concurrency: str,
+) -> None:
+    """Keep Uvicorn's original worker refusal before any socket or process is started.
+
+    Given: WEB_CONCURRENCY resolves to multiple workers with reload disabled.
+    When: The server command passes through the actual Uvicorn configuration and runner.
+    Then: Startup exits with the original warning and code before binding or spawning.
+    """
+    monkeypatch.setenv("WEB_CONCURRENCY", concurrency)
+    monkeypatch.setattr(app_module, "get_settings", lambda: _fake_settings(server_reload=False))
+    bind_socket = MagicMock()
+    multiprocess = MagicMock()
+    run_server = MagicMock()
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", bind_socket)
+    monkeypatch.setattr(uvicorn.Server, "run", run_server)
+    monkeypatch.setattr(importlib.import_module("uvicorn.main"), "Multiprocess", multiprocess)
+    caplog.set_level("WARNING", logger="uvicorn.error")
+
+    result = cli_runner.invoke(app, ["server"])
+
+    assert result.exit_code == 3
+    assert (
+        "You must pass the application as an import string to enable 'reload' or 'workers'."
+        in caplog.text
+    )
+    bind_socket.assert_not_called()
+    multiprocess.assert_not_called()
+    run_server.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("reload", "concurrency"),
+    [(False, None), (False, "1"), (True, None), (True, "1"), (True, "2")],
+)
+def test_server_preserves_uvicorn_start_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    reload: bool,
+    concurrency: str | None,
+) -> None:
+    """Keep single-worker and reload startup on the actual Uvicorn dispatch path.
+
+    Given: An unset or single-worker environment, or reload with an ignored worker count.
+    When: The server command resolves its configuration through Uvicorn.
+    Then: Only the existing single server or reload supervisor is selected.
+    """
+    if concurrency is None:
+        monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("WEB_CONCURRENCY", concurrency)
+    monkeypatch.setattr(app_module, "get_settings", lambda: _fake_settings(server_reload=reload))
+    started: list[uvicorn.Config] = []
+
+    def run_server(instance: uvicorn.Server) -> None:
+        """Observe the resolved server without starting its network or lifespan."""
+        started.append(instance.config)
+        instance.started = True
+
+    supervisor = MagicMock()
+    multiprocess = MagicMock()
+    bind_socket = MagicMock()
+    uvicorn_main = importlib.import_module("uvicorn.main")
+    monkeypatch.setattr(uvicorn.Server, "run", run_server)
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", bind_socket)
+    monkeypatch.setattr(uvicorn_main, "ChangeReload", supervisor)
+    monkeypatch.setattr(uvicorn_main, "Multiprocess", multiprocess)
+
+    result = cli_runner.invoke(app, ["server"])
+
+    assert result.exit_code == 0
+    multiprocess.assert_not_called()
+    if reload:
+        assert started == []
+        bind_socket.assert_called_once_with()
+        supervisor.assert_called_once()
+        supervisor.return_value.run.assert_called_once_with()
+        config = supervisor.call_args.args[0]
+        assert config.app == "snapper.server.app:create_app"
+        assert config.reload is True
+    else:
+        assert len(started) == 1
+        assert started[0].app is app_module._create_server_app
+        assert started[0].workers == 1
+        supervisor.assert_not_called()
+        bind_socket.assert_not_called()
+
+
+def test_server_deferred_factory_loads_the_actual_application() -> None:
+    """Load the real application through Uvicorn without starting any lifespan or socket.
+
+    Given: The non-reload callable factory retains deferred server imports.
+    When: Uvicorn loads that actual application factory.
+    Then: Its configured middleware wraps the real FastAPI application.
+    """
+    config = uvicorn.Config(app_module._create_server_app, factory=True, log_config=None)
+    config.load()
+    assert config.loaded
+    assert isinstance(config.loaded_app.app, FastAPI)
+
+
 def test_server_runs_without_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
     """Test server command runs uvicorn without reload.
 
     Given: Settings with server_reload=False,
     When: server command is invoked,
-    Then: Uvicorn runs with reload=False.
+    Then: Uvicorn loads the application factory with reload=False.
     """
-    captured: dict[str, Any] = {}
+    captured: dict[str, object] = {}
 
-    def fake_run(
-        app_obj: Any,
-        host: str,
-        port: int,
-        reload: bool,
-        log_level: str,
-        log_config: Any,
-        proxy_headers: bool,
-        forwarded_allow_ips: str,
-        loop: str,
-    ) -> None:
-        captured.update(
-            {
-                "app": app_obj,
-                "host": host,
-                "port": port,
-                "reload": reload,
-                "proxy_headers": proxy_headers,
-                "forwarded_allow_ips": forwarded_allow_ips,
-                "loop": loop,
-            }
-        )
+    def fake_run(app_factory: Callable[[], object], **kwargs: object) -> None:
+        captured["app"] = app_factory
+        captured.update(kwargs)
 
     monkeypatch.setattr(app_module, "get_settings", lambda: _fake_settings(server_reload=False))
-    monkeypatch.setattr(app_module, "create_app", lambda: "APP_INSTANCE")
     monkeypatch.setattr(uvicorn, "run", fake_run)
     result = cli_runner.invoke(app, ["server"])
     assert result.exit_code == 0
     assert captured == {
-        "app": "APP_INSTANCE",
+        "app": app_module._create_server_app,
+        "factory": True,
         "host": "127.0.0.1",
         "port": 8000,
         "reload": False,
+        "log_level": "info",
+        "log_config": None,
         "proxy_headers": True,
         "forwarded_allow_ips": "127.0.0.1",
         "loop": "uvloop",
@@ -1565,9 +1654,8 @@ class TestServerCommands:
         Given: ``server_reload`` is True,
         When: ``server`` is invoked,
         Then: ``uvicorn.run`` still receives ``loop="uvloop"`` — the
-            faster loop is desired in both prod and developer-reload
-            modes; the only difference between the two branches is
-            ``factory=True`` for hot reload.
+            faster loop is desired for both normal server starts and
+            developer reloads through the same application factory.
         """
         with patch("snapper.cli.app.get_settings") as mock_get_settings:
             mock_settings = create_mock_settings()
