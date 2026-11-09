@@ -25,6 +25,10 @@ from typing import TypeVar
 
 from loguru import logger
 
+from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxDiagnostics
+from snapper.application.portfolio.pnl_fx_diagnostics import observe_pnl_fx_diagnostics
+from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_diagnostics_text
+
 type PnlReadKind = Literal["series", "timeline"]
 type PnlReadStage = Literal["series", "prefix", "fx", "timeline"]
 type PnlFxPhase = Literal[
@@ -73,6 +77,7 @@ class _ReadTiming:
     """One handler's closed set of elapsed spans, with no request identifiers."""
 
     kind: PnlReadKind
+    fx_diagnostics: PnlFxDiagnostics
     spans: dict[_MeasuredStage, int] = field(default_factory=dict)
     counts: dict[_MeasuredCount, int] = field(default_factory=dict)
     event_read_mode: PnlFxReadMode | Literal["mixed"] | None = None
@@ -217,7 +222,7 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             "fx_event_rows={} fx_selected_rows={} fx_event_read_mode={} "
             "fx_event_intervals_observed={} "
             "series_anchor_ms={} series_replay_ms={} series_market_data_ms={} "
-            "series_requirements_ms={} series_valuation_ms={} series_overlay_ms={}",
+            "series_requirements_ms={} series_valuation_ms={} series_overlay_ms={}{}",
             timing.kind,
             "success" if succeeded else "failure",
             _elapsed_text(timing.spans.get("handler")),
@@ -245,6 +250,7 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             _elapsed_text(timing.spans.get("series_requirements")),
             _elapsed_text(timing.spans.get("series_valuation")),
             _elapsed_text(timing.spans.get("series_overlay")),
+            pnl_fx_diagnostics_text(timing.fx_diagnostics),
         )
     except Exception:
         return
@@ -268,18 +274,19 @@ def observe_pnl_read(
         @wraps(function)
         async def observed(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             """Reset request-local state before emitting exactly one summary."""
-            timing = _ReadTiming(kind)
-            started = _clock()
-            token = _current_timing.set(timing)
-            succeeded = False
-            try:
-                result = await function(*args, **kwargs)
-                succeeded = True
-                return result
-            finally:
-                _record_elapsed(timing, "handler", started)
-                _current_timing.reset(token)
-                _emit_timing(timing, succeeded)
+            with observe_pnl_fx_diagnostics() as fx_diagnostics:
+                timing = _ReadTiming(kind, fx_diagnostics)
+                started = _clock()
+                token = _current_timing.set(timing)
+                succeeded = False
+                try:
+                    result = await function(*args, **kwargs)
+                    succeeded = True
+                    return result
+                finally:
+                    _record_elapsed(timing, "handler", started)
+                    _current_timing.reset(token)
+                    _emit_timing(timing, succeeded)
 
         return observed
 

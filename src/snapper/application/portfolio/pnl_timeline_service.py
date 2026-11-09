@@ -82,6 +82,13 @@ from snapper.application.portfolio.pnl_anchor_identity import (
     normalize_portfolio_pnl_wallet_public_id,
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxFailure
+from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_conversion_scope
+from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_diagnostics_active
+from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_execution_time
+from snapper.application.portfolio.pnl_fx_diagnostics import record_pnl_fx_election
+from snapper.application.portfolio.pnl_fx_diagnostics import record_pnl_fx_failure
+from snapper.application.portfolio.pnl_fx_diagnostics import reset_pnl_fx_execution_order
 from snapper.application.portfolio.pnl_read_timing import pnl_read_core
 from snapper.application.portfolio.pnl_read_timing import pnl_read_count
 from snapper.application.portfolio.pnl_read_timing import pnl_read_fx_window
@@ -1568,6 +1575,9 @@ def _to_timeline_execution(
         The equivalent :class:`TimelineExecution`.
     """
     rate_minute = _rate_minute(row["timestamp"])
+    effective_time = pnl_fx_execution_time(
+        row["instrument_public_id"], row["shard_key"], row["timestamp"]
+    )
     converted_fee = convert_amount(
         row["fee"],
         row["fee_asset"],
@@ -1585,6 +1595,27 @@ def _to_timeline_execution(
         and converted_fee is None
         else None
     )
+    if fee_incompleteness_reason is not None:
+        record_pnl_fx_failure(
+            PnlFxFailure(
+                instrument=row["instrument_public_id"],
+                role="fee",
+                event_time=row["timestamp"],
+                rate_minute=rate_minute,
+                from_currency=row["fee_asset"],
+                to_currency=valuation_ccy,
+                causal_order=(
+                    effective_time,
+                    1,
+                    row["exchange"],
+                    row["scope_sequence"],
+                    row["instrument_public_id"],
+                    0,
+                ),
+            ),
+            rates,
+            venues,
+        )
     raw_price = row["price"]
     price = raw_price
     price_incompleteness_reason: PnlIncompletenessReason | None = None
@@ -1600,6 +1631,26 @@ def _to_timeline_execution(
         price = converted_price if is_positive_finite(converted_price) else math.nan
         if price_currency != valuation_ccy and not is_positive_finite(converted_price):
             price_incompleteness_reason = "fx_conversion_unproven"
+            record_pnl_fx_failure(
+                PnlFxFailure(
+                    instrument=row["instrument_public_id"],
+                    role="price",
+                    event_time=row["timestamp"],
+                    rate_minute=rate_minute,
+                    from_currency=price_currency,
+                    to_currency=valuation_ccy,
+                    causal_order=(
+                        effective_time,
+                        1,
+                        row["exchange"],
+                        row["scope_sequence"],
+                        row["instrument_public_id"],
+                        1,
+                    ),
+                ),
+                rates,
+                venues,
+            )
     return TimelineExecution(
         order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
@@ -1703,6 +1754,20 @@ def _to_timeline_accrual(
         and converted is None
         else None
     )
+    if incompleteness_reason is not None:
+        record_pnl_fx_failure(
+            PnlFxFailure(
+                instrument=row["instrument_public_id"],
+                role="accrual",
+                event_time=row["accrued_at"],
+                rate_minute=_rate_minute(row["accrued_at"]),
+                from_currency=row["amount_asset"],
+                to_currency=valuation_ccy,
+                causal_order=(row["accrued_at"], 0, row["instrument_public_id"], 0, "", 0),
+            ),
+            rates,
+            venues,
+        )
     return TimelineAccrual(
         instrument_public_id=row["instrument_public_id"],
         accrued_at=row["accrued_at"],
@@ -2043,6 +2108,19 @@ def _build_marks_and_reasons_from_candles(
             marks[(instrument_public_id, mark_minute)] = converted
         else:
             incompleteness_reasons[(instrument_public_id, mark_minute)] = "fx_conversion_unproven"
+            record_pnl_fx_failure(
+                PnlFxFailure(
+                    instrument=instrument_public_id,
+                    role="mark",
+                    event_time=mark_minute,
+                    rate_minute=mark_minute,
+                    from_currency=quote_currency,
+                    to_currency=valuation_ccy,
+                    causal_order=(mark_minute, 2, instrument_public_id, 0, "", 0),
+                ),
+                rates,
+                venues_by_instrument.get(instrument_public_id, {}),
+            )
     return marks, incompleteness_reasons
 
 
@@ -3307,13 +3385,80 @@ def _resolve_fx_planes(
         )
         if selected is not None:
             resolved[pair] = selected
+        _observe_shared_fx_election(
+            pair,
+            candidate_planes.get(pair, set()),
+            covered,
+            event_requirements.get(pair, set()),
+            selected,
+        )
     return resolved
+
+
+def _observe_shared_fx_election(
+    pair: FxPairKey,
+    planes: set[PnlFxRatePlane],
+    covered: Mapping[PnlFxRatePlane, _PlaneCoverage],
+    events: set[datetime],
+    selected: PnlFxRatePlane | None,
+) -> None:
+    """Observe existing exact coverage without letting diagnostic construction fail work.
+
+    Args:
+        pair: Existing unordered conversion pair.
+        planes: All eligible candidates before the event-complete restriction.
+        covered: Already computed combined exact and carry coverage.
+        events: Distinct general-consumer event minutes.
+        selected: Unchanged election result.
+    """
+    if not pnl_fx_diagnostics_active():
+        return
+    try:
+        record_pnl_fx_election(
+            pair,
+            events,
+            {plane: covered[plane].exact if plane in covered else set() for plane in planes},
+            selected,
+        )
+    except Exception:
+        return
+
+
+def _observe_identity_fx_elections(
+    events: Mapping[str, _FxMinuteRequirements],
+    identities: Mapping[str, PnlFxRatePlane],
+    observed: Mapping[PnlFxRatePlane, set[datetime]],
+    resolved: Mapping[str, PnlFxRatePlane],
+) -> None:
+    """Report canonical per-instrument elections from their existing published minutes.
+
+    Args:
+        events: Existing distinct event requirements grouped by consumer.
+        identities: Canonical plane claims already used for selection.
+        observed: Already folded usable exact plane minutes.
+        resolved: Unchanged canonical selection results.
+    """
+    if not pnl_fx_diagnostics_active():
+        return
+    try:
+        for instrument, plane in identities.items():
+            pair = currency_pair_key(plane[0], plane[1])
+            record_pnl_fx_election(
+                pair,
+                events.get(instrument, {}).get(pair, set()),
+                {plane: observed.get(plane, set())},
+                resolved.get(instrument),
+                instrument,
+            )
+    except Exception:
+        return
 
 
 def _resolve_identity_fx_planes(
     requirements: Mapping[str, _FxMinuteRequirements],
     identity_planes: Mapping[str, PnlFxRatePlane],
     rows: Sequence[PnlFxRateRow],
+    event_requirements: Mapping[str, _FxMinuteRequirements] | None = None,
 ) -> _FxIdentityPlanes:
     """Pin instrument-owned planes only after they prove usable coverage.
 
@@ -3330,6 +3475,7 @@ def _resolve_identity_fx_planes(
         requirements: Exact conversion minutes grouped by consuming instrument.
         identity_planes: Canonical source-plane claims keyed by instrument.
         rows: Candidate candle rows from both bounded reads.
+        event_requirements: Event minutes observed without changing identity resolution.
 
     Returns:
         Canonical planes with nonzero usable coverage keyed by instrument.
@@ -3342,6 +3488,7 @@ def _resolve_identity_fx_planes(
         published = observed.get(plane, set())
         if published & minutes or _carried_minutes_for_plane(published, minutes):
             resolved[instrument_public_id] = plane
+    _observe_identity_fx_elections(event_requirements or {}, identity_planes, observed, resolved)
     return resolved
 
 
@@ -3487,6 +3634,7 @@ async def _load_request_fx_rates(
             instrument_requirements,
             identity_planes,
             rows,
+            event_requirements,
         )
     planes_by_instrument = _fx_planes_by_instrument(
         instrument_requirements,
@@ -3652,6 +3800,19 @@ def _opening_marks_from_candles(
             planes_by_instrument.get(instrument_public_id, {}),
         )
         if not is_positive_finite(converted):
+            record_pnl_fx_failure(
+                PnlFxFailure(
+                    instrument=instrument_public_id,
+                    role="mark",
+                    event_time=t0,
+                    rate_minute=t0,
+                    from_currency=quote_by_instrument[instrument_public_id],
+                    to_currency=valuation_ccy,
+                    causal_order=(t0, 2, instrument_public_id, 0, "", 0),
+                ),
+                rates,
+                planes_by_instrument.get(instrument_public_id, {}),
+            )
             raise PnlAnchorEvidenceError("opening mark or FX evidence is unavailable")
         marks[instrument_public_id] = converted
     if set(marks) != nonflat_instruments:
@@ -3752,6 +3913,7 @@ async def _derive_anchor_candidate(
         planes_by_instrument,
         activation_time,
     )
+    reset_pnl_fx_execution_order()
     executions = [
         _to_timeline_execution(
             row,
@@ -5013,7 +5175,10 @@ async def build_wallet_pnl_series(
         as_of,
         valuation_ccy,
     )
-    with pnl_read_phase("series_valuation"):
+    with (
+        pnl_read_phase("series_valuation"),
+        pnl_fx_conversion_scope(mark_requirements, to_time),
+    ):
         marks, mark_incompleteness_reasons = _build_marks_and_reasons_from_candles(
             mark_candles,
             quote_by_instrument,
@@ -5023,6 +5188,7 @@ async def build_wallet_pnl_series(
         )
         marks = dict(marks)
         marks.update(anchor.marks)
+        reset_pnl_fx_execution_order()
         executions = [
             _to_timeline_execution(
                 row,
