@@ -454,27 +454,36 @@ async def test_rollover_requires_actual_margin_position(
     monkeypatch: pytest.MonkeyPatch,
     financing: str | None,
 ) -> None:
-    """A shared margin-capable instrument accrues only for proven margin fills.
+    """A paper margin-capable instrument accrues only for proven margin fills.
 
     Given: an open position with spot, margin or unknown durable financing,
     When: the coordinator considers a due rollover boundary,
     Then: only margin produces a charge using a stable position snapshot.
     """
     coord = _make_coord(monkeypatch)
+    shard_key = "paper.XRP-EUR.paper"
     engine = MagicMock(spec=TradingEngineService)
-    engine.instrument, engine.exchange, engine.mode = "XRP-EUR", "kraken", "live"
-    engine._shard_key, engine.wallet_public_id = _SHARD, _WALLET
+    engine.instrument, engine.exchange, engine.mode = "XRP-EUR", "paper", "paper"
+    engine._shard_key, engine.wallet_public_id = shard_key, _WALLET
     repository = AsyncMock(spec=SQLAlchemyRepository)
     coord.repository = repository
     repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
     repository.get_instrument_spec = AsyncMock(return_value=_make_spec())
     repository.get_shard_fill_financing = AsyncMock(return_value=financing)
     repository.get_last_accrual = AsyncMock(return_value=None)
-    event = _make_venue_event(event_id=1, shard_key=_SHARD, fill_price=1.00769, fill_size=4.07)
-    event["venue_timestamp"] = _OPENED
+    event = _make_venue_event(event_id=1, shard_key=shard_key, fill_price=1.00769, fill_size=4.07)
+    event.update(
+        {
+            "venue_timestamp": _OPENED,
+            "instrument": "XRP-EUR",
+            "mode": "paper",
+            "exchange": "paper",
+            "wallet_public_id": _WALLET,
+        }
+    )
     repository.get_venue_events_after = AsyncMock(return_value=[event])
     projection = coord.trade_service.project_fill_state_from_events([event])
-    coord.trade_service._shards[_SHARD] = ShardState(
+    coord.trade_service._shards[shard_key] = ShardState(
         position=PositionProjection(
             position_qty=4.07, entry_price=1.00769, position_opened_at=_OPENED
         ),
@@ -484,11 +493,11 @@ async def test_rollover_requires_actual_margin_position(
     monkeypatch.setattr(coord, "_accrue_one_boundary", accrue)
     await coord._accrue_engine("engine", engine, _OPENED + timedelta(hours=5))
     assert accrue.call_count == (1 if financing == "margin" else 0)
-    repository.get_shard_fill_financing.assert_awaited_once_with(_SHARD, _WALLET, since=_OPENED)
+    repository.get_shard_fill_financing.assert_awaited_once_with(shard_key, _WALLET, since=_OPENED)
     if financing == "margin":
         captured = cast(PositionProjection, accrue.call_args.kwargs["position"])
-        assert captured is not coord.trade_service.get_position(_SHARD)
-        coord.trade_service.get_position(_SHARD).position_qty += 1.0
+        assert captured is not coord.trade_service.get_position(shard_key)
+        coord.trade_service.get_position(shard_key).position_qty += 1.0
         assert captured.position_qty == 4.07
 
 

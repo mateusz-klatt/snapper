@@ -6734,6 +6734,8 @@ class TraderCoordinator(RegisterableProcess):
         spec = await self.repository.get_instrument_spec(instrument_public_id, as_of=now)
         if spec is None or spec["funding_type"] is None:
             return
+        if self._requires_native_rollover(engine, spec["funding_type"]):
+            return
         accrual_type = _FUNDING_TYPE_TO_ACCRUAL_TYPE.get(spec["funding_type"])
         if accrual_type is None:
             return
@@ -6768,6 +6770,21 @@ class TraderCoordinator(RegisterableProcess):
                 position=position,
                 now=now,
             )
+
+    @staticmethod
+    def _requires_native_rollover(engine: TradingEngineService, funding_type: str | None) -> bool:
+        """Reserve actual live Kraken spot financing costs for native postings.
+
+        Margin intent and fill-derived exposure cannot prove remaining borrowing.
+        Schedule estimates must not enter the authoritative accrual ledger, even
+        for a nonzero residual or a position snapshot taken before a close.
+        Paper and backtest modelling retain their existing schedule path.
+        """
+        return (engine.exchange, engine.mode, funding_type) == (
+            "kraken",
+            "live",
+            "spot_margin_rollover",
+        )
 
     async def _position_uses_margin(
         self, engine: TradingEngineService, opened_at: datetime
@@ -6808,7 +6825,9 @@ class TraderCoordinator(RegisterableProcess):
         position: Any,
         now: datetime,
     ) -> None:
-        """Compute and apply a single accrual boundary charge."""
+        """Apply a model boundary only when native postings are not required."""
+        if self._requires_native_rollover(engine, spec["funding_type"]):
+            return
         direction = "long" if position.position_qty > 0 else "short"
         rate_direction = "both" if spec["funding_type"] == "perpetual_funding" else direction
         rate_rows = await self.repository.get_funding_rates(
