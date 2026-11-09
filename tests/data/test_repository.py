@@ -1891,6 +1891,11 @@ class DummyRepository(Repository):
         """Upsert candles - no-op returning 0."""
         return 0
 
+    async def reconcile_native_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Return no native changes for the test repository."""
+        del rows
+        return []
+
     async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
         """Return no historical changes for the dummy repository."""
         del rows
@@ -3054,6 +3059,11 @@ class _MinimalRepository(Repository):
     ) -> list[CandleUpsertRow]:
         """Return no inserted rows for the minimal repository."""
         del rows, session
+        return []
+
+    async def reconcile_native_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Return no native changes for the test repository."""
+        del rows
         return []
 
     async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:

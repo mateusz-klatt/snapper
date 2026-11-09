@@ -206,7 +206,7 @@ class TestKrakenMarketDataPublisher:
     ) -> None:
         """Expose the acknowledged insertion result to the catchup worker.
 
-        Given: A missing-only repository returning either no rows or a normalized row.
+        Given: Native reconciliation returning either no rows or a normalized changed row.
         When: The publisher commits a native catchup candidate.
         Then: The callback returns exactly the repository result after releasing its gate.
 
@@ -222,13 +222,13 @@ class TestKrakenMarketDataPublisher:
         normalized: CandleUpsertRow = {**row, "public_id": "committed-id"}
         inserted = [normalized] if inserted_new_row else []
         repository = MagicMock(spec=Repository)
-        repository.insert_missing_candles = AsyncMock(return_value=inserted)
+        repository.reconcile_native_candles = AsyncMock(return_value=inserted)
         publisher.repository = repository
 
-        result = await publisher._insert_catchup_candle_rows([row])
+        result = await publisher._reconcile_catchup_candle_rows([row])
 
         assert result is inserted
-        repository.insert_missing_candles.assert_awaited_once_with([row])
+        repository.reconcile_native_candles.assert_awaited_once_with([row])
         assert not publisher._candle_identity_gate.locked()
 
     def test_registered_restart_policy_is_always(self) -> None:

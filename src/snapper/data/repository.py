@@ -3789,6 +3789,18 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def reconcile_native_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Commit bounded native minutes, correcting only proven synthetic zero history.
+
+        Insert absent keys and version current flat synthesized zeros only when
+        the incoming exact-minute native response has trades. Any native,
+        calculated, nonzero or unknown-trade historical provenance protects the
+        key. Return acknowledged inserted or corrected rows; preserve logical
+        identities and every earlier payload through bitemporal correction.
+        """
+        ...
+
+    @abstractmethod
     async def insert_missing_native_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11473,6 +11485,94 @@ class SQLAlchemyRepository(Repository):
             await owned.commit()
             return inserted
 
+    async def reconcile_native_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Insert missing native minutes and correct only evidenced synthetic zeros.
+
+        The 720-row bound and native validation match missing-only insertion.
+        Writer participation precedes all current and historical reads. Two
+        indexed lookups per 300 keys load current versions and detect any past
+        real or unknown trade provenance. Existing native and calculated rows
+        are protected even when their recorded volume and trade count are zero.
+        Corrections use the shared exact-version close-and-insert path, retaining
+        public identity and acquisition time; no historical events are emitted.
+
+        Args:
+            rows: Exact-minute native observations acquired before this short write.
+
+        Returns:
+            Normalized inserted or corrected rows after commit acknowledgement.
+        """
+        if not rows:
+            return []
+        if len(rows) > 720:
+            raise ValueError("native candle reconciliation batch exceeds 720 rows")
+        normalized = self._normalize_reconciled_candle_rows(rows, "native")
+        async with self.session() as session:
+            await self._begin_candle_reconciliation_write(session, sqlite_write_lock=True)
+            current, protected = await self._native_catchup_targets(session, normalized)
+            changed: list[CandleUpsertRow] = []
+            for row in normalized:
+                key = self._candle_natural_key(row)
+                existing = current.get(key)
+                if existing is None:
+                    result = await session.execute(self._missing_candle_insert_statement(row))
+                    if result.scalar_one_or_none() is not None:
+                        changed.append(row)
+                elif key not in protected and self._can_correct_synthetic_zero(existing, row):
+                    await self._replace_historical_candle_version(session, row, existing)
+                    changed.append(row)
+            await session.commit()
+            return changed
+
+    @classmethod
+    async def _native_catchup_targets(
+        cls, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> tuple[dict[_CandleNaturalKey, CandleVersionRow], set[_CandleNaturalKey]]:
+        """Read bounded current versions and conservative all-history trade provenance."""
+        keys = [cls._candle_natural_key(row) for row in rows]
+        current: dict[_CandleNaturalKey, CandleVersionRow] = {}
+        protected: set[_CandleNaturalKey] = set()
+        for offset in range(0, len(keys), _CANDLE_LOOKUP_CHUNK_SIZE):
+            in_keys = tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                keys[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
+            )
+            result = await session.execute(
+                select(Candle.__table__).where(in_keys, Candle.known_to == KNOWN_TO_MAX)
+            )
+            for stored in result.mappings().all():
+                existing = cast(CandleVersionRow, dict(stored))
+                current[cls._candle_natural_key(existing)] = existing
+            result = await session.execute(
+                select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at)
+                .where(
+                    in_keys,
+                    or_(
+                        Candle.source != "synthesized",
+                        Candle.volume != 0,
+                        Candle.trades != 0,
+                        Candle.trades.is_(None),
+                    ),
+                )
+                .distinct()
+            )
+            protected.update(
+                (instrument, timeframe, opening) for instrument, timeframe, opening in result.all()
+            )
+        return current, protected
+
+    @staticmethod
+    def _can_correct_synthetic_zero(existing: CandleVersionRow, row: CandleUpsertRow) -> bool:
+        """Require a flat empty synthesized predecessor and newer native trade evidence."""
+        return (
+            existing["source"] == "synthesized"
+            and existing["volume"] == 0
+            and existing["trades"] == 0
+            and existing["open"] == existing["high"] == existing["low"] == existing["close"]
+            and existing["timestamp"] < row["timestamp"]
+            and row["trades"] is not None
+            and row["trades"] > 0
+        )
+
     async def insert_missing_native_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11805,6 +11905,14 @@ class SQLAlchemyRepository(Repository):
         )
         if all(before[field] == candidate[field] for field in business):
             return 0
+        await SQLAlchemyRepository._replace_historical_candle_version(session, row, existing)
+        return 1
+
+    @staticmethod
+    async def _replace_historical_candle_version(
+        session: AsyncSession, row: CandleUpsertRow, existing: CandleVersionRow
+    ) -> None:
+        """Close exactly the fenced predecessor and retain its logical identity on insert."""
         closed = await session.execute(
             update(Candle)
             .where(
@@ -11815,16 +11923,15 @@ class SQLAlchemyRepository(Repository):
                 Candle.timestamp == existing["timestamp"],
                 Candle.public_id == existing["public_id"],
                 Candle.known_to == KNOWN_TO_MAX,
-                Candle.source == "synthesized",
+                Candle.source == existing["source"],
             )
             .values(known_to=row["timestamp"])
             .returning(Candle.public_id)
         )
         if closed.scalar_one_or_none() is None:
-            raise RuntimeError("historical synthesis lost its exact source-owned version")
+            raise RuntimeError("historical reconciliation lost its exact source-owned version")
         row["public_id"] = existing["public_id"]
         await session.execute(insert(Candle).values(**row))
-        return 1
 
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None

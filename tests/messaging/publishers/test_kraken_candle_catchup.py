@@ -83,7 +83,7 @@ class _Fixture:
         self.client = MagicMock(spec=KrakenExchangeClient)
         self.client.get_closed_1m_candles = AsyncMock(return_value=[_candle()])
         self.repository = MagicMock(spec=Repository)
-        self.repository.insert_missing_candles = AsyncMock(return_value=[])
+        self.repository.reconcile_native_candles = AsyncMock(return_value=[])
         self.committed = AsyncMock()
         self.tracker = SequenceTracker()
 
@@ -109,6 +109,9 @@ class _Fixture:
     [
         ("history_minutes", 0),
         ("history_minutes", 720),
+        ("priority_history_minutes", 119),
+        ("priority_history_minutes", 720),
+        ("priority_history_minutes", float("inf")),
         ("symbols_per_pass", -1),
         ("symbols_per_pass", 1),
         ("attempt_seconds", float("inf")),
@@ -147,10 +150,10 @@ async def test_startup_preserves_native_fields_author_and_committed_repair_order
         assert observations == ["committed"]
         observations.append("repair")
 
-    fixture.repository.insert_missing_candles.side_effect = insert
+    fixture.repository.reconcile_native_candles.side_effect = insert
     fixture.committed.side_effect = repair
     await fixture.worker().run_pass()
-    rows = fixture.repository.insert_missing_candles.call_args.args[0]
+    rows = fixture.repository.reconcile_native_candles.call_args.args[0]
     row = rows[0]
     assert (row["open"], row["high"], row["low"], row["close"]) == (10.0, 12.0, 9.0, 11.0)
     assert (row["vwap"], row["volume"], row["trades"]) == (10.5, 3.25, 7)
@@ -159,11 +162,11 @@ async def test_startup_preserves_native_fields_author_and_committed_repair_order
     assert row["session_id"] == fixture.tracker.session_id
     assert row["sequence_id"] == 1
     fixture.client.get_closed_1m_candles.assert_awaited_once_with(
-        "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
+        "BTC-USD", NOW.replace(second=0) - timedelta(minutes=719), NOW.replace(second=0)
     )
     assert observations == ["committed", "repair"]
     fixture.committed.assert_awaited_once_with(
-        "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
+        "BTC-USD", NOW.replace(second=0) - timedelta(minutes=719), NOW.replace(second=0)
     )
 
 
@@ -190,16 +193,16 @@ async def test_repairs_require_newly_inserted_rows(
         assert len(rows) == 2
         return rows[:insert_count]
 
-    fixture.repository.insert_missing_candles.side_effect = insert
+    fixture.repository.reconcile_native_candles.side_effect = insert
     worker = fixture.worker()
     if publisher_callback:
         publisher = _publisher()
         publisher.repository = fixture.repository
         worker._callbacks = replace(
-            worker._callbacks, insert_missing=publisher._insert_catchup_candle_rows
+            worker._callbacks, reconcile_native=publisher._reconcile_catchup_candle_rows
         )
     await worker._reconcile_symbol("BTC-USD", START, NOW)
-    fixture.repository.insert_missing_candles.assert_awaited_once()
+    fixture.repository.reconcile_native_candles.assert_awaited_once()
     if insert_count:
         fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
     else:
@@ -244,7 +247,7 @@ async def test_symbol_budget_is_round_robin_and_survives_one_failed_symbol() -> 
         "C",
         "D",
     ]
-    assert fixture.repository.insert_missing_candles.await_count == 3
+    assert fixture.repository.reconcile_native_candles.await_count == 3
     fixture.committed.assert_not_awaited()
 
 
@@ -260,7 +263,7 @@ async def test_unresolved_identity_never_fetches_or_writes() -> None:
     fixture.resolve.return_value = None
     await fixture.worker().run_pass()
     fixture.client.get_closed_1m_candles.assert_not_awaited()
-    fixture.repository.insert_missing_candles.assert_not_awaited()
+    fixture.repository.reconcile_native_candles.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -319,7 +322,7 @@ async def test_unknown_commit_ack_reconciles_existing_rows_on_the_next_pass() ->
             raise ConnectionError("commit acknowledgement unavailable")
         return []
 
-    fixture.repository.insert_missing_candles.side_effect = insert
+    fixture.repository.reconcile_native_candles.side_effect = insert
     worker = fixture.worker()
     await worker.run_pass()
     fixture.committed.assert_not_awaited()
@@ -329,10 +332,11 @@ async def test_unknown_commit_ack_reconciles_existing_rows_on_the_next_pass() ->
 
 
 @pytest.mark.asyncio
-async def test_supervisor_coalesces_requests_and_survives_a_failed_pass() -> None:
+@pytest.mark.parametrize("work", ["run_pass", "run_sweep"])
+async def test_supervisor_coalesces_requests_and_survives_a_failed_pass(work: str) -> None:
     """Reconnect requests stay paced and failures do not kill catchup.
 
-    Given: Repeated reconnect notifications and one failed bounded pass.
+    Given: Repeated reconnect notifications and one failed pass or full sweep.
     When: The supervisor runs until the publisher stops.
     Then: Requests coalesce and the following pass still executes.
     """
@@ -353,7 +357,7 @@ async def test_supervisor_coalesces_requests_and_survives_a_failed_pass() -> Non
             raise RuntimeError("temporary bounded pass failure")
         fixture.running = False
 
-    with patch.object(worker, "run_pass", side_effect=run_pass):
+    with patch.object(worker, work, side_effect=run_pass):
         await worker.run()
     assert calls == 2
 
@@ -743,15 +747,15 @@ async def test_wildcard_defaults_are_immediate_and_fair_pool_keeps_rotating() ->
     await worker.run_pass()
     visited = [call.args[0] for call in fixture.client.get_closed_1m_candles.call_args_list]
     assert visited == [
+        "EUR-USD",
         "BTC-USD",
         "ETH-USD",
-        "EUR-USD",
         "ALT0000-USD",
-        "BTC-USD",
-        "ETH-USD",
-        "ALT0001-USD",
         "EUR-USD",
         "BTC-USD",
+        "ALT0001-USD",
+        "ETH-USD",
+        "EUR-USD",
     ]
     assert len(visited) == 3 * 3
 
@@ -783,7 +787,7 @@ async def test_budget_exhaustion_advances_only_attempted_pool_and_cannot_starve_
     await worker.run_pass()
     await worker.run_pass()
     visited = [call.args[0] for call in fixture.client.get_closed_1m_candles.call_args_list]
-    assert visited == ["BTC-USD", "A", "B", "ETH-USD", "EUR-USD", "C", "BTC-USD", "ETH-USD"]
+    assert visited == ["EUR-USD", "A", "B", "BTC-USD", "ETH-USD", "C", "EUR-USD", "BTC-USD"]
 
 
 @pytest.mark.asyncio
@@ -823,7 +827,7 @@ async def test_removed_persistence_permission_refuses_a_response_learned_in_flig
 
     fixture.client.get_closed_1m_candles.side_effect = fetch
     await fixture.worker().run_pass()
-    fixture.repository.insert_missing_candles.assert_not_awaited()
+    fixture.repository.reconcile_native_candles.assert_not_awaited()
     fixture.committed.assert_not_awaited()
 
 
@@ -1134,7 +1138,7 @@ async def test_native_catchup_and_trusted_live_share_the_stored_minute_identity(
             lambda: True,
             publisher._tracker,
             lambda: catchup_at,
-            insert_missing=publisher._insert_catchup_candle_rows,
+            reconcile_native=publisher._reconcile_catchup_candle_rows,
         ),
     )
     try:
@@ -1182,7 +1186,7 @@ def _identity_publisher() -> tuple[KrakenMarketDataPublisher, MagicMock]:
     publisher = _publisher()
     repository = MagicMock(spec=Repository)
     repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
-    repository.insert_missing_candles = AsyncMock(return_value=[])
+    repository.reconcile_native_candles = AsyncMock(return_value=[])
     publisher.repository = repository
     return publisher, repository
 
@@ -1239,18 +1243,18 @@ async def test_identity_selection_serializes_native_commit_but_not_rest_acquisit
         lambda: True,
         publisher._tracker,
         lambda: NOW,
-        publisher._insert_catchup_candle_rows,
+        publisher._reconcile_catchup_candle_rows,
     )
     worker = KrakenCandleCatchup(repository, client, callbacks)
     live = asyncio.create_task(_resolve_test_identity(publisher))
     await entered.wait()
     native = asyncio.create_task(worker._reconcile_symbol("BTC-USD", START, NOW))
     await fetched.wait()
-    repository.insert_missing_candles.assert_not_awaited()
+    repository.reconcile_native_candles.assert_not_awaited()
     released.set()
     public_id = await live
     await native
-    assert repository.insert_missing_candles.await_args.args[0][0]["public_id"] == public_id
+    assert repository.reconcile_native_candles.await_args.args[0][0]["public_id"] == public_id
     assert not publisher._candle_identity_gate.locked()
 
 
@@ -1278,9 +1282,9 @@ async def test_quiet_commit_fate_preserves_unresolved_identity_and_releases_loca
             raise ConnectionError("quiet commit outcome unavailable")
         return []
 
-    repository.insert_missing_candles.side_effect = insert
+    repository.reconcile_native_candles.side_effect = insert
     task = asyncio.create_task(
-        publisher._insert_catchup_candle_rows([_native_identity_row(publisher)])
+        publisher._reconcile_catchup_candle_rows([_native_identity_row(publisher)])
     )
     await entered.wait()
     if fault == "cancelled":
@@ -1305,9 +1309,9 @@ async def test_unknown_native_commit_requires_fenced_lookup_before_any_new_ident
     Then: No UUID, latest cache entry or live event is created.
     """
     publisher, repository = _identity_publisher()
-    repository.insert_missing_candles.side_effect = ConnectionError("unknown commit")
+    repository.reconcile_native_candles.side_effect = ConnectionError("unknown commit")
     with pytest.raises(ConnectionError):
-        await publisher._insert_catchup_candle_rows([_native_identity_row(publisher)])
+        await publisher._reconcile_catchup_candle_rows([_native_identity_row(publisher)])
     repository.get_canonical_candle_public_id.side_effect = TimeoutError("writer fence busy")
     with pytest.raises(TimeoutError):
         await _resolve_test_identity(publisher)
@@ -1477,17 +1481,17 @@ async def test_native_replay_after_real_commit_and_lost_ack_retires_live_identit
         row.update({"instrument_public_id": instrument, "open_at": candle.interval_begin})
         key = (instrument, "1m", candle.interval_begin)
         public_id = publisher._pending_candle_identities[key]
-        original = repository.insert_missing_candles
+        original = repository.reconcile_native_candles
 
         async def committed_without_ack(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
             assert len(await original(rows)) == 1
             raise ConnectionError("acknowledgement lost after real commit")
 
         with (
-            patch.object(repository, "insert_missing_candles", new=committed_without_ack),
+            patch.object(repository, "reconcile_native_candles", new=committed_without_ack),
             pytest.raises(ConnectionError),
         ):
-            await publisher._insert_catchup_candle_rows([row])
+            await publisher._reconcile_catchup_candle_rows([row])
         assert publisher._pending_candle_identities[key] == public_id
 
         async def replay(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
@@ -1495,8 +1499,8 @@ async def test_native_replay_after_real_commit_and_lost_ack_retires_live_identit
             assert result == []
             return result
 
-        with patch.object(repository, "insert_missing_candles", new=replay):
-            assert await publisher._insert_catchup_candle_rows([row]) == []
+        with patch.object(repository, "reconcile_native_candles", new=replay):
+            assert await publisher._reconcile_catchup_candle_rows([row]) == []
         assert await repository.get_canonical_candle_public_id(*key) == public_id
         assert key not in publisher._pending_candle_identities
     finally:
@@ -1571,7 +1575,7 @@ async def test_acknowledged_quiet_write_keeps_unproven_or_replaced_reservation(
 
     repository.get_canonical_candle_public_id.side_effect = canonical
     operation = (
-        publisher._insert_catchup_candle_rows
+        publisher._reconcile_catchup_candle_rows
         if kind == "native"
         else publisher._persist_historical_candle_rows
     )
@@ -1636,10 +1640,10 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
         three others are committed, and spacing follows each attempt.
     """
     fixture = _Fixture()
-    fixture.symbols = ["XRP-USD", "BTC-USD", "ETH-USD", "SOL-USD"]
+    fixture.symbols = ["XRP-USD", "ADA-USD", "DOT-USD", "SOL-USD"]
 
     async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
-        if symbol == "ETH-USD":
+        if symbol == "DOT-USD":
             raise RuntimeError("temporary venue failure")
         return [_candle(symbol)]
 
@@ -1648,31 +1652,34 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
     async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
         return rows
 
-    fixture.repository.insert_missing_candles.side_effect = insert
+    fixture.repository.reconcile_native_candles.side_effect = insert
     worker = fixture.worker(CatchupPolicy(symbols_per_pass=2, sweep_spacing_seconds=0.001))
-    with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+    with (
+        patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        patch.object(worker, "run_pass", new=AsyncMock()),
+    ):
         await worker.run_sweep()
     requested = [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list]
-    assert requested == ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
+    assert requested == ["ADA-USD", "DOT-USD", "SOL-USD", "XRP-USD"]
     end = NOW.replace(second=0)
     assert {call.args[1:] for call in fixture.client.get_closed_1m_candles.await_args_list} == {
         (end - timedelta(minutes=120), end)
     }
     assert [call.args[0] for call in fixture.committed.await_args_list] == [
-        "BTC-USD",
+        "ADA-USD",
         "SOL-USD",
         "XRP-USD",
     ]
-    assert sleep.await_count == 4
+    assert sleep.await_count == 5
 
 
 @pytest.mark.asyncio
 async def test_sweep_stops_when_the_publisher_stops() -> None:
-    """Shutdown ends a sweep before its next acquisition.
+    """Shutdown after the initial priority pass prevents sweep acquisition.
 
-    Given: Two permitted symbols and a publisher that stops after the first.
+    Given: Two permitted symbols and a publisher that stops during the first pause.
     When: One sweep runs.
-    Then: Only the first symbol is requested.
+    Then: No alphabetical request follows shutdown.
     """
     fixture = _Fixture()
     fixture.symbols = ["BTC-USD", "ETH-USD"]
@@ -1681,11 +1688,208 @@ async def test_sweep_stops_when_the_publisher_stops() -> None:
         fixture.running = False
 
     worker = fixture.worker(CatchupPolicy(sweep_spacing_seconds=0.001))
-    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop)):
+    with (
+        patch("asyncio.sleep", new=AsyncMock(side_effect=stop)),
+        patch.object(worker, "run_pass", new=AsyncMock()),
+    ):
         await worker.run_sweep()
-    assert [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list] == [
-        "BTC-USD"
-    ]
+    fixture.client.get_closed_1m_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["trades", "no_trades", "unavailable"])
+async def test_publisher_catchup_corrects_zero_only_with_trades_and_replays_quietly(
+    tmp_path: Path, evidence: str
+) -> None:
+    """Native acquisition and the identity-gated write preserve zero evidence boundaries.
+
+    Given: A durable synthetic zero and native trades, no trades or unavailable history.
+    When: Two actual catchup passes use the publisher persistence callback.
+    Then: Only trade evidence creates one correction and repair, with no live publication.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'catchup-zero.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    publisher._publish_message = AsyncMock()
+    fixture = _Fixture()
+    instrument = "00000000-0000-4000-8000-000000000501"
+    fixture.resolve.return_value = instrument
+    worker = KrakenCandleCatchup(
+        repository,
+        fixture.client,
+        CatchupCallbacks(
+            lambda: fixture.symbols,
+            fixture.resolve,
+            fixture.committed,
+            lambda: True,
+            publisher._tracker,
+            lambda: NOW,
+            publisher._reconcile_catchup_candle_rows,
+        ),
+    )
+    zero = worker._row(_candle(), instrument, NOW - timedelta(hours=1))
+    zero.update(
+        {
+            "source": "synthesized",
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 0.0,
+            "vwap": 10.0,
+            "trades": 0,
+        }
+    )
+    if evidence == "unavailable":
+        fixture.client.get_closed_1m_candles.side_effect = ConnectionError("unavailable")
+    elif evidence == "no_trades":
+        fixture.client.get_closed_1m_candles.return_value = [replace(_candle(), trades=0)]
+    try:
+        await repository.upsert_candles([zero])
+        await worker.run_pass()
+        await worker.run_pass()
+        async with repository.session() as session:
+            versions = (
+                (await session.execute(select(Candle).order_by(Candle.timestamp))).scalars().all()
+            )
+        assert versions[0].trades == 0 and versions[0].source == "synthesized"
+        assert len(versions) == (2 if evidence == "trades" else 1)
+        if evidence == "trades":
+            assert versions[0].known_to == versions[1].timestamp == NOW
+            assert versions[1].public_id == versions[0].public_id
+            assert versions[1].trades == 7 and versions[1].source == "native"
+        else:
+            assert versions[0].known_to == KNOWN_TO_MAX
+        assert fixture.committed.await_count == (1 if evidence == "trades" else 0)
+        publisher._publish_message.assert_not_awaited()
+        assert publisher._candle_write_queue.empty()
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_priority_failure_retries_during_a_paced_large_sweep() -> None:
+    """A failed valuation pair is retried before the long alphabetical sweep completes.
+
+    Given: A large roster and the first EUR-USD acquisition failing.
+    When: The real startup supervisor enters its paced full sweep.
+    Then: EUR-USD runs first and retries within bounded passes during the sweep.
+    """
+    fixture = _Fixture()
+    fixture.symbols = [f"ALT{i:03}-USD" for i in range(45)] + ["EUR-USD", "BTC-USD", "ETH-USD"]
+    elapsed = 0.0
+    observations: list[tuple[str, float]] = []
+    pauses: list[float] = []
+    euro_attempts = 0
+
+    async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
+        nonlocal euro_attempts
+        observations.append((symbol, elapsed))
+        if symbol == "EUR-USD":
+            euro_attempts += 1
+            if euro_attempts == 1:
+                raise TimeoutError("native history temporarily unavailable")
+        return []
+
+    async def pause(seconds: float) -> None:
+        nonlocal elapsed
+        pauses.append(seconds)
+        elapsed += seconds
+        if fixture.client.get_closed_1m_candles.await_count >= len(fixture.symbols) + 9:
+            fixture.running = False
+
+    fixture.client.get_closed_1m_candles.side_effect = acquire
+    worker = fixture.worker()
+    with (
+        patch("asyncio.sleep", new=AsyncMock(side_effect=pause)),
+        patch(
+            "snapper.messaging.publishers.kraken_candle_catchup.monotonic",
+            side_effect=lambda: elapsed,
+        ),
+    ):
+        await worker.run_sweep()
+    visited = [symbol for symbol, _ in observations]
+    assert visited[:3] == ["EUR-USD", "BTC-USD", "ETH-USD"]
+    retry = next(i for i in range(1, len(visited)) if visited[i] == "EUR-USD")
+    assert retry < visited.index("ALT044-USD")
+    assert 60 <= observations[retry][1] <= 63
+    assert set(pauses) == {worker._policy.sweep_spacing_seconds}
+    assert len(visited) <= len(fixture.symbols) + 3 * (1 + int(elapsed // 60))
+
+
+@pytest.mark.asyncio
+async def test_sweep_survives_a_failed_pass_and_stops_during_an_interleaved_pass() -> None:
+    """A whole-pass failure cannot cancel the sweep or allow work after shutdown.
+
+    Given: One pass timeout and a later pass that stops the publisher.
+    When: A sweep reaches its next regular pass boundary.
+    Then: Alphabetical acquisition resumes after failure and ends after shutdown.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["A", "B", "C"]
+    worker = fixture.worker()
+    calls = 0
+
+    async def bounded_pass() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("whole pass deadline")
+        fixture.running = False
+
+    with (
+        patch.object(worker, "run_pass", new=AsyncMock(side_effect=bounded_pass)),
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch(
+            "snapper.messaging.publishers.kraken_candle_catchup.monotonic",
+            side_effect=[0.0, 1.0, 61.0, 61.0],
+        ),
+    ):
+        await worker.run_sweep()
+    assert calls == 2
+    assert [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list] == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_priority_restart_recovers_a_missed_minute_older_than_the_ordinary_window() -> None:
+    """Restarting does not discard a priority gap after the ordinary lookback expires.
+
+    Given: A failed valuation-pair request followed by a restart four hours later.
+    When: The new worker requests bounded native history.
+    Then: The old minute is recovered while ordinary pairs keep a two-hour bound.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["EUR-USD", "ALT-USD"]
+    fixture.client.get_closed_1m_candles.side_effect = ConnectionError("unavailable")
+    await fixture.worker().run_pass()
+    recovered: list[CandleUpsertRow] = []
+    restarted_at = NOW + timedelta(hours=4)
+    missed = _candle("EUR-USD")
+
+    async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
+        if symbol == "EUR-USD" and start <= missed.interval_begin < end:
+            return [missed]
+        return []
+
+    async def commit(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        recovered.extend(rows)
+        return rows
+
+    fixture.client.get_closed_1m_candles.reset_mock()
+    fixture.client.get_closed_1m_candles.side_effect = acquire
+    fixture.repository.reconcile_native_candles.side_effect = commit
+    restarted = fixture.worker()
+    restarted._callbacks = replace(restarted._callbacks, clock=lambda: restarted_at)
+    await restarted.run_pass()
+    assert [row["open_at"] for row in recovered] == [missed.interval_begin]
+    assert recovered[0]["timestamp"] == restarted_at
+    requested = fixture.client.get_closed_1m_candles.await_args_list
+    assert {
+        call.args[0]: (call.args[2] - call.args[1]).total_seconds() / 60 for call in requested
+    } == {
+        "EUR-USD": 719,
+        "ALT-USD": 120,
+    }
 
 
 @pytest.mark.asyncio

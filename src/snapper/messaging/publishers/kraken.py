@@ -510,7 +510,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         super()._mark_candle_writes_committed(rows)
         self._release_committed_candle_identities(rows)
 
-    async def _insert_catchup_candle_rows(
+    async def _reconcile_catchup_candle_rows(
         self, rows: list[CandleUpsertRow]
     ) -> list[CandleUpsertRow]:
         """Serialize quiet native commits with live identity choice after REST acquisition.
@@ -519,11 +519,11 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             rows: Full closed native observations acquired outside the local gate.
 
         Returns:
-            Newly inserted rows after acknowledgement and identity retirement, empty on replay.
+            Inserted or corrected rows after acknowledgement and identity retirement, empty on replay.
         """
         async with self._candle_identity_gate:
             prepared = self._bind_pending_candle_identities(rows)
-            inserted = await self._require_repository().insert_missing_candles(prepared)
+            inserted = await self._require_repository().reconcile_native_candles(prepared)
             self._release_committed_candle_identities(inserted)
             await self._retire_acknowledged_candle_identities(prepared)
             return inserted
@@ -656,7 +656,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                     committed=self._reconcile_catchup_repairs,
                     active=lambda: self.running,
                     tracker=self._tracker,
-                    insert_missing=self._insert_catchup_candle_rows,
+                    reconcile_native=self._reconcile_catchup_candle_rows,
                 ),
             )
             return [asyncio.create_task(self._candle_catchup.run())]
