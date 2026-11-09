@@ -22,6 +22,10 @@ from snapper.messaging.publishers.native_candle_finalizer import is_complete_his
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 
 
+class CatchupDeferredError(RuntimeError):
+    """Distinguish cooperative live-writer admission deferral from a successful replay."""
+
+
 def _now() -> datetime:
     """Return the actual UTC acquisition/write clock.
 
@@ -258,6 +262,10 @@ class KrakenCandleCatchup:
             try:
                 async with asyncio.timeout(self._policy.attempt_seconds):
                     await self._reconcile_symbol(symbol, start, end)
+            except CatchupDeferredError as error:
+                logger.info(
+                    "Kraken candle catchup sweep deferred: symbol={} reason={}", symbol, error
+                )
             except Exception as error:
                 logger.warning(
                     "Kraken candle catchup sweep unresolved: symbol={} error={}",
@@ -282,6 +290,10 @@ class KrakenCandleCatchup:
                 try:
                     async with asyncio.timeout(self._policy.attempt_seconds):
                         await self._reconcile_symbol(symbol, start, end)
+                except CatchupDeferredError as error:
+                    logger.info(
+                        "Kraken candle catchup deferred: symbol={} reason={}", symbol, error
+                    )
                 except Exception as error:
                     logger.warning(
                         "Kraken candle catchup symbol unresolved: symbol={} error={}",
@@ -309,12 +321,17 @@ class KrakenCandleCatchup:
             raise ValueError("Kraken catchup symbol left the permitted persistence roster")
         author = self._callbacks.clock()
         rows = [self._row(candle, instrument, author) for candle in candles]
-        if self._callbacks.insert_missing is None:
-            inserted = await self._repository.insert_missing_candles(rows)
-        else:
-            inserted = await self._callbacks.insert_missing(rows)
-        if inserted:
-            await self._callbacks.committed(symbol, start, end)
+        await self._repository.filter_missing_candles(rows)
+        committed = False
+        insert = self._callbacks.insert_missing or self._repository.insert_missing_candles
+        try:
+            for offset in range(0, len(rows), 100):
+                inserted = await insert(rows[offset : offset + 100])
+                committed = committed or bool(inserted)
+                await asyncio.sleep(0)
+        finally:
+            if committed:
+                await self._callbacks.committed(symbol, start, end)
 
     def _row(self, candle: CandleUpdate, instrument: str, author: datetime) -> CandleUpsertRow:
         """Preserve venue fields with actual knowledge time and producer provenance.

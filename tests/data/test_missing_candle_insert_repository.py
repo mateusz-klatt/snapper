@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -142,6 +143,67 @@ async def test_caller_transaction_can_rollback_and_repeated_calls_are_true_noops
     before = await _stored(repository)
     assert await repository.insert_missing_candles([_row()]) == []
     assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_owned_replay_skips_writer_fence_and_preserves_closed_history(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully present replay never acquires a writer fence or changes historical fields."""
+    row = _row() | {"known_to": _ACQUIRED + timedelta(days=1), "public_id": _SESSION}
+    async with repository.session() as session:
+        session.add(Candle(**row))
+        await session.commit()
+    before = await _stored(repository)
+    begin = AsyncMock(wraps=repository._begin_candle_reconciliation_write)
+    monkeypatch.setattr(repository, "_begin_candle_reconciliation_write", begin)
+
+    assert await repository.insert_missing_candles([_row()]) == []
+
+    begin.assert_not_awaited()
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_preflight_is_read_only_and_retains_original_candidate_identity(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A negative hint neither mints public identities nor enters the writer protocol."""
+    await repository.insert_missing_candles([_row()])
+    before = await _stored(repository)
+    rows = [_row(2), _row(), _row(1)]
+    begin = AsyncMock(wraps=repository._begin_candle_reconciliation_write)
+    monkeypatch.setattr(repository, "_begin_candle_reconciliation_write", begin)
+
+    missing = await repository.filter_missing_candles(rows)
+
+    assert missing == [rows[0], rows[2]]
+    assert missing[0] is not rows[0]
+    assert all("public_id" not in row for row in missing)
+    begin.assert_not_awaited()
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_missing_batch_uses_one_insert_and_returns_input_order(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """One hundred absent keys use one set-based statement under the writer fence."""
+    rows = [_row(offset) for offset in reversed(range(100))]
+    statements: list[str] = []
+
+    def record(*args: object) -> None:
+        """Record physical SQL without changing the real database transaction."""
+        statements.append(str(args[2]))
+
+    event.listen(repository.engine.sync_engine, "before_cursor_execute", record)
+    try:
+        inserted = await repository.insert_missing_candles(rows)
+    finally:
+        event.remove(repository.engine.sync_engine, "before_cursor_execute", record)
+
+    assert [row["open_at"] for row in inserted] == [row["open_at"] for row in rows]
+    assert sum("INSERT INTO candles" in statement for statement in statements) == 1
 
 
 @pytest.mark.asyncio
@@ -316,6 +378,7 @@ async def test_postgres_serialization_commands_precede_insert_receipt_without_co
     isolation.scalar_one.return_value = "read committed"
     inserted = MagicMock()
     inserted.scalar_one_or_none.return_value = "00000000-0000-4000-8000-000000000401"
+    inserted.all.return_value = [(_INSTRUMENT, "1m", _OPEN)]
     session.execute.side_effect = [isolation, MagicMock(), MagicMock(), inserted]
     try:
         assert (
@@ -340,6 +403,8 @@ async def test_unsupported_dialect_refuses_before_a_database_statement() -> None
     try:
         with pytest.raises(NotImplementedError):
             await repo.insert_missing_candles([_row()])
+        with pytest.raises(NotImplementedError):
+            await repo.insert_missing_native_candles([_row()])
     finally:
         await repo.engine.dispose()
 
@@ -999,3 +1064,18 @@ def test_reconciled_candle_seconds_keeps_synthesis_above_minutes() -> None:
     """
     with pytest.raises(ValueError, match="not supported"):
         SQLAlchemyRepository._reconciled_candle_seconds("1m", "synthesized", venue_bars=True)
+
+
+@pytest.mark.asyncio
+async def test_preflight_empty_and_invalid_suffix_never_open_a_session(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only admission validates the entire native batch before any database access."""
+    session = MagicMock(side_effect=AssertionError("unexpected database access"))
+    monkeypatch.setattr(repository, "session", session)
+    assert await repository.filter_missing_candles([]) == []
+    with pytest.raises(ValueError, match="duplicate natural keys"):
+        await repository.filter_missing_candles([_row(offset) for offset in range(100)] + [_row()])
+    with pytest.raises(ValueError, match="720"):
+        await repository.filter_missing_candles([_row(offset) for offset in range(721)])
+    session.assert_not_called()

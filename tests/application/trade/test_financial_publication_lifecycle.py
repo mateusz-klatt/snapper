@@ -493,6 +493,7 @@ class _ShutdownObservation:
     closes: list[ValidatedSubscriber] = field(default_factory=list)
     joined_at_close: list[bool] = field(default_factory=list)
     worker_tasks: tuple[asyncio.Task[None], ...] = ()
+    owned_subscriber: ValidatedSubscriber | None = None
     callback_cancellations: list[asyncio.CancelledError] = field(default_factory=list)
 
     async def hold_completed_callback(self) -> None:
@@ -563,10 +564,12 @@ def _observe_shutdown_callbacks(
         Args:
             subscriber: Actual lifecycle-owned receive socket reaching its original close method.
         """
-        observation.closes.append(subscriber)
-        observation.joined_at_close.append(
-            observation.finished.is_set() and all(task.done() for task in observation.worker_tasks)
-        )
+        if subscriber is observation.owned_subscriber:
+            observation.closes.append(subscriber)
+            observation.joined_at_close.append(
+                observation.finished.is_set()
+                and all(task.done() for task in observation.worker_tasks)
+            )
         original_close(subscriber)
 
     monkeypatch.setattr(
@@ -603,6 +606,8 @@ async def test_shutdown_double_cancellation_never_closes_receive_resources_befor
             owner = _owner(repository, intent.payload.scope, bus)
             try:
                 await owner.start()
+                observation.owned_subscriber = owner._subscriber
+                assert observation.owned_subscriber is not None
                 observation.worker_tasks = tuple(owner._workers)
                 assert len(observation.worker_tasks) == 2
                 if worker == "refresh":
@@ -610,6 +615,12 @@ async def test_shutdown_double_cancellation_never_closes_receive_resources_befor
                     owner.request_refresh()
                 await observation.entered.wait()
                 await _cancel_stop_twice(owner, observation.cancelled)
+                unrelated_context = zmq.asyncio.Context()
+                unrelated_socket = unrelated_context.socket(zmq.SUB)
+                unrelated = ValidatedSubscriber(unrelated_socket)
+                unrelated.close()
+                assert unrelated_socket.closed
+                unrelated_context.destroy(linger=0)
                 assert (
                     owner.status is FinancialPublicationLifecycleStatus.UNRESOLVED
                     and observation.closes == []

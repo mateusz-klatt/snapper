@@ -33,6 +33,7 @@ from snapper.messaging.publishers.base import _PendingCandleRepair
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupCallbacks
+from snapper.messaging.publishers.kraken_candle_catchup import CatchupDeferredError
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupPolicy
 from snapper.messaging.publishers.kraken_candle_catchup import KrakenCandleCatchup
 from snapper.messaging.publishers.kraken_candle_catchup import complete_repair_windows
@@ -83,6 +84,7 @@ class _Fixture:
         self.client = MagicMock(spec=KrakenExchangeClient)
         self.client.get_closed_1m_candles = AsyncMock(return_value=[_candle()])
         self.repository = MagicMock(spec=Repository)
+        self.repository.filter_missing_candles = AsyncMock(side_effect=lambda rows: list(rows))
         self.repository.insert_missing_candles = AsyncMock(return_value=[])
         self.committed = AsyncMock()
         self.tracker = SequenceTracker()
@@ -244,7 +246,8 @@ async def test_symbol_budget_is_round_robin_and_survives_one_failed_symbol() -> 
         "C",
         "D",
     ]
-    assert fixture.repository.insert_missing_candles.await_count == 3
+    fixture.repository.insert_missing_candles.assert_not_awaited()
+    assert fixture.repository.filter_missing_candles.await_count == 3
     fixture.committed.assert_not_awaited()
 
 
@@ -1107,7 +1110,7 @@ async def test_native_catchup_and_trusted_live_share_the_stored_minute_identity(
     """A legitimate live minute must retain one ID across native missing-only insertion.
 
     Given: A fully trusted builder minute and independently scheduled native catchup.
-    When: Catchup commits before either the live emission or its queued durable write.
+    When: Catchup either commits first or defers until the queued live writer acknowledges.
     Then: The published minute identity equals the actual committed logical identity.
     """
     repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'native-live-id.db'}")
@@ -1143,12 +1146,19 @@ async def test_native_catchup_and_trusted_live_share_the_stored_minute_identity(
                 publisher, candle, NOW - timedelta(seconds=1)
             )
             if advanced:
-                await _enqueue_trusted_live_minute(
+                advanced_row = await _enqueue_trusted_live_minute(
                     publisher,
                     _trusted_closed_trade_minute(35, catchup_at),
                     catchup_at - timedelta(seconds=1),
                 )
                 publisher._candle_write_queue.task_done()
+            with pytest.raises(CatchupDeferredError, match="outstanding="):
+                await worker._reconcile_symbol("BTC-USD", candle.interval_begin, NOW)
+            assert await repository.upsert_candles([queued]) == 1
+            publisher._mark_candle_writes_committed([queued])
+            if advanced:
+                assert await repository.upsert_candles([advanced_row]) == 1
+                publisher._mark_candle_writes_committed([advanced_row])
             await worker._reconcile_symbol("BTC-USD", candle.interval_begin, NOW)
         else:
             await worker._reconcile_symbol("BTC-USD", candle.interval_begin, NOW)
@@ -1181,6 +1191,7 @@ def _identity_publisher() -> tuple[KrakenMarketDataPublisher, MagicMock]:
     """Provide explicit canonical absence without substituting a mock object for an ID."""
     publisher = _publisher()
     repository = MagicMock(spec=Repository)
+    repository.filter_missing_candles = AsyncMock(side_effect=lambda rows: list(rows))
     repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
     repository.insert_missing_candles = AsyncMock(return_value=[])
     publisher.repository = repository
@@ -1471,7 +1482,8 @@ async def test_native_replay_after_real_commit_and_lost_ack_retires_live_identit
     )
     try:
         candle = _trusted_closed_trade_minute()
-        await _enqueue_trusted_live_minute(publisher, candle, NOW)
+        dropped = await _enqueue_trusted_live_minute(publisher, candle, NOW)
+        publisher._forget_candle_write_sequence(dropped)
         publisher._candle_write_queue.task_done()
         row = _native_identity_row(publisher)
         row.update({"instrument_public_id": instrument, "open_at": candle.interval_begin})
@@ -1663,7 +1675,7 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
         "SOL-USD",
         "XRP-USD",
     ]
-    assert sleep.await_count == 4
+    assert [call.args[0] for call in sleep.await_args_list if call.args[0]] == [0.001] * 4
 
 
 @pytest.mark.asyncio
@@ -1735,3 +1747,171 @@ def test_default_sweep_fits_the_history_window_for_the_spot_roster() -> None:
     policy = CatchupPolicy()
     sweep_minutes = 1853 * (policy.sweep_spacing_seconds + 0.1) / 60
     assert sweep_minutes + 15 <= policy.history_minutes
+
+
+@pytest.mark.asyncio
+async def test_native_worker_chunks_commits_and_repairs_after_a_later_failure() -> None:
+    """An acknowledged first chunk still schedules grid-verified repair after a later failure.
+
+    Given: A response with 201 minutes and a second-transaction failure.
+    When: The worker acknowledges its first chunk.
+    Then: Each transaction stays bounded and committed inputs still trigger repair.
+    """
+    fixture = _Fixture()
+    candles = [
+        replace(_candle(), interval_begin=START - timedelta(minutes=offset))
+        for offset in range(201)
+    ]
+    fixture.client.get_closed_1m_candles.return_value = candles
+    calls: list[int] = []
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Acknowledge the first independent transaction and fail the second."""
+        calls.append(len(rows))
+        if len(calls) == 2:
+            raise ConnectionError("second transaction unavailable")
+        return rows
+
+    fixture.repository.insert_missing_candles.side_effect = insert
+    worker = fixture.worker()
+    with pytest.raises(ConnectionError, match="second transaction"):
+        await worker._reconcile_symbol("BTC-USD", START, NOW)
+
+    assert calls == [100, 100]
+    assert len(fixture.repository.filter_missing_candles.await_args.args[0]) == 201
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
+
+
+@pytest.mark.asyncio
+async def test_native_worker_validates_full_response_before_first_chunk() -> None:
+    """A malformed suffix prevents every partial write rather than failing after one commit.
+
+    Given: Whole-response validation refuses a malformed input.
+    When: Reconciliation attempts to process that response.
+    Then: No insertion or repair acknowledgement occurs.
+    """
+    fixture = _Fixture()
+    fixture.repository.filter_missing_candles.side_effect = ValueError("invalid response suffix")
+    with pytest.raises(ValueError, match="invalid response suffix"):
+        await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
+    fixture.repository.insert_missing_candles.assert_not_awaited()
+    fixture.committed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_present_native_replay_avoids_local_identity_gate() -> None:
+    """A fully present replay with no reservation completes while live identity owns its gate.
+
+    Given: All native keys already exist and the local identity gate is held.
+    When: Read-only preflight confirms their presence.
+    Then: Replay completes without waiting for that gate or entering writer participation.
+    """
+    publisher, repository = _identity_publisher()
+    repository.filter_missing_candles.return_value = []
+    repository.filter_missing_candles.side_effect = None
+    async with publisher._candle_identity_gate:
+        async with asyncio.timeout(1):
+            assert (
+                await publisher._insert_catchup_candle_rows([_native_identity_row(publisher)]) == []
+            )
+    repository.insert_missing_candles.assert_not_awaited()
+    repository.get_canonical_candle_public_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_preflight_runs_outside_identity_gate() -> None:
+    """Presence reads do not hold the gate needed to choose and acknowledge live identities.
+
+    Given: Missing candidates require a presence read before native insertion.
+    When: The repository preflight is awaited.
+    Then: The local identity gate remains available to live publication.
+    """
+    publisher, repository = _identity_publisher()
+
+    async def preflight(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Inspect the actual gate while the awaited repository boundary runs."""
+        assert not publisher._candle_identity_gate.locked()
+        return rows
+
+    repository.filter_missing_candles.side_effect = preflight
+    await publisher._insert_catchup_candle_rows([_native_identity_row(publisher)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backlog", ["queued", "inflight", "errors", "backoff"])
+async def test_native_catchup_explicitly_defers_until_live_writer_recovers(backlog: str) -> None:
+    """Queued and retained in-flight live writes take priority without reporting false success.
+
+    Given: A queued, in-flight or recovering live writer.
+    When: Native reconciliation requests admission before and after recovery.
+    Then: The first attempt explicitly defers and the healthy retry enters insertion.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    if backlog == "queued":
+        publisher._candle_write_queue.put_nowait(row)
+    elif backlog == "inflight":
+        publisher._assign_candle_write_sequence(row)
+    elif backlog == "errors":
+        publisher._flush_errors["candle"] = 1
+    else:
+        publisher._candle_writer_backoff_s = 2.0
+    with pytest.raises(CatchupDeferredError, match="live writer"):
+        await publisher._insert_catchup_candle_rows([row])
+    repository.insert_missing_candles.assert_not_awaited()
+    assert not publisher._candle_identity_gate.locked()
+    if backlog == "queued":
+        publisher._candle_write_queue.get_nowait()
+        publisher._candle_write_queue.task_done()
+    elif backlog == "inflight":
+        publisher._forget_candle_write_sequence(row)
+    publisher._flush_errors["candle"] = 0
+    publisher._candle_writer_backoff_s = 1.0
+    await publisher._insert_catchup_candle_rows([row])
+    repository.insert_missing_candles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["pass", "sweep"])
+async def test_native_scheduler_records_live_deferral_without_repair_success(phase: str) -> None:
+    """An admission hold remains an explicit retryable deferral in either scheduling phase.
+
+    Given: Native insertion yields to a busy live writer.
+    When: A periodic pass or startup sweep visits that symbol.
+    Then: No repair or successful insertion is reported and the bounded visit finishes.
+    """
+    fixture = _Fixture()
+    worker = fixture.worker(CatchupPolicy(sweep_spacing_seconds=0.001))
+    insert = AsyncMock(side_effect=CatchupDeferredError("live writer outstanding=1"))
+    worker._callbacks = replace(worker._callbacks, insert_missing=insert)
+    with patch("snapper.messaging.publishers.kraken_candle_catchup.logger.info") as logged:
+        if phase == "sweep":
+            await worker.run_sweep()
+        else:
+            await worker.run_pass()
+    insert.assert_awaited_once()
+    fixture.committed.assert_not_awaited()
+    assert "deferred" in logged.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_native_worker_acknowledges_all_bounded_chunks_once() -> None:
+    """A complete response preserves every minute across independent bounded commits.
+
+    Given: A response contains 201 valid minute observations.
+    When: All independent native transactions acknowledge successfully.
+    Then: Three bounded chunks preserve input order and trigger one grid-verified repair.
+    """
+    fixture = _Fixture()
+    fixture.client.get_closed_1m_candles.return_value = [
+        replace(_candle(), interval_begin=START - timedelta(minutes=offset))
+        for offset in range(201)
+    ]
+    fixture.repository.insert_missing_candles.side_effect = lambda rows: rows
+    await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
+    batches = [call.args[0] for call in fixture.repository.insert_missing_candles.await_args_list]
+    assert list(map(len, batches)) == [100, 100, 1]
+    assert [row["open_at"] for batch in batches for row in batch] == [
+        candle.interval_begin for candle in fixture.client.get_closed_1m_candles.return_value
+    ]
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)

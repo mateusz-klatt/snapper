@@ -65,10 +65,12 @@ from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
+from snapper.messaging.publishers.base import _WRITER_RECONNECT_INITIAL_BACKOFF_S
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupCallbacks
+from snapper.messaging.publishers.kraken_candle_catchup import CatchupDeferredError
 from snapper.messaging.publishers.kraken_candle_catchup import KrakenCandleCatchup
 from snapper.messaging.publishers.kraken_candle_catchup import complete_repair_windows
 from snapper.messaging.publishers.kraken_candle_catchup import repair_read_start
@@ -521,12 +523,43 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         Returns:
             Newly inserted rows after acknowledgement and identity retirement, empty on replay.
         """
+        missing = await self._require_repository().filter_missing_candles(rows)
+        pending = any(
+            (row["instrument_public_id"], row["timeframe"], row["open_at"])
+            in self._pending_candle_identities
+            for row in rows
+        )
+        if not missing and not pending:
+            return []
+        self._defer_catchup_for_live_writes()
         async with self._candle_identity_gate:
+            self._defer_catchup_for_live_writes()
             prepared = self._bind_pending_candle_identities(rows)
             inserted = await self._require_repository().insert_missing_candles(prepared)
             self._release_committed_candle_identities(inserted)
             await self._retire_acknowledged_candle_identities(prepared)
             return inserted
+
+    def _defer_catchup_for_live_writes(self) -> None:
+        """Yield admission while live rows are queued, in flight or awaiting writer recovery.
+
+        The catchup scheduler reports a deferral and revisits on its bounded
+        cadence. Pending publication identities alone are not a backlog: they
+        may require this reconciliation to resolve an unknown commit outcome.
+        """
+        outstanding = len(self._candle_write_sequence_by_row_id)
+        queued = self._candle_write_queue.qsize()
+        errors = self._flush_errors["candle"]
+        if (
+            outstanding
+            or queued
+            or errors
+            or self._candle_writer_backoff_s > _WRITER_RECONNECT_INITIAL_BACKOFF_S
+        ):
+            raise CatchupDeferredError(
+                f"live writer outstanding={outstanding} queued={queued} errors={errors} "
+                f"backoff_s={self._candle_writer_backoff_s}"
+            )
 
     async def _persist_historical_candle_rows(self, rows: list[CandleUpsertRow]) -> None:
         """Serialize quiet synthesized commits without touching current-window identity.
