@@ -1687,7 +1687,12 @@ class PortfolioPnlPoint(TemporalMixin, Base):
 
 
 class FxConversionElection(TemporalMixin, Base):
-    """Bitemporal decision selecting one exact-coverage conversion plane."""
+    """Bitemporal decision selecting one exact-coverage conversion plane.
+
+    The requirement manifest digest includes the general-consumer event subset
+    as well as combined minutes, keeping each event classification distinct in
+    the existing identity indexes without additional schema columns.
+    """
 
     __tablename__ = "fx_conversion_elections"
     __table_args__ = (

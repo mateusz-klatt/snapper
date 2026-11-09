@@ -29,11 +29,13 @@ from snapper.application.portfolio.fx_proof_backfill import _checkpoint_start
 from snapper.application.portfolio.fx_proof_backfill import _consumer_discovery
 from snapper.application.portfolio.fx_proof_backfill import _consumer_key
 from snapper.application.portfolio.fx_proof_backfill import _consumer_manifest
+from snapper.application.portfolio.fx_proof_backfill import _evaluation_key
 from snapper.application.portfolio.fx_proof_backfill import _expected_evaluation_count
 from snapper.application.portfolio.fx_proof_backfill import _fsync_directory
 from snapper.application.portfolio.fx_proof_backfill import _metric_delta
 from snapper.application.portfolio.fx_proof_backfill import _ordered_consumers
 from snapper.application.portfolio.fx_proof_backfill import _release_apply_lock
+from snapper.application.portfolio.fx_proof_backfill import _requirement_key
 from snapper.application.portfolio.fx_proof_backfill import _write_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import discover_fx_proof_backfill
 from snapper.application.portfolio.fx_proof_backfill import fx_proof_backfill_apply_lock
@@ -302,6 +304,20 @@ async def _repository(tmp_path: Path, name: str) -> SQLAlchemyRepository:
     return repository
 
 
+def test_backfill_event_subsets_keep_distinct_report_and_evaluation_identities() -> None:
+    """Event classification survives backfill deduplication and report identities.
+
+    Given the same combined requirements and distinct event subsets
+    When the backfill builds its report and evaluation keys
+    Then neither key conflates the two consumer election inputs
+    """
+    requirement = _requirement()
+    evaluation = replace(requirement.evaluation, event_minutes=frozenset({_MINUTE}))
+    with_event = replace(requirement, evaluation=evaluation)
+    assert _requirement_key(requirement) != _requirement_key(with_event)
+    assert _evaluation_key(requirement.evaluation) != _evaluation_key(evaluation)
+
+
 @pytest.mark.asyncio
 async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> None:
     """Full consumer electorates reproduce election ranking and retain good peers.
@@ -316,8 +332,12 @@ async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> 
     by_pair = {item.evaluation.pair: item for item in discovery.requirements}
     eur = by_pair[("EUR", "USD")].evaluation
     assert eur.required_minutes == frozenset({_MINUTE, _MINUTE + timedelta(minutes=1)})
+    assert eur.event_minutes == eur.required_minutes
     assert eur.selected_plane == ("EUR", "USD", "kraken")
     assert by_pair[("PLN", "USD")].evaluation.required_minutes == frozenset(
+        {_MINUTE + timedelta(minutes=2)}
+    )
+    assert by_pair[("PLN", "USD")].evaluation.event_minutes == frozenset(
         {_MINUTE + timedelta(minutes=2)}
     )
     true_digest = build_requirement_manifest_digest((_MINUTE + timedelta(minutes=2),))

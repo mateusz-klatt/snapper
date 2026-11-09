@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 
+from snapper.application.portfolio.fx_conversion_shadow import FX_ELECTION_POLICY_VERSION
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import _artifact_matches_raw
@@ -29,6 +30,8 @@ from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_eva
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
+from snapper.data.fx_conversion_digests import build_decision_inputs_digest
+from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import FxConversionElection
 from snapper.data.models import FxConversionProof
 from snapper.data.repository import FxConversionArtifactUpgradeRequiredError
@@ -101,6 +104,38 @@ async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
     repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'shadow.db'}")
     await repository.create_all()
     return repository
+
+
+@pytest.mark.asyncio
+async def test_shadow_pins_event_classifications_as_distinct_decisions(tmp_path: Path) -> None:
+    """Shadow pinning preserves the election's event subset through persisted identity.
+
+    Given identical raw winners and combined evidence with distinct event subsets
+    When both raw decisions are pinned under the current policy
+    Then each retains its own event-aware identity without a conflict or mismatch
+    """
+    reset_fx_shadow_pin_metrics()
+    repository = await _repository(tmp_path)
+    mark_only = _evaluation()
+    with_event = replace(mark_only, event_minutes=frozenset({_MINUTE}))
+    election, proofs = _build_artifact(with_event, _AS_OF, "5C.3")
+    assert election["event_minutes"] == (_MINUTE,)
+    assert election["election_policy_version"] == FX_ELECTION_POLICY_VERSION == "pnl-fiat-v3"
+    await shadow_pin_fx_evaluations(repository, (mark_only, with_event), "5C.3")
+    await shadow_pin_fx_evaluations(repository, (with_event,), "5C.3")
+    async with repository.session() as session:
+        rows = (await session.execute(select(FxConversionElection))).scalars().all()
+    assert len(rows) == 2
+    assert {row.requirement_manifest_digest for row in rows} == {
+        build_requirement_manifest_digest((_MINUTE,)),
+        build_requirement_manifest_digest((_MINUTE,), (_MINUTE,)),
+    }
+    assert build_decision_inputs_digest(election, proofs) in {
+        row.decision_inputs_digest for row in rows
+    }
+    metrics = fx_shadow_pin_metrics()
+    assert (metrics.creation, metrics.reuse, metrics.conflict, metrics.mismatch) == (2, 1, 0, 0)
+    await repository.engine.dispose()
 
 
 def test_candidate_enumeration_is_stable_across_identical_evaluations() -> None:

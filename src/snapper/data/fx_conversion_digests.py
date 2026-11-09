@@ -59,10 +59,24 @@ def _canonical_decimal(value: Decimal) -> str:
     return format(value, "f")
 
 
-def build_requirement_manifest_digest(exact_minutes: Sequence[datetime]) -> str:
-    """Digest the sorted, duplicate-free normalized requirement minute set."""
+def build_requirement_manifest_digest(
+    exact_minutes: Sequence[datetime],
+    event_minutes: Sequence[datetime] = (),
+) -> str:
+    """Digest exact requirements and their separately classified event subset.
+
+    Empty event subsets retain the historical manifest spelling. Nonempty
+    subsets participate in the existing election identity digest, so no schema
+    change is needed to distinguish mark and event classifications.
+    """
     normalized = sorted({_canonical_minute(minute) for minute in exact_minutes})
-    return _sha256({"exact_minutes": normalized})
+    payload = {"exact_minutes": normalized}
+    if event_minutes:
+        events = sorted({_canonical_minute(minute) for minute in event_minutes})
+        if not set(events) <= set(normalized):
+            raise ValueError("FX event minutes must be a subset of exact requirements")
+        payload["event_minutes"] = events
+    return _sha256(payload)
 
 
 def build_proof_digest(proof: FxConversionProofInsertRow) -> str:
@@ -106,4 +120,8 @@ def build_decision_inputs_digest(
         "orientation": election["selected_orientation"],
         "proof_digests": sorted(build_proof_digest(proof) for proof in proofs),
     }
+    if election.get("event_minutes", ()):
+        payload["requirement_manifest_digest"] = build_requirement_manifest_digest(
+            election["required_minutes"], election["event_minutes"]
+        )
     return _sha256({"decision_inputs": payload})

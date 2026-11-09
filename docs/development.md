@@ -919,6 +919,20 @@ fields are appended after all existing message fields to preserve their order.
 
 ### P&L FX event reads
 
+Shared FX elections classify general-consumer event minutes separately from
+mark minutes. If an eligible oriented plane proves every event minute exactly,
+only event-complete planes compete under the existing combined-minute coverage,
+venue and orientation ranking. Otherwise the original candidates compete.
+Mark-only elections retain the original ranking, and instrument-owned planes
+retain their canonical restrictions. Bounded carry and conflicting rows cannot
+prove an exact event minute; conversions still require an exact close on the
+one elected plane.
+
+The `pnl-fiat-v3` election policy and `5C.3` sample calculation version identify
+this rule. Both requirement and decision digests distinguish the event subset
+within the combined minute requirements, using the existing manifest digest
+column and identity indexes without a schema migration.
+
 Mark and event FX evidence retain their separate bounded reads, original
 candidate-discovery windows and shared knowledge horizon. Sparse event reads
 add a conservative union of intervals inside the original event bounds. The

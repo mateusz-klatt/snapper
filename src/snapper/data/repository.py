@@ -9795,7 +9795,9 @@ class SQLAlchemyRepository(Repository):
         identity: FxConversionElectionInsertRow,
     ) -> FxConversionArtifactRow | None:
         """Read the active canonical artifact for one complete identity."""
-        manifest_digest = build_requirement_manifest_digest(identity["required_minutes"])
+        manifest_digest = build_requirement_manifest_digest(
+            identity["required_minutes"], identity.get("event_minutes", ())
+        )
         election = (
             (
                 await session.execute(
@@ -9904,7 +9906,9 @@ class SQLAlchemyRepository(Repository):
         Consumers must intersect with that set and fail closed for every absent
         required minute; absence never receives a rate.
         """
-        manifest_digest = build_requirement_manifest_digest(query["required_minutes"])
+        manifest_digest = build_requirement_manifest_digest(
+            query["required_minutes"], query.get("event_minutes", ())
+        )
         filters = [
             FxConversionElection.timestamp <= as_of,
             FxConversionElection.known_to > as_of,
@@ -9953,7 +9957,9 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
     ) -> bool:
         """Check the full canonical refusal identity at one consumer horizon."""
-        manifest_digest = build_requirement_manifest_digest(query["required_minutes"])
+        manifest_digest = build_requirement_manifest_digest(
+            query["required_minutes"], query.get("event_minutes", ())
+        )
         reason_digest = build_refusal_reason_digest(query["refusal_reason_json"])
         filters = [
             FxConversionElection.timestamp <= as_of,
@@ -10148,7 +10154,9 @@ class SQLAlchemyRepository(Repository):
         proofs: Sequence[FxConversionProofInsertRow],
     ) -> tuple[str, str, tuple[str, ...]]:
         """Refuse incomplete or internally inconsistent parent-child payloads."""
-        required_digest = build_requirement_manifest_digest(election["required_minutes"])
+        required_digest = build_requirement_manifest_digest(
+            election["required_minutes"], election.get("event_minutes", ())
+        )
         cls._validate_fx_proof_minutes_for_digest(proofs)
         required_minutes = {minute.astimezone(UTC) for minute in election["required_minutes"]}
         proof_minutes = {proof["conversion_minute"].astimezone(UTC) for proof in proofs}
@@ -10251,6 +10259,7 @@ class SQLAlchemyRepository(Repository):
             try:
                 election_values = dict(election)
                 election_values.pop("required_minutes")
+                election_values.pop("event_minutes", None)
                 election_values.pop("considered_candidate_planes")
                 election_values["requirement_manifest_digest"] = manifest_digest
                 election_values["decision_inputs_digest"] = decision_digest

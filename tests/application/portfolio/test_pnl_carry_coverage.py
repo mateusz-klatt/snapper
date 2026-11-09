@@ -206,13 +206,13 @@ def test_shared_and_owned_elections_match_original_oracle(
     candidates = {pair: {canonical, stale, fresh, conflicted, reverse}}
     identities = {_OWN: canonical, _STALE_OWN: stale}
     requirements = {_OWN: {pair: minutes}, _STALE_OWN: {pair: minutes}}
-    shared = _resolve_fx_planes({pair: minutes}, candidates, rows, "USD")
+    shared = _resolve_fx_planes({pair: minutes}, candidates, rows, "USD", {})
     owned = _resolve_identity_fx_planes(requirements, identities, rows)
     with monkeypatch.context() as original:
         original.setattr(
             pnl_timeline_service, "_carried_minutes_for_plane", _original_carried_minutes
         )
-        assert shared == _resolve_fx_planes({pair: minutes}, candidates, rows, "USD")
+        assert shared == _resolve_fx_planes({pair: minutes}, candidates, rows, "USD", {})
         assert owned == _resolve_identity_fx_planes(requirements, identities, rows)
     assert shared == {pair: reverse if include_exact else fresh}
     assert owned == {_OWN: canonical}

@@ -12,6 +12,7 @@ from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import patch
+from uuid import uuid7
 
 import pytest
 from sqlalchemy.engine import Connection
@@ -33,6 +34,7 @@ from snapper.data.repository import FxConversionArtifactUpgradeRequiredError
 from snapper.data.repository import FxConversionArtifactValueError
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import FxConversionCompleteness
 from snapper.data.repository_types import FxConversionElectionInsertRow
 from snapper.data.repository_types import FxConversionOperation
 from snapper.data.repository_types import FxConversionProofInsertRow
@@ -127,6 +129,7 @@ def _query(election: FxConversionElectionInsertRow) -> FxConversionSuccessfulQue
         "target_currency": election["target_currency"],
         "unordered_pair": election["unordered_pair"],
         "required_minutes": election["required_minutes"],
+        "event_minutes": election.get("event_minutes", ()),
         "election_policy_version": election["election_policy_version"],
         "calculation_version": election["calculation_version"],
     }
@@ -137,6 +140,113 @@ async def _repository(tmp_path: Path) -> SQLAlchemyRepository:
     repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'fx.db'}")
     await repository.create_all()
     return repository
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["complete", "refused"])
+async def test_event_subsets_have_distinct_reusable_and_refusal_identities(
+    tmp_path: Path, state: FxConversionCompleteness
+) -> None:
+    """Event classification distinguishes identities even with identical evidence.
+
+    Given identical combined requirements, selected planes and evidence
+    When each event subset is pinned and queried independently
+    Then successful and refusal lookups return only the matching classification
+    """
+    repository = await _repository(tmp_path)
+    next_minute = _MINUTE + timedelta(minutes=1)
+    public_ids: set[str] = set()
+    for events in ((), (_MINUTE,), (next_minute,)):
+        election = _election(str(uuid7()))
+        election["required_minutes"] = (_MINUTE, next_minute)
+        election["event_minutes"] = events
+        election["completeness_state"] = state
+        proofs: list[FxConversionProofInsertRow] = [
+            {
+                **_proof(election["public_id"], str(uuid7())),
+                "conversion_minute": minute,
+                "candle_open_minute": minute - timedelta(minutes=1),
+            }
+            for minute in election["required_minutes"]
+        ]
+        if state == "refused":
+            proofs = []
+            election["refusal_reason_json"] = '{"reason":"fx_conversion_unproven"}'
+            election["selected_source_exchange"] = None
+            election["selected_source_instrument_public_id"] = None
+            election["selected_native_symbol"] = None
+            election["selected_base"] = None
+            election["selected_quote"] = None
+            election["selected_orientation"] = None
+        artifact = await repository.pin_fx_conversion_artifact(election, proofs)
+        public_ids.add(artifact["election"]["public_id"])
+        assert artifact["election"]["requirement_manifest_digest"] == (
+            build_requirement_manifest_digest(election["required_minutes"], events)
+        )
+        repeated = await repository.pin_fx_conversion_artifact(election, proofs)
+        assert repeated["election"]["public_id"] == election["public_id"]
+        if state == "complete":
+            visible = await repository.get_latest_visible_fx_conversion_artifact(
+                _query(election), _HORIZON
+            )
+            active = await repository.get_fx_conversion_artifact(election)
+            assert visible is not None and active is not None
+            assert visible["election"]["public_id"] == election["public_id"]
+            assert active["election"]["public_id"] == election["public_id"]
+        else:
+            assert await repository.has_visible_fx_conversion_refusal(
+                {**_query(election), "refusal_reason_json": '{"reason":"fx_conversion_unproven"}'},
+                _HORIZON,
+            )
+    assert len(public_ids) == 3
+    await repository.engine.dispose()
+
+
+def test_event_manifest_digest_is_canonical_and_distinguishes_classification() -> None:
+    """The same combined minutes retain independent normalized event subsets.
+
+    Given a combined minute set and different event classifications
+    When their manifests and decision inputs are digested
+    Then ordering, duplication and zones are canonical while event identity differs
+    """
+    next_minute = _MINUTE + timedelta(minutes=1)
+    minutes = (_MINUTE, next_minute)
+    zone_shifted = _MINUTE.astimezone(timezone(timedelta(hours=2)))
+    legacy = build_requirement_manifest_digest(minutes)
+    first = build_requirement_manifest_digest(minutes, (_MINUTE,))
+    second = build_requirement_manifest_digest(minutes, (next_minute,))
+    assert len({legacy, first, second}) == 3
+    assert first == build_requirement_manifest_digest(
+        tuple(reversed(minutes)), (zone_shifted, _MINUTE)
+    )
+    election = _election(str(uuid7()))
+    election["required_minutes"] = minutes
+    baseline = build_decision_inputs_digest(election, [])
+    election["event_minutes"] = (_MINUTE,)
+    first_decision = build_decision_inputs_digest(election, [])
+    election["event_minutes"] = (next_minute,)
+    second_decision = build_decision_inputs_digest(election, [])
+    assert len({baseline, first_decision, second_decision}) == 3
+    assert legacy == build_requirement_manifest_digest(minutes, ())
+
+
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        (_MINUTE.replace(tzinfo=None), "timezone-aware"),
+        (_MINUTE.replace(second=1), "minute-aligned"),
+        (_MINUTE + timedelta(minutes=1), "subset"),
+    ],
+)
+def test_event_manifest_rejects_invalid_classification(event: datetime, message: str) -> None:
+    """Event requirements obey the same exact-minute contract as combined inputs.
+
+    Given an invalid or out-of-manifest event minute
+    When the event-aware manifest is built
+    Then its invalid classification is rejected before any persistence
+    """
+    with pytest.raises(ValueError, match=message):
+        build_requirement_manifest_digest((_MINUTE,), (event,))
 
 
 @pytest.mark.asyncio

@@ -135,7 +135,9 @@ def _consumer_key(consumer: FxProofBackfillConsumer) -> str:
 def _requirement_key(requirement: FxProofBackfillRequirement) -> str:
     """Return the canonical report and deduplication identity."""
     evaluation = requirement.evaluation
-    manifest = build_requirement_manifest_digest(tuple(sorted(evaluation.required_minutes)))
+    manifest = build_requirement_manifest_digest(
+        tuple(sorted(evaluation.required_minutes)), tuple(sorted(evaluation.event_minutes))
+    )
     return "|".join(
         (
             requirement.wallet_public_id,
@@ -341,6 +343,7 @@ async def _artifact_state(
         target_currency=target,
         unordered_pair="-".join(evaluation.pair),
         required_minutes=tuple(sorted(evaluation.required_minutes)),
+        event_minutes=tuple(sorted(evaluation.event_minutes)),
         election_policy_version=FX_ELECTION_POLICY_VERSION,
         calculation_version=calculation_version,
     )
@@ -467,6 +470,7 @@ def _evaluation_key(evaluation: FxShadowEvaluation) -> tuple[object, ...]:
         evaluation.consumer_instrument_public_id,
         evaluation.pair,
         tuple(sorted(evaluation.required_minutes)),
+        tuple(sorted(evaluation.event_minutes)),
     )
 
 
