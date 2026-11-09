@@ -897,6 +897,50 @@ results, so they do not identify SQL execution time alone. The same single
 message-text summary carries these fields through existing sinks; no response
 fields, request identifiers, query text or financial values are added.
 
+When a request observes an FX election or rejected conversion, that same
+`PnlReadTiming` line appends `fx_diagnostics=` followed by compact JSON. The
+request-local `first_failure` names the public instrument, role (`price`, `fee`,
+`accrual`, or `mark`), original `event_time`, exact `rate_minute`, source and target
+currencies, selected oriented plane (or `null`), and one closed reason:
+
+- `no_pin`: the consumer has no selected plane for the pair.
+- `missing_exact_minute`: the selected plane has no close at that exact minute.
+- `invalid_or_conflicting_close`: the exact close is invalid or conflicting, or
+    the selected orientation cannot serve the requested currencies.
+- `conversion_nonfinite`: the existing conversion rejected arithmetic despite
+    usable exact evidence. This includes positive price or mark conversions that
+    underflow to zero and fail the existing positivity guard.
+
+The collector compares causal replay keys rather than conversion-loop order:
+fills use each pool's monotonically clamped replay time, then exchange and scope
+sequence; equal-time accruals precede fills; fees precede prices within a fill;
+marks follow events at their closing minute. Original event times remain visible
+even when replay clamps a regressed fill. Series observations use the existing
+mark requirements to exclude unused candles, and exclude events whose effective
+replay time exceeds the requested end. Actual event rejection branches remain
+observable even when their denomination is absent from the FX query requirements.
+Successful earlier fills still advance the diagnostic replay clock.
+
+Each `elections` entry names an unordered pair, the public instrument for a
+canonical instrument-owned election (`null` for a shared election), `event_count`,
+`complete_plane_exists`, and `elected_plane`. Here an event means a distinct
+required event rate minute, so multiple flows sharing a minute count once. Each
+eligible candidate reports its oriented `plane`, `exact_event_count`, and earliest
+`first_missing_event_minute` (or `null`). Counts use the election's existing
+conflict-checked exact coverage; carry does not prove an event. All eligible
+candidates are considered before the complete-plane restriction. A candidate
+trivially covers an empty event set; no candidates means no complete plane.
+
+Diagnostics retain one failure and at most sixteen election entries with sixteen
+candidate details each. `elections_omitted` and each entry's `candidates_omitted`
+make truncation explicit; completeness still considers every candidate. Public
+identity strings are capped at 96 characters and JSON escaping keeps the output
+on one physical line. Neither monetary inputs/outputs nor closes, balances,
+wallet identifiers, order/shard identifiers, credentials, or query text enter the
+payload. Collection, rendering and logging failures leave handler behavior
+unchanged. Background callers do not enable the collector. FX selection,
+conversion arithmetic, repository queries and API responses are unchanged.
+
 The six series phases accumulate across repeated series calls in one handler.
 They are sequential portions of inclusive `series_ms`. When the anchor already
 exists, the request's `fx_ms` stage runs between requirements and valuation,

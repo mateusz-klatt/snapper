@@ -1,6 +1,7 @@
 """Observe real series phases without changing financial outputs or repository reads."""
 
 import asyncio
+import json
 from itertools import count
 from typing import cast
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
+from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
 from tests.application.portfolio.test_pnl_timeline_service import _I1
 from tests.application.portfolio.test_pnl_timeline_service import _T0
@@ -55,7 +57,8 @@ def _ticks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _fields(message: str) -> dict[str, str]:
     """Parse the actual emitted engineering summary into fixed field names."""
-    return dict(part.split("=", 1) for part in message.split()[1:])
+    timing = message.split(" fx_diagnostics=", 1)[0]
+    return dict(part.split("=", 1) for part in timing.split()[1:])
 
 
 def _series_repo() -> FakeRepo:
@@ -172,6 +175,26 @@ async def test_real_series_phases_exclude_fx_and_include_core_without_changing_r
         )
     )
     assert tuple(fields)[-len(_PHASES) :] == _PHASES
+    diagnostic_text = messages[0].split(" fx_diagnostics=", 1)[1]
+    diagnostics = cast(JsonObject, json.loads(diagnostic_text))
+    assert diagnostics["first_failure"] is None
+    elections = diagnostics["elections"]
+    assert isinstance(elections, list)
+    assert len(elections) == 1
+    election = cast(JsonObject, elections[0])
+    assert election["pair"] == ["EUR", "USD"]
+    assert election["event_count"] == 2
+    assert election["complete_plane_exists"] is True
+    assert election["elected_plane"] == ["EUR", "USD", "kraken"]
+    assert election["candidates"] == [
+        {
+            "plane": ["EUR", "USD", "kraken"],
+            "exact_event_count": 2,
+            "first_missing_event_minute": None,
+        }
+    ]
+    assert _W1 not in messages[0]
+    assert "100.0" not in messages[0] and "0.5" not in messages[0]
     assert pnl_read_timing._current_timing.get() is None
 
 

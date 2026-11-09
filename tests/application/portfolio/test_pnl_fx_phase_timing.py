@@ -1,6 +1,7 @@
 """Observe real FX boundaries without changing evidence, payloads or private data."""
 
 import asyncio
+import json
 from collections.abc import Sequence
 from collections.abc import Sized
 from datetime import datetime
@@ -19,6 +20,7 @@ from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline_service import _load_request_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import _sparse_event_fx_intervals
+from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PnlFxRatePlane
 from tests.application.portfolio.test_pnl_timeline_service import FakeRepo
@@ -60,7 +62,8 @@ def _capture(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def _fields(message: str) -> dict[str, str]:
     """Parse the fixed engineering summary without accepting arbitrary payloads."""
-    return dict(part.split("=", 1) for part in message.split()[1:])
+    timing = message.split(" fx_diagnostics=", 1)[0]
+    return dict(part.split("=", 1) for part in timing.split()[1:])
 
 
 def _ticks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,7 +115,8 @@ async def test_real_fx_boundaries_have_distinct_times_and_unchanged_reads(
 
     result = await handler()
     assert len(messages) == 1
-    fields = dict(part.split("=", 1) for part in messages[0].split()[1:])
+    timing, diagnostic_text = messages[0].split(" fx_diagnostics=", 1)
+    fields = _fields(timing)
     assert fields["fx_discovery_mark_ms"] == "2.000"
     assert fields["fx_discovery_event_ms"] == "3.000"
     assert fields["fx_load_mark_ms"] == "4.000"
@@ -134,7 +138,21 @@ async def test_real_fx_boundaries_have_distinct_times_and_unchanged_reads(
     assert repo.fx_plane_calls == [[_PLANE], [_PLANE]]
     assert result == expected
     assert "private-owner-sentinel" not in messages[0]
-    assert "EUR" not in messages[0] and "PLN" not in messages[0]
+    assert "EUR" not in timing and "PLN" not in timing
+    diagnostics = cast(JsonObject, json.loads(diagnostic_text))
+    assert diagnostics["first_failure"] is None
+    elections = diagnostics["elections"]
+    assert isinstance(elections, list)
+    assert len(elections) == 1
+    election = cast(JsonObject, elections[0])
+    assert election["pair"] == list(_PAIR)
+    assert election["event_count"] == 1
+    assert election["complete_plane_exists"] is True
+    assert election["elected_plane"] == list(_PLANE)
+    assert election["candidates"] == [
+        {"plane": list(_PLANE), "exact_event_count": 1, "first_missing_event_minute": None}
+    ]
+    assert "4.0" not in diagnostic_text and "5.0" not in diagnostic_text
     assert pnl_read_timing._current_timing.get() is None
 
 
