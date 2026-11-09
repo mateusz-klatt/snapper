@@ -1572,8 +1572,12 @@ evaluators in `application/plans/service.py`; they are not executable plan types
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id` and `native_instrument`
-into `plan.params`, then inserts a `create` `TradeCommand` for the outbox
-dispatcher and transitions the plan to `active`. The command row stores
+into `plan.params`, and transitions the plan to `active` before inserting a
+`create` `TradeCommand` for the outbox dispatcher. This ordering prevents a
+fast fill or local expiry from being overwritten by a later activation.
+Command insertion failures mark the plan `failed`. A crash between activation
+and command insertion can leave an active plan without a command; activation
+alone never places an order. The command row stores
 the CORE order-type vocabulary (`market`/`limit`/`stop`/`stop_limit`)
 plus the `stop_price` trigger for stop types; translation to the venue
 wire vocabulary (`stop-loss`/`stop-loss-limit`) happens only at the
@@ -1581,11 +1585,17 @@ executor's venue boundary. Cancel/flatten readers resolve the order type
 through `core_order_type_from_plan_params`, which still normalizes the
 legacy `venue_order_type` param carried by older plans. The
 `OutboxDispatcher` inside `TraderCoordinator` publishes the command as
-`OrderRequestData` on the `orders.commands.{ex}.{instr}.submit` topic.
+`OrderRequestData` on the `orders.commands.{ex}.{instr}.submit` topic after
+ensuring an engine owns its exact shard and full wallet. Existing engine
+positions and pending intent are preserved. Commands expired by the local
+dispatch TTL publish an `OrderData` expiry on `orders.events.` so the
+plan executor can mark the manual plan `expired` without a venue response.
 
 **Fill propagation:** `PlanExecutorService` subscribes to
 `orders.events.` and `market.` on the broker XPUB and consumes every
-fill. Cumulative `ExecutionData.size` is compared against
+fill. On an unknown child ID, it resolves the durable command-to-plan link and
+indexes an active manual plan created after its startup snapshot before applying
+the event. Cumulative `ExecutionData.size` is compared against
 `plan.filled_quantity` with a small epsilon so duplicate or stale frames
 are dropped. Partial fills update `filled_quantity` and keep the plan
 `active`; full fills transition the plan to `completed` with

@@ -72,6 +72,7 @@ from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionMode
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
@@ -379,6 +380,7 @@ class TraderCoordinator(RegisterableProcess):
         self._failed_recovery_shard_prefixes: set[tuple[str, str, str, str]] = set()
         self._failed_recovery_identities: set[tuple[str, str, str]] = set()
         self._recovery_certification_failed = False
+        self._unowned_fill_scopes: set[tuple[str, str]] = set()
         self._checkpoint_recovered_shard_keys: set[str] = set()
         self._checkpoint_recovered_shard_wallets: dict[str, str] = {}
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
@@ -4462,9 +4464,10 @@ class TraderCoordinator(RegisterableProcess):
         recorded dispatch wallet; only a fully legacy mapping (no wallet
         anywhere) falls back to a sole-candidate match. Anything else —
         no candidate, a wallet disagreement, or indistinguishable twins
-        — quarantines the projection and drops the fill: a lost fill is
-        recoverable by reconciliation, a mis-applied fill corrupts a
-        position.
+        — quarantines the projection and drops the fill. A missing engine
+        quarantines only this instrument until restart recovery; contradictory
+        ownership still fails global certification. A lost fill is recoverable
+        by reconciliation, a mis-applied fill corrupts a position.
         """
         mapping_wallet = self._order_wallet_map().get(fill.client_order_id, "")
         fill_wallet = fill.wallet_public_id or ""
@@ -4477,11 +4480,26 @@ class TraderCoordinator(RegisterableProcess):
             )
             self._recovery_certification_failed = True
             return None
+        mapped_scope = parse_shard_key(mapped_shard)
+        if mapped_scope is None or mapped_scope[:2] != (fill.exchange, fill.instrument):
+            logger.error(
+                "TraderCoordinator: fill {} scope {}/{} contradicts dispatched shard {}; "
+                "failing global certification",
+                fill.client_order_id,
+                fill.exchange,
+                fill.instrument,
+                mapped_shard,
+            )
+            self._recovery_certification_failed = True
+            return None
         candidates = [
             engine
             for engine in self.engines.values()
             if getattr(engine, "_shard_key", None) == mapped_shard
         ]
+        if not candidates:
+            self._quarantine_unowned_fill(fill)
+            return None
         owner_wallet = fill_wallet or mapping_wallet
         if owner_wallet:
             walleted = [
@@ -4510,6 +4528,25 @@ class TraderCoordinator(RegisterableProcess):
         )
         self._recovery_certification_failed = True
         return None
+
+    def _quarantine_unowned_fill(self, fill: ExecutionData) -> None:
+        """Refuse new exposure and projections for an unconsumed instrument fill.
+
+        Missing process topology is not contradictory ownership evidence. Keep
+        the affected instrument closed until restart recovery can replay durable
+        fills, without invalidating unrelated instruments' certification.
+        """
+        self._unowned_fill_scopes = getattr(self, "_unowned_fill_scopes", set())
+        if (fill.exchange, fill.instrument) in self._unowned_fill_scopes:
+            return
+        self._unowned_fill_scopes.add((fill.exchange, fill.instrument))
+        logger.error(
+            "TraderCoordinator: fill {} has no owning engine for {}/{}; "
+            "instrument execution and projections quarantined until restart recovery",
+            fill.client_order_id,
+            fill.exchange,
+            fill.instrument,
+        )
 
     def _find_engine_by_pending_client_order_id(
         self,
@@ -4658,10 +4695,7 @@ class TraderCoordinator(RegisterableProcess):
             return
         engine = self._find_engine_for_fill(fill)
         if engine is None:
-            logger.info(
-                f"ZMQTrader: No engine found for fill {fill.client_order_id} "
-                f"{fill.instrument} on {fill.exchange}"
-            )
+            self._quarantine_unowned_fill(fill)
             return
         if fill.status == FillStatusEnum.FILLED:
             self._retire_rearmable_cid(fill.client_order_id)
@@ -6156,6 +6190,17 @@ class TraderCoordinator(RegisterableProcess):
             )
             return None
         components = [sk for sk, ident in self._projection_identities.items() if ident == identity]
+        if any(
+            (parsed[0], parsed[1]) in getattr(self, "_unowned_fill_scopes", set())
+            for sk in components
+            if (parsed := parse_shard_key(sk)) is not None
+        ):
+            logger.warning(
+                "TraderCoordinator: position projection refused for {}: "
+                "an instrument fill has no owning engine",
+                identity,
+            )
+            return None
         if identity in getattr(self, "_failed_recovery_identities", set()):
             logger.warning(
                 f"TraderCoordinator: position projection skipped for {identity}: "
@@ -6423,13 +6468,14 @@ class TraderCoordinator(RegisterableProcess):
         The command was never published, so no executor event will ever
         arrive for it — without this release the engine's in-flight
         guard (armed at command INSERT) would wedge for its full 60s
-        valve per expiry. The outbox runs in-process, so instead of
-        fabricating bus traffic this routes a synthetic
+        valve per expiry. The outbox runs in-process and routes a synthetic
         ``OrderEventData(event="expired")`` through
         ``_handle_order_event`` — the exact pipeline a venue expiry
         uses: clears ``order_in_flight`` via ``clear_pending_intent``,
         shadow-writes ``order_terminal`` to TradeService, and projects
-        the paired-execution leg EXPIRED.
+        the paired-execution leg EXPIRED. A full ``OrderData`` expiry is
+        then published for the plan service; its broker echo does not repeat
+        the coordinator's local terminal shadow-write.
 
         Args:
             cmd: The expired TradeCommandRow.
@@ -6455,6 +6501,97 @@ class TraderCoordinator(RegisterableProcess):
             user_public_id=cmd.get("user_public_id"),
         )
         await self._handle_order_event(topic, event)
+        assert self.msg_publisher is not None
+        request = order_request_from_command(cmd)
+        status = OrderData(
+            public_id=event.public_id,
+            timestamp=event.timestamp,
+            session_id=event.session_id,
+            sequence_id=event.sequence_id,
+            exchange_order_id="",
+            client_order_id=request.client_order_id,
+            exchange=request.exchange,
+            instrument=request.instrument,
+            mode=request.mode,
+            side=request.side,
+            status=OrderEventEnum.EXPIRED,
+            order_type=request.order_type,
+            size=request.quantity,
+            filled_size=0.0,
+            price=request.price,
+            reason=event.reason,
+            created_at=cmd["created_at"],
+            leverage=request.leverage,
+            reduce_only=request.reduce_only,
+            wallet_public_id=request.wallet_public_id,
+            operator_public_id=request.operator_public_id,
+            user_public_id=request.user_public_id,
+            plan_public_id=cmd.get("plan_public_id"),
+        )
+        await self.msg_publisher.send(topic, status)
+
+    async def _ensure_command_engine(self, cmd: TradeCommandRow) -> None:
+        """Install the exact command owner before any create can reach the venue.
+
+        Manual and plan commands do not originate from a signal engine. Reuse
+        the recovery constructor so dispatch and restart produce identical
+        owners, preserving an existing engine's position and pending intent.
+        """
+        parsed = parse_shard_key(cmd["shard_key"])
+        if parsed is None or parsed[:3] != (cmd["exchange"], cmd["instrument"], cmd["mode"]):
+            self._recovery_certification_failed = True
+            raise RuntimeError("command scope disagrees with its dispatched shard")
+        exchange, instrument, mode, _wallet_short, strategy_tag = parsed
+        wallet = cmd.get("wallet_public_id") or ""
+        expected = compute_shard_key(
+            instrument=instrument,
+            exchange=cast(OrderExchange, exchange),
+            mode=cast(ExecutionMode, mode),
+            wallet_public_id=wallet,
+            strategy_tag=strategy_tag,
+        )
+        if expected != cmd["shard_key"]:
+            self._recovery_certification_failed = True
+            raise RuntimeError("command wallet disagrees with its dispatched shard")
+        engine_key = self._build_engine_key(instrument, exchange, strategy_tag or mode, wallet)
+        engine = self.engines.get(engine_key)
+        if engine is None:
+            created = await self._create_engine_for_recovery(
+                instrument,
+                exchange,
+                strategy_tag=strategy_tag,
+                wallet_public_id=wallet,
+                operator_public_id=cmd.get("operator_public_id") or "",
+            )
+            engine = self.engines.get(engine_key, created)
+        if engine is None:
+            raise RuntimeError("no owning engine can be created for command")
+        if engine._shard_key != expected or engine.wallet_public_id != wallet:
+            self._recovery_certification_failed = True
+            raise RuntimeError("command owner conflicts with the registered engine")
+        self.engines[engine_key] = engine
+        self.last_signal_time.setdefault(engine_key, 0.0)
+
+    def _assert_command_scope_certified(self, cmd: TradeCommandRow) -> None:
+        """Refuse dispatch against global contradictions or instrument uncertainty."""
+        attempt = f"trade command {cmd['public_id']} ({cmd['command_type']})"
+        if self._refuse_uncertified_order_execution(attempt):
+            raise RuntimeError("recovery certification failed; order execution refused")
+        if self._refuse_unowned_fill_execution(cmd["exchange"], cmd["instrument"]):
+            raise RuntimeError("instrument has an unowned fill; order execution refused")
+        if self._refuse_failed_recovery_shard(cmd["shard_key"]):
+            raise RuntimeError("shard recovery uncertified; order execution refused")
+
+    async def _prepare_command_route(self, cmd: TradeCommandRow) -> None:
+        """Establish truthful ownership before publishing a durable command."""
+        self._assert_command_scope_certified(cmd)
+        if cmd["command_type"] in ("create", OrderCommandEnum.SUBMIT.value):
+            await self._ensure_command_engine(cmd)
+            if not self._register_order_shard_key(
+                cmd["client_order_id"], cmd["shard_key"], cmd.get("wallet_public_id") or ""
+            ):
+                raise RuntimeError("conflicting command route; order execution refused")
+        self._assert_command_scope_certified(cmd)
 
     async def _outbox_publish(self, cmd: TradeCommandRow) -> None:
         """Publish a trade command from outbox to ZMQ.
@@ -6482,7 +6619,6 @@ class TraderCoordinator(RegisterableProcess):
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
         command_type = cmd["command_type"]
-        attempt = f"trade command {cmd['public_id']} ({command_type})"
         if command_type == OrderCommandEnum.CANCEL.value:
             topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
             resolved_venue_id = cmd.get("exchange_order_id") or ""
@@ -6509,12 +6645,7 @@ class TraderCoordinator(RegisterableProcess):
             return
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
         order = order_request_from_command(cmd)
-        if self._refuse_uncertified_order_execution(attempt):
-            raise RuntimeError("recovery certification failed; order execution refused")
-        if command_type in ("create", OrderCommandEnum.SUBMIT.value):
-            self._register_order_shard_key(
-                cmd["client_order_id"], cmd["shard_key"], cmd.get("wallet_public_id") or ""
-            )
+        await self._prepare_command_route(cmd)
         await self.msg_publisher.send(topic, order)
 
     async def _funding_accrual_loop(self) -> None:
@@ -6757,6 +6888,10 @@ class TraderCoordinator(RegisterableProcess):
         context = self._build_signal_routing_context(signal)
         if context is None:
             return
+        if self._refuse_unowned_fill_execution(
+            context.exchange, signal.instrument
+        ) or self._refuse_failed_recovery_shard(context.shard_key):
+            return
         if self._should_drop_signal_for_foreign_shard(context.shard_key):
             return
         if self._should_drop_signal_for_unhealthy_executor(context):
@@ -6830,6 +6965,31 @@ class TraderCoordinator(RegisterableProcess):
             "TraderCoordinator: refusing {} because recovery certification failed; "
             "global order execution remains halted",
             attempt,
+        )
+        return True
+
+    def _refuse_unowned_fill_execution(self, exchange: str, instrument: str) -> bool:
+        """Keep an instrument with an unapplied fill closed until restart recovery."""
+        if (exchange, instrument) not in getattr(self, "_unowned_fill_scopes", set()):
+            return False
+        logger.error(
+            "TraderCoordinator: refusing order execution for {}/{}: "
+            "an instrument fill has no owning engine",
+            exchange,
+            instrument,
+        )
+        return True
+
+    def _refuse_failed_recovery_shard(self, shard_key: str) -> bool:
+        """Keep a failed recovery scope closed even when other scopes certify."""
+        parsed = parse_shard_key(shard_key)
+        if parsed is None or parsed[:4] not in getattr(
+            self, "_failed_recovery_shard_prefixes", set()
+        ):
+            return False
+        logger.error(
+            "TraderCoordinator: refusing order execution for {}: shard recovery uncertified",
+            shard_key,
         )
         return True
 
@@ -7175,6 +7335,15 @@ class TraderCoordinator(RegisterableProcess):
             ownership=self._ownership,
             caps_enforcer=self._caps_enforcer,
         )
+        incumbent = self.engines.get(context.engine_key)
+        if incumbent is not None:
+            if (
+                incumbent._shard_key != engine._shard_key
+                or incumbent.wallet_public_id != engine.wallet_public_id
+            ):
+                self._recovery_certification_failed = True
+                raise RuntimeError("signal owner conflicts with the registered engine")
+            return incumbent
         self.engines[context.engine_key] = engine
         self.last_signal_time[context.engine_key] = 0.0
         return engine

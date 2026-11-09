@@ -20,8 +20,10 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository_types import InstrumentSourceResolution
 from snapper.data.repository_types import InstrumentValuationMetadataRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
@@ -417,6 +419,47 @@ def _create_client(mock_repo: Any) -> TestClient:
 class TestCreateOrder:
     """Tests for POST /api/orders."""
 
+    def test_fill_visible_at_command_insert_is_not_overwritten_by_activation(self) -> None:
+        """Activate a manual plan before its command can become visible to dispatch.
+
+        Given a manual order whose fill completes while its command insert returns,
+        When the REST route finishes persisting the order,
+        Then the plan remains completed with no activation after the fill.
+        """
+        repo = _create_order_repo()
+        plan = _make_plan_row(status="pending")
+        transitions: list[str] = []
+
+        async def persist_status(*, new_status: str, **_metadata: object) -> int:
+            """Model each durable lifecycle transition in its actual call order."""
+            transitions.append(new_status)
+            plan["status"] = new_status
+            return len(transitions)
+
+        async def complete_at_command_visibility(
+            row: TradeCommandInsertRow, *, ownership: ShardOwnership | None
+        ) -> tuple[int, str]:
+            """Model an immediate fill after the create command becomes dispatchable."""
+            assert ownership is None
+            assert transitions == ["active"]
+            await repo.update_execution_plan_status(
+                public_id=row["plan_public_id"],
+                new_status="completed",
+                filled_quantity=row["quantity"],
+            )
+            return 1, "cmd-1"
+
+        repo.update_execution_plan_status = AsyncMock(side_effect=persist_status)
+        repo.insert_trade_command = AsyncMock(side_effect=complete_at_command_visibility)
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_create_order_body())
+        client.close()
+
+        assert response.status_code == 200
+        assert response.json()["payload"]["status"] == "completed"
+        assert transitions == ["active", "completed"]
+
     def test_create_order_success(self) -> None:
         """Given valid order params, When creating, Then 200 with plan."""
         repo = AsyncMock()
@@ -532,7 +575,12 @@ class TestCreateOrder:
         client.close()
 
     def test_create_order_command_failure_marks_plan_failed(self) -> None:
-        """Given trade command insert fails, When creating, Then plan marked failed."""
+        """Compensate an activated manual plan when its command insert fails.
+
+        Given a pending manual plan whose command cannot be persisted,
+        When creation activates the plan and the command insert raises,
+        Then the route returns an error and transitions the plan to failed.
+        """
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
         repo.insert_trade_command = AsyncMock(side_effect=Exception("DB error"))
@@ -542,7 +590,10 @@ class TestCreateOrder:
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 500
-        repo.update_execution_plan_status.assert_called_once()
+        assert repo.update_execution_plan_status.await_count == 2
+        assert [
+            call.kwargs["new_status"] for call in repo.update_execution_plan_status.await_args_list
+        ] == ["active", "failed"]
         call_kwargs = repo.update_execution_plan_status.call_args[1]
         assert call_kwargs["new_status"] == "failed"
         client.close()

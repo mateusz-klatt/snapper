@@ -257,7 +257,8 @@ class TestFindEngineForFillIndexed:
         coord._order_shard_keys["cid-ghost"] = "kraken.BTC-USD.live.wa.ghost"
         ghost = _make_fill(client_order_id="cid-ghost", wallet_public_id=WALLET_A)
         assert coord._find_engine_for_fill(ghost) is None
-        assert coord._recovery_certification_failed is True
+        assert coord._recovery_certification_failed is False
+        assert coord._unowned_fill_scopes == {("kraken", "BTC-USD")}
 
     def test_mapped_shard_selects_by_full_wallet_among_suffix_twins(self) -> None:
         """Mapped-shard routing picks the engine whose FULL wallet matches.
