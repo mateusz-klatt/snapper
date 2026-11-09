@@ -371,6 +371,18 @@ snapper db-upgrade
 snapper db-upgrade --revision abc123
 ```
 
+`db-upgrade` applies schema migrations only. `make migrate-prod` additionally
+reseeds the `prod` profile, so use `db-upgrade` when a deployment needs a
+migration and nothing else.
+
+Migration `0067` adds the `(plan_public_id, known_to)` lookup index
+`ix_epc_plan_known_to` on `execution_plan_checkpoints`. PostgreSQL builds it
+with `CREATE INDEX CONCURRENTLY`: checkpoint writes continue, and on a table
+with millions of versions the build takes minutes. An interrupted build can
+leave the index behind in an invalid state. Remove it with
+`DROP INDEX CONCURRENTLY IF EXISTS ix_epc_plan_known_to` and run the upgrade
+again.
+
 ### `db-downgrade`
 
 Rolls back Alembic migrations.
