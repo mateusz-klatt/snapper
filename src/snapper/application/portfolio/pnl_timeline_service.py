@@ -3130,16 +3130,32 @@ def _carried_mark_demand(request: _MarkCarryRequest) -> dict[str, list[datetime]
     return demand
 
 
-def _positive_mark_closes(
+def _usable_mark_closes(
     candles: Sequence[PnlTimelineCandleRow],
 ) -> dict[str, dict[datetime, float]]:
-    """Index usable closes by instrument and the minute their bar closed."""
-    closes: dict[str, dict[datetime, float]] = {}
+    """Index the closes a carried mark may use, by instrument and close minute.
+
+    The candle read projects every matching source series onto the requesting
+    instrument without reducing them, so one minute can hold several rows. Every
+    observation of a minute must agree on one positive finite close. Two different
+    closes, or a usable close beside an invalid one, make the minute contradictory
+    and unusable as a source, whichever order the rows arrive in.
+
+    Args:
+        candles: Raw finalized mark candles.
+
+    Returns:
+        Unconflicted positive closes keyed by instrument and close minute.
+    """
+    observed: dict[tuple[str, datetime], float | None] = {}
     for candle in candles:
-        if is_positive_finite(candle["close"]):
-            closes.setdefault(candle["instrument_public_id"], {})[
-                candle["open_at"] + timedelta(minutes=1)
-            ] = candle["close"]
+        key = (candle["instrument_public_id"], candle["open_at"] + timedelta(minutes=1))
+        close = candle["close"] if is_positive_finite(candle["close"]) else None
+        observed[key] = close if observed.get(key, close) == close else None
+    closes: dict[str, dict[datetime, float]] = {}
+    for (instrument_public_id, minute), close in observed.items():
+        if close is not None:
+            closes.setdefault(instrument_public_id, {})[minute] = close
     return closes
 
 
@@ -3162,7 +3178,7 @@ async def _load_mark_predecessors(
     """
     for lower, upper in read_windows(anchor, MARK_CARRY_READ_STEPS):
         rows = await repo.get_pnl_timeline_candles([ref], lower, upper, as_of)
-        if any(is_positive_finite(row["close"]) for row in rows):
+        if _usable_mark_closes(rows):
             return rows
     return []
 
@@ -3181,13 +3197,13 @@ async def _plan_mark_carry(repo: Repository, request: _MarkCarryRequest) -> _Mar
         Sources per ``(instrument, minute)`` and the FX minutes they consume.
     """
     demand = _carried_mark_demand(request)
-    closes = _positive_mark_closes(request.candles)
+    closes = _usable_mark_closes(request.candles)
     refs_by_instrument = {ref["instrument_public_id"]: ref for ref in request.refs}
     for instrument_public_id, anchor in sorted(leading_mark_gaps(demand, closes).items()):
         rows = await _load_mark_predecessors(
             repo, refs_by_instrument[instrument_public_id], anchor, request.as_of
         )
-        for candles in _positive_mark_closes(rows).values():
+        for candles in _usable_mark_closes(rows).values():
             closes.setdefault(instrument_public_id, {}).update(candles)
     sources = carried_mark_sources(demand, closes, MARK_CARRY_BOUND)
     fx_requirements: _FxInstrumentRequirements = {}

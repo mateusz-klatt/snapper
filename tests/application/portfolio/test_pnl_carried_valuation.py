@@ -231,6 +231,58 @@ async def test_invalid_exact_close_is_not_covered_by_an_older_price() -> None:
     assert _point(result, 4).carried_inputs == (PnlCarriedInput(_I1, "mark", _m(2), 2),)
 
 
+@pytest.mark.parametrize(
+    "duplicates",
+    [
+        pytest.param(((2, 110.0), (2, 120.0)), id="disagreeing-closes"),
+        pytest.param(((2, 120.0), (2, 110.0)), id="disagreeing-closes-reversed"),
+        pytest.param(((2, 110.0), (2, 0.0)), id="positive-then-invalid"),
+        pytest.param(((2, 0.0), (2, 110.0)), id="invalid-then-positive"),
+    ],
+)
+async def test_contradictory_earlier_minute_never_feeds_a_carried_mark(
+    duplicates: tuple[tuple[int, float], tuple[int, float]],
+) -> None:
+    """Row order cannot pick a price when a minute's observations disagree.
+
+    Given: A held gap whose nearest earlier minute has contradictory rows.
+    When: The later minute is valued.
+    Then: The older unconflicted close serves it, in every row order.
+    """
+    result = await _series(_usd_position(_candles((1, 100.0), *duplicates)), (1, 3))
+    point = _point(result, 3)
+    assert point.carried_inputs == (PnlCarriedInput(_I1, "mark", _m(1), 2),)
+    assert point.unrealized_pnl == pytest.approx(0.0)
+
+
+async def test_identical_duplicates_remain_a_usable_source() -> None:
+    """Agreeing observations are not a conflict.
+
+    Given: Two rows with the same close for the nearest earlier minute.
+    When: The later minute is valued.
+    Then: That minute serves as the source.
+    """
+    result = await _series(_usd_position(_candles((1, 100.0), (2, 110.0), (2, 110.0))), (1, 3))
+    assert _point(result, 3).carried_inputs == (PnlCarriedInput(_I1, "mark", _m(2), 1),)
+
+
+async def test_window_holding_only_a_contradictory_minute_keeps_searching() -> None:
+    """A conflicted close cannot end the search for a usable one.
+
+    Given: A contradictory minute inside the first window and a clean close older.
+    When: The leading gap is searched.
+    Then: The second window is read and the clean close is used.
+    """
+    repo = _RangeRepo(
+        executions=[_exec_row(_I1, 1, -1000, "buy", 2.0, 100.0, 0.0, "USD")],
+        refs=[_ref(_I1, "BTC-USD", "USD")],
+        candles=_candles((-10, 150.0), (-10, 160.0), (-240, 130.0)),
+    )
+    result = await _series(repo, (0, 0))
+    assert len(repo.candle_calls) == 3
+    assert _point(result, 0).carried_inputs == (PnlCarriedInput(_I1, "mark", _m(-240), 240),)
+
+
 async def test_exact_mark_with_a_missing_rate_carries_the_fx_only() -> None:
     """Only the input that is actually older gets disclosed.
 
