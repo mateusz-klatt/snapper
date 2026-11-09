@@ -394,7 +394,10 @@ class TestSubmitManualOrderTool:
         return enforcer
 
     @pytest.mark.asyncio
-    async def test_happy_path_writes_trade_command_with_mcp_source_surface(self) -> None:
+    @pytest.mark.parametrize("idempotency_key", ["idem-1", "x" * 64])
+    async def test_happy_path_writes_trade_command_with_mcp_source_surface(
+        self, idempotency_key: str
+    ) -> None:
         """Valid call → both plan + command inserted with source_surface='mcp'.
 
         Given: caller holds CREATE_ORDERS (AI_DELEGATE), a cap-admit
@@ -422,7 +425,7 @@ class TestSubmitManualOrderTool:
                 "order_type": "limit",
                 "quantity": 0.5,
                 "wallet_public_id": "wallet-1",
-                "idempotency_key": "idem-1",
+                "idempotency_key": idempotency_key,
                 "price": 50000.0,
             },
         )
@@ -446,6 +449,7 @@ class TestSubmitManualOrderTool:
         assert plan_row["shard_key"] == expected_shard_key
         assert cmd_row["shard_key"] == expected_shard_key
         assert cmd_row["source_surface"] == "mcp"
+        assert plan_row["idempotency_key"] == idempotency_key
         assert cmd_row["submitted_notional_usd"] == 77.25
         assert cmd_row["ai_review_public_id"] is None
 

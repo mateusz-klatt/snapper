@@ -86,6 +86,9 @@ from snapper.auth.domain.permissions import is_ai_review_decision_capable
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
+from snapper.core.idempotency import IDEMPOTENCY_KEY_MAX_LENGTH
+from snapper.core.idempotency import IdempotencyKey
+from snapper.core.idempotency import validate_idempotency_key
 from snapper.core.json_types import JsonObject
 from snapper.core.order_numbers import OrderLeverage
 from snapper.core.order_numbers import PositiveOrderNumber
@@ -292,7 +295,6 @@ def _get_repository_or_raise(repository_getter: Callable[[], Repository | None])
 _LIST_ORDERS_LIMIT_CAP = 200
 _LIST_SIGNALS_LIMIT_CAP = 200
 _OHLCV_LIMIT_CAP = 1000
-_CANCEL_IDEMPOTENCY_KEY_MAX = 64
 _VALID_OHLCV_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "1h", "4h", "1d"})
 _TERMINAL_AI_REVIEW_STATUSES = frozenset(
     {
@@ -929,6 +931,7 @@ async def _prepare_manual_order(
             "stop_price": order.stop_price,
         }
     )
+    validate_idempotency_key(order.idempotency_key)
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
     created_at = datetime.now(UTC)
     manual_order_mode = derive_manual_execution_mode(order.exchange)
@@ -1971,15 +1974,15 @@ async def _cancel_order_tool(
             ),
             details=sanitize_output({}),
         )
-    if not idempotency_key or len(idempotency_key) > _CANCEL_IDEMPOTENCY_KEY_MAX:
+    if not idempotency_key or len(idempotency_key) > IDEMPOTENCY_KEY_MAX_LENGTH:
         return _invalid_argument_result(
             (
-                f"idempotency_key must be 1-{_CANCEL_IDEMPOTENCY_KEY_MAX} chars; "
+                f"idempotency_key must be 1-{IDEMPOTENCY_KEY_MAX_LENGTH} chars; "
                 "matches the execution_plans.cancel_idempotency_key column width."
             ),
             {
                 "idempotency_key_length": len(idempotency_key) if idempotency_key else 0,
-                "max_length": _CANCEL_IDEMPOTENCY_KEY_MAX,
+                "max_length": IDEMPOTENCY_KEY_MAX_LENGTH,
             },
         )
     tracker = tracker_getter() or SequenceTracker()
@@ -2286,7 +2289,7 @@ def register_mcp_tools(
         side: str,
         order_type: str,
         quantity: PositiveOrderNumber,
-        idempotency_key: str,
+        idempotency_key: IdempotencyKey,
         wallet_public_id: str | None = None,
         price: PositiveOrderNumber | None = None,
         stop_price: PositiveOrderNumber | None = None,

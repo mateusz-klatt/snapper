@@ -5108,8 +5108,7 @@ class TraderCoordinator(RegisterableProcess):
         if fill.trade_id or not isinstance(self.repository, SQLAlchemyRepository):
             return fill
         event = self._live_fill_event(fill, engine)
-        await self._resolve_live_fill_aliases(event)
-        native_alias = event["exec_id"] or event["trade_id"]
+        native_alias = await self._resolve_live_fill_aliases(event)
         if native_alias:
             return fill.model_copy(update={"trade_id": native_alias})
         return fill
@@ -5155,18 +5154,21 @@ class TraderCoordinator(RegisterableProcess):
             "wallet_public_id": fill.wallet_public_id or engine.wallet_public_id,
         }
 
-    async def _resolve_live_fill_aliases(self, event: VenueEventRow) -> None:
+    async def _resolve_live_fill_aliases(self, event: VenueEventRow) -> str | None:
         """Adopt both native aliases only from a uniquely proven durable live fill.
 
         Args:
             event: Shadow fill to enrich before TradeService dedup and checkpointing.
+
+        Returns:
+            The enriched event's preferred native alias, if available.
 
         Raises:
             ValueError: Durable alias evidence is ambiguous or contradicts the fill.
             Exception: Durable lookup failures quarantine the projection and propagate.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
-            return
+            return None
         try:
             events = await self.repository.get_fill_venue_events_for_order_identity(
                 client_order_id=event["client_order_id"] or "",
@@ -5184,6 +5186,7 @@ class TraderCoordinator(RegisterableProcess):
         if durable is not None:
             event["exec_id"] = durable["exec_id"]
             event["trade_id"] = durable["trade_id"]
+        return event["exec_id"] or event["trade_id"]
 
     async def _project_paired_execution_leg_fill(
         self, fill: ExecutionData, venue_event: VenueEventRow

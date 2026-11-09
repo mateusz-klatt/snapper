@@ -1147,7 +1147,7 @@ X-CSRF-Token: <csrf_token>
 | `reduce_only` | boolean | no | Reduce-only flag for closing exposure (`false` default) |
 | `wallet_public_id` | string | no | Target wallet UUID; when omitted, the server resolves the caller's single accessible wallet for the requested mode |
 | `operator_public_id` | string | no | Operator identity |
-| `idempotency_key` | string | no | Dedup key (409 on duplicate) |
+| `idempotency_key` | string | no | Dedup key, at most 64 characters (409 on duplicate); longer keys return 422 before persistence |
 | `ai_review_public_id` | string | no | Approved `ai_reviews` row cited for AI-mediated manual orders |
 
 **Response (200):** `ExecutionPlanResponse` envelope with plan details.
@@ -1689,7 +1689,9 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-At least one of `sl_price` or `tp_price` is required.
+At least one of `sl_price` or `tp_price` is required. The optional
+`idempotency_key` accepts at most 64 characters; longer keys return 422 before
+persistence.
 
 **Response (200):** `ExecutionPlanResponse` wrapping the new armed bracket plan.
 
@@ -1740,7 +1742,8 @@ reduce_only market close on breach.
 - `position_cycle_public_id` (string, required): Target position cycle.
 - `trailing_pct` (float, required): Trailing distance as percentage (0 < x < 100).
 - `min_lock_pct` (float, optional, default 0): Minimum profit % before trailing activates.
-- `idempotency_key` (string, optional): Dedup key for retries.
+- `idempotency_key` (string, optional): Dedup key for retries, at most 64 characters;
+    longer keys return 422 before persistence.
 
 **Permission:** `create:orders`. CSRF token required.
 
