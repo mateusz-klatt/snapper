@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import event as sa_event
 
+from snapper.application.portfolio.pnl_timeline_service import _usable_mark_closes
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
@@ -409,6 +410,41 @@ class TestGetPnlTimelineCandles:
             }
         ]
         assert relabeled == []
+
+    async def test_two_source_identities_make_a_minute_unusable_for_carry(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """The read projects every source series, so carried marks must fold its rows.
+
+        Given: A retired and a current instrument identity of one series whose
+            candles disagree about the same minute.
+        When: The requesting instrument's candles are read through the real query.
+        Then: Both rows arrive under one identity and the minute cannot feed a carry.
+        """
+        old_at = _NOW - timedelta(hours=3)
+        retired_at = _NOW - timedelta(hours=2)
+        open_at = _NOW - timedelta(minutes=30)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol(_SPID_USD, "BTC-USD", "USD", "crypto", old_at, _NOW),
+                    _instrument(
+                        _INST_REVISED,
+                        _SPID_USD,
+                        "kraken",
+                        timestamp=old_at,
+                        known_to=retired_at,
+                    ),
+                    _candle(_INST_REVISED, open_at, 100.0, timestamp=old_at),
+                    _candle(_INST_USD, open_at, 101.0),
+                ]
+            )
+            await session.commit()
+        refs = await repository.get_instrument_symbol_refs([_INST_USD], _NOW)
+        rows = await repository.get_pnl_timeline_candles([refs[-1]], open_at, open_at, _NOW)
+        assert sorted(row["close"] or 0.0 for row in rows) == [100.0, 101.0]
+        assert {row["instrument_public_id"] for row in rows} == {_INST_USD}
+        assert _usable_mark_closes(rows) == {}
 
     async def test_fill_reference_interval_does_not_bound_later_same_series_marks(
         self, repository: SQLAlchemyRepository

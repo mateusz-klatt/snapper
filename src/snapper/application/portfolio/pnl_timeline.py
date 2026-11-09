@@ -235,6 +235,83 @@ type OpeningMarkMap = Mapping[str, float | None]
 _GRANULARITY_MINUTES: Final[dict[str, int]] = {"1m": 1, "5m": 5, "1h": 60, "1d": 1440}
 """Downsampling bucket width in minutes per supported granularity."""
 
+PnlCarriedInputRole = Literal["mark", "fx", "event"]
+"""Which valuation input reached back to an earlier published minute.
+
+``mark`` is the instrument's own close, ``fx`` is the rate that converted a mark,
+and ``event`` is the rate that converted a fill price, fee or accrual.
+"""
+
+
+@dataclass(frozen=True)
+class PnlCarriedInput:
+    """One valuation input served by an earlier close instead of its own minute.
+
+    Attributes:
+        instrument_public_id: Instrument whose value depends on the input.
+        role: Which input was carried.
+        source_minute: Bar-close minute of the evidence actually used.
+        age_minutes: Whole minutes between the valued minute and the evidence.
+        source_plane: Oriented FX plane label for an FX input, ``None`` for a mark.
+    """
+
+    instrument_public_id: str
+    role: PnlCarriedInputRole
+    source_minute: datetime
+    age_minutes: int
+    source_plane: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject a carried claim that is not actually older than its minute."""
+        if self.age_minutes <= 0:
+            raise ValueError("a carried input must be older than the minute it values")
+
+
+def _carried_input_rank(item: PnlCarriedInput) -> tuple[int, str, str]:
+    """Order inputs of one instrument and role by age, then deterministically."""
+    return item.age_minutes, item.source_plane or "", item.source_minute.isoformat()
+
+
+def canonical_carried_inputs(
+    inputs: Collection[PnlCarriedInput],
+) -> tuple[PnlCarriedInput, ...]:
+    """Keep the oldest input per instrument and role in a stable order.
+
+    A point discloses its largest carry age, so one entry per instrument and
+    role states it without letting long histories inflate every response.
+
+    Args:
+        inputs: Carried inputs the point depends on.
+
+    Returns:
+        One entry per ``(instrument, role)``, ordered by that key.
+    """
+    oldest: dict[tuple[str, str], PnlCarriedInput] = {}
+    for item in inputs:
+        key = (item.instrument_public_id, item.role)
+        current = oldest.get(key)
+        if current is None or _carried_input_rank(item) > _carried_input_rank(current):
+            oldest[key] = item
+    return tuple(oldest[key] for key in sorted(oldest))
+
+
+type MarkCarriedInputMap = Mapping[tuple[str, datetime], Sequence[PnlCarriedInput]]
+"""Carried inputs behind a mark, keyed by ``(instrument_public_id, point_minute)``."""
+
+
+@dataclass(frozen=True)
+class TimelineMarkEvidence:
+    """Caller-stamped facts about the marks injected into the builder.
+
+    Attributes:
+        incompleteness_reasons: Exact causes for marks omitted during conversion.
+            Other absent or non-finite marks are classified as unavailable.
+        carried_inputs: Carried inputs behind each mark that reached back.
+    """
+
+    incompleteness_reasons: MarkIncompletenessReasonMap = field(default_factory=dict)
+    carried_inputs: MarkCarriedInputMap = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class TimelineExecution:
@@ -264,6 +341,7 @@ class TimelineExecution:
             the caller, or ``None`` when no caller-side failure was established.
         fee_incompleteness_reason: Causal fee-conversion failure stamped by the
             caller, or ``None`` when no caller-side failure was established.
+        carried_inputs: Rates this fill's price or fee reached back for.
     """
 
     instrument_public_id: str
@@ -280,6 +358,7 @@ class TimelineExecution:
     order_public_id: str
     price_incompleteness_reason: PnlIncompletenessReason | None = None
     fee_incompleteness_reason: PnlIncompletenessReason | None = None
+    carried_inputs: tuple[PnlCarriedInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -317,12 +396,14 @@ class TimelineAccrual:
             means the holder pays (a negative P&L contribution).
         incompleteness_reason: Causal conversion failure stamped by the caller,
             or ``None`` when no caller-side failure was established.
+        carried_inputs: Rates this accrual reached back for.
     """
 
     instrument_public_id: str
     accrued_at: datetime
     amount_usd: float
     incompleteness_reason: PnlIncompletenessReason | None = None
+    carried_inputs: tuple[PnlCarriedInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -617,6 +698,10 @@ class PnlTimelinePoint:
         incompleteness_reasons: Canonical reasons stamped at withholding sites.
         per_instrument: Per-instrument contributions, ordered by instrument id.
         attribution: Composite origin/strategy contributions in stable order.
+        carried_inputs: Inputs of this value that reached back to an earlier
+            minute, one per instrument and role. A ``complete`` point with entries
+            is complete with carried inputs; the status enum stays closed so
+            existing clients keep plotting it as a value.
     """
 
     point_time: datetime
@@ -629,9 +714,10 @@ class PnlTimelinePoint:
     incompleteness_reasons: tuple[PnlIncompletenessReasonEntry, ...]
     per_instrument: tuple[PnlInstrumentContribution, ...]
     attribution: tuple[PnlAttributionContribution, ...]
+    carried_inputs: tuple[PnlCarriedInput, ...] = ()
 
     def __post_init__(self) -> None:
-        """Enforce reason/status equivalence and canonical reason ordering."""
+        """Enforce reason/status equivalence and canonical input ordering."""
         canonical = canonical_incompleteness_reasons(self.incompleteness_reasons)
         if self.incompleteness_reasons != canonical:
             raise ValueError("incompleteness reasons must be deduplicated and sorted")
@@ -639,6 +725,18 @@ class PnlTimelinePoint:
             raise ValueError("a complete point cannot carry incompleteness reasons")
         if self.valuation_status == "incomplete" and not canonical:
             raise ValueError("an incomplete point must carry an incompleteness reason")
+        if self.carried_inputs != canonical_carried_inputs(self.carried_inputs):
+            raise ValueError("carried inputs must be one per instrument and role, sorted")
+
+    @property
+    def max_carry_age_minutes(self) -> int | None:
+        """Return the largest carry age among this point's inputs.
+
+        Returns:
+            Whole minutes of the oldest carried input, or ``None`` when every
+            input of the point was exact.
+        """
+        return max((item.age_minutes for item in self.carried_inputs), default=None)
 
 
 @dataclass(frozen=True)
@@ -1589,6 +1687,8 @@ class _PointValuationContext:
     ]
     basis_reasons_by_pool: Mapping[PoolKey, Collection[PnlIncompletenessReason]]
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
+    mark_carried_inputs: MarkCarriedInputMap
+    carried_event_inputs: Collection[PnlCarriedInput]
 
 
 @dataclass(frozen=True)
@@ -1635,6 +1735,7 @@ class _PointAccumulator:
     """Mutable point-local valuation outputs collected in stable order."""
 
     point_reasons: set[PnlIncompletenessReasonEntry] = field(default_factory=set)
+    carried_inputs: set[PnlCarriedInput] = field(default_factory=set)
     contributions: list[PnlInstrumentContribution] = field(default_factory=list)
     unrealized_by_attribution: defaultdict[AttributionKey, float] = field(
         default_factory=lambda: defaultdict(float)
@@ -2032,6 +2133,10 @@ def _instrument_unrealized(
             inputs,
         )
         return None
+    if not is_activation_point:
+        accumulator.carried_inputs.update(
+            context.mark_carried_inputs.get((instrument_public_id, context.point_time), ())
+        )
     return _trusted_instrument_unrealized(
         context,
         accumulator,
@@ -2244,6 +2349,7 @@ def _mark_incomplete_point(
         incompleteness_reasons=canonical_incompleteness_reasons(accumulator.point_reasons),
         per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
+        carried_inputs=canonical_carried_inputs(accumulator.carried_inputs),
     )
 
 
@@ -2295,6 +2401,7 @@ def _finalize_valued_point(
         incompleteness_reasons=(),
         per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
+        carried_inputs=canonical_carried_inputs(accumulator.carried_inputs),
     )
 
 
@@ -2308,7 +2415,8 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
             reason
             for reasons in prepared.instrument_untrusted_reasons.values()
             for reason in reasons
-        }
+        },
+        carried_inputs=set(context.carried_event_inputs),
     )
     for instrument_public_id in context.seen:
         _append_instrument_contribution(
@@ -2394,6 +2502,7 @@ class _TimelineBuildEvidence:
         Collection[PnlIncompletenessReason],
     ]
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
+    mark_carried_inputs: MarkCarriedInputMap
 
 
 @dataclass
@@ -2436,6 +2545,7 @@ class _TimelineBuildState:
     realized_total: ExactSum = field(default_factory=ExactSum)
     fee_total: ExactSum = field(default_factory=ExactSum)
     accrual_total: ExactSum = field(default_factory=ExactSum)
+    carried_event_inputs: tuple[PnlCarriedInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2477,9 +2587,10 @@ def _resolved_build_evidence(
     marks: MarkMap,
     lineage: Mapping[str, TimelineExecutionLineage] | None,
     untrusted_price_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]] | None,
-    mark_incompleteness_reasons: MarkIncompletenessReasonMap | None,
+    mark_evidence: TimelineMarkEvidence | None,
 ) -> _TimelineBuildEvidence:
     """Resolve optional caller evidence to immutable empty mappings."""
+    resolved_mark_evidence = TimelineMarkEvidence() if mark_evidence is None else mark_evidence
     return _TimelineBuildEvidence(
         marks=marks,
         lineage={} if lineage is None else lineage,
@@ -2488,9 +2599,8 @@ def _resolved_build_evidence(
             if untrusted_price_reasons_by_instrument is None
             else untrusted_price_reasons_by_instrument
         ),
-        mark_incompleteness_reasons=(
-            {} if mark_incompleteness_reasons is None else mark_incompleteness_reasons
-        ),
+        mark_incompleteness_reasons=resolved_mark_evidence.incompleteness_reasons,
+        mark_carried_inputs=resolved_mark_evidence.carried_inputs,
     )
 
 
@@ -2832,6 +2942,17 @@ def _record_execution_weights_and_basis(
         state.basis_reasons_by_pool.pop(application.pool_key, None)
 
 
+def _latch_carried_event_inputs(
+    state: _TimelineBuildState,
+    inputs: tuple[PnlCarriedInput, ...],
+) -> None:
+    """Remember carried event rates, because every later cumulative depends on them."""
+    if inputs:
+        state.carried_event_inputs = canonical_carried_inputs(
+            [*state.carried_event_inputs, *inputs]
+        )
+
+
 def _apply_execution_event(
     state: _TimelineBuildState,
     evidence: _TimelineBuildEvidence,
@@ -2841,6 +2962,7 @@ def _apply_execution_event(
     application = _begin_execution_application(state, evidence, execution)
     if application is None:
         return
+    _latch_carried_event_inputs(state, execution.carried_inputs)
     _record_execution_pool_basis(state, application)
     _record_execution_realized(state, application)
     _record_execution_fee(state, application)
@@ -2854,6 +2976,7 @@ def _apply_accrual_event(
     attribution_is_ambiguous: bool,
 ) -> None:
     """Apply one accrual against strictly earlier inventory ownership."""
+    _latch_carried_event_inputs(state, accrual.carried_inputs)
     if accrual.incompleteness_reason is not None:
         _add_instrument_untrusted_reason(
             state.untrusted_reasons_by_instrument,
@@ -3054,6 +3177,8 @@ def _point_valuation_context(
         untrusted_reasons_by_instrument=state.untrusted_reasons_by_instrument,
         basis_reasons_by_pool=state.basis_reasons_by_pool,
         mark_incompleteness_reasons=evidence.mark_incompleteness_reasons,
+        mark_carried_inputs=evidence.mark_carried_inputs,
+        carried_event_inputs=state.carried_event_inputs,
     )
 
 
@@ -3111,7 +3236,7 @@ def build_pnl_timeline(
     untrusted_price_reasons_by_instrument: (
         Mapping[str, Collection[PnlIncompletenessReason]] | None
     ) = None,
-    mark_incompleteness_reasons: MarkIncompletenessReasonMap | None = None,
+    mark_evidence: TimelineMarkEvidence | None = None,
 ) -> PnlTimelineResult:
     """Build the Net-P&L-since-activation series for one wallet/mode scope.
 
@@ -3138,9 +3263,10 @@ def build_pnl_timeline(
             proof failures keyed by instrument. Their fills are never passed to
             the accounting kernel and their exact reasons latch when replay
             reaches them.
-        mark_incompleteness_reasons: Exact caller-stamped causes for mark values
-            omitted during conversion. Other absent or non-finite marks are
-            classified only as unavailable when the builder needs them.
+        mark_evidence: Caller-stamped causes for marks omitted during conversion
+            and the carried inputs behind marks that reached back. Other absent
+            or non-finite marks are classified only as unavailable when the
+            builder needs them.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -3153,7 +3279,7 @@ def build_pnl_timeline(
         marks,
         lineage,
         untrusted_price_reasons_by_instrument,
-        mark_incompleteness_reasons,
+        mark_evidence,
     )
     state = _initialize_timeline_state(opening)
     _validate_timeline_execution_scopes(state, executions)

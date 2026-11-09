@@ -38,6 +38,7 @@ from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import _UNSAMPLED_EQUITY_COVERAGE
+from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
@@ -150,7 +151,7 @@ def _empty_anchor(
         "point_time": point_time,
         "point_kind": "anchor",
         "epoch_public_id": public_id,
-        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "calc_version": PNL_ANCHOR_CALC_VERSION,
         "valuation_status": "complete",
         "realized_pnl": 0.0,
         "fee_pnl": 0.0,
@@ -4322,7 +4323,8 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.13"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.14"
+    assert PNL_ANCHOR_CALC_VERSION == "5A.13"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 

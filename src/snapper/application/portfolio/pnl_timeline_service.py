@@ -24,10 +24,20 @@ currency legs match a needed pair instead uses its canonical oriented source
 plane for all of that instrument's conversions on the pair. Neither a rival
 venue nor the opposite orientation can fill that instrument plane's gap, while
 the gap cannot suppress independently covered peers. No triangulation,
-nearest-minute match, or stale carry-forward is permitted. A missing execution
-rate becomes ``NaN`` so the pure builder applies its existing
+nearest-minute match, or stale carry-forward is permitted on an exact-only read.
+A missing execution rate becomes ``NaN`` so the pure builder applies its existing
 opening-versus-closing trust tiers. A missing mark rate emits no mark, producing
 mark-incomplete valuation without tainting mark-independent cumulatives.
+
+API reads set :attr:`PnlSeriesReadPolicy.carry_valuation`, the operator's 2026-11-09
+decision that availability outranks minute-exact proof. A minute with no exact
+evidence then uses the latest earlier close on the same plane or series inside a
+bound, and the point discloses that input and its age. Exact evidence always wins,
+contradictory exact evidence stays withheld, and no candle is written. Plane
+election still counts only exact-consuming minutes, so a carried minute can never
+change which plane an exact minute uses. The snapshotter and anchor derivation stay
+exact-only, which keeps persisted samples and the activation anchor on their
+existing contracts.
 
 The mark for grid minute ``M`` is the close of the finalized candle covering
 ``[M-1m, M)`` (``open_at == M - 1min``), and its FX rate follows the same
@@ -71,17 +81,32 @@ from snapper.application.portfolio.fill_booking import booked_signed_quantity
 from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
 from snapper.application.portfolio.fx_conversion_shadow import current_fx_shadow_context
+from snapper.application.portfolio.fx_rates import FX_CARRY_BOUND
+from snapper.application.portfolio.fx_rates import CarriedConversion
+from snapper.application.portfolio.fx_rates import FxCarryBook
 from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateKey
 from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
+from snapper.application.portfolio.fx_rates import build_fx_carry_book
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.fx_rates import exact_fx_book
 from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
 from snapper.application.portfolio.pnl_anchor_identity import (
     normalize_portfolio_pnl_wallet_public_id,
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_carry import CARRY_ANCHOR_LIMIT
+from snapper.application.portfolio.pnl_carry import FX_CARRY_READ_STEPS
+from snapper.application.portfolio.pnl_carry import MARK_CARRY_BOUND
+from snapper.application.portfolio.pnl_carry import MARK_CARRY_READ_STEPS
+from snapper.application.portfolio.pnl_carry import CarriedMarkSource
+from snapper.application.portfolio.pnl_carry import carried_mark_sources
+from snapper.application.portfolio.pnl_carry import carry_serves
+from snapper.application.portfolio.pnl_carry import fx_gap_anchors
+from snapper.application.portfolio.pnl_carry import leading_mark_gaps
+from snapper.application.portfolio.pnl_carry import read_windows
 from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxFailure
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_conversion_scope
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_diagnostics_active
@@ -92,12 +117,15 @@ from snapper.application.portfolio.pnl_fx_diagnostics import reset_pnl_fx_execut
 from snapper.application.portfolio.pnl_read_timing import pnl_read_core
 from snapper.application.portfolio.pnl_read_timing import pnl_read_count
 from snapper.application.portfolio.pnl_read_timing import pnl_read_fx_window
+from snapper.application.portfolio.pnl_read_timing import pnl_read_max
 from snapper.application.portfolio.pnl_read_timing import pnl_read_phase
 from snapper.application.portfolio.pnl_read_timing import pnl_read_stage
 from snapper.application.portfolio.pnl_timeline import MarkIncompletenessReasonMap
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
 from snapper.application.portfolio.pnl_timeline import PnlAttributionContribution
+from snapper.application.portfolio.pnl_timeline import PnlCarriedInput
+from snapper.application.portfolio.pnl_timeline import PnlCarriedInputRole
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
@@ -106,10 +134,12 @@ from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
+from snapper.application.portfolio.pnl_timeline import TimelineMarkEvidence
 from snapper.application.portfolio.pnl_timeline import TimelineOpening
 from snapper.application.portfolio.pnl_timeline import TimelineOpeningDerivation
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
+from snapper.application.portfolio.pnl_timeline import canonical_carried_inputs
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 from snapper.core.numeric import is_positive_finite
@@ -140,12 +170,21 @@ _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.13"
+PNL_TIMELINE_CALC_VERSION = "5A.14"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
 contract changes so a cached or persisted point can be told apart from a
-re-derivation under a newer contract.
+re-derivation under a newer contract. ``5A.14`` adds carried prices and FX rates
+to API reads; a point with exact evidence is bit-identical to ``5A.13``.
+"""
+
+PNL_ANCHOR_CALC_VERSION: Final[str] = "5A.13"
+"""Contract version of a persisted activation anchor, independent of the read path.
+
+Anchor derivation stays exact-only, so the anchor of 2026-07-26 and every other
+persisted anchor remain valid under carried reads. A later change to how anchors
+are derived must bump this constant, not the timeline version.
 """
 
 PNL_SAMPLE_CALC_VERSION = _PNL_SAMPLE_CALC_VERSION
@@ -494,6 +533,10 @@ class PnlSeriesReadPolicy:
     snapshotter's results or make it answer as though it had named a past
     instant. The default is the conservative one: an explicit horizon.
 
+    ``carry_valuation`` lets a minute without exact evidence use a bounded earlier
+    close. Only the API routes grant it. It stays OFF for the snapshotter so a
+    persisted sample keeps its exact-minute contract without a recompute from t0.
+
     ``allow_anchor_creation`` still defaults ON, which is the one permissive
     default here and a known wart: it is a durable WRITE reachable from a GET, so
     a caller that forgets to state the capability receives it. Flipping it is a
@@ -506,6 +549,7 @@ class PnlSeriesReadPolicy:
     allow_anchor_creation: bool = True
     current_truth: bool = False
     current_truth_horizon: bool = False
+    carry_valuation: bool = False
 
 
 _DEFAULT_READ_POLICY: Final[PnlSeriesReadPolicy] = PnlSeriesReadPolicy()
@@ -709,7 +753,7 @@ def _validated_anchor_raw_unrealized(row: PortfolioPnlAnchorRow) -> float:
         or row["public_id"] != expected_public_id
         or row["epoch_public_id"] != row["public_id"]
         or row["point_kind"] != "anchor"
-        or row["calc_version"] != PNL_TIMELINE_CALC_VERSION
+        or row["calc_version"] != PNL_ANCHOR_CALC_VERSION
         or row["valuation_status"] != "complete"
         or type(row["realized_pnl"]) is not float
         or not _is_exact_zero(row["realized_pnl"])
@@ -1542,10 +1586,42 @@ async def load_basket_fiat_evidence(
     )
 
 
+def _as_fx_book(rates: FxRateMap | FxCarryBook) -> FxCarryBook:
+    """Give exact-only callers the same conversion path as a carried read."""
+    return rates if isinstance(rates, FxCarryBook) else exact_fx_book(rates)
+
+
+def _fx_carried_input(
+    instrument_public_id: str,
+    role: PnlCarriedInputRole,
+    conversion: CarriedConversion | None,
+) -> PnlCarriedInput | None:
+    """Describe the evidence behind one conversion when it reached back.
+
+    Args:
+        instrument_public_id: Instrument whose value depends on the conversion.
+        role: Which valuation input the rate served.
+        conversion: The completed conversion, if any.
+
+    Returns:
+        The disclosure entry, or ``None`` for exact, identity or failed conversions.
+    """
+    rate = None if conversion is None else conversion.rate
+    if rate is None or rate.age_minutes == 0:
+        return None
+    return PnlCarriedInput(
+        instrument_public_id=instrument_public_id,
+        role=role,
+        source_minute=rate.source_minute,
+        age_minutes=rate.age_minutes,
+        source_plane=_oriented_plane_label(rate.plane),
+    )
+
+
 def _to_timeline_execution(
     row: PnlTimelineOpeningExecutionRow,
     valuation_ccy: str,
-    rates: FxRateMap,
+    rates: FxRateMap | FxCarryBook,
     base_asset: str | None = None,
     price_currency: str | None = None,
     venues: FxVenueMap | None = None,
@@ -1564,7 +1640,7 @@ def _to_timeline_execution(
     Args:
         row: One ``get_pnl_timeline_executions`` row.
         valuation_ccy: Currency the series is valued in.
-        rates: Minute-keyed FX rates used for price and fee conversion.
+        rates: Minute-keyed FX rates, or a carry book on a carried read.
         base_asset: Proven base asset of the execution instrument.
         price_currency: Proven quote currency of the execution price. ``None``
             leaves the raw price unchanged for callers that enforce trust
@@ -1578,14 +1654,9 @@ def _to_timeline_execution(
     effective_time = pnl_fx_execution_time(
         row["instrument_public_id"], row["shard_key"], row["timestamp"]
     )
-    converted_fee = convert_amount(
-        row["fee"],
-        row["fee_asset"],
-        valuation_ccy,
-        rate_minute,
-        rates,
-        venues,
-    )
+    book = _as_fx_book(rates)
+    fee_conversion = book.convert(row["fee"], row["fee_asset"], valuation_ccy, rate_minute, venues)
+    converted_fee = None if fee_conversion is None else fee_conversion.amount
     fee = math.nan if converted_fee is None else converted_fee
     fee_incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
@@ -1613,21 +1684,18 @@ def _to_timeline_execution(
                     0,
                 ),
             ),
-            rates,
+            book.exact,
             venues,
         )
     raw_price = row["price"]
     price = raw_price
     price_incompleteness_reason: PnlIncompletenessReason | None = None
+    price_conversion: CarriedConversion | None = None
     if price_currency is not None and is_positive_finite(raw_price):
-        converted_price = convert_amount(
-            raw_price,
-            price_currency,
-            valuation_ccy,
-            rate_minute,
-            rates,
-            venues,
+        price_conversion = book.convert(
+            raw_price, price_currency, valuation_ccy, rate_minute, venues
         )
+        converted_price = None if price_conversion is None else price_conversion.amount
         price = converted_price if is_positive_finite(converted_price) else math.nan
         if price_currency != valuation_ccy and not is_positive_finite(converted_price):
             price_incompleteness_reason = "fx_conversion_unproven"
@@ -1648,9 +1716,17 @@ def _to_timeline_execution(
                         1,
                     ),
                 ),
-                rates,
+                book.exact,
                 venues,
             )
+    carried_inputs = [
+        carried
+        for carried in (
+            _fx_carried_input(row["instrument_public_id"], "event", fee_conversion),
+            _fx_carried_input(row["instrument_public_id"], "event", price_conversion),
+        )
+        if carried is not None
+    ]
     return TimelineExecution(
         order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
@@ -1673,6 +1749,7 @@ def _to_timeline_execution(
         fee_asset=row["fee_asset"],
         price_incompleteness_reason=price_incompleteness_reason,
         fee_incompleteness_reason=fee_incompleteness_reason,
+        carried_inputs=canonical_carried_inputs(carried_inputs),
     )
 
 
@@ -1718,7 +1795,7 @@ def _build_execution_lineage(
 def _to_timeline_accrual(
     row: PnlTimelineAccrualRow,
     valuation_ccy: str,
-    rates: FxRateMap,
+    rates: FxRateMap | FxCarryBook,
     venues: FxVenueMap | None = None,
 ) -> TimelineAccrual:
     """Map a repository accrual row onto the pure builder's input.
@@ -1731,20 +1808,21 @@ def _to_timeline_accrual(
     Args:
         row: One ``get_accruals_for_pnl`` row.
         valuation_ccy: Currency the series is valued in.
-        rates: Minute-keyed FX rates used to convert a foreign-denominated amount.
+        rates: Minute-keyed FX rates, or a carry book on a carried read.
         venues: Instrument-pinned oriented plane for each converted currency pair.
 
     Returns:
         The equivalent :class:`TimelineAccrual`.
     """
-    converted = convert_amount(
+    book = _as_fx_book(rates)
+    conversion = book.convert(
         row["amount"],
         row["amount_asset"],
         valuation_ccy,
         _rate_minute(row["accrued_at"]),
-        rates,
         venues,
     )
+    converted = None if conversion is None else conversion.amount
     amount = math.nan if converted is None else converted
     incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
@@ -1765,14 +1843,16 @@ def _to_timeline_accrual(
                 to_currency=valuation_ccy,
                 causal_order=(row["accrued_at"], 0, row["instrument_public_id"], 0, "", 0),
             ),
-            rates,
+            book.exact,
             venues,
         )
+    carried_input = _fx_carried_input(row["instrument_public_id"], "event", conversion)
     return TimelineAccrual(
         instrument_public_id=row["instrument_public_id"],
         accrued_at=row["accrued_at"],
         amount_usd=amount,
         incompleteness_reason=incompleteness_reason,
+        carried_inputs=() if carried_input is None else (carried_input,),
     )
 
 
@@ -1955,6 +2035,7 @@ def _with_point_instrument_display_identities(
             for contribution in point.per_instrument
         ),
         attribution=point.attribution,
+        carried_inputs=point.carried_inputs,
     )
 
 
@@ -2067,11 +2148,128 @@ async def _load_mark_candles(
     return list(candles)
 
 
+@dataclass(frozen=True, slots=True)
+class _MarkValuation:
+    """Everything needed to turn one raw close into a valuation-currency mark."""
+
+    quote_by_instrument: Mapping[str, str]
+    valuation_ccy: str
+    book: FxCarryBook
+    venues_by_instrument: Mapping[str, FxVenueMap]
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkBuild:
+    """Marks, conversion failures and carried inputs collected for one request."""
+
+    marks: dict[tuple[str, datetime], float | None] = field(default_factory=dict)
+    reasons: dict[tuple[str, datetime], PnlIncompletenessReason] = field(default_factory=dict)
+    carried_inputs: dict[tuple[str, datetime], tuple[PnlCarriedInput, ...]] = field(
+        default_factory=dict
+    )
+
+
+def _record_mark(
+    build: _MarkBuild,
+    valuation: _MarkValuation,
+    key: tuple[str, datetime],
+    close: float,
+    carried_mark: PnlCarriedInput | None = None,
+) -> None:
+    """Convert one positive close at the minute it values and record the outcome.
+
+    Args:
+        build: Mutable marks, failures and disclosures for this request.
+        valuation: Currency, rate evidence and instrument plane pins.
+        key: ``(instrument, grid minute)`` being valued.
+        close: Positive close in the instrument's quote currency.
+        carried_mark: Disclosure when the close itself came from an earlier bar.
+    """
+    instrument_public_id, minute = key
+    quote_currency = valuation.quote_by_instrument[instrument_public_id]
+    venues = valuation.venues_by_instrument.get(instrument_public_id, {})
+    converted = valuation.book.convert(
+        close, quote_currency, valuation.valuation_ccy, minute, venues
+    )
+    if converted is None or not is_positive_finite(converted.amount):
+        build.reasons[key] = "fx_conversion_unproven"
+        record_pnl_fx_failure(
+            PnlFxFailure(
+                instrument=instrument_public_id,
+                role="mark",
+                event_time=minute,
+                rate_minute=minute,
+                from_currency=quote_currency,
+                to_currency=valuation.valuation_ccy,
+                causal_order=(minute, 2, instrument_public_id, 0, "", 0),
+            ),
+            valuation.book.exact,
+            venues,
+        )
+        return
+    build.marks[key] = converted.amount
+    carried = [
+        item
+        for item in (carried_mark, _fx_carried_input(instrument_public_id, "fx", converted))
+        if item is not None
+    ]
+    if carried:
+        build.carried_inputs[key] = tuple(carried)
+
+
+def _mark_build_from_candles(
+    candles: Sequence[PnlTimelineCandleRow],
+    valuation: _MarkValuation,
+) -> _MarkBuild:
+    """Value every positive raw close at the grid minute its bar closed.
+
+    Args:
+        candles: Raw finalized mark candles.
+        valuation: Currency, rate evidence and instrument plane pins.
+
+    Returns:
+        Marks, caller-stamped conversion failures and carried FX inputs.
+    """
+    build = _MarkBuild()
+    for candle in candles:
+        close = candle["close"]
+        if is_positive_finite(close):
+            key = (candle["instrument_public_id"], candle["open_at"] + timedelta(minutes=1))
+            _record_mark(build, valuation, key, close)
+    return build
+
+
+def _add_carried_marks(
+    build: _MarkBuild,
+    valuation: _MarkValuation,
+    sources: Mapping[tuple[str, datetime], CarriedMarkSource],
+) -> None:
+    """Value held minutes without a bar from their planned earlier closes.
+
+    The FX rate is taken at the valued minute rather than the close's own minute,
+    because the position is worth its last price in today's rate.
+
+    Args:
+        build: Mutable marks, failures and disclosures for this request.
+        valuation: Currency, rate evidence and instrument plane pins.
+        sources: Earlier close chosen for each demanded minute.
+    """
+    for key, source in sorted(sources.items()):
+        instrument_public_id, minute = key
+        carried_mark = PnlCarriedInput(
+            instrument_public_id=instrument_public_id,
+            role="mark",
+            source_minute=source.source_minute,
+            age_minutes=int((minute - source.source_minute).total_seconds() // 60),
+        )
+        _record_mark(build, valuation, key, source.close, carried_mark)
+
+
 def _build_marks_and_reasons_from_candles(
     candles: Sequence[PnlTimelineCandleRow],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
-    rates: FxRateMap,
+    rates: FxRateMap | FxCarryBook,
     venues_by_instrument: Mapping[str, FxVenueMap],
 ) -> tuple[MarkMap, MarkIncompletenessReasonMap]:
     """Convert raw closes and retain exact caller-side FX failures.
@@ -2080,48 +2278,20 @@ def _build_marks_and_reasons_from_candles(
         candles: Raw finalized mark candles.
         quote_by_instrument: Proven denomination of each candle close.
         valuation_ccy: Currency the returned marks are denominated in.
-        rates: Plane-qualified exact-minute FX closes.
+        rates: Plane-qualified exact-minute FX closes, or a carry book.
         venues_by_instrument: Consumer-pinned planes keyed by instrument and pair.
 
     Returns:
         Positive converted marks and caller-stamped conversion failures keyed by
         instrument and closing minute.
     """
-    marks: dict[tuple[str, datetime], float | None] = {}
-    incompleteness_reasons: dict[tuple[str, datetime], PnlIncompletenessReason] = {}
-    for candle in candles:
-        close = candle["close"]
-        if not is_positive_finite(close):
-            continue
-        instrument_public_id = candle["instrument_public_id"]
-        quote_currency = quote_by_instrument[instrument_public_id]
-        mark_minute = candle["open_at"] + timedelta(minutes=1)
-        converted = convert_amount(
-            close,
-            quote_currency,
-            valuation_ccy,
-            mark_minute,
-            rates,
-            venues_by_instrument.get(instrument_public_id, {}),
-        )
-        if is_positive_finite(converted):
-            marks[(instrument_public_id, mark_minute)] = converted
-        else:
-            incompleteness_reasons[(instrument_public_id, mark_minute)] = "fx_conversion_unproven"
-            record_pnl_fx_failure(
-                PnlFxFailure(
-                    instrument=instrument_public_id,
-                    role="mark",
-                    event_time=mark_minute,
-                    rate_minute=mark_minute,
-                    from_currency=quote_currency,
-                    to_currency=valuation_ccy,
-                    causal_order=(mark_minute, 2, instrument_public_id, 0, "", 0),
-                ),
-                rates,
-                venues_by_instrument.get(instrument_public_id, {}),
-            )
-    return marks, incompleteness_reasons
+    build = _mark_build_from_candles(
+        candles,
+        _MarkValuation(
+            quote_by_instrument, valuation_ccy, _as_fx_book(rates), venues_by_instrument
+        ),
+    )
+    return build.marks, build.reasons
 
 
 def _build_marks_from_candles(
@@ -2748,7 +2918,18 @@ def _mark_minute_is_eligible(
     window: _MarkFxWindow,
 ) -> bool:
     """Return whether one positive close truthfully consumes an FX rate."""
-    if not is_positive_finite(candle["close"]) or not state.mark_eligible:
+    return is_positive_finite(candle["close"]) and _mark_minute_is_consumed(
+        mark_minute, state, window
+    )
+
+
+def _mark_minute_is_consumed(
+    mark_minute: datetime,
+    state: _MarkReplayState,
+    window: _MarkFxWindow,
+) -> bool:
+    """Return whether one grid minute values a trusted open position."""
+    if not state.mark_eligible:
         return False
     if mark_minute < window.grid_start or mark_minute > window.to_time:
         return False
@@ -2848,6 +3029,207 @@ def _mark_fx_minutes(
                 mark_minute,
             )
     return needed
+
+
+def _instrument_carry_minutes(
+    instrument_public_id: str,
+    candles: Sequence[PnlTimelineCandleRow],
+    events: Sequence[_EffectiveMarkEvent],
+    opening_quantities: Mapping[_PoolKey, float],
+    window: _MarkFxWindow,
+) -> list[datetime]:
+    """Replay one instrument and return held minutes that have no bar at all.
+
+    A minute that has a bar is never demanded, whether or not it is usable: a
+    valid close is exact evidence, and an invalid close is contradictory evidence
+    that must stay withheld rather than be papered over by an older price.
+
+    Args:
+        instrument_public_id: Instrument being replayed.
+        candles: Its raw finalized candles inside the chart window.
+        events: Its monotone effective position events.
+        opening_quantities: Rebased pool quantities active at t0.
+        window: Grid bounds and global regression shadows.
+
+    Returns:
+        Ascending grid minutes that need a carried mark.
+    """
+    state = _MarkReplayState(
+        event_index=0,
+        pool_quantities={
+            shard_key: quantity
+            for (opening_instrument, shard_key), quantity in opening_quantities.items()
+            if opening_instrument == instrument_public_id
+        },
+        mark_eligible=True,
+    )
+    observed = {candle["open_at"] + timedelta(minutes=1) for candle in candles}
+    demand: list[datetime] = []
+    minute = window.grid_start
+    while minute <= window.to_time:
+        _advance_mark_replay(state, events, minute)
+        if minute not in observed and _mark_minute_is_consumed(minute, state, window):
+            demand.append(minute)
+        minute += timedelta(minutes=1)
+    return demand
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkCarryRequest:
+    """Inputs for deciding which held minutes need an earlier close."""
+
+    candles: Sequence[PnlTimelineCandleRow]
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow]
+    base_by_instrument: Mapping[str, str]
+    quote_by_instrument: Mapping[str, str]
+    refs: Sequence[InstrumentSymbolRefRow]
+    valuation_ccy: str
+    from_time: datetime
+    to_time: datetime
+    opening: TimelineOpening | None
+    as_of: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkCarryPlan:
+    """Earlier closes chosen for held minutes, and the FX minutes they consume."""
+
+    sources: Mapping[tuple[str, datetime], CarriedMarkSource]
+    fx_requirements: Mapping[str, _FxMinuteRequirements]
+
+
+_NO_MARK_CARRY: Final[_MarkCarryPlan] = _MarkCarryPlan(sources={}, fx_requirements={})
+"""Plan for exact-only reads, which never reach back for a mark."""
+
+
+def _carried_mark_demand(request: _MarkCarryRequest) -> dict[str, list[datetime]]:
+    """Collect the held minutes of every trusted instrument that have no bar."""
+    effective_events, regression_shadows = _effective_mark_events(
+        request.execution_rows,
+        request.base_by_instrument,
+        request.quote_by_instrument,
+    )
+    window = _MarkFxWindow(
+        grid_start=request.from_time.replace(second=0, microsecond=0),
+        to_time=request.to_time,
+        regression_shadows=regression_shadows,
+    )
+    opening_quantities = _opening_pool_quantities(request.opening)
+    candles_by_instrument = _candles_by_instrument(request.candles)
+    demand: dict[str, list[datetime]] = {}
+    for instrument_public_id in sorted(request.quote_by_instrument):
+        minutes = _instrument_carry_minutes(
+            instrument_public_id,
+            candles_by_instrument.get(instrument_public_id, ()),
+            sorted(effective_events.get(instrument_public_id, [])),
+            opening_quantities,
+            window,
+        )
+        if minutes:
+            demand[instrument_public_id] = minutes
+    return demand
+
+
+def _usable_mark_closes(
+    candles: Sequence[PnlTimelineCandleRow],
+) -> dict[str, dict[datetime, float]]:
+    """Index the closes a carried mark may use, by instrument and close minute.
+
+    The candle read projects every matching source series onto the requesting
+    instrument without reducing them, so one minute can hold several rows. Every
+    observation of a minute must agree on one positive finite close. Two different
+    closes, or a usable close beside an invalid one, make the minute contradictory
+    and unusable as a source, whichever order the rows arrive in.
+
+    Args:
+        candles: Raw finalized mark candles.
+
+    Returns:
+        Unconflicted positive closes keyed by instrument and close minute.
+    """
+    observed: dict[tuple[str, datetime], float | None] = {}
+    for candle in candles:
+        key = (candle["instrument_public_id"], candle["open_at"] + timedelta(minutes=1))
+        close = candle["close"] if is_positive_finite(candle["close"]) else None
+        observed[key] = close if observed.get(key, close) == close else None
+    closes: dict[str, dict[datetime, float]] = {}
+    for (instrument_public_id, minute), close in observed.items():
+        if close is not None:
+            closes.setdefault(instrument_public_id, {})[minute] = close
+    return closes
+
+
+async def _load_mark_predecessors(
+    repo: Repository,
+    ref: InstrumentSymbolRefRow,
+    anchor: datetime,
+    known: Sequence[PnlTimelineCandleRow],
+    as_of: datetime,
+) -> list[PnlTimelineCandleRow]:
+    """Widen one bounded search behind a leading gap until a usable close appears.
+
+    A window can overlap the chart read, and two reads are not one snapshot. Each
+    window is judged together with everything already observed, so a re-read that
+    no longer shows a contradiction cannot make that minute usable.
+
+    Args:
+        repo: Repository providing the unchanged timeline candle read.
+        ref: The one instrument whose gap is being served.
+        anchor: First demanded grid minute.
+        known: Observations already read for this request.
+        as_of: Knowledge horizon threading the candle read.
+
+    Returns:
+        Every row read by this search.
+    """
+    observed: list[PnlTimelineCandleRow] = []
+    for lower, upper in read_windows(anchor, MARK_CARRY_READ_STEPS):
+        rows = await repo.get_pnl_timeline_candles([ref], lower, upper, as_of)
+        observed.extend(rows)
+        usable = _usable_mark_closes([*known, *observed]).get(ref["instrument_public_id"], {})
+        if any(row["open_at"] + timedelta(minutes=1) in usable for row in rows):
+            break
+    return observed
+
+
+async def _plan_mark_carry(repo: Repository, request: _MarkCarryRequest) -> _MarkCarryPlan:
+    """Choose earlier closes for held minutes without a bar of their own.
+
+    One read per instrument at most: the demand after the first minute is served
+    by closes already inside the chart window.
+
+    Args:
+        repo: Repository providing the unchanged timeline candle read.
+        request: Chart window, position replay inputs and trusted references.
+
+    Returns:
+        Sources per ``(instrument, minute)`` and the FX minutes they consume.
+    """
+    demand = _carried_mark_demand(request)
+    observations = list(request.candles)
+    refs_by_instrument = {ref["instrument_public_id"]: ref for ref in request.refs}
+    gaps = leading_mark_gaps(demand, _usable_mark_closes(observations))
+    for instrument_public_id, anchor in sorted(gaps.items()):
+        observations.extend(
+            await _load_mark_predecessors(
+                repo,
+                refs_by_instrument[instrument_public_id],
+                anchor,
+                observations,
+                request.as_of,
+            )
+        )
+    sources = carried_mark_sources(demand, _usable_mark_closes(observations), MARK_CARRY_BOUND)
+    fx_requirements: _FxInstrumentRequirements = {}
+    for instrument_public_id, minute in sources:
+        _add_fx_minute(
+            fx_requirements,
+            instrument_public_id,
+            request.quote_by_instrument[instrument_public_id],
+            request.valuation_ccy,
+            minute,
+        )
+    return _MarkCarryPlan(sources, fx_requirements)
 
 
 def _merge_fx_minutes(
@@ -3014,6 +3396,7 @@ async def _discover_fx_candidates(
     as_of: datetime,
     *,
     open_intervals: Sequence[tuple[datetime, datetime]] = (),
+    lookback: timedelta = _FX_CARRY_WINDOW,
 ) -> list[PnlFxRatePlane]:
     """Discover every spot-FX plane with evidence in one bounded rate window.
 
@@ -3022,6 +3405,7 @@ async def _discover_fx_candidates(
         requirements: Exact pair minutes in this mark or event window.
         as_of: Knowledge horizon threading the repository read.
         open_intervals: Optional inclusive candle-open intervals shared with the load.
+        lookback: How far before the first minute a plane may have published.
 
     Returns:
         Concrete oriented venue planes with evidence in this window.
@@ -3032,7 +3416,7 @@ async def _discover_fx_candidates(
         return []
     return await repo.get_pnl_fx_rate_exchanges(
         _oriented_fx_pairs(pairs),
-        bounds[0] - _FX_CARRY_WINDOW,
+        bounds[0] - lookback,
         bounds[1],
         as_of,
         open_intervals=open_intervals,
@@ -3189,6 +3573,7 @@ def _plane_observations(
 def _carried_minutes_for_plane(
     published: set[datetime],
     required: set[datetime],
+    bound: timedelta = _FX_CARRY_WINDOW,
 ) -> dict[datetime, int]:
     """Return each required minute this plane reaches only by bounded carry.
 
@@ -3199,6 +3584,7 @@ def _carried_minutes_for_plane(
     Args:
         published: Minutes this plane closed a usable bar on.
         required: Conversion minutes the election must serve.
+        bound: Oldest publication that may still serve a minute.
 
     Returns:
         Carried minutes mapped to how many whole minutes each had to reach back.
@@ -3210,7 +3596,7 @@ def _carried_minutes_for_plane(
     for minute in required:
         if minute in published:
             continue
-        earliest = minute - _FX_CARRY_WINDOW
+        earliest = minute - bound
         index = bisect_left(ordered, minute)
         if index and ordered[index - 1] >= earliest:
             carried[minute] = int((minute - ordered[index - 1]).total_seconds() // 60)
@@ -3220,6 +3606,7 @@ def _carried_minutes_for_plane(
 def _covered_fx_minutes(
     requirements: Mapping[FxPairKey, set[datetime]],
     rows: Sequence[PnlFxRateRow],
+    bound: timedelta = _FX_CARRY_WINDOW,
 ) -> dict[PnlFxRatePlane, _PlaneCoverage]:
     """Collect exact and bounded-carry requirement coverage for each plane.
 
@@ -3232,7 +3619,7 @@ def _covered_fx_minutes(
         pair = currency_pair_key(plane[0], plane[1])
         required = requirements.get(pair, set())
         exact = published & required
-        distances = _carried_minutes_for_plane(published, required)
+        distances = _carried_minutes_for_plane(published, required, bound)
         if exact or distances:
             covered[plane] = _PlaneCoverage(
                 exact=exact,
@@ -3531,6 +3918,70 @@ def _fx_planes_by_instrument(
     return selected
 
 
+@dataclass(frozen=True, slots=True)
+class _FxRequest:
+    """One request's FX consumers, separated by how each minute may vote.
+
+    ``carried_mark_requirements`` widens which minutes are read and which
+    consumers receive a plane, yet never votes for a plane on a pair that has an
+    exact-consuming minute. Without that separation a carried minute could move
+    the election and change the value of a minute that has exact evidence.
+    """
+
+    mark_requirements: Mapping[str, _FxMinuteRequirements]
+    event_requirements: Mapping[str, _FxMinuteRequirements]
+    identity_planes: Mapping[str, PnlFxRatePlane]
+    as_of: datetime
+    valuation_ccy: str
+    carried_mark_requirements: Mapping[str, _FxMinuteRequirements] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _FxElection:
+    """Elected planes plus the evidence a carried read extends."""
+
+    rates: FxRateMap
+    planes_by_instrument: _FxPlanesByInstrument
+    used_planes: set[tuple[FxPairKey, PnlFxRatePlane]]
+    rows: list[PnlFxRateRow]
+    candidate_planes: dict[FxPairKey, set[PnlFxRatePlane]]
+    requirements: _FxInstrumentRequirements
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesFxEvidence:
+    """Rate book and plane pins one series read converts through."""
+
+    book: FxCarryBook
+    planes_by_instrument: _FxPlanesByInstrument
+    used_planes: set[tuple[FxPairKey, PnlFxRatePlane]]
+
+
+def _election_fx_minutes(
+    exact: Mapping[str, _FxMinuteRequirements],
+    carried: Mapping[str, _FxMinuteRequirements],
+) -> _FxInstrumentRequirements:
+    """Let carried minutes vote only on pairs that have no exact-consuming minute.
+
+    Args:
+        exact: Minutes with exact-mark or event consumers, by instrument and pair.
+        carried: Minutes that only carried marks consume.
+
+    Returns:
+        Voting minutes by instrument and pair.
+    """
+    exact_pairs = {pair for requirements in exact.values() for pair in requirements}
+    voting: _FxInstrumentRequirements = {
+        instrument_public_id: {pair: set(minutes) for pair, minutes in requirements.items()}
+        for instrument_public_id, requirements in exact.items()
+    }
+    for instrument_public_id, requirements in carried.items():
+        for pair, minutes in requirements.items():
+            if pair not in exact_pairs:
+                voting.setdefault(instrument_public_id, {}).setdefault(pair, set()).update(minutes)
+    return voting
+
+
 @pnl_read_stage("fx")
 async def _load_request_fx_rates(
     repo: Repository,
@@ -3570,17 +4021,54 @@ async def _load_request_fx_rates(
     Returns:
         Plane-filtered rates, per-instrument selections, and distinct used planes.
     """
+    election = await _elect_fx_planes(
+        repo,
+        _FxRequest(
+            mark_requirements=mark_requirements,
+            event_requirements=event_requirements,
+            identity_planes=identity_planes,
+            as_of=as_of,
+            valuation_ccy=valuation_ccy,
+        ),
+    )
+    return election.rates, election.planes_by_instrument, election.used_planes
+
+
+async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection:
+    """Run plane discovery, loading and election for one request.
+
+    Args:
+        repo: Repository providing bounded FX plane and candle reads.
+        request: Consumers and knowledge horizon of this read.
+
+    Returns:
+        Exact rates, per-instrument selections and the evidence behind them.
+    """
+    mark_requirements = request.mark_requirements
+    event_requirements = request.event_requirements
+    identity_planes = request.identity_planes
+    as_of = request.as_of
+    valuation_ccy = request.valuation_ccy
     instrument_requirements = _merge_instrument_fx_minutes(
         mark_requirements,
         event_requirements,
     )
-    mark_pair_requirements = _collapse_fx_minutes(mark_requirements)
+    consumer_requirements = _merge_instrument_fx_minutes(
+        instrument_requirements,
+        request.carried_mark_requirements,
+    )
+    mark_pair_requirements = _collapse_fx_minutes(
+        _merge_instrument_fx_minutes(mark_requirements, request.carried_mark_requirements)
+    )
     event_pair_requirements = _collapse_fx_minutes(event_requirements)
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
-        return {}, {}, set()
+        return _FxElection({}, {}, set(), [], {}, {})
     event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
-    general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
+    general_requirements = _general_fx_minutes(
+        _election_fx_minutes(instrument_requirements, request.carried_mark_requirements),
+        identity_planes,
+    )
     general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
@@ -3631,13 +4119,13 @@ async def _load_request_fx_rates(
             general_event_requirements,
         )
         resolved_identity_planes = _resolve_identity_fx_planes(
-            instrument_requirements,
+            consumer_requirements,
             identity_planes,
             rows,
             event_requirements,
         )
     planes_by_instrument = _fx_planes_by_instrument(
-        instrument_requirements,
+        consumer_requirements,
         shared_planes,
         identity_planes,
         resolved_identity_planes,
@@ -3696,7 +4184,311 @@ async def _load_request_fx_rates(
                 ),
             ]
         )
-    return rates, planes_by_instrument, used_planes
+    return _FxElection(
+        rates=rates,
+        planes_by_instrument=planes_by_instrument,
+        used_planes=used_planes,
+        rows=rows,
+        candidate_planes=candidate_planes,
+        requirements=consumer_requirements,
+    )
+
+
+@dataclass(slots=True)
+class _UnpinnedFxGroup:
+    """Consumers of one pair that the exact election could not give a plane."""
+
+    minutes: set[datetime] = field(default_factory=set)
+    instruments: set[str] = field(default_factory=set)
+
+
+type _FxGroupKey = tuple[str | None, FxPairKey]
+"""Owning instrument of an identity plane, or ``None`` for a shared pair."""
+
+
+def _unpinned_fx_groups(
+    election: _FxElection,
+    identity_planes: Mapping[str, PnlFxRatePlane],
+) -> dict[_FxGroupKey, _UnpinnedFxGroup]:
+    """Group consumers left without a plane by who may pin it for them."""
+    groups: dict[_FxGroupKey, _UnpinnedFxGroup] = {}
+    for instrument_public_id, requirements in election.requirements.items():
+        owned = identity_planes.get(instrument_public_id)
+        owned_pair = None if owned is None else currency_pair_key(owned[0], owned[1])
+        for pair, minutes in requirements.items():
+            if pair in election.planes_by_instrument.get(instrument_public_id, {}):
+                continue
+            owner = instrument_public_id if pair == owned_pair else None
+            group = groups.setdefault((owner, pair), _UnpinnedFxGroup())
+            group.minutes.update(minutes)
+            group.instruments.add(instrument_public_id)
+    return groups
+
+
+def _fx_group_candidates(
+    key: _FxGroupKey,
+    election: _FxElection,
+    identity_planes: Mapping[str, PnlFxRatePlane],
+) -> set[PnlFxRatePlane]:
+    """Return the planes a group may pin, keeping identity claims exclusive."""
+    owner, pair = key
+    if owner is not None:
+        return {identity_planes[owner]}
+    return set(election.candidate_planes.get(pair, set()))
+
+
+async def _load_fx_predecessors(
+    repo: Repository,
+    planes_by_anchor: Mapping[datetime, set[PnlFxRatePlane]],
+    as_of: datetime,
+) -> list[PnlFxRateRow]:
+    """Search behind each gap with widening windows until every plane is served.
+
+    Reuses the unchanged bounded candle read, so ownership, denomination and
+    knowledge-horizon proof are identical to an in-window row. A plane stops being
+    searched at the first window holding a usable close.
+
+    Args:
+        repo: Repository providing bounded FX candle reads.
+        planes_by_anchor: Planes to search behind each gap's first minute.
+        as_of: Knowledge horizon threading the read.
+
+    Returns:
+        Every row seen, including conflicting duplicates needed for proof.
+    """
+    rows: list[PnlFxRateRow] = []
+    for anchor, planes in sorted(planes_by_anchor.items()):
+        pending = set(planes)
+        for lower, upper in read_windows(anchor, FX_CARRY_READ_STEPS):
+            found = await repo.get_pnl_fx_rate_candles(sorted(pending), lower, upper, as_of)
+            rows.extend(found)
+            pending.difference_update(_plane_observations(found))
+            if not pending:
+                break
+    return rows
+
+
+async def _pin_carry_only_planes(
+    repo: Repository,
+    election: _FxElection,
+    request: _FxRequest,
+) -> list[PnlFxRateRow]:
+    """Pin pairs the exact election left empty, using the full FX carry bound.
+
+    Only a pair with no usable evidence near any required minute reaches here, so
+    this can never displace a plane elected on exact evidence. Ordinary discovery
+    looks only at the chart window, so a pair with one rate per day is discovered
+    again over the whole bound before its planes are searched.
+
+    Args:
+        repo: Repository providing bounded FX candle reads.
+        election: Exact election, whose plane maps gain the new pins.
+        request: Consumers and knowledge horizon of this read.
+
+    Returns:
+        Rows read to reach the pins.
+    """
+    groups = _unpinned_fx_groups(election, request.identity_planes)
+    undiscovered = {
+        key[1]: group.minutes
+        for key, group in groups.items()
+        if key[0] is None and not election.candidate_planes.get(key[1])
+    }
+    discovered = await _discover_fx_candidates(
+        repo, undiscovered, request.as_of, lookback=FX_CARRY_BOUND
+    )
+    for pair, planes in _candidate_planes(discovered, {}).items():
+        election.candidate_planes.setdefault(pair, set()).update(planes)
+    planes_by_anchor: dict[datetime, set[PnlFxRatePlane]] = {}
+    for key, group in groups.items():
+        candidates = _fx_group_candidates(key, election, request.identity_planes)
+        if candidates:
+            planes_by_anchor.setdefault(min(group.minutes), set()).update(candidates)
+    rows = await _load_fx_predecessors(repo, planes_by_anchor, request.as_of)
+    evidence = [*election.rows, *rows]
+    for key, group in sorted(groups.items(), key=lambda item: (item[0][0] or "", item[0][1])):
+        _, pair = key
+        selected = _preferred_fx_plane(
+            pair,
+            group.minutes,
+            _fx_group_candidates(key, election, request.identity_planes),
+            _covered_fx_minutes({pair: group.minutes}, evidence, FX_CARRY_BOUND),
+            request.valuation_ccy,
+        )
+        if selected is None:
+            continue
+        election.used_planes.add((pair, selected))
+        for instrument_public_id in group.instruments:
+            election.planes_by_instrument.setdefault(instrument_public_id, {})[pair] = selected
+    return rows
+
+
+def _fx_plane_requirements(election: _FxElection) -> dict[PnlFxRatePlane, set[datetime]]:
+    """Collect the minutes each pinned plane must value across its consumers."""
+    needed: dict[PnlFxRatePlane, set[datetime]] = {}
+    for instrument_public_id, requirements in election.requirements.items():
+        planes = election.planes_by_instrument.get(instrument_public_id, {})
+        for pair, minutes in requirements.items():
+            plane = planes.get(pair)
+            if plane is not None:
+                needed.setdefault(plane, set()).update(minutes)
+    return needed
+
+
+def _published_fx_index(
+    rows: Sequence[PnlFxRateRow],
+) -> tuple[dict[PnlFxRatePlane, list[datetime]], dict[PnlFxRatePlane, set[datetime]]]:
+    """Split loaded closes into usable publications and contradictory minutes."""
+    published: dict[PnlFxRatePlane, list[datetime]] = {}
+    blocked: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if is_positive_finite(close):
+            published.setdefault((base, quote, exchange), []).append(minute)
+        else:
+            blocked.setdefault((base, quote, exchange), set()).add(minute)
+    return {plane: sorted(minutes) for plane, minutes in published.items()}, blocked
+
+
+async def _load_gap_predecessors(
+    repo: Repository,
+    needed: Mapping[PnlFxRatePlane, set[datetime]],
+    rows: Sequence[PnlFxRateRow],
+    as_of: datetime,
+) -> tuple[list[PnlFxRateRow], list[datetime]]:
+    """Search behind the gaps loaded evidence cannot serve, oldest gap first.
+
+    Gaps are visited in time order because a found close usually serves the next
+    gap too, and because a missing old flow rate latches its instrument for every
+    later point while a missing recent mark rate withholds only its own minute.
+
+    Args:
+        repo: Repository providing bounded FX candle reads.
+        needed: Minutes each pinned plane must value.
+        rows: Evidence already loaded.
+        as_of: Knowledge horizon threading the read.
+
+    Returns:
+        The rows found and the anchors actually searched.
+    """
+    published, blocked = _published_fx_index(rows)
+    gaps = sorted(
+        (anchor, plane)
+        for plane, minutes in needed.items()
+        for anchor in fx_gap_anchors(minutes, published.get(plane, []), blocked.get(plane, set()))
+    )
+    fetched: list[PnlFxRateRow] = []
+    searched: list[datetime] = []
+    for anchor, plane in gaps:
+        if carry_serves(published.get(plane, []), anchor):
+            continue
+        if len(searched) == CARRY_ANCHOR_LIMIT:
+            logger.warning(
+                "P&L FX carry gaps exceed the read budget: searched={}", CARRY_ANCHOR_LIMIT
+            )
+            return fetched, searched
+        searched.append(anchor)
+        found = await _load_fx_predecessors(repo, {anchor: {plane}}, as_of)
+        fetched.extend(found)
+        newly_published, _ = _published_fx_index(found)
+        published[plane] = sorted({*published.get(plane, []), *newly_published.get(plane, [])})
+    return fetched, searched
+
+
+@pnl_read_stage("fx")
+async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
+    """Elect planes as an exact read would, then add carry evidence for the gaps.
+
+    A healthy request finds no gap and issues no extra query.
+
+    Args:
+        repo: Repository providing bounded FX plane and candle reads.
+        request: Consumers and knowledge horizon of this read.
+
+    Returns:
+        The rate book, per-instrument pins and every plane actually used.
+    """
+    election = await _elect_fx_planes(repo, request)
+    with pnl_read_phase("fx_carry"):
+        pinned_rows = await _pin_carry_only_planes(repo, election, request)
+        rows = [*election.rows, *pinned_rows]
+        gap_rows, anchors = await _load_gap_predecessors(
+            repo, _fx_plane_requirements(election), rows, request.as_of
+        )
+    pnl_read_count("fx_carry_anchors", anchors)
+    pnl_read_count("fx_carry_rows", [*pinned_rows, *gap_rows])
+    selected_planes = {plane for _, plane in election.used_planes}
+    selected_rows = [
+        row
+        for row in [*rows, *gap_rows]
+        if (row["base"], row["quote"], row["exchange"]) in selected_planes
+    ]
+    return _SeriesFxEvidence(
+        book=build_fx_carry_book(build_fx_rates(selected_rows)),
+        planes_by_instrument=election.planes_by_instrument,
+        used_planes=election.used_planes,
+    )
+
+
+async def _load_series_fx(
+    repo: Repository,
+    request: _FxRequest,
+    *,
+    carry_valuation: bool,
+) -> _SeriesFxEvidence:
+    """Load one series read's FX evidence under its valuation policy."""
+    if carry_valuation:
+        return await _load_request_fx_book(repo, request)
+    rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
+        repo,
+        request.mark_requirements,
+        request.event_requirements,
+        request.identity_planes,
+        request.as_of,
+        request.valuation_ccy,
+    )
+    return _SeriesFxEvidence(exact_fx_book(rates), planes_by_instrument, used_planes)
+
+
+def _series_mark_evidence(
+    candles: Sequence[PnlTimelineCandleRow],
+    valuation: _MarkValuation,
+    mark_carry: _MarkCarryPlan,
+    anchor_marks: MarkMap,
+) -> tuple[MarkMap, TimelineMarkEvidence]:
+    """Assemble one series read's marks and the facts the builder must disclose.
+
+    Args:
+        candles: Raw finalized mark candles of the chart window.
+        valuation: Currency, rate evidence and instrument plane pins.
+        mark_carry: Earlier closes chosen for held minutes without a bar.
+        anchor_marks: Persisted activation marks, which always win at t0.
+
+    Returns:
+        The complete mark map and its caller-stamped evidence.
+    """
+    build = _mark_build_from_candles(candles, valuation)
+    _add_carried_marks(build, valuation, mark_carry.sources)
+    marks = dict(build.marks)
+    marks.update(anchor_marks)
+    return marks, TimelineMarkEvidence(build.reasons, build.carried_inputs)
+
+
+def _record_carry_timing(points: Sequence[PnlTimelinePoint], *, carry_valuation: bool) -> None:
+    """Report how much of a carried series depended on carried inputs."""
+    if not carry_valuation:
+        return
+    carried = [point for point in points if point.carried_inputs]
+    pnl_read_count(
+        "carried_mark_points",
+        [p for p in carried if any(i.role == "mark" for i in p.carried_inputs)],
+    )
+    pnl_read_count(
+        "carried_fx_points",
+        [p for p in carried if any(i.role != "mark" for i in p.carried_inputs)],
+    )
+    pnl_read_max(
+        "max_carry_age_minutes", max((p.max_carry_age_minutes or 0 for p in carried), default=0)
+    )
 
 
 def _opening_nonflat_instruments(
@@ -3953,7 +4745,7 @@ async def _derive_anchor_candidate(
         point_time=activation_time,
         point_kind="anchor",
         epoch_public_id=public_id,
-        calc_version=PNL_TIMELINE_CALC_VERSION,
+        calc_version=PNL_ANCHOR_CALC_VERSION,
         valuation_status="complete",
         realized_pnl=0.0,
         fee_pnl=0.0,
@@ -5159,44 +5951,68 @@ async def build_wallet_pnl_series(
             valuation_ccy,
             anchor.opening,
         )
-        instrument_requirements = _merge_instrument_fx_minutes(
-            mark_requirements,
-            event_requirements,
+        mark_carry = (
+            await _plan_mark_carry(
+                repo,
+                _MarkCarryRequest(
+                    candles=mark_candles,
+                    execution_rows=loaded_execution_rows,
+                    base_by_instrument=base_by_instrument,
+                    quote_by_instrument=quote_by_instrument,
+                    refs=trusted_refs,
+                    valuation_ccy=valuation_ccy,
+                    from_time=from_time,
+                    to_time=to_time,
+                    opening=anchor.opening,
+                    as_of=as_of,
+                ),
+            )
+            if policy.carry_valuation
+            else _NO_MARK_CARRY
         )
         identity_planes = _identity_fx_planes(
             trusted_refs,
-            instrument_requirements,
+            _merge_instrument_fx_minutes(
+                _merge_instrument_fx_minutes(mark_requirements, event_requirements),
+                mark_carry.fx_requirements,
+            ),
         )
-    rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
+    fx_evidence = await _load_series_fx(
         repo,
-        mark_requirements,
-        event_requirements,
-        identity_planes,
-        as_of,
-        valuation_ccy,
+        _FxRequest(
+            mark_requirements=mark_requirements,
+            event_requirements=event_requirements,
+            identity_planes=identity_planes,
+            as_of=as_of,
+            valuation_ccy=valuation_ccy,
+            carried_mark_requirements=mark_carry.fx_requirements,
+        ),
+        carry_valuation=policy.carry_valuation,
     )
     with (
         pnl_read_phase("series_valuation"),
         pnl_fx_conversion_scope(mark_requirements, to_time),
     ):
-        marks, mark_incompleteness_reasons = _build_marks_and_reasons_from_candles(
+        marks, mark_evidence = _series_mark_evidence(
             mark_candles,
-            quote_by_instrument,
-            valuation_ccy,
-            rates,
-            planes_by_instrument,
+            _MarkValuation(
+                quote_by_instrument,
+                valuation_ccy,
+                fx_evidence.book,
+                fx_evidence.planes_by_instrument,
+            ),
+            mark_carry,
+            anchor.marks,
         )
-        marks = dict(marks)
-        marks.update(anchor.marks)
         reset_pnl_fx_execution_order()
         executions = [
             _to_timeline_execution(
                 row,
                 valuation_ccy,
-                rates,
+                fx_evidence.book,
                 base_asset=base_by_instrument.get(row["instrument_public_id"]),
                 price_currency=quote_by_instrument.get(row["instrument_public_id"]),
-                venues=planes_by_instrument.get(row["instrument_public_id"], {}),
+                venues=fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
             )
             for row in loaded_execution_rows
         ]
@@ -5204,8 +6020,8 @@ async def build_wallet_pnl_series(
             _to_timeline_accrual(
                 row,
                 valuation_ccy,
-                rates,
-                planes_by_instrument.get(row["instrument_public_id"], {}),
+                fx_evidence.book,
+                fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
             )
             for row in accrual_rows
         ]
@@ -5223,8 +6039,9 @@ async def build_wallet_pnl_series(
             opening=anchor.opening,
             lineage=replay.lineage,
             untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
-            mark_incompleteness_reasons=mark_incompleteness_reasons,
+            mark_evidence=mark_evidence,
         )
+        _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
         for global_reason in (
             replay.fill_gap_reason,
             replay.late_pre_activation_reason,
@@ -5243,7 +6060,9 @@ async def build_wallet_pnl_series(
                 quote_currency=quote_currency,
                 exchange=exchange,
             )
-            for (first, second), (base_currency, quote_currency, exchange) in sorted(used_planes)
+            for (first, second), (base_currency, quote_currency, exchange) in sorted(
+                fx_evidence.used_planes
+            )
         )
     with pnl_read_phase("series_overlay"):
         return await _finalize_wallet_pnl_series(

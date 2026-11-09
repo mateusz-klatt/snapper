@@ -432,6 +432,8 @@ class TestMachineReadableIncompletenessReasons:
             untrusted_reasons_by_instrument={},
             basis_reasons_by_pool={},
             mark_incompleteness_reasons={},
+            mark_carried_inputs={},
+            carried_event_inputs=(),
         )
         with pytest.raises(ValueError, match="requires a stamped causal reason"):
             _value_point(unstamped_basis_context)

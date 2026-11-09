@@ -47,6 +47,7 @@ from loguru import logger
 
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
+from snapper.api.schemas.pnl_timeline import PnlCarriedInputData
 from snapper.api.schemas.pnl_timeline import PnlEquityCoverageData
 from snapper.api.schemas.pnl_timeline import PnlExecutionCorrectionData
 from snapper.api.schemas.pnl_timeline import PnlExecutionHistoryData
@@ -398,6 +399,17 @@ def _point_payload(
             )
             for contribution in point.attribution
         ],
+        carried_inputs=[
+            PnlCarriedInputData(
+                instrument_public_id=item.instrument_public_id,
+                role=item.role,
+                source_minute=item.source_minute,
+                age_minutes=item.age_minutes,
+                source_plane=item.source_plane,
+            )
+            for item in point.carried_inputs
+        ],
+        max_carry_age_minutes=point.max_carry_age_minutes,
     )
 
 
@@ -590,6 +602,7 @@ async def get_pnl_series(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
                 current_truth_horizon=validated.current_truth,
+                carry_valuation=True,
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
@@ -732,6 +745,7 @@ async def get_pnl_timeline(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
                 current_truth_horizon=validated.current_truth,
+                carry_valuation=True,
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker

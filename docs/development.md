@@ -844,6 +844,7 @@ logging failure leaves the handler result unchanged.
 | `fx_load_mark_ms` / `fx_load_event_ms` | Separate candidate-row loads, including local preparation, repository waits and materialization |
 | `fx_election_ms` | Both shared and identity resolution calls, including coverage calculations and their internal observation folds |
 | `fx_fold_final_ms` | Final rate-map fold after selected-row filtering |
+| `fx_carry_ms` | Extra discovery and widening candle reads behind FX gaps on a carried read |
 | `series_anchor_ms` | Wallet normalization, initial work-budget check and anchor load or permitted creation, including creation's non-preloaded execution-prefix and opening FX work and empty or preactivation result construction |
 | `series_replay_ms` | Execution prefix, fill-gap, lineage and accrual reads; suffix filtering, replay metadata, ordered instrument identities and pool work-budget check |
 | `series_market_data_ms` | Symbol-reference read, price-trust partitioning, currency maps and mark-candle reads |
@@ -858,6 +859,12 @@ preserves clock failures or inconsistent interval subtraction. Compare these
 summaries with bounded HTTP observations while accounting for concurrent reads
 and the handler's serialization and transfer exclusions. Background service
 callers do not enable this request-local timing.
+
+Carried reads add `fx_carry_anchors` (gaps searched), `fx_carry_rows` (rows those
+searches returned), `carried_mark_points` and `carried_fx_points` (served points
+with a carried mark, or with a carried FX or event rate) and
+`max_carry_age_minutes`. A carried read that finds no gap records zeros, and an
+exact-only caller leaves them `unobserved`.
 
 The fixed aggregate counts `fx_mark_candidate_planes`,
 `fx_event_candidate_planes`, `fx_mark_rows`, `fx_event_rows` and

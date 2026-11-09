@@ -13,7 +13,7 @@ from starlette.requests import Request
 
 from snapper.application.portfolio import pnl_read_timing
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
-from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
+from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -49,7 +49,7 @@ def _anchor(point_time: datetime) -> PortfolioPnlAnchorRow:
         "point_time": point_time,
         "point_kind": "anchor",
         "epoch_public_id": identity,
-        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "calc_version": PNL_ANCHOR_CALC_VERSION,
         "valuation_status": "complete",
         "realized_pnl": 0.0,
         "fee_pnl": 0.0,
