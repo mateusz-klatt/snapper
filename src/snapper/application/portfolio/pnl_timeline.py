@@ -71,8 +71,10 @@ checklist:
   two reasons that differ in what is trustworthy:
   (a) MARK-incomplete — a held (non-flat) instrument has no finite mark for that
   minute — withholds only ``unrealized_pnl`` and ``net_pnl``; the cumulative
-  realized / fee / accrual are still returned because they are mark-independent. A
-  stale or non-finite (NaN/Inf) mark is never carried forward.
+  realized / fee / accrual are still returned because they are mark-independent.
+  This builder never reaches for an earlier mark itself: it values only the marks
+  it is given and treats a non-finite one as absent. On a carried read the caller
+  supplies earlier closes and the point discloses them in ``carried_inputs``.
   (b) UNTRUSTED — withholds EVERY aggregate component (realized / fee / accrual /
   unrealized / net all NULL) because at least one cumulative cannot be trusted at
   that instant. Global triggers also withhold every per-instrument contribution;
@@ -308,8 +310,9 @@ class TimelineMarkEvidence:
             Other absent or non-finite marks are classified as unavailable.
         carried_inputs: Carried inputs behind each mark that reached back.
         widen_unrealized_absorber: Let any bucket absorb the last-place rounding
-            when unrealized values reconcile. Carried reads set it; exact-only
-            callers keep the persisted sample contract.
+            when unrealized values reconcile, so that a dust final bucket cannot
+            withhold a point. Carried reads set it; exact-only callers keep the
+            persisted sample contract.
     """
 
     incompleteness_reasons: MarkIncompletenessReasonMap = field(default_factory=dict)
