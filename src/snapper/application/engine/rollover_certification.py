@@ -55,27 +55,54 @@ def _rollover_matches_projection(
 
 
 def _rollover_order_certain(
-    rows: list[AccrualLedgerRow],
-    index: int,
+    row: AccrualLedgerRow,
+    previous: AccrualLedgerRow | None,
     checkpoint: TradeProjectionCheckpointRow,
     opened_at: datetime,
 ) -> bool:
     """Require one session's strictly ordered boundaries and insertion evidence."""
-    row = rows[index]
     if not row["session_id"] or row["sequence_id"] <= 0:
         return False
     if not opened_at < row["accrued_at"] <= row["timestamp"] <= checkpoint["checkpoint_at"]:
         return False
-    if index == 0:
+    if previous is None:
         return True
-    previous = rows[index - 1]
     return (
-        row["instrument_public_id"] == previous["instrument_public_id"]
-        and row["session_id"] == previous["session_id"]
-        and row["sequence_id"] > previous["sequence_id"]
+        row["sequence_id"] > previous["sequence_id"]
         and row["accrued_at"] > previous["accrued_at"]
         and row["timestamp"] >= previous["timestamp"]
     )
+
+
+def _rollover_history_certain(
+    rows: list[AccrualLedgerRow],
+    checkpoint: TradeProjectionCheckpointRow,
+    opened_at: datetime,
+) -> bool:
+    """Keep source order per session and require order-independent cross-session costs.
+
+    Finite positive floats compare equal only when their bits are identical.
+    Their repeated subtraction is therefore independent of inter-session order.
+    The caller still validates every row's finite positive monetary components.
+    """
+    first = rows[0]
+    sessions = {row["session_id"] for row in rows}
+    if len(sessions) > 1 and any(row["amount"] != first["amount"] for row in rows):
+        return False
+    previous_by_session: dict[str, AccrualLedgerRow] = {}
+    boundaries: set[datetime] = set()
+    for row in rows:
+        if (
+            row["instrument_public_id"] != first["instrument_public_id"]
+            or row["accrued_at"] in boundaries
+        ):
+            return False
+        previous = previous_by_session.get(row["session_id"])
+        if not _rollover_order_certain(row, previous, checkpoint, opened_at):
+            return False
+        previous_by_session[row["session_id"]] = row
+        boundaries.add(row["accrued_at"])
+    return True
 
 
 def project_legacy_spot_rollovers(
@@ -87,9 +114,12 @@ def project_legacy_spot_rollovers(
     """Forward-fold proven internal rollover charges after one unique spot buy.
 
     Only a complete ledger for an independently proven unlevered, untagged spot
-    shard may be supplied. Every charge must belong to one nonempty ledger
-    session and exactly describe the single unchanged position. Later checkpoint
-    refreshes may have a different session without changing the recorded costs.
+    shard may be supplied. Every charge must have a nonempty ledger session and
+    exactly describe the single unchanged position. Multiple ledger sessions
+    require bit-identical finite positive amounts so cross-session subtraction
+    order cannot affect the result. Boundaries must be globally unique, with
+    valid sequence, boundary and insertion order within each session. Later
+    checkpoint refreshes may have a different session without changing costs.
     Multiple fills, unknown order, foreign identity, nonfinite values and inexact
     charges refuse. The caller must compare the returned expected state against
     the entire restored digest with zero tolerance; this helper does not grant
@@ -98,7 +128,7 @@ def project_legacy_spot_rollovers(
     Args:
         projection: Full durable fill replay before any internal accrual costs.
         events: The same replay's complete exact-shard venue-event history.
-        accruals: Complete exact-wallet/instrument ledger in original charge order.
+        accruals: Complete exact-wallet/instrument ledger in each session's charge order.
         checkpoint: Checkpoint providing the insertion upper bound.
 
     Returns:
@@ -115,11 +145,11 @@ def project_legacy_spot_rollovers(
     opened_at = projection["position_opened_at"]
     if opened_at is None or not _single_buy_projection_valid(projection, fill):
         return None
+    if not _rollover_history_certain(accruals, checkpoint, opened_at):
+        return None
     expected = projection.copy()
-    for index, row in enumerate(accruals):
+    for row in accruals:
         if not _rollover_matches_projection(row, projection, fill):
-            return None
-        if not _rollover_order_certain(accruals, index, checkpoint, opened_at):
             return None
         expected["cash"] -= row["amount"]
         expected["realized_pnl"] -= row["amount"]

@@ -1,5 +1,6 @@
 """Exact legacy rollover reconstruction refuses every unproven charge shape."""
 
+import math
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -391,16 +392,174 @@ def test_refreshed_checkpoint_session_preserves_ledger_history(history: _History
     assert history.project() is not None
 
 
-def test_multiple_original_ledger_sessions_refuse(history: _History) -> None:
-    """Sequence counters from different source sessions cannot establish one order.
+def test_identical_charges_across_original_sessions_are_supported(history: _History) -> None:
+    """Identical subtraction operands do not need a cross-session charge order.
 
-    Given: two otherwise ordered charges from distinct original ledger sessions.
-    When: the helper checks whether their sequence counters prove one order.
-    Then: the mixed source sessions prevent an adjusted projection.
+    Given: two identical charges from distinct sessions with the same sequence.
+    When: the helper reconstructs the complete historical rollover costs.
+    Then: both charges are retained without comparing cross-session counters.
+    """
+    second = _next_charge(history)
+    second["session_id"] = "other-ledger-session"
+    second["sequence_id"] = 1
+    history.accruals.append(second)
+
+    expected = history.project()
+
+    assert expected is not None
+    assert expected["cash"] == history.projection["cash"] - second["amount"] - second["amount"]
+    assert expected["realized_pnl"] == -0.00205064915
+
+
+def test_single_session_preserves_differing_exact_charge_amounts(history: _History) -> None:
+    """A proven single-session order continues to support unequal charge amounts.
+
+    Given: ordered charges in one session with distinct exact rate products.
+    When: the helper applies the historical charges in their proven order.
+    Then: the existing single-session behavior retains both exact amounts.
+    """
+    first = history.accruals[0]
+    second = _next_charge(history)
+    second["rate"] = math.nextafter(first["rate"], math.inf)
+    second["amount"] = second["notional"] * second["rate"]
+    history.accruals.append(second)
+
+    expected = history.project()
+
+    assert second["amount"] == math.nextafter(first["amount"], math.inf)
+    assert expected is not None
+    assert expected["cash"] == history.projection["cash"] - first["amount"] - second["amount"]
+    assert expected["realized_pnl"] == -first["amount"] - second["amount"]
+
+
+def test_multiple_sessions_refuse_one_bit_amount_difference(history: _History) -> None:
+    """A one-bit operand difference leaves cross-session subtraction unproven.
+
+    Given: two sessions whose charges differ by one bit despite exact products.
+    When: the helper evaluates whether charge order is financially irrelevant.
+    Then: it refuses the unequal operands without introducing a tolerance.
+    """
+    first = history.accruals[0]
+    second = _next_charge(history)
+    second["session_id"] = "other-ledger-session"
+    second["sequence_id"] = 1
+    second["rate"] = math.nextafter(first["rate"], math.inf)
+    second["amount"] = second["notional"] * second["rate"]
+    history.accruals.append(second)
+
+    assert second["amount"] == math.nextafter(first["amount"], math.inf)
+    assert history.project() is None
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 0, 1), (0, 2, 1)])
+def test_identical_charges_preserve_each_session_order_across_permutations(
+    history: _History, order: tuple[int, int, int]
+) -> None:
+    """Session grouping cannot change a fold of identical subtraction operands.
+
+    Given: three identical charges and a proven order within one source session.
+    When: the other session appears before, after or between that session's rows.
+    Then: every valid permutation reconstructs exactly the same full projection.
+    """
+    history.accruals.append(_next_charge(history))
+    third = _next_charge(history)
+    third["public_id"] = "accrual-3"
+    third["session_id"] = "other-ledger-session"
+    third["sequence_id"] = 1
+    history.accruals.append(third)
+    history.checkpoint["checkpoint_at"] += timedelta(hours=4)
+    original = history.project()
+    history.accruals = [history.accruals[index] for index in order]
+
+    expected = history.project()
+
+    assert original is not None
+    assert expected == original
+
+
+def test_duplicate_boundary_across_sessions_refuses(history: _History) -> None:
+    """Identical charges still require globally unique economic boundaries.
+
+    Given: two sessions recording the same rollover boundary with equal amounts.
+    When: the helper checks the complete ledger's distinct charge evidence.
+    Then: it refuses the duplicate boundary instead of counting it twice.
+    """
+    second = _next_charge(history)
+    second["session_id"] = "other-ledger-session"
+    second["sequence_id"] = 1
+    second["accrued_at"] = history.accruals[0]["accrued_at"]
+    history.accruals.append(second)
+
+    assert history.project() is None
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["duplicate-sequence", "reversed-sequence", "reversed-boundary", "reversed-insertion"],
+)
+def test_interleaved_session_cannot_hide_invalid_original_order(
+    history: _History,
+    problem: Literal[
+        "duplicate-sequence", "reversed-sequence", "reversed-boundary", "reversed-insertion"
+    ],
+) -> None:
+    """A different intervening session cannot reset the original session proof.
+
+    Given: two rows from one session separated by an identical foreign-session row.
+    When: their sequences, boundaries or insertion timestamps contradict order.
+    Then: the helper refuses despite equal amounts and valid individual bounds.
+    """
+    first = history.accruals[0]
+    second = _next_charge(history)
+    second["session_id"] = "other-ledger-session"
+    second["sequence_id"] = 1
+    history.accruals.append(second)
+    third = _next_charge(history)
+    third["public_id"] = "accrual-3"
+    third["session_id"] = first["session_id"]
+    history.accruals.append(third)
+    history.checkpoint["checkpoint_at"] += timedelta(hours=4)
+    if problem == "duplicate-sequence":
+        third["sequence_id"] = first["sequence_id"]
+    elif problem == "reversed-sequence":
+        first["sequence_id"] = third["sequence_id"] + 1
+    elif problem == "reversed-boundary":
+        third["accrued_at"] = first["accrued_at"] - timedelta(seconds=1)
+    else:
+        first["timestamp"] = third["timestamp"] + timedelta(seconds=1)
+
+    assert history.project() is None
+
+
+def test_multiple_sessions_still_require_nonempty_session_ids(history: _History) -> None:
+    """An unknown source session cannot use the identical-charge allowance.
+
+    Given: equal charges with one nonempty and one missing source session.
+    When: the helper validates each row's source identity.
+    Then: it refuses the incomplete session proof.
+    """
+    second = _next_charge(history)
+    second["session_id"] = ""
+    history.accruals.append(second)
+
+    assert history.project() is None
+
+
+@pytest.mark.parametrize("amount", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+def test_multiple_sessions_still_require_finite_positive_amounts(
+    history: _History, amount: float
+) -> None:
+    """Equal invalid operands cannot establish a supported historical charge.
+
+    Given: equal nonpositive or nonfinite amounts recorded by two sessions.
+    When: the helper checks the complete rollover ledger.
+    Then: the invalid charge values prevent an adjusted projection.
     """
     second = _next_charge(history)
     second["session_id"] = "other-ledger-session"
     history.accruals.append(second)
+    for row in history.accruals:
+        row["amount"] = amount
 
     assert history.project() is None
 

@@ -2,6 +2,7 @@
 
 import json
 import math
+import struct
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -30,6 +31,8 @@ _SHARD = "kraken.XRP-EUR.live"
 _WALLET = "w-1"
 _OPENED = datetime(2026, 11, 8, 20, 10, tzinfo=UTC)
 _CHARGE = 0.001025324575
+_FIRST_LEDGER_SESSION = "01a1bda8-6be9-70ab-aab4-da4b9a7a8dbe"
+_SECOND_LEDGER_SESSION = "01a1bdca-bd78-7344-80f2-9c0f30515a25"
 
 
 def _rollover_case(
@@ -96,6 +99,168 @@ def _rollover_case(
     repository.shard_has_any_accruals = AsyncMock(return_value=True)
     coord._projection_identities[_SHARD] = ("inst-pid", "live", _WALLET)
     return coord, checkpoint, [row]
+
+
+def _production_rollover_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TraderCoordinator, TradeProjectionCheckpointRow, list[AccrualLedgerRow]]:
+    """Reproduce checkpoint 229 by forward-subtracting its three recorded charges."""
+    coord, checkpoint, rows = _rollover_case(monkeypatch)
+    first = rows[0]
+    boundary = datetime(2026, 11, 9, tzinfo=UTC)
+    first.update(
+        {
+            "accrued_at": boundary,
+            "timestamp": boundary + timedelta(seconds=1),
+            "session_id": _FIRST_LEDGER_SESSION,
+        }
+    )
+    for index, sequence in enumerate((1, 3), start=1):
+        row = first.copy()
+        row.update(
+            {
+                "public_id": f"accrual-{index + 1}",
+                "accrued_at": boundary + timedelta(hours=4 * index),
+                "timestamp": boundary + timedelta(hours=4 * index, seconds=1),
+                "session_id": _SECOND_LEDGER_SESSION,
+                "sequence_id": sequence,
+            }
+        )
+        rows.append(row)
+        checkpoint["cash"] -= row["amount"]
+        checkpoint["realized_pnl"] -= row["amount"]
+    checkpoint.update(
+        {
+            "session_id": _SECOND_LEDGER_SESSION,
+            "checkpoint_at": boundary + timedelta(hours=8, minutes=30),
+        }
+    )
+    repository = cast(AsyncMock, coord.repository)
+    repository.get_all_shard_accruals = AsyncMock(return_value=rows)
+    return coord, checkpoint, rows
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_229_identical_charges_certify_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three exact historical charges certify despite their session restart.
+
+    Given: checkpoint 229 and three equal XRP rollover costs from two sessions,
+    When: startup forward-folds the complete ledger and verifies both gates,
+    Then: the exact production cash and realized bits certify without recharging.
+    """
+    coord, checkpoint, rows = _production_rollover_case(monkeypatch)
+    repository = cast(AsyncMock, coord.repository)
+    events = cast(list[VenueEventRow], await repository.get_venue_events_after(_SHARD, 0))
+    projection = coord.trade_service.project_fill_state_from_events(events)
+    cash, realized = projection["cash"], projection["realized_pnl"]
+    for row in rows:
+        cash -= row["amount"]
+        realized -= row["amount"]
+        assert struct.pack(">d", row["amount"]).hex() == "3f50cc85e11d3f40"
+    assert checkpoint["cash"] == cash == 9995.862815336277
+    assert checkpoint["realized_pnl"] == realized == -0.003075973725
+    assert struct.pack(">d", cash).hex() == "40c385ee70bba1e6"
+    assert struct.pack(">d", realized).hex() == "bf6932c8d1abdee0"
+    assert checkpoint["position_qty"] == 4.07
+    assert checkpoint["turnover"] == 4.1012983
+    repository.get_venue_events_after = AsyncMock(side_effect=[[], events])
+
+    engine_key = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+
+    assert engine_key is not None
+    assert _SHARD in coord._trusted_recovery_shards
+    assert not coord._recovery_certification_failed
+    assert coord._verified_checkpoint_rollovers[_SHARD] == rows
+    assert coord.trade_service._shards[_SHARD].cash == cash
+    assert coord.engines[engine_key].portfolio.cash == cash
+    assert repository.get_all_shard_accruals.await_count == 2
+    repository.get_accruals.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["cash", "realized_pnl"])
+async def test_multisession_rollover_plus_one_ulp_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """Identical cross-session charges cannot explain an additional monetary bit.
+
+    Given: checkpoint 229 with cash or realized PnL changed by one ULP,
+    When: startup compares its full digest with the three-charge replay,
+    Then: certification refuses and retains no verified rollover proof.
+    """
+    coord, checkpoint, _rows = _production_rollover_case(monkeypatch)
+    value = checkpoint["cash"] if field == "cash" else checkpoint["realized_pnl"]
+    checkpoint = cast(
+        TradeProjectionCheckpointRow, dict(checkpoint) | {field: math.nextafter(value, math.inf)}
+    )
+    coord._restore_trade_service_from_checkpoint(checkpoint, _SHARD, [])
+
+    assert not await coord._checkpoint_fill_evidence_certain(_SHARD, _WALLET, checkpoint)
+    assert coord._recovery_certification_failed
+    assert _SHARD not in coord._verified_checkpoint_rollovers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "problem", ["amount-bit", "duplicate-boundary", "sequence", "boundary", "insertion", "currency"]
+)
+async def test_multisession_rollover_invalid_ledger_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    problem: str,
+) -> None:
+    """Cross-session equality preserves every ledger identity and ordering refusal.
+
+    Given: the production ledger with one changed charge or ordering constraint,
+    When: startup reconstructs the complete history,
+    Then: the altered evidence cannot certify the checkpoint.
+    """
+    coord, checkpoint, rows = _production_rollover_case(monkeypatch)
+    if problem == "amount-bit":
+        rows[-1]["rate"] = math.nextafter(rows[-1]["rate"], math.inf)
+        rows[-1]["amount"] = rows[-1]["notional"] * rows[-1]["rate"]
+        assert struct.pack(">d", rows[-1]["amount"]).hex() == "3f50cc85e11d3f41"
+        checkpoint["realized_pnl"] = 0.0
+        for row in rows:
+            checkpoint["realized_pnl"] -= row["amount"]
+    elif problem == "duplicate-boundary":
+        rows[1]["accrued_at"] = rows[0]["accrued_at"]
+    elif problem == "sequence":
+        rows[-1]["sequence_id"] = rows[1]["sequence_id"]
+    elif problem == "boundary":
+        rows[-1]["accrued_at"] = rows[1]["accrued_at"] - timedelta(seconds=1)
+    elif problem == "insertion":
+        rows[1]["timestamp"] = rows[-1]["timestamp"] + timedelta(seconds=1)
+    else:
+        rows[-1]["amount_asset"] = "USD"
+    coord._restore_trade_service_from_checkpoint(checkpoint, _SHARD, [])
+
+    assert not await coord._checkpoint_fill_evidence_certain(_SHARD, _WALLET, checkpoint)
+    assert _SHARD not in coord._verified_checkpoint_rollovers
+
+
+@pytest.mark.asyncio
+async def test_multisession_complete_ledger_change_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A certified three-charge digest still requires an unchanged complete ledger.
+
+    Given: checkpoint 229 passes its exact digest and then a ledger row changes,
+    When: startup rechecks accrual certainty,
+    Then: the changed history refuses the second certification gate.
+    """
+    coord, checkpoint, rows = _production_rollover_case(monkeypatch)
+    coord._restore_trade_service_from_checkpoint(checkpoint, _SHARD, [])
+    assert await coord._checkpoint_fill_evidence_certain(_SHARD, _WALLET, checkpoint)
+    changed = [row.copy() for row in rows]
+    changed[-1]["public_id"] = "changed-ledger-row"
+    repository = cast(AsyncMock, coord.repository)
+    repository.get_all_shard_accruals = AsyncMock(return_value=changed)
+    context = CheckpointRecoveryContext(_SHARD, "kraken", "XRP-EUR", "live", None, _WALLET)
+
+    assert not await coord._checkpoint_accruals_certain(context, True)
 
 
 @pytest.mark.asyncio
