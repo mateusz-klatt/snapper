@@ -4931,9 +4931,9 @@ class TestAccrueEngine:
         """Verify _accrue_engine skips when position_qty is zero."""
         engine = MagicMock()
         engine.instrument = "BTC-USD"
-        engine.exchange = "kraken"
-        engine._shard_key = "kraken.BTC-USD.live"
-        engine.mode = "live"
+        engine.exchange = "paper"
+        engine._shard_key = "paper.BTC-USD.paper"
+        engine.mode = "paper"
         coord.repository = AsyncMock()
         coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         coord.repository.get_instrument_spec = AsyncMock(return_value=_make_spec())
@@ -4946,9 +4946,9 @@ class TestAccrueEngine:
         """Verify _accrue_engine calls _accrue_one_boundary when boundary is due."""
         engine = MagicMock()
         engine.instrument = "BTC-USD"
-        engine.exchange = "kraken"
-        engine._shard_key = "kraken.BTC-USD.live"
-        engine.mode = "live"
+        engine.exchange = "paper"
+        engine._shard_key = "paper.BTC-USD.paper"
+        engine.mode = "paper"
         opened_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 5, 0, tzinfo=UTC)
         coord.repository = AsyncMock()
@@ -4958,7 +4958,7 @@ class TestAccrueEngine:
         pos = PositionProjection(
             position_qty=1.0, entry_price=50000.0, position_opened_at=opened_at
         )
-        coord.trade_service._shards["kraken.BTC-USD.live"] = MagicMock(position=pos)
+        coord.trade_service._shards["paper.BTC-USD.paper"] = MagicMock(position=pos)
         coord_any = cast(Any, coord)
         coord_any._accrue_one_boundary = AsyncMock()
         coord_any._position_uses_margin = AsyncMock(return_value=True)
@@ -4979,7 +4979,8 @@ class TestAccrueOneBoundary:
     async def test_skips_when_no_rate(self, coord: TraderCoordinator) -> None:
         """Verify _accrue_one_boundary returns when no rates found."""
         engine = MagicMock()
-        engine.exchange = "kraken"
+        engine.exchange = "paper"
+        engine.mode = "paper"
         coord.repository = AsyncMock()
         coord.repository.get_funding_rates = AsyncMock(return_value=[])
         pos = PositionProjection(
@@ -5003,9 +5004,9 @@ class TestAccrueOneBoundary:
         """Verify rollover charge is computed and applied correctly."""
         engine = MagicMock()
         engine.instrument = "BTC-USD"
-        engine.exchange = "kraken"
-        engine._shard_key = "kraken.BTC-USD.live"
-        engine.mode = "live"
+        engine.exchange = "paper"
+        engine._shard_key = "paper.BTC-USD.paper"
+        engine.mode = "paper"
         engine.wallet_public_id = "w1"
         engine.operator_public_id = ""
         engine.portfolio = PortfolioTracker(cash=10_000.0)
@@ -5044,9 +5045,9 @@ class TestAccrueOneBoundary:
         """Verify IntegrityError on duplicate insert is silently swallowed."""
         engine = MagicMock()
         engine.instrument = "BTC-USD"
-        engine.exchange = "kraken"
-        engine._shard_key = "kraken.BTC-USD.live"
-        engine.mode = "live"
+        engine.exchange = "paper"
+        engine._shard_key = "paper.BTC-USD.paper"
+        engine.mode = "paper"
         engine.wallet_public_id = "w1"
         engine.operator_public_id = ""
         coord.repository = AsyncMock()
@@ -5075,9 +5076,9 @@ class TestAccrueOneBoundary:
         """Verify FundingAccrualData is published after successful accrual."""
         engine = MagicMock()
         engine.instrument = "BTC-USD"
-        engine.exchange = "kraken"
-        engine._shard_key = "kraken.BTC-USD.live"
-        engine.mode = "live"
+        engine.exchange = "paper"
+        engine._shard_key = "paper.BTC-USD.paper"
+        engine.mode = "paper"
         engine.wallet_public_id = "w1"
         engine.operator_public_id = ""
         engine.portfolio = PortfolioTracker(cash=10_000.0)
@@ -5104,7 +5105,7 @@ class TestAccrueOneBoundary:
         )
         coord.msg_publisher.send.assert_called_once()
         topic_arg = coord.msg_publisher.send.call_args[0][0]
-        assert topic_arg == "accruals.kraken.BTC-USD.rollover"
+        assert topic_arg == "accruals.paper.BTC-USD.rollover"
 
 
 class TestAccrueAllDueBoundaries:

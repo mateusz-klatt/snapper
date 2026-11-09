@@ -1134,11 +1134,20 @@ cannot be booked twice. Watermark lookup retains the original publication.
 Missing durable evidence for a positive live fill also refuses certification.
 
 An instrument's `spot_margin_rollover` schedule describes its margin capability;
-unlevered spot holdings do not accrue rollover. The coordinator requires
-consistent durable order or command leverage evidence for every fill in the
-current position cycle before charging margin rollover. Default engine leverage
-does not establish financing for manual orders. Unknown or mixed financing does
-not authorize a charge; perpetual funding follows its existing path.
+unlevered spot holdings do not accrue rollover. Live Kraken spot financing costs
+require native ledger postings. The coordinator skips schedule-based rollover
+both when scanning an engine and before applying an individual boundary, so a
+closed margin lot, a fill-derived residual or a concurrent close cannot create
+another authoritative internal charge. No quantity threshold applies. Actual
+financing cost remains unavailable until native posting evidence is supported;
+`margin_ledger_replay` retains its error-only dispatch.
+
+Paper and backtest schedule models retain their existing paths. The coordinator
+still requires consistent durable order or command leverage evidence for every
+fill in the current position cycle before modelling margin rollover. Default
+engine leverage does not establish financing for manual orders. Unknown or mixed
+financing does not authorize a model charge; perpetual funding follows its
+existing path. Historical accruals are preserved without correction or refund.
 
 Startup retains historical internal spot rollover costs only under an exact,
 narrow proof: an untagged shard has one unique, durably proven spot buy, and its
