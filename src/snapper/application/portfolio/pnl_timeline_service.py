@@ -4240,6 +4240,33 @@ def _fx_group_candidates(
     return set(election.candidate_planes.get(pair, set()))
 
 
+@dataclass(slots=True)
+class _FxCarryBudget:
+    """Searches one request may spend behind FX gaps, across every phase."""
+
+    searched: list[datetime] = field(default_factory=list)
+    warned: bool = False
+
+    def spend(self, anchor: datetime) -> bool:
+        """Claim one search, or report once that the request has run out.
+
+        Args:
+            anchor: First minute of the gap about to be searched.
+
+        Returns:
+            ``True`` when the search may run.
+        """
+        if len(self.searched) < CARRY_ANCHOR_LIMIT:
+            self.searched.append(anchor)
+            return True
+        if not self.warned:
+            self.warned = True
+            logger.warning(
+                "P&L FX carry gaps exceed the read budget: searched={}", CARRY_ANCHOR_LIMIT
+            )
+        return False
+
+
 async def _load_fx_predecessors(
     repo: Repository,
     planes_by_anchor: Mapping[datetime, set[PnlFxRatePlane]],
@@ -4276,6 +4303,7 @@ async def _first_carry_evidence(
     minutes: set[datetime],
     candidates: set[PnlFxRatePlane],
     as_of: datetime,
+    budget: _FxCarryBudget,
 ) -> list[PnlFxRateRow]:
     """Search behind each run of minutes until a candidate shows a usable close.
 
@@ -4287,12 +4315,15 @@ async def _first_carry_evidence(
         minutes: Minutes the unpinned consumers must value.
         candidates: Planes those consumers may pin.
         as_of: Knowledge horizon threading the read.
+        budget: Searches this request may still spend.
 
     Returns:
         Every row seen until the first usable close.
     """
     rows: list[PnlFxRateRow] = []
-    for anchor in fx_gap_anchors(minutes, [], set())[:CARRY_ANCHOR_LIMIT]:
+    for anchor in fx_gap_anchors(minutes, [], set()):
+        if not budget.spend(anchor):
+            break
         found = await _load_fx_predecessors(repo, {anchor: candidates}, as_of)
         rows.extend(found)
         if _plane_observations(found):
@@ -4304,6 +4335,7 @@ async def _pin_carry_only_planes(
     repo: Repository,
     election: _FxElection,
     request: _FxRequest,
+    budget: _FxCarryBudget,
 ) -> list[PnlFxRateRow]:
     """Pin pairs the exact election left empty, using the full FX carry bound.
 
@@ -4316,6 +4348,7 @@ async def _pin_carry_only_planes(
         repo: Repository providing bounded FX candle reads.
         election: Exact election, whose plane maps gain the new pins.
         request: Consumers and knowledge horizon of this read.
+        budget: Searches this request may still spend.
 
     Returns:
         Rows read to reach the pins.
@@ -4336,7 +4369,9 @@ async def _pin_carry_only_planes(
     for key, group in ordered:
         candidates = _fx_group_candidates(key, election, request.identity_planes)
         if candidates:
-            rows.extend(await _first_carry_evidence(repo, group.minutes, candidates, request.as_of))
+            rows.extend(
+                await _first_carry_evidence(repo, group.minutes, candidates, request.as_of, budget)
+            )
     evidence = [*election.rows, *rows]
     for key, group in ordered:
         _, pair = key
@@ -4386,7 +4421,8 @@ async def _load_gap_predecessors(
     needed: Mapping[PnlFxRatePlane, set[datetime]],
     rows: Sequence[PnlFxRateRow],
     as_of: datetime,
-) -> tuple[list[PnlFxRateRow], list[datetime]]:
+    budget: _FxCarryBudget,
+) -> list[PnlFxRateRow]:
     """Search behind the gaps loaded evidence cannot serve, oldest gap first.
 
     Gaps are visited in time order because a found close usually serves the next
@@ -4398,9 +4434,10 @@ async def _load_gap_predecessors(
         needed: Minutes each pinned plane must value.
         rows: Evidence already loaded.
         as_of: Knowledge horizon threading the read.
+        budget: Searches this request may still spend.
 
     Returns:
-        The rows found and the anchors actually searched.
+        The rows found.
     """
     published, blocked = _published_fx_index(rows)
     gaps = sorted(
@@ -4409,21 +4446,16 @@ async def _load_gap_predecessors(
         for anchor in fx_gap_anchors(minutes, published.get(plane, []), blocked.get(plane, set()))
     )
     fetched: list[PnlFxRateRow] = []
-    searched: list[datetime] = []
     for anchor, plane in gaps:
         if carry_serves(published.get(plane, []), anchor):
             continue
-        if len(searched) == CARRY_ANCHOR_LIMIT:
-            logger.warning(
-                "P&L FX carry gaps exceed the read budget: searched={}", CARRY_ANCHOR_LIMIT
-            )
-            return fetched, searched
-        searched.append(anchor)
+        if not budget.spend(anchor):
+            return fetched
         found = await _load_fx_predecessors(repo, {anchor: {plane}}, as_of)
         fetched.extend(found)
         newly_published, _ = _published_fx_index(found)
         published[plane] = sorted({*published.get(plane, []), *newly_published.get(plane, [])})
-    return fetched, searched
+    return fetched
 
 
 @pnl_read_stage("fx")
@@ -4441,12 +4473,13 @@ async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _Serie
     """
     election = await _elect_fx_planes(repo, request)
     with pnl_read_phase("fx_carry"):
-        pinned_rows = await _pin_carry_only_planes(repo, election, request)
+        budget = _FxCarryBudget()
+        pinned_rows = await _pin_carry_only_planes(repo, election, request, budget)
         rows = [*election.rows, *pinned_rows]
-        gap_rows, anchors = await _load_gap_predecessors(
-            repo, _fx_plane_requirements(election), rows, request.as_of
+        gap_rows = await _load_gap_predecessors(
+            repo, _fx_plane_requirements(election), rows, request.as_of, budget
         )
-    pnl_read_count("fx_carry_anchors", anchors)
+    pnl_read_count("fx_carry_anchors", budget.searched)
     pnl_read_count("fx_carry_rows", [*pinned_rows, *gap_rows])
     selected_planes = {plane for _, plane in election.used_planes}
     selected_rows = [

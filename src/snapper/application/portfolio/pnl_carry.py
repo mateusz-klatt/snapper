@@ -57,7 +57,7 @@ _DISABLED_ENV_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "of
 """Values that turn carried valuation off; anything else leaves it on."""
 
 CARRY_ANCHOR_LIMIT: Final[int] = 32
-"""Most FX gaps one request may search, each costing at most four reads.
+"""Most FX gap searches one request may run across all phases, four reads each.
 
 Gaps collapse as they are served, so this bound is only reached by a plane with
 evidence scattered thinly across months of history.

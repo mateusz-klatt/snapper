@@ -25,6 +25,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPoli
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import _election_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _first_carry_evidence
+from snapper.application.portfolio.pnl_timeline_service import _FxCarryBudget
 from snapper.application.portfolio.pnl_timeline_service import _load_gap_predecessors
 from snapper.application.portfolio.pnl_timeline_service import _record_carry_timing
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
@@ -609,7 +610,7 @@ async def test_empty_search_behind_the_first_minute_does_not_end_the_pin_search(
     plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
     repo = FakeRepo(fx_rows=[_fx_row("EUR", "USD", 14400 - 60, 1.1)])
     rows = await _first_carry_evidence(
-        cast(Repository, repo), {_m(0), _m(14400)}, {plane}, _m(14401)
+        cast(Repository, repo), {_m(0), _m(14400)}, {plane}, _m(14401), _FxCarryBudget()
     )
     assert [row["close"] for row in rows] == [1.1]
     assert len(repo.fx_range_calls) == 5
@@ -760,10 +761,11 @@ async def test_a_found_close_serves_the_next_gap_without_another_search() -> Non
     """
     plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
     repo = FakeRepo(fx_rows=[_fx_row("EUR", "USD", -5, 1.1)])
-    rows, searched = await _load_gap_predecessors(
-        cast(Repository, repo), {plane: {_m(10), _m(200)}}, [], _m(300)
+    budget = _FxCarryBudget()
+    rows = await _load_gap_predecessors(
+        cast(Repository, repo), {plane: {_m(10), _m(200)}}, [], _m(300), budget
     )
-    assert searched == [_m(10)]
+    assert budget.searched == [_m(10)]
     assert len(repo.fx_range_calls) == 1
     assert [row["close"] for row in rows] == [1.1]
 
@@ -786,10 +788,11 @@ async def test_read_budget_stops_at_the_limit_and_warns(
     monkeypatch.setattr(pnl_timeline_service.logger, "warning", capture)
     plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
     minutes = {_m(minute * 10000) for minute in range(CARRY_ANCHOR_LIMIT + 3)}
-    _, searched = await _load_gap_predecessors(
-        cast(Repository, FakeRepo()), {plane: minutes}, [], _m(10_000_000)
+    budget = _FxCarryBudget()
+    await _load_gap_predecessors(
+        cast(Repository, FakeRepo()), {plane: minutes}, [], _m(10_000_000), budget
     )
-    assert searched == sorted(minutes)[:CARRY_ANCHOR_LIMIT]
+    assert budget.searched == sorted(minutes)[:CARRY_ANCHOR_LIMIT]
     assert warnings == [f"P&L FX carry gaps exceed the read budget: searched={CARRY_ANCHOR_LIMIT}"]
 
 
@@ -806,8 +809,38 @@ async def test_read_budget_spends_on_the_oldest_gaps_across_all_planes(
     first: PnlFxRatePlane = ("AUD", "USD", "kraken")
     last: PnlFxRatePlane = ("EUR", "USD", "kraken")
     needed = {first: {_m(30), _m(9000)}, last: {_m(10)}}
-    _, searched = await _load_gap_predecessors(cast(Repository, FakeRepo()), needed, [], _m(10_000))
-    assert searched == [_m(10), _m(30)]
+    budget = _FxCarryBudget()
+    await _load_gap_predecessors(cast(Repository, FakeRepo()), needed, [], _m(10_000), budget)
+    assert budget.searched == [_m(10), _m(30)]
+
+
+async def test_every_search_phase_draws_on_one_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin searches and gap searches cannot each spend a full budget.
+
+    Given: Two pin groups with empty gaps and a later gap search, with a budget of three.
+    When: The phases run in order against one request budget.
+    Then: Only three searches run in total, and the shortage is logged once.
+    """
+    monkeypatch.setattr(pnl_timeline_service, "CARRY_ANCHOR_LIMIT", 3)
+    warnings: list[str] = []
+
+    def capture(message: str, *args: object) -> None:
+        """Keep the rendered warning instead of writing to the log sink."""
+        warnings.append(message.format(*args))
+
+    monkeypatch.setattr(pnl_timeline_service.logger, "warning", capture)
+    plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
+    other: PnlFxRatePlane = ("GBP", "USD", "kraken")
+    repo = cast(Repository, FakeRepo())
+    budget = _FxCarryBudget()
+    far_apart = {_m(0), _m(30_000)}
+    await _first_carry_evidence(repo, far_apart, {plane}, _m(40_000), budget)
+    await _first_carry_evidence(repo, far_apart, {other}, _m(40_000), budget)
+    await _load_gap_predecessors(repo, {plane: {_m(39_000)}}, [], _m(40_000), budget)
+    assert len(budget.searched) == 3
+    assert warnings == ["P&L FX carry gaps exceed the read budget: searched=3"]
 
 
 async def test_blocked_exact_minute_needs_no_search() -> None:
@@ -820,10 +853,12 @@ async def test_blocked_exact_minute_needs_no_search() -> None:
     plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
     rows = [_fx_row("EUR", "USD", 3, 1.1), _fx_row("EUR", "USD", 3, 1.2)]
     repo = FakeRepo()
-    assert await _load_gap_predecessors(cast(Repository, repo), {plane: {_m(3)}}, rows, _m(9)) == (
-        [],
-        [],
+    budget = _FxCarryBudget()
+    fetched = await _load_gap_predecessors(
+        cast(Repository, repo), {plane: {_m(3)}}, rows, _m(9), budget
     )
+    assert fetched == []
+    assert budget.searched == []
     assert repo.fx_range_calls == []
 
 
