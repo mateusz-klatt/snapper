@@ -307,10 +307,14 @@ class TimelineMarkEvidence:
         incompleteness_reasons: Exact causes for marks omitted during conversion.
             Other absent or non-finite marks are classified as unavailable.
         carried_inputs: Carried inputs behind each mark that reached back.
+        widen_unrealized_absorber: Let any bucket absorb the last-place rounding
+            when unrealized values reconcile. Carried reads set it; exact-only
+            callers keep the persisted sample contract.
     """
 
     incompleteness_reasons: MarkIncompletenessReasonMap = field(default_factory=dict)
     carried_inputs: MarkCarriedInputMap = field(default_factory=dict)
+    widen_unrealized_absorber: bool = False
 
 
 @dataclass(frozen=True)
@@ -1217,42 +1221,51 @@ def _values_with_residue[KeyT: Hashable](
     values: Mapping[KeyT, float],
     keys: Sequence[KeyT],
     total: float,
+    *,
+    widen: bool = False,
 ) -> dict[KeyT, float] | None:
-    """Reconcile values through the final key or fail if floats cannot represent it.
+    """Reconcile values through one bucket or fail if floats cannot represent it.
 
     The accumulated final value is tried first. Its adjacent floats are also
     tried because the later stable-order sum can round in the opposite direction
     by one unit in the last place. A direct residual farther away is not proof of
-    ownership and is never transported into the final bucket. If no allowed
-    representation sums exactly, returning ``None`` lets the caller withhold the
-    point instead of publishing a fabricated keyed contribution.
+    ownership and is never transported into a bucket. If no allowed representation
+    sums exactly, returning ``None`` lets the caller withhold the point instead of
+    publishing a fabricated keyed contribution.
+
+    A dust final bucket cannot absorb that unit, because its own last place is far
+    smaller than the sum's. ``widen`` then lets each other bucket take the role in
+    turn, as :func:`_reconciled_buckets` already does for flows. Exactly one
+    bucket moves, by at most one unit in the last place, and a point the final
+    bucket can reconcile is returned unchanged.
 
     Args:
         values: Cumulative values before point-level reconciliation.
         keys: Caller-provided deterministic key order.
         total: Aggregate value the buckets must equal exactly.
+        widen: Whether every bucket may absorb the rounding, not only the final.
 
     Returns:
         Reconciled values, or ``None`` when exact float reconciliation fails.
     """
     if not keys:
         return {} if _is_exactly_zero(total) else None
-    reconciled: dict[KeyT, float] = {}
-    for key in keys[:-1]:
-        reconciled[key] = values.get(key, 0.0)
-    final_key = keys[-1]
-    original = values.get(final_key, 0.0)
-    if not math.isfinite(total) or not math.isfinite(original):
+    reconciled = {key: values.get(key, 0.0) for key in keys}
+    if not math.isfinite(total) or not math.isfinite(reconciled[keys[-1]]):
         return None
-    candidates = (
-        original,
-        math.nextafter(original, math.inf),
-        math.nextafter(original, -math.inf),
-    )
-    for candidate in candidates:
-        reconciled[final_key] = candidate
-        if sum(reconciled[key] for key in keys) == total:
-            return reconciled
+    last = len(keys) - 1
+    for position in (last, *range(last)) if widen else (last,):
+        key = keys[position]
+        original = reconciled[key]
+        for candidate in (
+            original,
+            math.nextafter(original, math.inf),
+            math.nextafter(original, -math.inf),
+        ):
+            reconciled[key] = candidate
+            if sum(reconciled[item] for item in keys) == total:
+                return reconciled
+        reconciled[key] = original
     return None
 
 
@@ -1576,6 +1589,7 @@ def _untrusted_point(
     seen: Sequence[str],
     attribution_keys: Sequence[AttributionKey],
     incompleteness_reasons: Collection[PnlIncompletenessReasonEntry],
+    carried_inputs: tuple[PnlCarriedInput, ...] = (),
 ) -> PnlTimelinePoint:
     """Build a fully-untrusted incomplete point (all components withheld).
 
@@ -1588,6 +1602,7 @@ def _untrusted_point(
         seen: Instruments to list (all with null contributions).
         attribution_keys: Composite buckets to list with null contributions.
         incompleteness_reasons: Causes established before this early return.
+        carried_inputs: Carried inputs consulted before the point was withheld.
 
     Returns:
         An incomplete :class:`PnlTimelinePoint` with every component ``None``.
@@ -1626,6 +1641,7 @@ def _untrusted_point(
         incompleteness_reasons=canonical_incompleteness_reasons(incompleteness_reasons),
         per_instrument=contributions,
         attribution=attribution,
+        carried_inputs=carried_inputs,
     )
 
 
@@ -1689,6 +1705,7 @@ class _PointValuationContext:
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
     mark_carried_inputs: MarkCarriedInputMap
     carried_event_inputs: Collection[PnlCarriedInput]
+    widen_unrealized_absorber: bool = False
 
 
 @dataclass(frozen=True)
@@ -1758,13 +1775,19 @@ def _context_untrusted_point(
     context: _PointValuationContext,
     attribution_keys: Sequence[AttributionKey],
     reasons: Collection[PnlIncompletenessReasonEntry],
+    carried_inputs: Collection[PnlCarriedInput] = (),
 ) -> PnlTimelinePoint:
-    """Build a fully withheld point using stable identities from one context."""
+    """Build a fully withheld point using stable identities from one context.
+
+    A withheld point still names the carried inputs consulted before it was
+    withheld, so an empty list on such a point never implies that none were used.
+    """
     return _untrusted_point(
         context.point_time,
         context.seen,
         attribution_keys,
         reasons,
+        canonical_carried_inputs([*context.carried_event_inputs, *carried_inputs]),
     )
 
 
@@ -2231,6 +2254,7 @@ def _instrument_untrusted_valued_point(
         incompleteness_reasons=canonical_incompleteness_reasons(accumulator.point_reasons),
         per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
+        carried_inputs=canonical_carried_inputs(accumulator.carried_inputs),
     )
 
 
@@ -2250,6 +2274,7 @@ def _reconcile_instrument_unrealized(
         unrealized_by_instrument,
         context.seen,
         accumulator.unrealized_total,
+        widen=context.widen_unrealized_absorber,
     )
     if reconciled is None:
         return False
@@ -2293,6 +2318,7 @@ def _reconcile_attribution(
             accumulator.unrealized_by_attribution,
             attribution_keys,
             accumulator.unrealized_total,
+            widen=context.widen_unrealized_absorber,
         )
         if unrealized is None:
             return None
@@ -2442,6 +2468,7 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
                     "untrusted",
                 )
             },
+            accumulator.carried_inputs,
         )
     reconciled_attribution = _reconcile_attribution(
         context,
@@ -2460,6 +2487,7 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
             context,
             attribution_keys,
             accumulator.point_reasons,
+            accumulator.carried_inputs,
         )
     attribution = _attribution_contributions(
         reconciled_attribution,
@@ -2503,6 +2531,7 @@ class _TimelineBuildEvidence:
     ]
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
     mark_carried_inputs: MarkCarriedInputMap
+    widen_unrealized_absorber: bool
 
 
 @dataclass
@@ -2601,6 +2630,7 @@ def _resolved_build_evidence(
         ),
         mark_incompleteness_reasons=resolved_mark_evidence.incompleteness_reasons,
         mark_carried_inputs=resolved_mark_evidence.carried_inputs,
+        widen_unrealized_absorber=resolved_mark_evidence.widen_unrealized_absorber,
     )
 
 
@@ -3179,6 +3209,7 @@ def _point_valuation_context(
         mark_incompleteness_reasons=evidence.mark_incompleteness_reasons,
         mark_carried_inputs=evidence.mark_carried_inputs,
         carried_event_inputs=state.carried_event_inputs,
+        widen_unrealized_absorber=evidence.widen_unrealized_absorber,
     )
 
 

@@ -860,7 +860,7 @@ summaries with bounded HTTP observations while accounting for concurrent reads
 and the handler's serialization and transfer exclusions. Background service
 callers do not enable this request-local timing.
 
-Carried reads add `fx_carry_anchors` (gaps searched), `fx_carry_rows` (rows those
+Carried reads add `fx_carry_anchors` (gaps searched in any phase), `fx_carry_rows` (rows those
 searches returned), `carried_mark_points` and `carried_fx_points` (served points
 with a carried mark, or with a carried FX or event rate) and
 `max_carry_age_minutes`. A carried read that finds no gap records zeros, and an

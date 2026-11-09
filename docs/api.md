@@ -1669,7 +1669,11 @@ fill or accrual), `source_minute`, `age_minutes`, and the oriented `source_plane
 of an FX input. An `event` entry stays listed on later points because their
 cumulatives include that conversion. A minute whose own close is non-positive,
 non-finite or conflicting stays `incomplete`, and no candle is ever written to
-represent a carried value. Responses report `calc_version` `5A.14`.
+represent a carried value. On these reads, a point whose unrealized buckets can
+only reconcile by moving one bucket by one unit in the last place publishes instead
+of being withheld. Responses report `calc_version` `5A.15`. Setting
+`PNL_CARRY_VALUATION_ENABLED=false` returns both routes to exact-minute valuation
+without a new image.
 
 ### POST /api/execution-plans
 

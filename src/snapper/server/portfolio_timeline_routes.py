@@ -62,6 +62,7 @@ from snapper.api.schemas.pnl_timeline import PnlTimelineData
 from snapper.api.schemas.pnl_timeline import PnlTimelineMarkerData
 from snapper.api.schemas.pnl_timeline import PnlTimelinePointData
 from snapper.api.schemas.pnl_timeline import PnlTimelineResponse
+from snapper.application.portfolio.pnl_carry import carry_valuation_enabled
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
@@ -602,7 +603,7 @@ async def get_pnl_series(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
                 current_truth_horizon=validated.current_truth,
-                carry_valuation=True,
+                carry_valuation=carry_valuation_enabled(),
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
@@ -745,7 +746,7 @@ async def get_pnl_timeline(
                 allow_anchor_creation=validated.allow_anchor_creation,
                 current_truth=validated.current_truth,
                 current_truth_horizon=validated.current_truth,
-                carry_valuation=True,
+                carry_valuation=carry_valuation_enabled(),
             ),
         )
         tracker: SequenceTracker = request.app.state.rest_tracker

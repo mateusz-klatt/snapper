@@ -4323,7 +4323,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.14"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.15"
     assert PNL_ANCHOR_CALC_VERSION == "5A.13"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
