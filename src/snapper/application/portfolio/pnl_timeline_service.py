@@ -4082,7 +4082,6 @@ async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection
     Returns:
         Exact rates, per-instrument selections and the evidence behind them.
     """
-    mark_requirements = request.mark_requirements
     event_requirements = request.event_requirements
     identity_planes = request.identity_planes
     as_of = request.as_of
