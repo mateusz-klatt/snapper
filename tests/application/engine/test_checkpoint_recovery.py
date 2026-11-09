@@ -3218,18 +3218,17 @@ class TestNoGapFillEvidence:
         assert coord._recovery_certification_failed is True
 
     @pytest.mark.asyncio
-    async def test_legitimate_funding_cash_certifies(
+    async def test_inconsistent_funding_cash_refuses(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Funding cash is excluded from a fill-only digest.
+        """A funding ledger cannot excuse contradictory cash and realized PnL.
 
         Given: a current-version checkpoint whose exact fill fold matches
-            but whose cash includes a real pre-checkpoint ledger charge,
+            but whose cash decreases while its ledger records a credit,
         When: no-gap certification queries that durable accrual data,
-        Then: the legitimate checkpoint certifies without weakening cash
-            checks for reconstructable shards.
+        Then: the contradictory checkpoint refuses instead of skipping cash.
         """
         coord = _make_coord(monkeypatch)
         repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'funding.db'}")
@@ -3280,8 +3279,8 @@ class TestNoGapFillEvidence:
                 datetime.now(UTC),
                 checkpoint,
             )
-        assert certain is True
-        assert coord._recovery_certification_failed is False
+        assert certain is False
+        assert coord._recovery_certification_failed is True
 
     @pytest.mark.asyncio
     async def test_future_accrual_does_not_mask_cash_corruption(
@@ -3369,12 +3368,14 @@ class TestNoGapFillEvidence:
         coord = self._coord_with_repo(monkeypatch, [])
         mock_repo = cast(AsyncMock, coord.repository)
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=instrument_public_id)
-        reconstructable = await coord._checkpoint_cash_is_fill_reconstructable(
+        projection, rows = await coord._checkpoint_fill_projection(
             shard_key,
             self._WALLET,
             _make_checkpoint(),
+            [],
         )
-        assert reconstructable is True
+        assert projection["cash"] == 10000.0
+        assert rows == []
 
     @pytest.mark.asyncio
     async def test_throwing_accrual_scope_keeps_cash_comparison(
@@ -3393,24 +3394,18 @@ class TestNoGapFillEvidence:
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
             side_effect=RuntimeError("resolution failed")
         )
-        assert (
-            await coord._checkpoint_cash_is_fill_reconstructable(
-                self._SHARD,
-                self._WALLET,
-                checkpoint,
-            )
-            is True
+        projection, rows = await coord._checkpoint_fill_projection(
+            "paper.BTC-USD.paper", self._WALLET, checkpoint, []
         )
+        assert projection["cash"] == 10000.0
+        assert rows == []
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         mock_repo.shard_has_any_accruals = AsyncMock(side_effect=RuntimeError("probe failed"))
-        assert (
-            await coord._checkpoint_cash_is_fill_reconstructable(
-                self._SHARD,
-                self._WALLET,
-                checkpoint,
-            )
-            is True
+        projection, rows = await coord._checkpoint_fill_projection(
+            "paper.BTC-USD.paper", self._WALLET, checkpoint, []
         )
+        assert projection["cash"] == 10000.0
+        assert rows == []
 
     @pytest.mark.asyncio
     async def test_identity_digest_mismatch_quarantines(

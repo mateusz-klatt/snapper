@@ -23,6 +23,7 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from functools import cached_property
 from typing import Any
 from typing import cast
 from typing import get_args
@@ -41,6 +42,7 @@ from snapper.application.engine.coordinator_lifecycle import join_cleanup
 from snapper.application.engine.coordinator_lifecycle import retain_failure
 from snapper.application.engine.coordinator_lifecycle import supervise_workers
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
+from snapper.application.engine.rollover_certification import project_legacy_spot_rollovers
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import compute_shard_key
@@ -89,6 +91,7 @@ from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
@@ -1344,6 +1347,8 @@ class TraderCoordinator(RegisterableProcess):
         repository = self.repository
         if not replay_certain or not isinstance(repository, SQLAlchemyRepository):
             return replay_certain
+        if context.shard_key in self._verified_checkpoint_rollovers:
+            return await self._checkpoint_rollover_ledger_unchanged(context)
         try:
             instrument_public_id = await repository.get_instrument_public_id_by_symbol(
                 native_symbol=context.instrument,
@@ -1904,20 +1909,15 @@ class TraderCoordinator(RegisterableProcess):
         events: list[VenueEventRow],
     ) -> bool:
         """Require restored fill state to equal the durable full-history fold."""
-        projection = self.trade_service.project_fill_state_from_events(events)
-        shard = self.trade_service._get_or_create_shard(shard_key)
-        compare_cash = await self._checkpoint_cash_is_fill_reconstructable(
-            shard_key,
-            wallet_public_id,
-            checkpoint,
+        projection, rollovers = await self._checkpoint_fill_projection(
+            shard_key, wallet_public_id, checkpoint, events
         )
+        shard = self.trade_service._get_or_create_shard(shard_key)
         aliases_certain = aliases_cover_same_fills(
             shard.seen_exec_ids, projection["seen_exec_ids"], events
         )
         verified = replace(shard, seen_exec_ids=projection["seen_exec_ids"].copy())
-        if not aliases_certain or not self._fill_digest_matches(
-            verified, projection, compare_cash=compare_cash
-        ):
+        if not aliases_certain or not self._fill_digest_matches(verified, projection):
             logger.warning(
                 f"ZMQTrader: checkpoint {shard_key} restored fill state "
                 f"(pos={shard.position.position_qty}, "
@@ -1937,44 +1937,82 @@ class TraderCoordinator(RegisterableProcess):
             self._recovery_certification_failed = True
             return False
         shard.seen_exec_ids = verified.seen_exec_ids
+        if rollovers:
+            self._verified_checkpoint_rollovers[shard_key] = rollovers
         return True
 
-    async def _checkpoint_cash_is_fill_reconstructable(
+    @cached_property
+    def _verified_checkpoint_rollovers(self) -> dict[str, list[AccrualLedgerRow]]:
+        """Retain complete ledger evidence only after exact checkpoint verification."""
+        return {}
+
+    async def _checkpoint_fill_projection(
         self,
         shard_key: str,
         wallet_public_id: str,
         checkpoint: TradeProjectionCheckpointRow,
-    ) -> bool:
-        """Keep cash comparison unless checkpoint-scoped accruals are proven."""
+        events: list[VenueEventRow],
+    ) -> tuple[FillProjection, list[AccrualLedgerRow]]:
+        """Include only fully identified historical spot rollover charges.
+
+        Forward replay preserves the original floating-point subtraction;
+        neither cash nor realized PnL receives a tolerance or a skipped check.
+        Every current ledger row must be represented, avoiding reliance on a
+        coordinator-clock cutoff as a substitute for an accrual watermark.
+        Unsupported histories retain the strict fill-only comparison and the
+        existing accrual-certainty refusal.
+        """
+        projection = self.trade_service.project_fill_state_from_events(events)
         try:
             repository = cast(SQLAlchemyRepository, self.repository)
             parsed = self._parse_shard_key(shard_key)
-            checkpoint_at = checkpoint["checkpoint_at"]
-            if parsed is None or checkpoint_at is None:
-                return True
+            if parsed is None or parsed[4] or not wallet_public_id:
+                return projection, []
             instrument_public_id = await repository.get_instrument_public_id_by_symbol(
                 native_symbol=parsed[1],
                 exchange=parsed[0],
-                as_of=checkpoint_at,
+                as_of=checkpoint["checkpoint_at"],
             )
             if instrument_public_id is None:
-                return True
-            has_accruals = await repository.shard_has_any_accruals(
-                wallet_public_id,
-                instrument_public_id,
-                parsed[2],
-                checkpoint_at,
+                return projection, []
+            if not await repository.shard_has_any_accruals(
+                wallet_public_id, instrument_public_id, parsed[2], checkpoint["checkpoint_at"]
+            ):
+                return projection, []
+            if await repository.get_shard_fill_financing(shard_key, wallet_public_id) != "spot":
+                return projection, []
+            rollovers = await repository.get_all_shard_accruals(
+                wallet_public_id, instrument_public_id, parsed[2]
+            )
+            adjusted = project_legacy_spot_rollovers(projection, events, rollovers, checkpoint)
+        except Exception:
+            return projection, []
+        return (adjusted, rollovers) if adjusted is not None else (projection, [])
+
+    async def _checkpoint_rollover_ledger_unchanged(
+        self, context: CheckpointRecoveryContext
+    ) -> bool:
+        """Recheck the complete ledger before granting accrual certainty."""
+        repository = cast(SQLAlchemyRepository, self.repository)
+        try:
+            instrument_public_id = await repository.get_instrument_public_id_by_symbol(
+                native_symbol=context.instrument,
+                exchange=context.exchange,
+                as_of=datetime.now(UTC),
+            )
+            if instrument_public_id is None:
+                return False
+            current = await repository.get_all_shard_accruals(
+                context.wallet_public_id, instrument_public_id, context.mode
             )
         except Exception:
-            return True
-        return not has_accruals
+            return False
+        return current == self._verified_checkpoint_rollovers[context.shard_key]
 
     def _fill_digest_matches(
         self,
         shard: ShardState,
         projection: FillProjection,
-        *,
-        compare_cash: bool = True,
     ) -> bool:
         """Compare restored fill-derived state against a durable replay digest.
 
@@ -1986,7 +2024,7 @@ class TraderCoordinator(RegisterableProcess):
         drift already flips the projection writer's non-flat boundary).
         Position, entry, realized PnL, turnover, the opening timestamp,
         and the venue-event watermark must all agree. Cash must also
-        agree when the durable replay can reconstruct it. Non-finite
+        agree, including any exactly proven legacy rollover costs. Non-finite
         values never match (a NaN/inf checkpoint is corruption). Fill
         identity sets must agree, and a side at the 10k LRU dedup cap
         is SATURATED — completeness is undecidable there, so it never
@@ -1999,7 +2037,7 @@ class TraderCoordinator(RegisterableProcess):
         )
         if not all(self._finite_values_match(*pair) for pair in numeric_pairs):
             return False
-        if compare_cash and not self._finite_values_match(shard.cash, projection["cash"]):
+        if not self._finite_values_match(shard.cash, projection["cash"]):
             return False
         restored_entry = shard.position.entry_price
         replayed_entry = projection["entry_price"]
@@ -2430,6 +2468,8 @@ class TraderCoordinator(RegisterableProcess):
             short an accrual and the projection rebuild must not
             certify it as truth.
         """
+        if shard_key in self._verified_checkpoint_rollovers:
+            return True
         checkpoint_at = checkpoint.get("checkpoint_at")
         if checkpoint_at is None:
             logger.warning(
@@ -6694,8 +6734,12 @@ class TraderCoordinator(RegisterableProcess):
         accrual_type = _FUNDING_TYPE_TO_ACCRUAL_TYPE.get(spec["funding_type"])
         if accrual_type is None:
             return
-        position = self.trade_service.get_position(engine._shard_key)
+        position = replace(self.trade_service.get_position(engine._shard_key))
         if position.position_qty == 0 or position.position_opened_at is None:
+            return
+        if spec["funding_type"] == "spot_margin_rollover" and not await self._position_uses_margin(
+            engine, position.position_opened_at
+        ):
             return
         frequency_hours = spec["funding_frequency_hours"] or 4
         last_accrual = await self.repository.get_last_accrual(
@@ -6721,6 +6765,35 @@ class TraderCoordinator(RegisterableProcess):
                 position=position,
                 now=now,
             )
+
+    async def _position_uses_margin(
+        self, engine: TradingEngineService, opened_at: datetime
+    ) -> bool:
+        """Require durable financing evidence, including for manual orders.
+
+        An instrument's rollover schedule describes margin capability, not
+        borrowing by its holder. Unknown or mixed financing cannot authorize
+        a charge; default engine configuration is not a position witness.
+        """
+        repository = cast(SQLAlchemyRepository, self.repository)
+        events = await repository.get_venue_events_after(engine._shard_key, 0)
+        if not isinstance(events, list):
+            return False
+        financing = await repository.get_shard_fill_financing(
+            engine._shard_key, engine.wallet_public_id, since=opened_at
+        )
+        if financing != "margin":
+            return False
+        projection = self.trade_service.project_fill_state_from_events(events)
+        shard = self.trade_service._get_or_create_shard(engine._shard_key)
+        return (
+            self._finite_values_match(shard.position.position_qty, projection["position_qty"])
+            and self._optional_finite_values_match(
+                shard.position.entry_price, projection["entry_price"]
+            )
+            and opened_at == projection["position_opened_at"]
+            and aliases_cover_same_fills(shard.seen_exec_ids, projection["seen_exec_ids"], events)
+        )
 
     async def _accrue_one_boundary(
         self,

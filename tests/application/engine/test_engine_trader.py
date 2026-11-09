@@ -4961,6 +4961,7 @@ class TestAccrueEngine:
         coord.trade_service._shards["kraken.BTC-USD.live"] = MagicMock(position=pos)
         coord_any = cast(Any, coord)
         coord_any._accrue_one_boundary = AsyncMock()
+        coord_any._position_uses_margin = AsyncMock(return_value=True)
         await coord_any._accrue_engine("key1", engine, now)
         coord_any._accrue_one_boundary.assert_called_once()
 
