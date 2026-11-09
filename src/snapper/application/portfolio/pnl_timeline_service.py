@@ -3163,24 +3163,33 @@ async def _load_mark_predecessors(
     repo: Repository,
     ref: InstrumentSymbolRefRow,
     anchor: datetime,
+    known: Sequence[PnlTimelineCandleRow],
     as_of: datetime,
 ) -> list[PnlTimelineCandleRow]:
     """Widen one bounded search behind a leading gap until a usable close appears.
+
+    A window can overlap the chart read, and two reads are not one snapshot. Each
+    window is judged together with everything already observed, so a re-read that
+    no longer shows a contradiction cannot make that minute usable.
 
     Args:
         repo: Repository providing the unchanged timeline candle read.
         ref: The one instrument whose gap is being served.
         anchor: First demanded grid minute.
+        known: Observations already read for this request.
         as_of: Knowledge horizon threading the candle read.
 
     Returns:
-        Rows of the window that held a usable close, or an empty list.
+        Every row read by this search.
     """
+    observed: list[PnlTimelineCandleRow] = []
     for lower, upper in read_windows(anchor, MARK_CARRY_READ_STEPS):
         rows = await repo.get_pnl_timeline_candles([ref], lower, upper, as_of)
-        if _usable_mark_closes(rows):
-            return rows
-    return []
+        observed.extend(rows)
+        usable = _usable_mark_closes([*known, *observed]).get(ref["instrument_public_id"], {})
+        if any(row["open_at"] + timedelta(minutes=1) in usable for row in rows):
+            break
+    return observed
 
 
 async def _plan_mark_carry(repo: Repository, request: _MarkCarryRequest) -> _MarkCarryPlan:
@@ -3197,15 +3206,20 @@ async def _plan_mark_carry(repo: Repository, request: _MarkCarryRequest) -> _Mar
         Sources per ``(instrument, minute)`` and the FX minutes they consume.
     """
     demand = _carried_mark_demand(request)
-    closes = _usable_mark_closes(request.candles)
+    observations = list(request.candles)
     refs_by_instrument = {ref["instrument_public_id"]: ref for ref in request.refs}
-    for instrument_public_id, anchor in sorted(leading_mark_gaps(demand, closes).items()):
-        rows = await _load_mark_predecessors(
-            repo, refs_by_instrument[instrument_public_id], anchor, request.as_of
+    gaps = leading_mark_gaps(demand, _usable_mark_closes(observations))
+    for instrument_public_id, anchor in sorted(gaps.items()):
+        observations.extend(
+            await _load_mark_predecessors(
+                repo,
+                refs_by_instrument[instrument_public_id],
+                anchor,
+                observations,
+                request.as_of,
+            )
         )
-        for candles in _usable_mark_closes(rows).values():
-            closes.setdefault(instrument_public_id, {}).update(candles)
-    sources = carried_mark_sources(demand, closes, MARK_CARRY_BOUND)
+    sources = carried_mark_sources(demand, _usable_mark_closes(observations), MARK_CARRY_BOUND)
     fx_requirements: _FxInstrumentRequirements = {}
     for instrument_public_id, minute in sources:
         _add_fx_minute(

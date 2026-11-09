@@ -283,6 +283,41 @@ async def test_window_holding_only_a_contradictory_minute_keeps_searching() -> N
     assert _point(result, 0).carried_inputs == (PnlCarriedInput(_I1, "mark", _m(-240), 240),)
 
 
+class _CorrectedOnRereadRepo(_RangeRepo):
+    """Repository double whose later candle reads no longer show a contradiction."""
+
+    async def get_pnl_timeline_candles(
+        self,
+        refs: Sequence[InstrumentSymbolRefRow],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlTimelineCandleRow]:
+        """Return the disagreeing rows once, then only one of them."""
+        rows = await super().get_pnl_timeline_candles(refs, start, end, as_of)
+        return (
+            rows if len(self.candle_calls) == 1 else [row for row in rows if row["close"] == 110.0]
+        )
+
+
+async def test_contradiction_seen_once_is_not_forgotten_by_a_later_read() -> None:
+    """Separate reads are not one snapshot, so conflicts are kept across them.
+
+    Given: A chart read with a contradictory minute, and a re-read showing one row.
+    When: The following held minute needs a carried mark.
+    Then: The minute stays unusable and the point is withheld.
+    """
+    repo = _CorrectedOnRereadRepo(
+        executions=[_exec_row(_I1, 1, 1, "buy", 2.0, 100.0, 0.0, "USD")],
+        refs=[_ref(_I1, "BTC-USD", "USD")],
+        candles=_candles((2, 110.0), (2, 120.0)),
+    )
+    point = _point(await _series(repo, (2, 3)), 3)
+    assert len(repo.candle_calls) > 1
+    assert point.carried_inputs == ()
+    assert _reasons(point) == {"mark_unavailable"}
+
+
 async def test_exact_mark_with_a_missing_rate_carries_the_fx_only() -> None:
     """Only the input that is actually older gets disclosed.
 
