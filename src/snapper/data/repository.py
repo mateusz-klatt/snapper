@@ -112,7 +112,9 @@ from sqlalchemy import TableClause
 from sqlalchemy import Text
 from sqlalchemy import and_
 from sqlalchemy import any_
+from sqlalchemy import bindparam
 from sqlalchemy import case
+from sqlalchemy import column
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import delete
 from sqlalchemy import desc
@@ -127,6 +129,7 @@ from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import tuple_
 from sqlalchemy import update
+from sqlalchemy import values as sql_values
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
@@ -3770,6 +3773,16 @@ class Repository(ABC):
         It allocates no identity and changes no candle value. An optional caller
         transaction remains owned by its caller; an owned short transaction
         releases its writer participation before returning.
+        """
+        ...
+
+    @abstractmethod
+    async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Validate up to 720 native minutes and return copies of apparently absent keys.
+
+        This read-only hint checks all knowledge versions without acquiring a
+        writer fence or assigning candidate identities. Actual insertion must
+        repeat the absence proof inside its existing writer protocol.
         """
         ...
 
@@ -11437,6 +11450,52 @@ class SQLAlchemyRepository(Repository):
             raise RuntimeError("canonical candle natural key has conflicting public identities")
         return identities[0] if identities else None
 
+    async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Read all-version key presence without locking writers or allocating public IDs.
+
+        Args:
+            rows: At most 720 complete closed native one-minute candidates.
+
+        Returns:
+            Copies of original absent candidates, retaining input order and provenance.
+        """
+        if not rows:
+            return []
+        normalized = self._validate_missing_candle_batch(rows)
+        async with self.session() as session:
+            missing = await self._filter_missing_candle_rows(session, normalized)
+        keys = {self._candle_natural_key(row) for row in missing}
+        return [
+            row.copy()
+            for row, normalized_row in zip(rows, normalized, strict=True)
+            if self._candle_natural_key(normalized_row) in keys
+        ]
+
+    def _validate_missing_candle_batch(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Validate the entire input before any read or write transaction is opened."""
+        if len(rows) > 720:
+            raise ValueError("missing candle insert batch exceeds 720 rows")
+        normalized = self._normalize_reconciled_candle_rows(rows, "native")
+        if self.dialect_name not in {"sqlite", "postgresql"}:
+            raise NotImplementedError(
+                "missing candle insertion supports only SQLite and PostgreSQL"
+            )
+        return normalized
+
+    @staticmethod
+    async def _filter_missing_candle_rows(
+        session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Check exact natural keys across every historical version without a writer fence."""
+        keys = [SQLAlchemyRepository._candle_natural_key(row) for row in rows]
+        result = await session.execute(
+            select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
+                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(keys)
+            )
+        )
+        present = set(result.all())
+        return [row for row, key in zip(rows, keys, strict=True) if key not in present]
+
     async def insert_missing_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> list[CandleUpsertRow]:
@@ -11446,8 +11505,8 @@ class SQLAlchemyRepository(Repository):
         natural keys are checked across every knowledge version, without an
         author-time or sentinel filter. PostgreSQL serializes the short batch
         against all candle writers and partition maintenance under a recursive
-        relation lock with at most a one-second acquisition wait. SQLite's
-        INSERT-select statement holds its writer lock before evaluating absence.
+        relation lock with at most a one-second acquisition wait. SQLite takes
+        its existing empty-update writer reservation before evaluating absence.
         No existing row is updated, closed, deleted or broadcast.
 
         Args:
@@ -11463,11 +11522,13 @@ class SQLAlchemyRepository(Repository):
         """
         if not rows:
             return []
-        if len(rows) > 720:
-            raise ValueError("missing candle insert batch exceeds 720 rows")
-        normalized = self._normalize_reconciled_candle_rows(rows, "native")
+        normalized = self._validate_missing_candle_batch(rows)
         if session is not None:
             return await self._insert_missing_candles_in_session(session, normalized)
+        async with self.session() as preflight:
+            normalized = await self._filter_missing_candle_rows(preflight, normalized)
+        if not normalized:
+            return []
         async with self.session() as owned:
             inserted = await self._insert_missing_candles_in_session(owned, normalized)
             await owned.commit()
@@ -11684,15 +11745,51 @@ class SQLAlchemyRepository(Repository):
         lock_mode: Literal["ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"] = "SHARE ROW EXCLUSIVE",
     ) -> list[CandleUpsertRow]:
         """Serialize absent-key proof and insert-only writes in one short transaction."""
+        statement = self._missing_candle_batch_insert_statement(rows)
         await self._begin_candle_reconciliation_write(
             session, sqlite_write_lock=False, lock_mode=lock_mode
         )
-        inserted: list[CandleUpsertRow] = []
-        for row in rows:
-            result = await session.execute(self._missing_candle_insert_statement(row))
-            if result.scalar_one_or_none() is not None:
-                inserted.append(row)
-        return inserted
+        if self.dialect_name == "sqlite":
+            await self._prepare_live_candle_write(session, [])
+        result = await session.execute(statement)
+        inserted = set(result.all())
+        return [row for row in rows if self._candle_natural_key(row) in inserted]
+
+    def _missing_candle_batch_insert_statement(self, rows: list[CandleUpsertRow]) -> Insert:
+        """Insert an entire validated batch with one authoritative all-history absence proof."""
+        values: list[dict[str, object]] = [dict(row) for row in rows]
+        columns = list(values[0])
+        if self.dialect_name == "postgresql":
+            candidates = select(
+                *(
+                    func.unnest(
+                        bindparam(
+                            name,
+                            [row[name] for row in values],
+                            type_=ARRAY(Candle.__table__.c[name].type),
+                        ),
+                        type_=Candle.__table__.c[name].type,
+                    ).label(name)
+                    for name in columns
+                )
+            ).cte("missing_candle_candidates")
+        else:
+            candidates = (
+                sql_values(*(column(name, Candle.__table__.c[name].type) for name in columns))
+                .data([tuple(row[name] for name in columns) for row in values])
+                .cte("missing_candle_candidates")
+            )
+        absent = ~exists().where(
+            Candle.instrument_public_id == candidates.c.instrument_public_id,
+            Candle.timeframe == candidates.c.timeframe,
+            Candle.open_at == candidates.c.open_at,
+        )
+        source = select(*(candidates.c[name] for name in columns)).where(absent)
+        return (
+            insert(Candle)
+            .from_select(columns, source)
+            .returning(Candle.instrument_public_id, Candle.timeframe, Candle.open_at)
+        )
 
     async def _begin_candle_reconciliation_write(
         self,

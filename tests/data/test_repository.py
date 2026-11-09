@@ -1880,6 +1880,10 @@ class DummyRepository(Repository):
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
 
+    async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Return the original candidates for the nonpersistent repository stub."""
+        return rows
+
     async def insert_missing_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> list[CandleUpsertRow]:
@@ -3048,6 +3052,10 @@ class _MinimalRepository(Repository):
         self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
+
+    async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Return the original candidates for the nonpersistent repository stub."""
+        return rows
 
     async def insert_missing_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None

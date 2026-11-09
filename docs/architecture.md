@@ -1255,6 +1255,23 @@ keys, those rows keep the sequential close+insert path because an
 earlier row in that group can create the version a later row must close.
 Lookup batches are chunked to stay below SQLite parameter limits.
 
+Native minute catchup validates the entire response before committing independent
+chunks of at most 100 rows. Read-only preflight checks every knowledge version
+before entering the publisher identity gate. A fully present replay with no pending
+publication identity takes neither the local gate nor the database writer fence.
+Pending identities still require the existing writer-fenced canonical readback,
+including recovery after an unknown commit acknowledgement.
+
+Each missing-only transaction repeats its authoritative all-history absence proof
+in one set-based `INSERT ... SELECT ... RETURNING`. PostgreSQL uses typed arrays
+with `unnest` and retains the recursive `SHARE ROW EXCLUSIVE` fence, READ COMMITTED
+requirement and bounded lock timeout. SQLite uses typed candidate values and its
+existing empty-update writer reservation so caller rollback remains effective.
+Catchup explicitly defers while live writes are queued, in flight or recovering,
+then retries on its bounded scheduler cadence. If an earlier chunk committed before
+a later failure or deferral, repair still reads the complete committed minute grid;
+partial input never proves a complete higher-timeframe candle.
+
 Append-only batch writes do NOT use the SCD2 close-insert pattern and
 split into two shapes:
 
