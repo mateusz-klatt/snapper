@@ -47,6 +47,9 @@ type PnlValuationStatus = Literal["complete", "incomplete"]
 type PnlIncompletenessReason = DomainPnlIncompletenessReason
 """Closed transport taxonomy for why a P&L point was withheld."""
 
+type PnlCarriedInputRole = Literal["mark", "fx", "event"]
+"""Which valuation input reached back to an earlier published minute."""
+
 type PnlWithholdingTier = DomainPnlWithholdingTier
 """Closed transport tier for a withholding cause."""
 
@@ -64,6 +67,21 @@ type PnlExecutionCorrectionReason = DomainAnnulmentReason
 
 type PnlExecutionHistoryStatus = Literal["as_recorded", "operator_corrected"]
 """Whether this scope's effective history is the raw ledger or a corrected fold."""
+
+
+class PnlCarriedInputData(StrictBody):
+    """One valuation input served by an earlier close instead of its own minute.
+
+    ``role`` is ``mark`` for the instrument's own price, ``fx`` for the rate that
+    converted a mark, and ``event`` for the rate that converted a fill or accrual.
+    ``source_plane`` names the oriented FX series and is ``None`` for a mark.
+    """
+
+    instrument_public_id: str
+    role: PnlCarriedInputRole
+    source_minute: datetime
+    age_minutes: int
+    source_plane: str | None
 
 
 class PnlIncompletenessReasonData(StrictBody):
@@ -172,6 +190,8 @@ class PnlTimelinePointData(StrictBody):
     incompleteness_reasons: list[PnlIncompletenessReasonData]
     per_instrument: list[PnlInstrumentContributionData]
     attribution: list[PnlAttributionContributionData]
+    carried_inputs: list[PnlCarriedInputData] = Field(default_factory=list)
+    max_carry_age_minutes: int | None = None
 
     @model_validator(mode="after")
     def _require_consistent_incompleteness(self) -> Self:
@@ -417,8 +437,7 @@ class PnlExecutionHistoryData(StrictBody):
         """Keep the disclosed status equivalent to the disclosed corrections."""
         if (self.status == "operator_corrected") != bool(self.corrections):
             raise ValueError(
-                "operator_corrected requires at least one correction and "
-                "as_recorded requires none"
+                "operator_corrected requires at least one correction and as_recorded requires none"
             )
         return self
 

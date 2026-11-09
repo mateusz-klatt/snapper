@@ -38,6 +38,7 @@ type PnlFxPhase = Literal[
     "fx_load_event",
     "fx_election",
     "fx_fold_final",
+    "fx_carry",
 ]
 type PnlSeriesPhase = Literal[
     "series_anchor",
@@ -53,6 +54,10 @@ type PnlFxCount = Literal[
     "fx_mark_rows",
     "fx_event_rows",
     "fx_selected_rows",
+    "fx_carry_anchors",
+    "fx_carry_rows",
+    "carried_mark_points",
+    "carried_fx_points",
 ]
 type PnlFxReadMode = Literal[
     "no_requirements",
@@ -66,7 +71,8 @@ type PnlFxReadMode = Literal[
 type _MeasuredStage = (
     Literal["handler", "series", "prefix", "fx", "core", "timeline"] | PnlFxPhase | PnlSeriesPhase
 )
-type _MeasuredCount = PnlFxCount | Literal["fx_event_intervals_observed"]
+type PnlFxMaximum = Literal["max_carry_age_minutes"]
+type _MeasuredCount = PnlFxCount | PnlFxMaximum | Literal["fx_event_intervals_observed"]
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -148,6 +154,18 @@ def _record_count(timing: _ReadTiming, name: _MeasuredCount, values: Sized) -> i
     return observed
 
 
+def pnl_read_max(name: PnlFxMaximum, value: int) -> None:
+    """Record the largest observed value only while an API collector is active.
+
+    Args:
+        name: Closed engineering maximum independent of business identities.
+        value: Non-negative observation.
+    """
+    timing = _current_timing.get()
+    if timing is not None:
+        timing.counts[name] = max(timing.counts.get(name, 0), value)
+
+
 def pnl_read_count(name: PnlFxCount, values: Sized) -> None:
     """Record a fixed aggregate count only while an API collector is active.
 
@@ -221,6 +239,8 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             "fx_mark_candidate_planes={} fx_event_candidate_planes={} fx_mark_rows={} "
             "fx_event_rows={} fx_selected_rows={} fx_event_read_mode={} "
             "fx_event_intervals_observed={} "
+            "fx_carry_ms={} fx_carry_anchors={} fx_carry_rows={} "
+            "carried_mark_points={} carried_fx_points={} max_carry_age_minutes={} "
             "series_anchor_ms={} series_replay_ms={} series_market_data_ms={} "
             "series_requirements_ms={} series_valuation_ms={} series_overlay_ms={}{}",
             timing.kind,
@@ -244,6 +264,12 @@ def _emit_timing(timing: _ReadTiming, succeeded: bool) -> None:
             _count_text(timing.counts.get("fx_selected_rows")),
             timing.event_read_mode or "unobserved",
             _count_text(timing.counts.get("fx_event_intervals_observed")),
+            _elapsed_text(timing.spans.get("fx_carry")),
+            _count_text(timing.counts.get("fx_carry_anchors")),
+            _count_text(timing.counts.get("fx_carry_rows")),
+            _count_text(timing.counts.get("carried_mark_points")),
+            _count_text(timing.counts.get("carried_fx_points")),
+            _count_text(timing.counts.get("max_carry_age_minutes")),
             _elapsed_text(timing.spans.get("series_anchor")),
             _elapsed_text(timing.spans.get("series_replay")),
             _elapsed_text(timing.spans.get("series_market_data")),

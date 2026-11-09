@@ -21,7 +21,7 @@ from sqlalchemy.exc import ArgumentError
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
-from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
+from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.models import Execution
@@ -220,7 +220,7 @@ def _empty_anchor(point_time: datetime) -> PortfolioPnlAnchorRow:
         "point_time": point_time,
         "point_kind": "anchor",
         "epoch_public_id": public_id,
-        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "calc_version": PNL_ANCHOR_CALC_VERSION,
         "valuation_status": "complete",
         "realized_pnl": 0.0,
         "fee_pnl": 0.0,

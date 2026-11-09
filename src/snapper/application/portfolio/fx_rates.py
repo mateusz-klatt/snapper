@@ -28,15 +28,37 @@ Scope is deliberately narrow (no FX graph, no external feed):
 The rate for minute ``M`` is the close of the candle covering ``[M-1m, M)`` — the
 bar that CLOSED at ``M`` — matching the mark convention exactly, so a fee and the
 position it belongs to are valued off the same instant with no look-ahead.
+
+Carried valuation is the one deliberate exception to "nothing else", and it lives
+behind :class:`FxCarryBook`. The operator decided on 2026-11-09 that a P&L point
+must not be withheld over a missing minute when an earlier rate exists. The book
+keeps the plane pin and the orientation rule untouched, serves an exact minute
+exactly as :func:`resolve_rate` does, and reaches back only for a minute that has
+no exact evidence at all. A minute whose exact evidence is conflicted or invalid
+stays withheld, because that minute was observed and contradicted, not missed.
+Every carried result names the minute it came from so the caller can disclose it.
 """
 
 import math
+from bisect import bisect_left
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
+from datetime import timedelta
+from typing import Final
 from typing import Literal
 
 from snapper.core.numeric import is_positive_finite
+
+FX_CARRY_BOUND: Final[timedelta] = timedelta(hours=96)
+"""Oldest earlier close a valuation may reuse on one FX plane.
+
+Four days span a forex weekend plus a missing day, so one rate per day values
+every point. Changing the bound changes published money, so it is a constant
+tied to the calculation version rather than a runtime setting.
+"""
 
 type FxOrientation = Literal["direct", "inverse"]
 """Whether a pinned plane is used as quoted (``direct``) or reciprocal."""
@@ -144,6 +166,196 @@ def resolve_rate(
     )
 
 
+@dataclass(frozen=True)
+class CarriedRate:
+    """One usable close and the minute it was actually published.
+
+    Attributes:
+        plane: Exact ``(base, quote, exchange)`` series the close belongs to.
+        close: Positive finite close of ``plane`` at ``source_minute``.
+        orientation: Whether the plane is quoted as requested or reciprocal.
+        source_minute: Bar-close minute of the evidence used.
+        age_minutes: Whole minutes between the valued minute and the evidence;
+            zero means the rate is exact.
+    """
+
+    plane: FxRatePlane
+    close: float
+    orientation: FxOrientation
+    source_minute: datetime
+    age_minutes: int
+
+
+@dataclass(frozen=True)
+class CarriedConversion:
+    """A converted amount and the rate that produced it.
+
+    Attributes:
+        amount: Finite converted amount in the target currency.
+        rate: Evidence used, or ``None`` when the conversion needed none because
+            the amount is exactly zero or already in the target currency.
+    """
+
+    amount: float
+    rate: CarriedRate | None
+
+
+def _plane_orientation(
+    plane: FxRatePlane,
+    from_currency: str,
+    to_currency: str,
+) -> FxOrientation | None:
+    """Classify a plane against the requested conversion, or reject a mismatch."""
+    if (plane[0], plane[1]) == (from_currency, to_currency):
+        return "direct"
+    if (plane[0], plane[1]) == (to_currency, from_currency):
+        return "inverse"
+    return None
+
+
+def _apply_rate(amount: float, close: float, orientation: FxOrientation) -> float:
+    """Apply one close in the fixed orientation, keeping both paths bit-identical."""
+    return amount * close if orientation == "direct" else amount / close
+
+
+@dataclass(frozen=True)
+class FxCarryBook:
+    """All rate evidence one request may consult, exact and carried.
+
+    A book with an empty ``published`` index cannot carry, so it behaves exactly
+    like the exact-minute functions. That is how exact-only callers share this
+    one conversion path, and why :func:`exact_fx_book` exists.
+
+    Attributes:
+        exact: Plane-qualified closes; a conflicted minute is ``NaN``.
+        published: Ascending usable minutes per plane, excluding every conflicted
+            or invalid close so that no search can ever land on one.
+        bound: Oldest evidence a carried minute may use.
+    """
+
+    exact: FxRateMap
+    published: Mapping[FxRatePlane, Sequence[datetime]] = field(default_factory=dict)
+    bound: timedelta = FX_CARRY_BOUND
+
+    def resolve(
+        self,
+        from_currency: str,
+        to_currency: str,
+        minute: datetime,
+        venues: FxVenueMap | None,
+    ) -> CarriedRate | None:
+        """Resolve the pinned plane exactly when evidenced, otherwise by carry.
+
+        Args:
+            from_currency: Currency being converted from.
+            to_currency: Target currency.
+            minute: Grid minute being valued.
+            venues: Consumer-pinned oriented plane keyed by unordered pair.
+
+        Returns:
+            The rate and its provenance, or ``None`` when the pair is unpinned,
+            the exact evidence is contradictory, or nothing lies inside the bound.
+        """
+        plane = (
+            None if venues is None else venues.get(currency_pair_key(from_currency, to_currency))
+        )
+        if plane is None:
+            return None
+        orientation = _plane_orientation(plane, from_currency, to_currency)
+        if orientation is None:
+            return None
+        exact_key = (plane[0], plane[1], plane[2], minute)
+        if exact_key in self.exact:
+            close = self.exact[exact_key]
+            if not is_positive_finite(close):
+                return None
+            return CarriedRate(plane, close, orientation, minute, 0)
+        source = self._latest_source(plane, minute)
+        if source is None:
+            return None
+        return CarriedRate(
+            plane,
+            self.exact[(plane[0], plane[1], plane[2], source)],
+            orientation,
+            source,
+            int((minute - source).total_seconds() // 60),
+        )
+
+    def _latest_source(self, plane: FxRatePlane, minute: datetime) -> datetime | None:
+        """Return the newest usable publication before ``minute`` inside the bound."""
+        minutes = self.published.get(plane, ())
+        index = bisect_left(minutes, minute)
+        if index == 0 or minutes[index - 1] < minute - self.bound:
+            return None
+        return minutes[index - 1]
+
+    def convert(
+        self,
+        amount: float,
+        from_currency: str,
+        to_currency: str,
+        minute: datetime,
+        venues: FxVenueMap | None,
+    ) -> CarriedConversion | None:
+        """Convert one amount, retaining the evidence the value depends on.
+
+        Exact zero and identity need no evidence, matching :func:`convert_amount`.
+
+        Args:
+            amount: Signed amount denominated in ``from_currency``.
+            from_currency: Denomination; empty means none was recorded.
+            to_currency: Target valuation currency.
+            minute: Grid minute being valued.
+            venues: Consumer-pinned oriented plane keyed by unordered pair.
+
+        Returns:
+            The converted amount with provenance, or ``None`` when no usable
+            evidence exists or the arithmetic left the finite range.
+        """
+        if math.isclose(amount, 0.0, rel_tol=0.0, abs_tol=0.0):
+            return CarriedConversion(0.0, None)
+        if from_currency == to_currency:
+            return CarriedConversion(amount, None)
+        rate = self.resolve(from_currency, to_currency, minute, venues)
+        if rate is None:
+            return None
+        converted = _apply_rate(amount, rate.close, rate.orientation)
+        return CarriedConversion(converted, rate) if math.isfinite(converted) else None
+
+
+def exact_fx_book(rates: FxRateMap) -> FxCarryBook:
+    """Wrap an exact-only rate map so it shares the carried conversion path.
+
+    Args:
+        rates: Plane-qualified closes.
+
+    Returns:
+        A book that serves exact minutes and can never carry.
+    """
+    return FxCarryBook(exact=rates)
+
+
+def build_fx_carry_book(rates: FxRateMap, bound: timedelta = FX_CARRY_BOUND) -> FxCarryBook:
+    """Index usable publications so a missing minute can find its predecessor.
+
+    Args:
+        rates: Plane-qualified closes, with conflicted minutes already ``NaN``.
+        bound: Oldest evidence a carried minute may use.
+
+    Returns:
+        A book whose per-plane index holds only positive finite closes.
+    """
+    published: dict[FxRatePlane, list[datetime]] = {}
+    for (base, quote, exchange, minute), close in rates.items():
+        if is_positive_finite(close):
+            published.setdefault((base, quote, exchange), []).append(minute)
+    return FxCarryBook(
+        exact=rates,
+        published={plane: tuple(sorted(minutes)) for plane, minutes in published.items()},
+        bound=bound,
+    )
+
+
 def convert_amount(
     amount: float,
     from_currency: str,
@@ -175,10 +387,7 @@ def convert_amount(
     resolved = resolve_rate(from_currency, to_currency, minute, rates, venues)
     if resolved is None:
         return None
-    if resolved.orientation == "direct":
-        converted = amount * resolved.close
-    else:
-        converted = amount / resolved.close
+    converted = _apply_rate(amount, resolved.close, resolved.orientation)
     return converted if math.isfinite(converted) else None
 
 

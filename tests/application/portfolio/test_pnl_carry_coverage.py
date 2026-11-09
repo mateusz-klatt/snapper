@@ -31,13 +31,14 @@ def _at(seconds: int = 0, microseconds: int = 0) -> datetime:
 def _original_carried_minutes(
     published: set[datetime],
     required: set[datetime],
+    bound: timedelta = _FX_CARRY_WINDOW,
 ) -> dict[datetime, int]:
     """Keep the literal deployed 5f carry scan as the independent oracle."""
     carried: dict[datetime, int] = {}
     for minute in required:
         if minute in published:
             continue
-        earliest = minute - _FX_CARRY_WINDOW
+        earliest = minute - bound
         reachable = [observed for observed in published if earliest <= observed < minute]
         if reachable:
             carried[minute] = int((minute - max(reachable)).total_seconds() // 60)

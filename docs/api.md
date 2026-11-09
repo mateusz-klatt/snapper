@@ -1659,6 +1659,18 @@ authenticated user, login state, time window, mode, currency, granularity or kno
 that retained view. Historical windows remain fixed until the selected horizon
 changes.
 
+**Carried valuation.** Both routes value a minute that has no exact evidence from
+the latest earlier close of the same series: an instrument's own one-minute close
+up to 24 hours old, or an FX close on the elected plane up to 96 hours old.
+`valuation_status` stays `complete`, and each such point lists `carried_inputs`
+and `max_carry_age_minutes`. An entry names `instrument_public_id`, `role`
+(`mark`, `fx` for a rate converting a mark, or `event` for a rate converting a
+fill or accrual), `source_minute`, `age_minutes`, and the oriented `source_plane`
+of an FX input. An `event` entry stays listed on later points because their
+cumulatives include that conversion. A minute whose own close is non-positive,
+non-finite or conflicting stays `incomplete`, and no candle is ever written to
+represent a carried value. Responses report `calc_version` `5A.14`.
+
 ### POST /api/execution-plans
 
 Create a bracket (SL/TP) execution plan on an open position cycle. Requires

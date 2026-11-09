@@ -22,10 +22,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_timeline import PnlCarriedInput
+from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
-from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
+from snapper.application.portfolio.pnl_timeline_service import PnlPointEquityOverlay
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -103,7 +106,7 @@ def _empty_anchor(
         "point_time": _ANCHOR_TIME,
         "point_kind": "anchor",
         "epoch_public_id": public_id,
-        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "calc_version": PNL_ANCHOR_CALC_VERSION,
         "valuation_status": "complete",
         "realized_pnl": 0.0,
         "fee_pnl": 0.0,
@@ -409,6 +412,7 @@ class TestServerOwnedLiveWindow:
         assert call.args[6] == horizon
         assert call.kwargs["policy"].current_truth is True
         assert call.kwargs["policy"].current_truth_horizon is True
+        assert call.kwargs["policy"].carry_valuation is True
         assert call.kwargs["policy"].allow_anchor_creation is (role is UserRole.ADMIN)
         if role is UserRole.AUDITOR:
             repo.list_accessible_wallets_for_operators.assert_not_awaited()
@@ -421,8 +425,7 @@ class TestServerOwnedLiveWindow:
         endpoint = "timeline" if timeline else "series"
 
         response = _create_client(repo).get(
-            f"/api/portfolio/pnl/{endpoint}?wallet_public_id={_WALLET}"
-            f"&from={_FROM}&as_of={_AS_OF}"
+            f"/api/portfolio/pnl/{endpoint}?wallet_public_id={_WALLET}&from={_FROM}&as_of={_AS_OF}"
         )
 
         assert response.status_code == 400
@@ -491,7 +494,7 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.13"
+        assert payload["calc_version"] == "5A.14"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -1512,3 +1515,41 @@ class TestExecutionHistoryDisclosure:
         assert response.status_code == 200
         correction = response.json()["payload"]["execution_history"]["corrections"][0]
         assert "target_execution_digest" not in correction
+
+
+def test_point_payload_discloses_carried_inputs_and_their_largest_age() -> None:
+    """The transport states a carried value as a value with its provenance.
+
+    Given: A complete point whose mark and rate reached back to earlier minutes.
+    When: It is projected into the strict transport model.
+    Then: Status stays complete and every carried input and the largest age are present.
+    """
+    minute = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+    point = PnlTimelinePoint(
+        point_time=minute,
+        realized_pnl=0.0,
+        fee_pnl=0.0,
+        accrual_pnl=0.0,
+        unrealized_pnl=1.5,
+        net_pnl=1.5,
+        valuation_status="complete",
+        incompleteness_reasons=(),
+        per_instrument=(),
+        attribution=(),
+        carried_inputs=(
+            PnlCarriedInput("instrument", "fx", minute - timedelta(minutes=9), 9, "EUR/USD@kraken"),
+            PnlCarriedInput("instrument", "mark", minute - timedelta(minutes=2), 2),
+        ),
+    )
+    payload = portfolio_timeline_routes._point_payload(
+        point,
+        PnlPointEquityOverlay(equity=None, cash=None, position_value=None, drawdown=None),
+    )
+    assert payload.valuation_status == "complete"
+    assert payload.max_carry_age_minutes == 9
+    assert [
+        (item.role, item.age_minutes, item.source_plane) for item in payload.carried_inputs
+    ] == [
+        ("fx", 9, "EUR/USD@kraken"),
+        ("mark", 2, None),
+    ]
