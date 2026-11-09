@@ -48,6 +48,7 @@ from snapper.application.market_data_watchdog.watchdog import ENV_VARS as MARKET
 from snapper.application.notify.portfolio_drift_recovery import (
     ENV_VARS as PORTFOLIO_DRIFT_RECOVERY_ENV_VARS,
 )
+from snapper.application.portfolio.pnl_carry import ENV_VARS as PNL_CARRY_ENV_VARS
 from snapper.application.portfolio.pnl_snapshotter_config import (
     ENV_VARS as PNL_SNAPSHOTTER_ENV_VARS,
 )
@@ -127,6 +128,7 @@ KNOWN_ENV_KEYS: frozenset[str] = (
     | DB_ENGINE_ENV_VARS
     | DB_STATS_ENV_VARS
     | MARKET_WATCHDOG_ENV_VARS
+    | PNL_CARRY_ENV_VARS
     | PNL_SNAPSHOTTER_ENV_VARS
     | PORTFOLIO_DRIFT_RECOVERY_ENV_VARS
     | RETENTION_ENV_VARS

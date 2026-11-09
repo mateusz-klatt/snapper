@@ -53,6 +53,9 @@ MARK_CARRY_READ_STEPS: Final[tuple[timedelta, ...]] = (
 CARRY_VALUATION_ENV_VAR: Final[str] = "PNL_CARRY_VALUATION_ENABLED"
 """Environment switch that returns API reads to exact-minute valuation."""
 
+ENV_VARS: Final[frozenset[str]] = frozenset({CARRY_VALUATION_ENV_VAR})
+"""Keys this subsystem owns in the shared ``.env`` contract."""
+
 _DISABLED_ENV_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 """Values that turn carried valuation off; anything else leaves it on."""
 
