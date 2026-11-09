@@ -39,10 +39,7 @@ async def get_bound_native_position_family(
         session, value.scope, value.instrument_public_id, known_at
     )
     for event in events:
-        predecessor = await get_native_financial_event_family(
-            session, event.row.public_id, known_at
-        )
-        if not isinstance(predecessor, AdmittedNativeEventMaterialV3):
+        if not isinstance(event.material, AdmittedNativeEventMaterialV3):
             raise NativeFinancialBindingError("native_position_prior_admission_migration_required")
     selected = next((event for event in events if event.row.public_id == public_id), None)
     if selected is None:

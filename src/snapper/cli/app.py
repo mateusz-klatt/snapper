@@ -65,6 +65,7 @@ from datetime import UTC
 from datetime import date as date_type
 from datetime import datetime
 from datetime import timedelta
+from importlib import import_module
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -77,6 +78,7 @@ import zmq
 import zmq.asyncio
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -196,7 +198,6 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-from snapper.server.app import create_app
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.heartbeat_consult import HeartbeatConsult
 from snapper.strategies.macd import MACDCrossover
@@ -467,6 +468,16 @@ def db_seed(
         raise typer.Exit(code=1) from e
 
 
+def _create_server_app() -> FastAPI:
+    """Defer server imports while preserving Uvicorn's refusal of multiple callable workers.
+
+    Returns:
+        The actual FastAPI application before its lifespan starts.
+    """
+    create_app = cast(Callable[[], FastAPI], import_module("snapper.server.app").create_app)
+    return create_app()
+
+
 @app.command()
 def server(
     host: str | None = typer.Option(None, help="Server host (overrides SERVER_HOST env var)"),
@@ -497,31 +508,18 @@ def server(
     if server_reload:
         typer.echo("Reload mode enabled - file changes will restart server")
     try:
-        if server_reload:
-            uvicorn.run(
-                "snapper.server.app:create_app",
-                factory=True,
-                host=server_host,
-                port=server_port,
-                reload=server_reload,
-                log_level="info",
-                log_config=None,
-                proxy_headers=server_proxy_headers,
-                forwarded_allow_ips=server_forwarded_allow_ips,
-                loop="uvloop",
-            )
-        else:
-            uvicorn.run(
-                create_app(),
-                host=server_host,
-                port=server_port,
-                reload=server_reload,
-                log_level="info",
-                log_config=None,
-                proxy_headers=server_proxy_headers,
-                forwarded_allow_ips=server_forwarded_allow_ips,
-                loop="uvloop",
-            )
+        uvicorn.run(
+            "snapper.server.app:create_app" if server_reload else _create_server_app,
+            factory=True,
+            host=server_host,
+            port=server_port,
+            reload=server_reload,
+            log_level="info",
+            log_config=None,
+            proxy_headers=server_proxy_headers,
+            forwarded_allow_ips=server_forwarded_allow_ips,
+            loop="uvloop",
+        )
     except KeyboardInterrupt:
         typer.echo("\nShutting down gracefully...")
 

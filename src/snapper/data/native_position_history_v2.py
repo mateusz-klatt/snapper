@@ -20,10 +20,15 @@ from snapper.core.execution_route_authority import account_scope_digest
 from snapper.core.execution_unit_snapshot import EvidenceInstant
 from snapper.core.execution_unit_snapshot import EvidenceUUID
 from snapper.core.execution_unit_snapshot import SnapshotWriteProvenance
+from snapper.data.accounting_native_source_store_v2 import (
+    _get_bound_native_source_claim_from_material_v2,
+)
 from snapper.data.accounting_native_source_store_v2 import get_bound_native_source_claim_v2
 from snapper.data.models import ContractAccountingAnchor
 from snapper.data.models import ContractAccountingEvent
 from snapper.data.models import is_open_ended_version
+from snapper.data.native_financial_event_binding_v2 import NativeFinancialEventMaterialV2
+from snapper.data.native_financial_event_family import AdmittedNativeEventMaterialV3
 from snapper.data.native_financial_event_family import (
     bind_native_financial_event_family as bind_native_financial_event_material,
 )
@@ -47,6 +52,7 @@ class BoundNativePositionEventV2:
     source: BoundNativeFinancialSource
     fill: BoundOriginalPositionFillV2
     anchor: ContractPositionAnchorV2
+    material: NativeFinancialEventMaterialV2
 
 
 def native_position_anchor_columns_v2(
@@ -198,16 +204,27 @@ async def load_native_position_history_v2(
                 and payload.operands.instrument_public_id == instrument,
                 "native_position_requested_scope_or_instrument_mismatch",
             )
-            bound = await bind_native_position_source_v2(session, payload)
+            bound = (
+                material.admitted.source
+                if isinstance(material, AdmittedNativeEventMaterialV3)
+                else await bind_native_position_source_v2(session, payload)
+            )
             require_native_financial_binding(
                 bound.financial_source == material.source,
                 "native_position_rebound_log_changed",
             )
             anchor = await _bound_anchor(session, payload.operands.anchor_public_id, row.timestamp)
             _require_conservation(result, row, payload, anchor)
-            await get_bound_native_source_claim_v2(session, row.public_id, row.timestamp)
+            if isinstance(material, AdmittedNativeEventMaterialV3):
+                await _get_bound_native_source_claim_from_material_v2(
+                    session, material, row.timestamp
+                )
+            else:
+                await get_bound_native_source_claim_v2(session, row.public_id, row.timestamp)
             result.append(
-                BoundNativePositionEventV2(row, payload, material.source, bound.fill, anchor)
+                BoundNativePositionEventV2(
+                    row, payload, material.source, bound.fill, anchor, material
+                )
             )
     return tuple(result)
 

@@ -121,10 +121,8 @@ def native_claim_columns_v2(payload: AccountingNativeSourceClaimPayloadV2) -> di
     }
 
 
-async def _bound_v2_claim(
-    session: AsyncSession, row: AccountingNativeSourceClaim, known_at: datetime
-) -> AccountingNativeSourceClaimPayloadV2:
-    """Rebind every row mirror plus original event/provenance, without trusting a mere claim join."""
+def _claim_payload(row: AccountingNativeSourceClaim) -> AccountingNativeSourceClaimPayloadV2:
+    """Check every immutable claim mirror before inspecting its original event material."""
     payload = AccountingNativeSourceClaimPayloadV2.model_validate_json(row.canonical_payload)
     require_native_financial_binding(
         is_open_ended_version(row.known_to)
@@ -134,12 +132,21 @@ async def _bound_v2_claim(
         ),
         "native_financial_claim_projection_mismatch",
     )
-    material = await get_native_financial_event_material(
-        session, payload.accounting_event_public_id, known_at
-    )
+    return payload
+
+
+def _verify_claim_material(
+    session: AsyncSession,
+    row: AccountingNativeSourceClaim,
+    payload: AccountingNativeSourceClaimPayloadV2,
+    material: NativeFinancialEventMaterialV2,
+    known_at: datetime,
+) -> AccountingNativeSourceClaimPayloadV2:
+    """Match actual claim provenance and lineage against its already bound session-owned event."""
     event = material.row
     require_native_financial_binding(
-        (row.timestamp, row.session_id, row.sequence_id)
+        event in session
+        and (row.timestamp, row.session_id, row.sequence_id)
         == (event.timestamp, event.session_id, event.sequence_id)
         and row.timestamp <= known_at,
         "native_financial_claim_provenance_mismatch",
@@ -149,6 +156,17 @@ async def _bound_v2_claim(
         "native_financial_claim_original_lineage_mismatch",
     )
     return payload
+
+
+async def _bound_v2_claim(
+    session: AsyncSession, row: AccountingNativeSourceClaim, known_at: datetime
+) -> AccountingNativeSourceClaimPayloadV2:
+    """Rebind every row mirror plus original event/provenance, without trusting a mere claim join."""
+    payload = _claim_payload(row)
+    material = await get_native_financial_event_material(
+        session, payload.accounting_event_public_id, known_at
+    )
+    return _verify_claim_material(session, row, payload, material, known_at)
 
 
 async def _bound_existing_claim(
@@ -180,14 +198,36 @@ async def get_bound_native_source_claim_v2(
         Its exact source/event/policy/sidecar claim, without a current financial admission grant.
     """
     with session_no_autoflush(session):
-        row = await session.scalar(
-            select(AccountingNativeSourceClaim).where(
-                AccountingNativeSourceClaim.accounting_event_public_id == accounting_event_public_id
-            )
-        )
-        if row is None:
-            raise NativeFinancialBindingError("native_financial_actual_claim_missing")
+        row = await _claim_row(session, accounting_event_public_id)
         return await _bound_v2_claim(session, row, known_at)
+
+
+async def _claim_row(
+    session: AsyncSession, accounting_event_public_id: str
+) -> AccountingNativeSourceClaim:
+    """Load the actual shared claim without substituting an event's copied source reference."""
+    row = await session.scalar(
+        select(AccountingNativeSourceClaim).where(
+            AccountingNativeSourceClaim.accounting_event_public_id == accounting_event_public_id
+        )
+    )
+    if row is None:
+        raise NativeFinancialBindingError("native_financial_actual_claim_missing")
+    return row
+
+
+async def _get_bound_native_source_claim_from_material_v2(
+    session: AsyncSession, material: NativeFinancialEventMaterialV2, known_at: datetime
+) -> AccountingNativeSourceClaimPayloadV2:
+    """Verify a claim while composing one history read from its already bound original event.
+
+    The caller has rebound the complete source graph at the event's posting
+    clock in this same session. The claim still comes from actual storage and
+    every projection, provenance and lineage check runs independently.
+    """
+    with session_no_autoflush(session):
+        row = await _claim_row(session, material.row.public_id)
+        return _verify_claim_material(session, row, _claim_payload(row), material, known_at)
 
 
 async def _require_claimed_family(
