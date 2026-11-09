@@ -497,6 +497,8 @@ to `caps_enforcer_getter` at registration.
     out-of-membership `operator_public_id` values when the caller's effective
     grant lacks `impersonate:operator`, rechecks wallet scope against active
     grants on every call, and fails closed on any cap violation.
+    The required `idempotency_key` accepts at most 64 characters, matching REST;
+    longer keys fail validation before persistence.
     Validates order params with the same evaluator rule as REST:
     `price` is required for `limit`/`stop_limit` and `stop_price` is
     required for `stop`/`stop_limit` order types.

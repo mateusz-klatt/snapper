@@ -9,6 +9,7 @@ from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -460,7 +461,8 @@ class TestCreateOrder:
         assert response.json()["payload"]["status"] == "completed"
         assert transitions == ["active", "completed"]
 
-    def test_create_order_success(self) -> None:
+    @pytest.mark.parametrize("idempotency_key", [None, "x" * 64])
+    def test_create_order_success(self, idempotency_key: str | None) -> None:
         """Given valid order params, When creating, Then 200 with plan."""
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
@@ -470,8 +472,11 @@ class TestCreateOrder:
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         _arm_execution_venue(repo)
         client = _create_client(repo)
-        response = client.post("/api/orders", json=_create_order_body())
+        body = _create_order_body()
+        body["payload"]["idempotency_key"] = idempotency_key
+        response = client.post("/api/orders", json=body)
         assert response.status_code == 200
+        assert repo.insert_execution_plan.await_args.args[0]["idempotency_key"] == idempotency_key
         data = response.json()
         assert data["type"] == "execution_plan_response"
         assert data["payload"]["plan_type"] == "manual_once"

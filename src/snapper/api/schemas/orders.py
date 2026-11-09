@@ -7,6 +7,7 @@ from pydantic import field_validator
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
+from snapper.core.idempotency import IdempotencyKey
 from snapper.core.order_numbers import OrderLeverage
 from snapper.core.order_numbers import PositiveOrderNumber
 from snapper.messaging.schemas.data import ExecutionPlanData
@@ -59,7 +60,7 @@ class CreateOrderBody(StrictBody):
     reduce_only: bool = False
     wallet_public_id: str | None = None
     operator_public_id: str | None = None
-    idempotency_key: str | None = None
+    idempotency_key: IdempotencyKey | None = None
     ai_review_public_id: str | None = None
 
     @field_validator("wallet_public_id")

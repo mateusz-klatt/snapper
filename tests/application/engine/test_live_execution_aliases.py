@@ -34,6 +34,32 @@ def _live_event(durable: VenueEventRow) -> VenueEventRow:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_ids", [("E-1", "T-1"), ("E-1", None), (None, "T-1"), (None, None)])
+async def test_live_alias_resolution_returns_preferred_native_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    native_ids: tuple[str | None, str | None],
+) -> None:
+    """Return the alias adopted from durable evidence to the engine dedup caller.
+
+    Given: a uniquely witnessed fill with both native aliases, one alias, or neither.
+    When: live alias resolution enriches an event without a published exec identifier.
+    Then: its explicit result prefers exec_id and preserves both enriched fields.
+    """
+    durable = _fill(1)
+    durable["exec_id"], durable["trade_id"] = native_ids
+    live = _live_event(durable)
+    coord = _coord_with_events(monkeypatch, [durable])
+    repository = cast(AsyncMock, coord.repository)
+    repository.get_fill_venue_events_for_order_identity = AsyncMock(return_value=[durable])
+
+    resolved = await coord._resolve_live_fill_aliases(live)
+
+    assert resolved == (native_ids[0] or native_ids[1])
+    assert live["exec_id"] == native_ids[0]
+    assert live["trade_id"] == native_ids[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_ids", [("E-1", "T-1"), ("E-1", None), (None, "T-1"), (None, None)])
 async def test_live_checkpoint_aliases_equal_durable_replay(
     monkeypatch: pytest.MonkeyPatch,
     native_ids: tuple[str | None, str | None],

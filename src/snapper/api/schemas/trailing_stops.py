@@ -4,6 +4,7 @@ from typing import Literal
 
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
+from snapper.core.idempotency import IdempotencyKey
 
 
 class TrailingStopCreateBody(StrictBody):
@@ -19,7 +20,7 @@ class TrailingStopCreateBody(StrictBody):
     position_cycle_public_id: str
     trailing_pct: float
     min_lock_pct: float = 0.0
-    idempotency_key: str | None = None
+    idempotency_key: IdempotencyKey | None = None
 
 
 class TrailingStopCreateCommand(
