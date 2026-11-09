@@ -15,6 +15,7 @@ No candle is written and no value is invented here. A carried input is always a
 real earlier close, bounded in age and disclosed by the caller.
 """
 
+import os
 from bisect import bisect_left
 from collections.abc import Collection
 from collections.abc import Mapping
@@ -49,6 +50,12 @@ MARK_CARRY_READ_STEPS: Final[tuple[timedelta, ...]] = (
 )
 """Widening look-backs for one instrument's leading mark gap."""
 
+CARRY_VALUATION_ENV_VAR: Final[str] = "PNL_CARRY_VALUATION_ENABLED"
+"""Environment switch that returns API reads to exact-minute valuation."""
+
+_DISABLED_ENV_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+"""Values that turn carried valuation off; anything else leaves it on."""
+
 CARRY_ANCHOR_LIMIT: Final[int] = 32
 """Most FX gaps one request may search, each costing at most four reads.
 
@@ -71,6 +78,19 @@ class CarriedMarkSource:
 
     close: float
     source_minute: datetime
+
+
+def carry_valuation_enabled() -> bool:
+    """Return whether API reads may use carried prices and rates.
+
+    Enabled unless the operator explicitly switches it off, because carry is the
+    decided behavior and the switch exists only to retreat without a new image.
+
+    Returns:
+        ``False`` only for an explicit falsy value of the environment switch.
+    """
+    value = os.environ.get(CARRY_VALUATION_ENV_VAR)
+    return value is None or value.strip().lower() not in _DISABLED_ENV_VALUES
 
 
 def read_windows(

@@ -423,7 +423,7 @@ class TestGetPnlTimelineCandles:
         """
         old_at = _NOW - timedelta(hours=3)
         retired_at = _NOW - timedelta(hours=2)
-        open_at = _NOW - timedelta(minutes=30)
+        open_at = old_at - timedelta(minutes=30)
         async with repository.session() as session:
             session.add_all(
                 [

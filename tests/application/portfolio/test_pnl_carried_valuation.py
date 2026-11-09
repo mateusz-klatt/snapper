@@ -1,5 +1,8 @@
 """Carried valuation serves real earlier evidence and discloses every use of it."""
 
+import math
+from collections.abc import Hashable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -8,22 +11,29 @@ from typing import cast
 
 import pytest
 
+from snapper.application.portfolio import pnl_timeline
 from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.pnl_carry import CARRY_ANCHOR_LIMIT
+from snapper.application.portfolio.pnl_carry import CARRY_VALUATION_ENV_VAR
+from snapper.application.portfolio.pnl_carry import carry_valuation_enabled
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline import PnlCarriedInput
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import _values_with_residue
 from snapper.application.portfolio.pnl_timeline import canonical_carried_inputs
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import _election_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _first_carry_evidence
 from snapper.application.portfolio.pnl_timeline_service import _load_gap_predecessors
 from snapper.application.portfolio.pnl_timeline_service import _record_carry_timing
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
+from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineCandleRow
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from tests.application.portfolio.test_pnl_timeline_service import _I1
 from tests.application.portfolio.test_pnl_timeline_service import _W1
 from tests.application.portfolio.test_pnl_timeline_service import FakeRepo
@@ -90,7 +100,7 @@ def _usd_position(candles: list[PnlTimelineCandleRow]) -> _RangeRepo:
     )
 
 
-def _eur_position(candles: list[PnlTimelineCandleRow], fx_rows: list) -> _RangeRepo:
+def _eur_position(candles: list[PnlTimelineCandleRow], fx_rows: list[PnlFxRateRow]) -> _RangeRepo:
     """Hold one EUR-quoted instrument from minute one, valued in USD."""
     return _RangeRepo(
         executions=[_exec_row(_I1, 1, 1, "buy", 2.0, 100.0, 0.0, "USD")],
@@ -284,7 +294,18 @@ async def test_window_holding_only_a_contradictory_minute_keeps_searching() -> N
 
 
 class _CorrectedOnRereadRepo(_RangeRepo):
-    """Repository double whose later candle reads no longer show a contradiction."""
+    """Repository double whose later candle reads show a corrected minute."""
+
+    def __init__(
+        self,
+        corrected: Sequence[PnlTimelineCandleRow],
+        executions: Sequence[PnlTimelineOpeningExecutionRow],
+        refs: Sequence[InstrumentSymbolRefRow],
+        candles: Sequence[PnlTimelineCandleRow],
+    ) -> None:
+        """Store the rows every read after the first returns."""
+        super().__init__(executions=executions, refs=refs, candles=candles)
+        self._corrected = list(corrected)
 
     async def get_pnl_timeline_candles(
         self,
@@ -293,24 +314,35 @@ class _CorrectedOnRereadRepo(_RangeRepo):
         end: datetime,
         as_of: datetime,
     ) -> list[PnlTimelineCandleRow]:
-        """Return the disagreeing rows once, then only one of them."""
+        """Return the original rows once, then the corrected ones."""
         rows = await super().get_pnl_timeline_candles(refs, start, end, as_of)
-        return (
-            rows if len(self.candle_calls) == 1 else [row for row in rows if row["close"] == 110.0]
-        )
+        if len(self.candle_calls) == 1:
+            return rows
+        return [row for row in self._corrected if start <= row["open_at"] <= end]
 
 
-async def test_contradiction_seen_once_is_not_forgotten_by_a_later_read() -> None:
-    """Separate reads are not one snapshot, so conflicts are kept across them.
+@pytest.mark.parametrize(
+    ("original", "corrected"),
+    [
+        pytest.param(((2, 110.0), (2, 120.0)), ((2, 110.0),), id="conflict-then-one-row"),
+        pytest.param(((2, 0.0),), ((2, 110.0),), id="invalid-then-positive"),
+    ],
+)
+async def test_minute_rejected_once_is_not_rehabilitated_by_a_later_read(
+    original: tuple[tuple[int, float], ...],
+    corrected: tuple[tuple[int, float], ...],
+) -> None:
+    """Separate reads are not one snapshot, so a rejection is kept across them.
 
-    Given: A chart read with a contradictory minute, and a re-read showing one row.
+    Given: A chart read rejecting a minute, and a re-read that no longer would.
     When: The following held minute needs a carried mark.
     Then: The minute stays unusable and the point is withheld.
     """
     repo = _CorrectedOnRereadRepo(
+        _candles(*corrected),
         executions=[_exec_row(_I1, 1, 1, "buy", 2.0, 100.0, 0.0, "USD")],
         refs=[_ref(_I1, "BTC-USD", "USD")],
-        candles=_candles((2, 110.0), (2, 120.0)),
+        candles=_candles(*original),
     )
     point = _point(await _series(repo, (2, 3)), 3)
     assert len(repo.candle_calls) > 1
@@ -565,6 +597,136 @@ def test_carried_minutes_vote_only_on_pairs_without_exact_consumers() -> None:
         "a": {exact_pair: {_m(1)}},
         "b": {carried_pair: {_m(3)}},
     }
+
+
+async def test_empty_search_behind_the_first_minute_does_not_end_the_pin_search() -> None:
+    """A later minute's own rate can still pin a pair the earliest minute cannot.
+
+    Given: Two far-apart minutes and a single rate shortly before the later one.
+    When: The carry-only search runs.
+    Then: The first gap's windows come back empty and the second finds the rate.
+    """
+    plane: PnlFxRatePlane = ("EUR", "USD", "kraken")
+    repo = FakeRepo(fx_rows=[_fx_row("EUR", "USD", 14400 - 60, 1.1)])
+    rows = await _first_carry_evidence(
+        cast(Repository, repo), {_m(0), _m(14400)}, {plane}, _m(14401)
+    )
+    assert [row["close"] for row in rows] == [1.1]
+    assert len(repo.fx_range_calls) == 5
+
+
+async def test_carried_reads_alone_widen_the_unrealized_absorber(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact-only readers keep the rule persisted samples were written under.
+
+    Given: The same position read under each policy.
+    When: Unrealized values reconcile.
+    Then: Only the carried read asks for the widened absorber.
+    """
+    seen: list[bool] = []
+    original = pnl_timeline._values_with_residue
+
+    def spy[KeyT: Hashable](
+        values: Mapping[KeyT, float],
+        keys: Sequence[KeyT],
+        total: float,
+        *,
+        widen: bool = False,
+    ) -> dict[KeyT, float] | None:
+        """Record the requested rule and defer to the real reconciliation."""
+        seen.append(widen)
+        return original(values, keys, total, widen=widen)
+
+    monkeypatch.setattr(pnl_timeline, "_values_with_residue", spy)
+    await _series(_usd_position(_candles((1, 100.0), (2, 110.0))), (1, 2), policy=_EXACT)
+    assert seen and not any(seen)
+    seen.clear()
+    await _series(_usd_position(_candles((1, 100.0), (2, 110.0))), (1, 2))
+    assert any(seen)
+
+
+def test_dust_final_bucket_needs_a_larger_bucket_to_absorb_the_rounding() -> None:
+    """Reconciliation succeeds by moving one bucket one last-place unit, no more.
+
+    Given: A large bucket and a dust final bucket whose sum misses the total by one unit.
+    When: Values reconcile narrowly and then widened.
+    Then: The narrow rule refuses and the widened rule moves only the large bucket.
+    """
+    large = 1000.0
+    dust = 1e-20
+    total = math.nextafter(large, math.inf)
+    values = {"a": large, "b": dust}
+    assert _values_with_residue(values, ["a", "b"], total) is None
+    reconciled = _values_with_residue(values, ["a", "b"], total, widen=True)
+    assert reconciled == {"a": total, "b": dust}
+
+
+def test_final_bucket_keeps_priority_and_impossible_totals_still_refuse() -> None:
+    """Widening never changes a point the final bucket reconciles, nor invents money.
+
+    Given: A total the final bucket reaches, and a total no single unit can reach.
+    When: Values reconcile with widening.
+    Then: Only the final bucket moves in the first and the second still refuses.
+    """
+    values = {"a": 1.0, "b": 2.0}
+    total = 3.0 + 2**-51
+    assert _values_with_residue(values, ["a", "b"], total, widen=True) == {
+        "a": 1.0,
+        "b": math.nextafter(2.0, math.inf),
+    }
+    assert _values_with_residue(values, ["a", "b"], 5.0, widen=True) is None
+
+
+async def test_withheld_point_still_names_the_event_rate_it_consumed() -> None:
+    """An empty list on a withheld point must not imply nothing was carried.
+
+    Given: A carried fee, followed by a fee with no rate that latches the instrument.
+    When: The series reaches the withheld point.
+    Then: The withheld point still names the carried input.
+    """
+    repo = _RangeRepo(
+        executions=[
+            _exec_row(_I1, 1, 2, "buy", 2.0, 100.0, 1.0, "EUR"),
+            _exec_row(_I1, 2, 3, "buy", 1.0, 100.0, 1.0, "CHF"),
+        ],
+        refs=[_ref(_I1, "BTC-USD", "USD")],
+        candles=_candles(*((minute, 100.0) for minute in range(0, 5))),
+        fx_rows=[_fx_row("EUR", "USD", 0, 1.1), _fx_row("EUR", "USD", 4, 1.2)],
+    )
+    point = _point(await _series(repo, (0, 3)), 3)
+    assert point.valuation_status == "incomplete"
+    assert [item.role for item in point.carried_inputs] == ["event"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, True),
+        ("true", True),
+        ("1", True),
+        ("anything", True),
+        ("false", False),
+        (" OFF ", False),
+        ("0", False),
+        ("no", False),
+    ],
+)
+def test_carry_switch_defaults_on_and_needs_an_explicit_off(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+    expected: bool,
+) -> None:
+    """The retreat switch cannot be flipped by an unset or mistyped value.
+
+    Given: The switch unset, truthy, unknown or explicitly falsy.
+    When: The routes ask whether carry is enabled.
+    Then: Only an explicit falsy value turns it off.
+    """
+    monkeypatch.delenv(CARRY_VALUATION_ENV_VAR, raising=False)
+    if value is not None:
+        monkeypatch.setenv(CARRY_VALUATION_ENV_VAR, value)
+    assert carry_valuation_enabled() is expected
 
 
 async def test_gap_on_a_pinned_plane_searches_behind_it_once() -> None:

@@ -170,13 +170,16 @@ _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.14"
+PNL_TIMELINE_CALC_VERSION = "5A.15"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
 contract changes so a cached or persisted point can be told apart from a
 re-derivation under a newer contract. ``5A.14`` adds carried prices and FX rates
-to API reads; a point with exact evidence is bit-identical to ``5A.13``.
+to API reads; a point with exact evidence is bit-identical to ``5A.13``. ``5A.15``
+lets any bucket absorb the last-place rounding of unrealized values on those reads,
+so a point withheld only by that rounding now publishes; published points are
+unchanged.
 """
 
 PNL_ANCHOR_CALC_VERSION: Final[str] = "5A.13"
@@ -4268,6 +4271,35 @@ async def _load_fx_predecessors(
     return rows
 
 
+async def _first_carry_evidence(
+    repo: Repository,
+    minutes: set[datetime],
+    candidates: set[PnlFxRatePlane],
+    as_of: datetime,
+) -> list[PnlFxRateRow]:
+    """Search behind each run of minutes until a candidate shows a usable close.
+
+    An empty search behind the earliest minute says nothing about a later one,
+    which may have a rate inside its own bound.
+
+    Args:
+        repo: Repository providing bounded FX candle reads.
+        minutes: Minutes the unpinned consumers must value.
+        candidates: Planes those consumers may pin.
+        as_of: Knowledge horizon threading the read.
+
+    Returns:
+        Every row seen until the first usable close.
+    """
+    rows: list[PnlFxRateRow] = []
+    for anchor in fx_gap_anchors(minutes, [], set())[:CARRY_ANCHOR_LIMIT]:
+        found = await _load_fx_predecessors(repo, {anchor: candidates}, as_of)
+        rows.extend(found)
+        if _plane_observations(found):
+            break
+    return rows
+
+
 async def _pin_carry_only_planes(
     repo: Repository,
     election: _FxElection,
@@ -4299,14 +4331,14 @@ async def _pin_carry_only_planes(
     )
     for pair, planes in _candidate_planes(discovered, {}).items():
         election.candidate_planes.setdefault(pair, set()).update(planes)
-    planes_by_anchor: dict[datetime, set[PnlFxRatePlane]] = {}
-    for key, group in groups.items():
+    ordered = sorted(groups.items(), key=lambda item: (item[0][0] or "", item[0][1]))
+    rows: list[PnlFxRateRow] = []
+    for key, group in ordered:
         candidates = _fx_group_candidates(key, election, request.identity_planes)
         if candidates:
-            planes_by_anchor.setdefault(min(group.minutes), set()).update(candidates)
-    rows = await _load_fx_predecessors(repo, planes_by_anchor, request.as_of)
+            rows.extend(await _first_carry_evidence(repo, group.minutes, candidates, request.as_of))
     evidence = [*election.rows, *rows]
-    for key, group in sorted(groups.items(), key=lambda item: (item[0][0] or "", item[0][1])):
+    for key, group in ordered:
         _, pair = key
         selected = _preferred_fx_plane(
             pair,
@@ -4454,6 +4486,8 @@ def _series_mark_evidence(
     valuation: _MarkValuation,
     mark_carry: _MarkCarryPlan,
     anchor_marks: MarkMap,
+    *,
+    carry_valuation: bool,
 ) -> tuple[MarkMap, TimelineMarkEvidence]:
     """Assemble one series read's marks and the facts the builder must disclose.
 
@@ -4462,6 +4496,7 @@ def _series_mark_evidence(
         valuation: Currency, rate evidence and instrument plane pins.
         mark_carry: Earlier closes chosen for held minutes without a bar.
         anchor_marks: Persisted activation marks, which always win at t0.
+        carry_valuation: Whether this read follows the carried valuation contract.
 
     Returns:
         The complete mark map and its caller-stamped evidence.
@@ -4470,7 +4505,11 @@ def _series_mark_evidence(
     _add_carried_marks(build, valuation, mark_carry.sources)
     marks = dict(build.marks)
     marks.update(anchor_marks)
-    return marks, TimelineMarkEvidence(build.reasons, build.carried_inputs)
+    return marks, TimelineMarkEvidence(
+        build.reasons,
+        build.carried_inputs,
+        widen_unrealized_absorber=carry_valuation,
+    )
 
 
 def _record_carry_timing(points: Sequence[PnlTimelinePoint], *, carry_valuation: bool) -> None:
@@ -6003,6 +6042,7 @@ async def build_wallet_pnl_series(
             ),
             mark_carry,
             anchor.marks,
+            carry_valuation=policy.carry_valuation,
         )
         reset_pnl_fx_execution_order()
         executions = [
