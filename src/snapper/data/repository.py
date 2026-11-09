@@ -634,6 +634,20 @@ type _PnlTimelineFallbackPoolKey = (
 
 
 @dataclass(frozen=True, slots=True)
+class _FillFinancingEvidence:
+    """Current durable order intent used to classify a fill's borrowing."""
+
+    client_order_id: str | None
+    command_public_id: str | None
+    shard_key: str | None
+    wallet_public_id: str
+    exchange: str | None
+    instrument: str | None
+    mode: str
+    leverage: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _DeliveryAttemptTransition:
     """Counter operation applied to the exact delivery version being closed."""
 
@@ -25776,6 +25790,185 @@ class SQLAlchemyRepository(Repository):
             )
             return list(result.scalars().all())
 
+    async def get_shard_fill_financing(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        since: datetime | None = None,
+    ) -> Literal["spot", "margin"] | None:
+        """Classify every witnessed fill from consistent, fully scoped order intent.
+
+        NULL leverage means no borrowing; a positive integral leverage means
+        margin, including leverage one. Missing, foreign, mixed or conflicting
+        evidence never authorizes either classification. Current versions are
+        selected without coordinator-clock filters. An optional current-cycle
+        boundary retains unknown venue timestamps so uncertainty fails closed.
+        """
+        parsed = parse_shard_key(shard_key)
+        if parsed is None or not wallet_public_id:
+            return None
+        async with self.session() as session:
+            query = select(VenueEvent).where(
+                VenueEvent.shard_key == shard_key,
+                VenueEvent.event_type == "fill_observed",
+                VenueEvent.known_to == KNOWN_TO_MAX,
+            )
+            if since is not None:
+                query = query.where(
+                    or_(VenueEvent.venue_timestamp >= since, VenueEvent.venue_timestamp.is_(None))
+                )
+            events = list((await session.execute(query)).scalars().all())
+            scope = (wallet_public_id, parsed[0], parsed[1], parsed[2], shard_key)
+            if not events or not all(
+                self._financing_fill_scope_matches(event, scope, since) for event in events
+            ):
+                return None
+            evidence = await self._get_fill_financing_orders(session, events)
+            evidence.extend(await self._get_fill_financing_commands(session, events))
+        classifications = {
+            self._fill_financing_from_evidence(event, evidence, scope) for event in events
+        }
+        if classifications == {"spot"}:
+            return "spot"
+        if classifications == {"margin"}:
+            return "margin"
+        return None
+
+    @staticmethod
+    def _financing_fill_scope_matches(
+        event: VenueEvent,
+        scope: tuple[str, str, str, str, str],
+        since: datetime | None,
+    ) -> bool:
+        """Require exact fill attribution and an observed current-cycle instant."""
+        return (
+            event.wallet_public_id,
+            event.exchange,
+            event.instrument,
+            event.mode,
+            event.shard_key,
+        ) == scope and (since is None or event.venue_timestamp is not None)
+
+    @staticmethod
+    async def _get_fill_financing_orders(
+        session: AsyncSession,
+        events: list[VenueEvent],
+    ) -> list[_FillFinancingEvidence]:
+        """Load current order evidence, retaining unresolved or foreign identities."""
+        client_ids = {event.client_order_id for event in events if event.client_order_id}
+        result = await session.execute(
+            select(Order, Instrument.exchange, Symbol.native_symbol)
+            .outerjoin(
+                Instrument,
+                and_(
+                    Instrument.public_id == Order.instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .outerjoin(
+                Symbol,
+                and_(
+                    Symbol.public_id == Instrument.symbol_public_id,
+                    Symbol.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(Order.client_order_id.in_(client_ids), Order.known_to == KNOWN_TO_MAX)
+        )
+        return [
+            _FillFinancingEvidence(
+                client_order_id=order.client_order_id,
+                command_public_id=None,
+                shard_key=None,
+                wallet_public_id=order.wallet_public_id,
+                exchange=exchange,
+                instrument=instrument,
+                mode=order.mode,
+                leverage=order.leverage,
+            )
+            for order, exchange, instrument in result.all()
+        ]
+
+    @staticmethod
+    async def _get_fill_financing_commands(
+        session: AsyncSession,
+        events: list[VenueEvent],
+    ) -> list[_FillFinancingEvidence]:
+        """Load current create/submit intents by either durable fill identifier."""
+        client_ids = {event.client_order_id for event in events if event.client_order_id}
+        command_ids = {event.command_public_id for event in events if event.command_public_id}
+        result = await session.execute(
+            select(TradeCommand).where(
+                or_(
+                    TradeCommand.client_order_id.in_(client_ids),
+                    TradeCommand.public_id.in_(command_ids),
+                ),
+                TradeCommand.command_type.in_(("create", "submit")),
+                TradeCommand.known_to == KNOWN_TO_MAX,
+            )
+        )
+        return [
+            _FillFinancingEvidence(
+                client_order_id=command.client_order_id,
+                command_public_id=command.public_id,
+                shard_key=command.shard_key,
+                wallet_public_id=command.wallet_public_id,
+                exchange=command.exchange,
+                instrument=command.instrument,
+                mode=command.mode,
+                leverage=command.leverage,
+            )
+            for command in result.scalars().all()
+        ]
+
+    @staticmethod
+    def _fill_financing_from_evidence(
+        event: VenueEvent,
+        evidence: list[_FillFinancingEvidence],
+        scope: tuple[str, str, str, str, str],
+    ) -> Literal["spot", "margin"] | None:
+        """Require every matching witness to agree on identity and exact leverage."""
+        matches = [
+            item
+            for item in evidence
+            if (event.client_order_id and item.client_order_id == event.client_order_id)
+            or (event.command_public_id and item.command_public_id == event.command_public_id)
+        ]
+        if not matches or not all(
+            SQLAlchemyRepository._financing_intent_scope_matches(item, event, scope)
+            for item in matches
+        ):
+            return None
+        command_ids = {item.command_public_id for item in matches if item.command_public_id}
+        if len(command_ids) > 1 or (event.command_public_id and not command_ids):
+            return None
+        leverages = {item.leverage for item in matches}
+        if leverages == {None}:
+            return "spot"
+        if len(leverages) != 1:
+            return None
+        leverage = next(iter(leverages))
+        if type(leverage) is int and leverage > 0:
+            return "margin"
+        return None
+
+    @staticmethod
+    def _financing_intent_scope_matches(
+        item: _FillFinancingEvidence,
+        event: VenueEvent,
+        scope: tuple[str, str, str, str, str],
+    ) -> bool:
+        """Reject foreign witnesses and conflicting explicit command identifiers."""
+        return (
+            (item.wallet_public_id, item.exchange, item.instrument, item.mode) == scope[:4]
+            and (item.shard_key is None or item.shard_key == scope[4])
+            and (not event.client_order_id or item.client_order_id == event.client_order_id)
+            and (
+                not event.command_public_id
+                or item.command_public_id is None
+                or item.command_public_id == event.command_public_id
+            )
+        )
+
     async def shard_has_fill_gap(self, shard_key: str, as_of: datetime) -> bool:
         """Return True when a shard's recorded fills exceed its consumed fills.
 
@@ -25937,9 +26130,8 @@ class SQLAlchemyRepository(Repository):
         state could have folded the accrual.
 
         The accrual ledger carries no strategy-tag identity. Tagged
-        siblings therefore share this predicate's scope, so an accrual
-        through the state boundary disables cash comparison for all of
-        them, a residual fail-open direction for certification.
+        siblings therefore share this predicate's scope; existence alone
+        cannot attribute a charge or waive an exact cash comparison.
 
         Args:
             wallet_public_id: Owning wallet.
@@ -25963,6 +26155,36 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             return bool(result.scalar())
+
+    async def get_all_shard_accruals(
+        self,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        mode: str,
+    ) -> list[AccrualLedgerRow]:
+        """Read the complete current accrual ledger without any clock boundary.
+
+        Recovery must not omit a skewed insertion or economic timestamp when
+        proving that the ledger exactly explains a checkpoint difference.
+        Session and sequence preserve each writer's charge order; public ID
+        makes the result deterministic when inconsistent sequences exist.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(AccrualLedger)
+                .where(
+                    AccrualLedger.wallet_public_id == wallet_public_id,
+                    AccrualLedger.instrument_public_id == instrument_public_id,
+                    AccrualLedger.mode == mode,
+                    AccrualLedger.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(
+                    AccrualLedger.session_id,
+                    AccrualLedger.sequence_id,
+                    AccrualLedger.public_id,
+                )
+            )
+            return [self._accrual_row_to_dict(row) for row in result.scalars().all()]
 
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.

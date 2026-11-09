@@ -1133,6 +1133,27 @@ proven durable native alias before deduplication so restored trade-only fills
 cannot be booked twice. Watermark lookup retains the original publication.
 Missing durable evidence for a positive live fill also refuses certification.
 
+An instrument's `spot_margin_rollover` schedule describes its margin capability;
+unlevered spot holdings do not accrue rollover. The coordinator requires
+consistent durable order or command leverage evidence for every fill in the
+current position cycle before charging margin rollover. Default engine leverage
+does not establish financing for manual orders. Unknown or mixed financing does
+not authorize a charge; perpetual funding follows its existing path.
+
+Startup retains historical internal spot rollover costs only under an exact,
+narrow proof: an untagged shard has one unique, durably proven spot buy, and its
+complete current accrual ledger consists of positive rollover rows for that
+unchanged position and quote currency. Each amount must equal its recorded
+notional times rate. The rows must share one ledger session and have an
+unambiguous sequence of boundaries and insertions after opening and before the
+checkpoint. Recovery forward-subtracts each charge from replay cash and realized
+P&L, then compares the entire digest exactly, including position, entry, fees,
+turnover, timestamps, watermark and execution aliases. It rechecks the complete
+ledger before granting accrual certainty. Any additional difference or incomplete
+proof refuses certification. Historical internal charges remain recorded; recovery
+does not refund them or rewrite the ledger. Other accrual histories retain the
+existing refusal pending a durable accrual watermark.
+
 Recovery is also **gap-aware**. The executor commits a `fill_observed`
 venue event BEFORE publishing the fill and inserts the `executions`
 row only after a successful publish, so a fill recorded but never
