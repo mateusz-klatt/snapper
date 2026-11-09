@@ -36,13 +36,17 @@ from snapper.data.repository_types import FxConversionScopeKind
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 
-FX_ELECTION_POLICY_VERSION = "pnl-fiat-v2"
+FX_ELECTION_POLICY_VERSION = "pnl-fiat-v3"
 """Identity of the election ALGORITHM, not of the data it elects.
 
 It is part of the election uniqueness key, so it is what keeps two
 contradictory answers to the same question from claiming to be the same
 answer. Bump it whenever a change can make identical inputs at an identical
 knowledge horizon elect differently.
+
+``v3`` protects the complete exact event-minute subset before applying the
+existing combined-coverage and venue/orientation ranking. Event classification
+also participates in the requirement manifest and decision inputs digests.
 
 ``v2`` (2026-08-04) made bounded carry-forward reachable: a requirement whose
 only mark predates it now elects `carried` where `v1` refused. Without the bump
@@ -75,6 +79,7 @@ class FxShadowEvaluation:
     rows: tuple[PnlFxRateRow, ...]
     authoritative_rates: Mapping[FxRateKey, float]
     discovered_candidates: tuple[FxConversionCandidatePlane, ...] | None = None
+    event_minutes: frozenset[datetime] = frozenset()
 
 
 @dataclass
@@ -480,6 +485,7 @@ def _build_artifact(
         target_currency=target,
         unordered_pair="-".join(evaluation.pair),
         required_minutes=tuple(sorted(evaluation.required_minutes)),
+        event_minutes=tuple(sorted(evaluation.event_minutes)),
         requested_knowledge_at=as_of,
         resolved_knowledge_at=(
             max(row["candle_timestamp"] for row in selected_rows.values())
@@ -577,7 +583,9 @@ def _artifact_matches_raw(
         and committed_election["completeness_state"] == election["completeness_state"]
         and committed_election["refusal_reason_json"] == election["refusal_reason_json"]
         and committed_election["requirement_manifest_digest"]
-        == build_requirement_manifest_digest(election["required_minutes"])
+        == build_requirement_manifest_digest(
+            election["required_minutes"], election.get("event_minutes", ())
+        )
         and committed_election["decision_inputs_digest"]
         == build_decision_inputs_digest(election, proofs)
     )

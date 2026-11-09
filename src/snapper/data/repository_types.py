@@ -83,6 +83,7 @@ class FxConversionElectionInsertRow(FxConversionElectionBaseRow):
 
     required_minutes: tuple[datetime, ...]
     considered_candidate_planes: tuple[FxConversionCandidatePlane, ...]
+    event_minutes: NotRequired[tuple[datetime, ...]]
 
 
 class FxConversionElectionRow(FxConversionElectionBaseRow):
@@ -140,6 +141,7 @@ class FxConversionSuccessfulQuery(TypedDict):
     target_currency: str
     unordered_pair: str
     required_minutes: tuple[datetime, ...]
+    event_minutes: NotRequired[tuple[datetime, ...]]
     election_policy_version: str
     calculation_version: str
 
@@ -1008,8 +1010,12 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5C.2"
+PNL_SAMPLE_CALC_VERSION = "5C.3"
 """Algorithm version stamped on every persisted Phase-5B sample point.
+
+``5C.3`` protects every general-consumer event minute during FX plane election
+when an eligible oriented plane proves the full event subset exactly. The
+sample writer must recompute earlier elections under that changed contract.
 
 ``5C.2`` is a deliberately cosmetic bump: the arithmetic is exactly ``5C.1``'s
 after the widened absorber pass. It exists because the always-on writer ticked

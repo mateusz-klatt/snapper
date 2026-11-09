@@ -1507,7 +1507,7 @@ async def load_basket_fiat_evidence(
     candidates = await _discover_fx_candidates(repo, requirements, as_of)
     candidate_planes = _candidate_planes(candidates, {})
     rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
-    resolved = _resolve_fx_planes(requirements, candidate_planes, rows, "USD")
+    resolved = _resolve_fx_planes(requirements, candidate_planes, rows, "USD", {})
     rates = build_fx_rates(rows)
     shadow_context = current_fx_shadow_context()
     if shadow_context is not None:
@@ -3203,17 +3203,16 @@ def _preferred_fx_plane(
     covered: Mapping[PnlFxRatePlane, _PlaneCoverage],
     valuation_ccy: str,
 ) -> PnlFxRatePlane | None:
-    """Select the coverage, venue, and orientation winner for one pair.
+    """Select the coverage, venue, and orientation winner among eligible planes.
 
-    Carry is consulted ONLY when no candidate has any exact mark. As long as one
-    plane publishes on any required minute, scoring is exact-count alone and
-    every existing election elects exactly the plane it always did; carry then
-    fills that winner's gaps downstream. Letting carry count as a tie-break
+    The caller applies the complete-event restriction before this ranking.
+    Carry is consulted only when no eligible candidate has any exact mark.
+    Otherwise scoring stays exact-count alone. Letting carry count as a tie-break
     among planes that do have exact marks would re-elect settled elections — a
     plane whose sole exact mark sits at the end of the window plus one stale
     mark before it would outscore a rival with a fresh mark mid-window, and
-    displace it across venue and orientation. Only the previously hopeless case,
-    where every candidate scored zero and the pair was refused, changes outcome.
+    displace it across venue and orientation. Carry ranking therefore serves only
+    the fallback where every eligible candidate scores zero exact coverage.
     """
     if not planes:
         return None
@@ -3244,15 +3243,37 @@ def _preferred_fx_plane(
     return min(direct or venue_finalists)
 
 
+def _event_complete_fx_planes(
+    planes: set[PnlFxRatePlane],
+    event_minutes: set[datetime],
+    covered: Mapping[PnlFxRatePlane, _PlaneCoverage],
+) -> set[PnlFxRatePlane]:
+    """Restrict candidates to exact event-complete planes when one exists.
+
+    Carry evidence cannot prove an event minute. Each orientation must prove
+    the entire event subset itself, using conflict-checked exact coverage.
+    Empty event sets and pairs without a complete plane retain all candidates.
+    """
+    if not event_minutes:
+        return planes
+    complete = {
+        plane for plane in planes if plane in covered and event_minutes <= covered[plane].exact
+    }
+    return complete or planes
+
+
 def _resolve_fx_planes(
     requirements: Mapping[FxPairKey, set[datetime]],
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     rows: Sequence[PnlFxRateRow],
     valuation_ccy: str,
+    event_requirements: Mapping[FxPairKey, set[datetime]],
 ) -> dict[FxPairKey, PnlFxRatePlane]:
     """Resolve one oriented plane per pair for general conversion consumers.
 
-    The oriented series covering the most exact general-consumer minutes wins.
+    If any eligible oriented series proves every general-consumer event minute
+    exactly, only those series compete. Within that subset, or the original
+    candidates when none is event-complete, the most exact combined minutes win.
     Identity-only requirements have already been excluded so they cannot steer
     a peer's plane. When several complete planes cover a PLN pair, Walutomat is
     preferred. Other ties preserve lexical venue order, then prefer the
@@ -3264,6 +3285,7 @@ def _resolve_fx_planes(
         candidate_planes: Eligible discovered or forced planes by pair.
         rows: Candidate candle rows from both bounded reads.
         valuation_ccy: Target currency defining the preferred conversion direction.
+        event_requirements: General-consumer flow minutes requiring exact evidence.
 
     Returns:
         One selected oriented plane for each resolvable unordered pair.
@@ -3271,7 +3293,11 @@ def _resolve_fx_planes(
     covered = _covered_fx_minutes(requirements, rows)
     resolved: dict[FxPairKey, PnlFxRatePlane] = {}
     for pair, minutes in requirements.items():
-        planes = candidate_planes.get(pair, set())
+        planes = _event_complete_fx_planes(
+            candidate_planes.get(pair, set()),
+            event_requirements.get(pair, set()),
+            covered,
+        )
         selected = _preferred_fx_plane(
             pair,
             minutes,
@@ -3408,6 +3434,7 @@ async def _load_request_fx_rates(
         return {}, {}, set()
     event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
     general_requirements = _general_fx_minutes(instrument_requirements, identity_planes)
+    general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
     if general_requirements:
@@ -3454,6 +3481,7 @@ async def _load_request_fx_rates(
             candidate_planes,
             rows,
             valuation_ccy,
+            general_event_requirements,
         )
         resolved_identity_planes = _resolve_identity_fx_planes(
             instrument_requirements,
@@ -3489,6 +3517,7 @@ async def _load_request_fx_rates(
                         pair=pair,
                         target_currency=valuation_ccy,
                         required_minutes=frozenset(minutes),
+                        event_minutes=frozenset(general_event_requirements.get(pair, set())),
                         candidate_planes=frozenset(candidate_planes.get(pair, set())),
                         selected_plane=shared_planes.get(pair),
                         requested_knowledge_at=as_of,
@@ -4490,7 +4519,7 @@ async def _load_overlay_conversion(
     planes = sorted(candidate_planes.get(currency_pair_key(valuation_ccy, "USD"), set()))
     rows = await repo.get_pnl_fx_rate_candles_at(planes, sorted(_rate_minute_opens(minutes)), as_of)
     return build_fx_rates(rows), _resolve_fx_planes(
-        requirements, candidate_planes, rows, valuation_ccy
+        requirements, candidate_planes, rows, valuation_ccy, {}
     )
 
 
