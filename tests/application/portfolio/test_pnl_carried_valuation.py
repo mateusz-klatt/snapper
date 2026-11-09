@@ -544,6 +544,23 @@ async def test_read_budget_stops_at_the_limit_and_warns(
     assert warnings == [f"P&L FX carry gaps exceed the read budget: searched={CARRY_ANCHOR_LIMIT}"]
 
 
+async def test_read_budget_spends_on_the_oldest_gaps_across_all_planes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhausting the budget cannot starve a plane because of its name.
+
+    Given: A plane sorting first with later gaps and one sorting last with the oldest.
+    When: A budget of two searches is spent.
+    Then: Gaps are taken strictly by time across both planes.
+    """
+    monkeypatch.setattr(pnl_timeline_service, "CARRY_ANCHOR_LIMIT", 2)
+    first: PnlFxRatePlane = ("AUD", "USD", "kraken")
+    last: PnlFxRatePlane = ("EUR", "USD", "kraken")
+    needed = {first: {_m(30), _m(9000)}, last: {_m(10)}}
+    _, searched = await _load_gap_predecessors(cast(Repository, FakeRepo()), needed, [], _m(10_000))
+    assert searched == [_m(10), _m(30)]
+
+
 async def test_blocked_exact_minute_needs_no_search() -> None:
     """Contradictory exact evidence is never treated as a gap to search behind.
 

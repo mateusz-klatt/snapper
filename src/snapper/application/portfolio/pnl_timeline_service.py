@@ -4341,22 +4341,26 @@ async def _load_gap_predecessors(
         The rows found and the anchors actually searched.
     """
     published, blocked = _published_fx_index(rows)
+    gaps = sorted(
+        (anchor, plane)
+        for plane, minutes in needed.items()
+        for anchor in fx_gap_anchors(minutes, published.get(plane, []), blocked.get(plane, set()))
+    )
     fetched: list[PnlFxRateRow] = []
     searched: list[datetime] = []
-    for plane, minutes in sorted(needed.items()):
-        for anchor in fx_gap_anchors(minutes, published.get(plane, []), blocked.get(plane, set())):
-            if carry_serves(published.get(plane, []), anchor):
-                continue
-            if len(searched) == CARRY_ANCHOR_LIMIT:
-                logger.warning(
-                    "P&L FX carry gaps exceed the read budget: searched={}", CARRY_ANCHOR_LIMIT
-                )
-                return fetched, searched
-            searched.append(anchor)
-            found = await _load_fx_predecessors(repo, {anchor: {plane}}, as_of)
-            fetched.extend(found)
-            newly_published, _ = _published_fx_index(found)
-            published[plane] = sorted({*published.get(plane, []), *newly_published.get(plane, [])})
+    for anchor, plane in gaps:
+        if carry_serves(published.get(plane, []), anchor):
+            continue
+        if len(searched) == CARRY_ANCHOR_LIMIT:
+            logger.warning(
+                "P&L FX carry gaps exceed the read budget: searched={}", CARRY_ANCHOR_LIMIT
+            )
+            return fetched, searched
+        searched.append(anchor)
+        found = await _load_fx_predecessors(repo, {anchor: {plane}}, as_of)
+        fetched.extend(found)
+        newly_published, _ = _published_fx_index(found)
+        published[plane] = sorted({*published.get(plane, []), *newly_published.get(plane, [])})
     return fetched, searched
 
 
