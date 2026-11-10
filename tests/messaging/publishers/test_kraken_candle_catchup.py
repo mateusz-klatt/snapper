@@ -88,6 +88,7 @@ class _Fixture:
         self.repository = MagicMock(spec=Repository)
         self.repository.filter_missing_candles = AsyncMock(side_effect=lambda rows: list(rows))
         self.repository.insert_missing_candles = AsyncMock(return_value=[])
+        self.repository.correct_false_zero_candles = AsyncMock(return_value=[])
         self.committed = AsyncMock()
         self.tracker = SequenceTracker()
 
@@ -113,6 +114,9 @@ class _Fixture:
     [
         ("history_minutes", 0),
         ("history_minutes", 720),
+        ("priority_history_minutes", 119),
+        ("priority_history_minutes", 720),
+        ("priority_history_minutes", float("inf")),
         ("symbols_per_pass", -1),
         ("symbols_per_pass", 1),
         ("attempt_seconds", float("inf")),
@@ -147,7 +151,9 @@ async def test_startup_preserves_native_fields_author_and_committed_repair_order
         observations.append("committed")
         return rows
 
-    async def repair(symbol: str, start: datetime, end: datetime) -> None:
+    async def repair(
+        symbol: str, start: datetime, end: datetime, changed: frozenset[datetime]
+    ) -> None:
         assert observations == ["committed"]
         observations.append("repair")
 
@@ -163,11 +169,14 @@ async def test_startup_preserves_native_fields_author_and_committed_repair_order
     assert row["session_id"] == fixture.tracker.session_id
     assert row["sequence_id"] == 1
     fixture.client.get_closed_1m_candles.assert_awaited_once_with(
-        "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
+        "BTC-USD", NOW.replace(second=0) - timedelta(minutes=719), NOW.replace(second=0)
     )
     assert observations == ["committed", "repair"]
     fixture.committed.assert_awaited_once_with(
-        "BTC-USD", NOW.replace(hour=19, second=0), NOW.replace(second=0)
+        "BTC-USD",
+        NOW.replace(second=0) - timedelta(minutes=719),
+        NOW.replace(second=0),
+        frozenset({START}),
     )
 
 
@@ -205,7 +214,7 @@ async def test_repairs_require_newly_inserted_rows(
     await worker._reconcile_symbol("BTC-USD", START, NOW)
     fixture.repository.insert_missing_candles.assert_awaited_once()
     if insert_count:
-        fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
+        fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset({START}))
     else:
         fixture.committed.assert_not_awaited()
 
@@ -334,12 +343,16 @@ async def test_unknown_commit_ack_reconciles_existing_rows_on_the_next_pass() ->
 
 
 @pytest.mark.asyncio
-async def test_supervisor_coalesces_requests_and_survives_a_failed_pass() -> None:
+@pytest.mark.parametrize("work", ["run_pass", "run_sweep"])
+async def test_supervisor_coalesces_requests_and_survives_a_failed_pass(work: str) -> None:
     """Reconnect requests stay paced and failures do not kill catchup.
 
-    Given: Repeated reconnect notifications and one failed bounded pass.
+    Given: Repeated reconnect notifications and one failed pass or full sweep.
     When: The supervisor runs until the publisher stops.
-    Then: Requests coalesce and the following pass still executes.
+    Then: Requests coalesce and the following pass or sweep still executes.
+
+    Args:
+        work: The supervised operation that fails once.
     """
     fixture = _Fixture()
     worker = fixture.worker(
@@ -358,7 +371,7 @@ async def test_supervisor_coalesces_requests_and_survives_a_failed_pass() -> Non
             raise RuntimeError("temporary bounded pass failure")
         fixture.running = False
 
-    with patch.object(worker, "run_pass", side_effect=run_pass):
+    with patch.object(worker, work, side_effect=run_pass):
         await worker.run()
     assert calls == 2
 
@@ -606,6 +619,8 @@ async def test_startup_background_task_never_blocks_live_consumers() -> None:
         run.assert_awaited_once()
     catchup = publisher._candle_catchup
     assert catchup is not None
+    assert catchup._callbacks.insert_missing == publisher._insert_catchup_candle_rows
+    assert catchup._callbacks.correct_zero == publisher._correct_catchup_candle_rows
     publisher._suspend_candle_synthesis_across_break()
     publisher._exchange_client.reset_trade_candle_epoch.assert_called_once()
 
@@ -619,12 +634,16 @@ async def test_committed_reconciliation_schedules_historical_only_full_grid() ->
     Then: The pending repair requires every minute and suppresses live publication.
     """
     publisher = _publisher()
-    await publisher._reconcile_catchup_repairs("BTC-USD", START, START.replace(minute=30))
+    await publisher._reconcile_catchup_repairs(
+        "BTC-USD", START, START.replace(minute=30), frozenset()
+    )
     publisher._candle_aggregator = CandleAggregator(["5m"])
     repository = MagicMock(spec=Repository)
     repository.get_candles = AsyncMock(return_value=[_row(i) for i in range(25, 30)])
     publisher.repository = repository
-    await publisher._reconcile_catchup_repairs("BTC-USD", START, START.replace(minute=30))
+    await publisher._reconcile_catchup_repairs(
+        "BTC-USD", START, START.replace(minute=30), frozenset()
+    )
     key = _CandleRepairKey("BTC-USD", "5m", START)
     assert publisher._pending_candle_repairs[key].historical_only is True
     assert publisher._pending_candle_repairs[key].expected_source_minutes == frozenset(
@@ -632,8 +651,81 @@ async def test_committed_reconciliation_schedules_historical_only_full_grid() ->
     )
     publisher.settings.timeframes = ["1m"]
     repository.get_candles.reset_mock()
-    await publisher._reconcile_catchup_repairs("BTC-USD", START, START.replace(minute=30))
+    await publisher._reconcile_catchup_repairs(
+        "BTC-USD", START, START.replace(minute=30), frozenset()
+    )
     repository.get_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_windows_holding_a_changed_minute_start_a_new_repair_generation() -> None:
+    """A catchup change revises the pending repairs of its own windows only.
+
+    Given: Pending historical repairs for two complete five-minute windows.
+    When: Catchup reports one changed minute in the second window.
+    Then: The second window gets a new pending object; the first keeps its own.
+    """
+    publisher = _publisher()
+    publisher._candle_aggregator = CandleAggregator(["5m"])
+    repository = MagicMock(spec=Repository)
+    repository.get_candles = AsyncMock(return_value=[_row(i) for i in range(25, 35)])
+    publisher.repository = repository
+    end = START.replace(minute=35)
+    await publisher._reconcile_catchup_repairs("BTC-USD", START, end, frozenset())
+    first = _CandleRepairKey("BTC-USD", "5m", START)
+    second = _CandleRepairKey("BTC-USD", "5m", START.replace(minute=30))
+    before = {key: publisher._pending_candle_repairs[key] for key in (first, second)}
+    before[second].attempts = 2
+    await publisher._reconcile_catchup_repairs(
+        "BTC-USD", START, end, frozenset({START.replace(minute=32)})
+    )
+    assert publisher._pending_candle_repairs[first] is before[first]
+    revised = publisher._pending_candle_repairs[second]
+    assert revised is not before[second]
+    assert revised.attempts == 0
+    assert revised.expected_source_minutes == before[second].expected_source_minutes
+    assert revised.historical_only is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revised", [False, True])
+async def test_attempt_that_read_a_corrected_minute_cannot_clear_its_revised_repair(
+    revised: bool,
+) -> None:
+    """A correction during a running repair keeps the repair pending for another run.
+
+    Given: A historical repair whose transaction is in flight with an aggregate
+        derived before a source minute was corrected.
+    When: Catchup schedules the same window again, with or without the revision.
+    Then: Without the revision the old attempt clears the request; with it the
+        request stays pending as a new object, ready to derive again.
+    """
+    publisher = _publisher()
+    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._publish_message = AsyncMock()
+    publisher._candle_aggregator = CandleAggregator(["5m"])
+    key = _CandleRepairKey("BTC-USD", "5m", START)
+    minutes = frozenset(START.replace(minute=i) for i in range(25, 30))
+    publisher._schedule_seeded_incomplete_candle_repair_key(key, minutes, historical_only=True)
+    publisher._derive_repaired_synthesized_candle = AsyncMock(return_value=_candle())
+    repository = MagicMock(spec=Repository)
+    original = publisher._pending_candle_repairs[key]
+
+    async def commit(rows: list[CandleUpsertRow]) -> int:
+        publisher._schedule_seeded_incomplete_candle_repair_key(
+            key, minutes, historical_only=True, revised=revised
+        )
+        return len(rows)
+
+    repository.upsert_historical_synthesized_candles = AsyncMock(side_effect=commit)
+    publisher.repository = repository
+    await publisher._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    if revised:
+        assert publisher._pending_candle_repairs[key] is not original
+        assert publisher._candle_repair_event.is_set()
+    else:
+        assert key not in publisher._pending_candle_repairs
+    publisher._publish_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -775,14 +867,21 @@ def test_priority_policy_rejects_blank_names() -> None:
 
 @pytest.mark.asyncio
 async def test_wildcard_defaults_are_immediate_and_fair_pool_keeps_rotating() -> None:
-    """A large wildcard universe cannot hide the three default dashboard pairs.
+    """A large wildcard universe cannot hide the default priority symbols.
 
-    Given: Fifteen hundred other persisted symbols and the default priority trio.
+    Given: Fifteen hundred other persisted symbols and the five default priority symbols.
     When: Three fixed-budget passes run.
-    Then: Defaults run immediately and independent fair work advances every later pass.
+    Then: The P&L valuation pairs run first, the rest of the priority pool follows,
+        and independent fair work advances every later pass.
     """
     fixture = _Fixture()
-    fixture.symbols = [f"ALT{i:04}-USD" for i in range(1500)] + ["BTC-USD", "ETH-USD", "EUR-USD"]
+    fixture.symbols = [f"ALT{i:04}-USD" for i in range(1500)] + [
+        "BTC-USD",
+        "ETH-USD",
+        "EUR-USD",
+        "BTC-EUR",
+        "XRP-EUR",
+    ]
     fixture.client.get_closed_1m_candles.return_value = []
     worker = fixture.worker()
     await worker.run_pass()
@@ -790,15 +889,15 @@ async def test_wildcard_defaults_are_immediate_and_fair_pool_keeps_rotating() ->
     await worker.run_pass()
     visited = [call.args[0] for call in fixture.client.get_closed_1m_candles.call_args_list]
     assert visited == [
-        "BTC-USD",
-        "ETH-USD",
+        "XRP-EUR",
         "EUR-USD",
+        "BTC-EUR",
         "ALT0000-USD",
         "BTC-USD",
         "ETH-USD",
         "ALT0001-USD",
+        "XRP-EUR",
         "EUR-USD",
-        "BTC-USD",
     ]
     assert len(visited) == 3 * 3
 
@@ -830,7 +929,7 @@ async def test_budget_exhaustion_advances_only_attempted_pool_and_cannot_starve_
     await worker.run_pass()
     await worker.run_pass()
     visited = [call.args[0] for call in fixture.client.get_closed_1m_candles.call_args_list]
-    assert visited == ["BTC-USD", "A", "B", "ETH-USD", "EUR-USD", "C", "BTC-USD", "ETH-USD"]
+    assert visited == ["EUR-USD", "A", "B", "BTC-USD", "ETH-USD", "C", "EUR-USD", "BTC-USD"]
 
 
 @pytest.mark.asyncio
@@ -1238,6 +1337,7 @@ def _identity_publisher() -> tuple[KrakenMarketDataPublisher, MagicMock]:
     repository.filter_missing_candles = AsyncMock(side_effect=lambda rows: list(rows))
     repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
     repository.insert_missing_candles = AsyncMock(return_value=[])
+    repository.correct_false_zero_candles = AsyncMock(return_value=[])
     publisher.repository = repository
     return publisher, repository
 
@@ -1689,13 +1789,14 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
     Given: Four permitted symbols, one of whose acquisitions fails.
     When: One sweep runs.
     Then: Every symbol is requested once over the full history window, the
-        three others are committed, and spacing follows each attempt.
+        three others are committed, and spacing follows the initial regular
+        pass and each attempt.
     """
     fixture = _Fixture()
-    fixture.symbols = ["XRP-USD", "BTC-USD", "ETH-USD", "SOL-USD"]
+    fixture.symbols = ["XRP-USD", "ADA-USD", "DOT-USD", "SOL-USD"]
 
     async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
-        if symbol == "ETH-USD":
+        if symbol == "DOT-USD":
             raise RuntimeError("temporary venue failure")
         return [_candle(symbol)]
 
@@ -1706,29 +1807,32 @@ async def test_sweep_visits_every_symbol_once_and_survives_one_failure() -> None
 
     fixture.repository.insert_missing_candles.side_effect = insert
     worker = fixture.worker(CatchupPolicy(symbols_per_pass=2, sweep_spacing_seconds=0.001))
-    with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+    with (
+        patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        patch.object(worker, "run_pass", new=AsyncMock()),
+    ):
         await worker.run_sweep()
     requested = [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list]
-    assert requested == ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
+    assert requested == ["ADA-USD", "DOT-USD", "SOL-USD", "XRP-USD"]
     end = NOW.replace(second=0)
     assert {call.args[1:] for call in fixture.client.get_closed_1m_candles.await_args_list} == {
         (end - timedelta(minutes=120), end)
     }
     assert [call.args[0] for call in fixture.committed.await_args_list] == [
-        "BTC-USD",
+        "ADA-USD",
         "SOL-USD",
         "XRP-USD",
     ]
-    assert [call.args[0] for call in sleep.await_args_list if call.args[0]] == [0.001] * 4
+    assert [call.args[0] for call in sleep.await_args_list if call.args[0]] == [0.001] * 5
 
 
 @pytest.mark.asyncio
 async def test_sweep_stops_when_the_publisher_stops() -> None:
-    """Shutdown ends a sweep before its next acquisition.
+    """Shutdown after the initial regular pass prevents any sweep acquisition.
 
-    Given: Two permitted symbols and a publisher that stops after the first.
+    Given: Two permitted symbols and a publisher that stops during the first pause.
     When: One sweep runs.
-    Then: Only the first symbol is requested.
+    Then: No alphabetical request follows shutdown.
     """
     fixture = _Fixture()
     fixture.symbols = ["BTC-USD", "ETH-USD"]
@@ -1737,11 +1841,253 @@ async def test_sweep_stops_when_the_publisher_stops() -> None:
         fixture.running = False
 
     worker = fixture.worker(CatchupPolicy(sweep_spacing_seconds=0.001))
-    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop)):
+    with (
+        patch("asyncio.sleep", new=AsyncMock(side_effect=stop)),
+        patch.object(worker, "run_pass", new=AsyncMock()),
+    ):
         await worker.run_sweep()
-    assert [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list] == [
-        "BTC-USD"
-    ]
+    fixture.client.get_closed_1m_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["trades", "no_trades", "unavailable"])
+async def test_publisher_catchup_corrects_zero_only_with_trades_and_replays_quietly(
+    tmp_path: Path, evidence: str
+) -> None:
+    """Native acquisition and the identity-gated write respect the false-zero boundary.
+
+    Given: A durable synthesized zero and native trades, no trades or unavailable history.
+    When: Two actual catchup passes use the publisher reconciliation callback.
+    Then: Only trade evidence creates one correction and one repair, with no live event.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'catchup-zero.db'}")
+    await repository.create_all()
+    publisher = _publisher()
+    publisher.repository = repository
+    publisher._publish_message = AsyncMock()
+    fixture = _Fixture()
+    instrument = "00000000-0000-4000-8000-000000000501"
+    fixture.resolve.return_value = instrument
+    worker = KrakenCandleCatchup(
+        repository,
+        fixture.client,
+        CatchupCallbacks(
+            lambda: fixture.symbols,
+            fixture.resolve,
+            fixture.committed,
+            lambda: True,
+            publisher._tracker,
+            lambda: NOW,
+            publisher._insert_catchup_candle_rows,
+            publisher._correct_catchup_candle_rows,
+        ),
+    )
+    zero = worker._row(_candle(), instrument, NOW - timedelta(hours=1))
+    zero.update(
+        {
+            "source": "synthesized",
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 0.0,
+            "vwap": 10.0,
+            "trades": 0,
+        }
+    )
+    if evidence == "unavailable":
+        fixture.client.get_closed_1m_candles.side_effect = ConnectionError("unavailable")
+    elif evidence == "no_trades":
+        fixture.client.get_closed_1m_candles.return_value = [replace(_candle(), trades=0)]
+    try:
+        await repository.upsert_candles([zero])
+        await worker.run_pass()
+        await worker.run_pass()
+        async with repository.session() as session:
+            versions = (
+                (await session.execute(select(Candle).order_by(Candle.timestamp))).scalars().all()
+            )
+        assert versions[0].trades == 0 and versions[0].source == "synthesized"
+        assert len(versions) == (2 if evidence == "trades" else 1)
+        if evidence == "trades":
+            assert versions[0].known_to == versions[1].timestamp == NOW
+            assert versions[1].public_id == versions[0].public_id
+            assert versions[1].trades == 7 and versions[1].source == "native"
+        else:
+            assert versions[0].known_to == KNOWN_TO_MAX
+        assert fixture.committed.await_count == (1 if evidence == "trades" else 0)
+        publisher._publish_message.assert_not_awaited()
+        assert publisher._candle_write_queue.empty()
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_committed_insert_still_repairs_when_the_following_correction_fails() -> None:
+    """An acknowledged insert schedules repairs even if the chunk's correction step fails.
+
+    Given: A chunk whose absent minutes commit and whose correction then defers.
+    When: The symbol is reconciled.
+    Then: The deferral propagates, and the committed insert still schedules repairs.
+    """
+    fixture = _Fixture()
+    fixture.repository.insert_missing_candles.side_effect = lambda rows: list(rows)
+    fixture.repository.correct_false_zero_candles.side_effect = CatchupDeferredError(
+        "live writer outstanding=1"
+    )
+    with pytest.raises(CatchupDeferredError):
+        await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset({START}))
+
+
+@pytest.mark.asyncio
+async def test_default_reconciliation_inserts_before_correcting_and_repairs_a_correction() -> None:
+    """Without a publisher callback the worker still inserts first, then corrects.
+
+    Given: A repository that inserts nothing and corrects every row of the chunk.
+    When: One symbol is reconciled through the worker's own repository boundary.
+    Then: Insertion precedes correction and the correction alone schedules repairs.
+    """
+    fixture = _Fixture()
+    order: list[str] = []
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        order.append("insert")
+        return []
+
+    async def correct(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        order.append("correct")
+        return list(rows)
+
+    fixture.repository.insert_missing_candles.side_effect = insert
+    fixture.repository.correct_false_zero_candles.side_effect = correct
+    await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
+    assert order == ["insert", "correct"]
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset({START}))
+
+
+@pytest.mark.asyncio
+async def test_startup_priority_failure_retries_during_a_paced_large_sweep() -> None:
+    """A failed valuation pair is retried before the long alphabetical sweep completes.
+
+    Given: A large roster and the first EUR-USD acquisition failing.
+    When: The startup sweep runs with its paced regular passes.
+    Then: EUR-USD runs first and is retried by a regular pass during the sweep.
+    """
+    fixture = _Fixture()
+    fixture.symbols = [f"ALT{i:03}-USD" for i in range(45)] + ["EUR-USD", "BTC-USD", "ETH-USD"]
+    elapsed = 0.0
+    observations: list[tuple[str, float]] = []
+    pauses: list[float] = []
+    euro_attempts = 0
+
+    async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
+        nonlocal euro_attempts
+        observations.append((symbol, elapsed))
+        if symbol == "EUR-USD":
+            euro_attempts += 1
+            if euro_attempts == 1:
+                raise TimeoutError("native history temporarily unavailable")
+        return []
+
+    async def pause(seconds: float) -> None:
+        nonlocal elapsed
+        pauses.append(seconds)
+        elapsed += seconds
+        if fixture.client.get_closed_1m_candles.await_count >= len(fixture.symbols) + 9:
+            fixture.running = False
+
+    fixture.client.get_closed_1m_candles.side_effect = acquire
+    worker = fixture.worker()
+    with (
+        patch("asyncio.sleep", new=AsyncMock(side_effect=pause)),
+        patch(
+            "snapper.messaging.publishers.kraken_candle_catchup.monotonic",
+            side_effect=lambda: elapsed,
+        ),
+    ):
+        await worker.run_sweep()
+    visited = [symbol for symbol, _ in observations]
+    assert visited[:3] == ["EUR-USD", "BTC-USD", "ETH-USD"]
+    retry = next(i for i in range(1, len(visited)) if visited[i] == "EUR-USD")
+    assert retry < visited.index("ALT044-USD")
+    assert 60 <= observations[retry][1] <= 63
+    assert set(pauses) == {worker._policy.sweep_spacing_seconds}
+    assert len(visited) <= len(fixture.symbols) + 3 * (1 + int(elapsed // 60))
+
+
+@pytest.mark.asyncio
+async def test_sweep_survives_a_failed_pass_and_stops_during_an_interleaved_pass() -> None:
+    """A whole-pass failure cannot cancel the sweep or allow work after shutdown.
+
+    Given: One pass timeout and a later pass that stops the publisher.
+    When: A sweep reaches its next regular pass boundary.
+    Then: Alphabetical acquisition resumes after the failure and ends after shutdown.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["A", "B", "C"]
+    worker = fixture.worker()
+    calls = 0
+
+    async def bounded_pass() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("whole pass deadline")
+        fixture.running = False
+
+    with (
+        patch.object(worker, "run_pass", new=AsyncMock(side_effect=bounded_pass)),
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch(
+            "snapper.messaging.publishers.kraken_candle_catchup.monotonic",
+            side_effect=[0.0, 1.0, 61.0, 61.0],
+        ),
+    ):
+        await worker.run_sweep()
+    assert calls == 2
+    assert [call.args[0] for call in fixture.client.get_closed_1m_candles.await_args_list] == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_priority_restart_recovers_a_missed_minute_older_than_the_ordinary_window() -> None:
+    """Restarting does not discard a priority gap after the ordinary lookback expires.
+
+    Given: A failed valuation-pair request followed by a restart four hours later.
+    When: The new worker requests bounded native history.
+    Then: The old minute is recovered while ordinary pairs keep a two-hour bound.
+    """
+    fixture = _Fixture()
+    fixture.symbols = ["EUR-USD", "ALT-USD"]
+    fixture.client.get_closed_1m_candles.side_effect = ConnectionError("unavailable")
+    await fixture.worker().run_pass()
+    recovered: list[CandleUpsertRow] = []
+    restarted_at = NOW + timedelta(hours=4)
+    missed = _candle("EUR-USD")
+
+    async def acquire(symbol: str, start: datetime, end: datetime) -> list[CandleUpdate]:
+        if symbol == "EUR-USD" and start <= missed.interval_begin < end:
+            return [missed]
+        return []
+
+    async def commit(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        recovered.extend(rows)
+        return rows
+
+    fixture.client.get_closed_1m_candles.reset_mock()
+    fixture.client.get_closed_1m_candles.side_effect = acquire
+    fixture.repository.insert_missing_candles.side_effect = commit
+    restarted = fixture.worker()
+    restarted._callbacks = replace(restarted._callbacks, clock=lambda: restarted_at)
+    await restarted.run_pass()
+    assert [row["open_at"] for row in recovered] == [missed.interval_begin]
+    assert recovered[0]["timestamp"] == restarted_at
+    requested = fixture.client.get_closed_1m_candles.await_args_list
+    assert {
+        call.args[0]: (call.args[2] - call.args[1]).total_seconds() / 60 for call in requested
+    } == {
+        "EUR-USD": 719,
+        "ALT-USD": 120,
+    }
 
 
 @pytest.mark.asyncio
@@ -1823,7 +2169,12 @@ async def test_native_worker_chunks_commits_and_repairs_after_a_later_failure() 
 
     assert calls == [100, 100]
     assert len(fixture.repository.filter_missing_candles.await_args.args[0]) == 201
-    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
+    fixture.committed.assert_awaited_once_with(
+        "BTC-USD",
+        START,
+        NOW,
+        frozenset(candle.interval_begin for candle in candles[:100]),
+    )
 
 
 @pytest.mark.asyncio
@@ -1916,6 +2267,90 @@ async def test_native_catchup_explicitly_defers_until_live_writer_recovers(backl
 
 
 @pytest.mark.asyncio
+async def test_nothing_to_correct_skips_the_identity_gate_and_the_write() -> None:
+    """A chunk without a correctable zero never waits for the local gate.
+
+    Given: A preflight that finds no correctable zero while live identity holds the gate.
+    When: The publisher correction step runs.
+    Then: It returns at once, without a write call.
+    """
+    publisher, repository = _identity_publisher()
+    async with publisher._candle_identity_gate:
+        async with asyncio.timeout(1):
+            assert (
+                await publisher._correct_catchup_candle_rows([_native_identity_row(publisher)])
+                == []
+            )
+    repository.correct_false_zero_candles.assert_awaited_once()
+    assert repository.correct_false_zero_candles.await_args.kwargs == {"dry_run": True}
+
+
+@pytest.mark.asyncio
+async def test_correction_takes_the_gate_and_releases_the_corrected_identity() -> None:
+    """A correction keeps the zero's ID and settles a reservation that carried it.
+
+    Given: A correctable zero whose public ID is still a pending live reservation.
+    When: The publisher correction step runs.
+    Then: The repository corrects under the gate and the reservation is released.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+    publisher._pending_candle_identities[key] = "zero-id"
+    corrected = [row | {"public_id": "zero-id"}]
+
+    async def correct(
+        rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Report the zero in preflight and correct it only under the gate."""
+        if dry_run:
+            assert not publisher._candle_identity_gate.locked()
+            return list(rows)
+        assert publisher._candle_identity_gate.locked()
+        return corrected
+
+    repository.correct_false_zero_candles.side_effect = correct
+    assert await publisher._correct_catchup_candle_rows([row]) == corrected
+    assert key not in publisher._pending_candle_identities
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["before_gate", "inside_gate"])
+async def test_correction_defers_to_live_writes_before_and_inside_the_gate(phase: str) -> None:
+    """A correction yields to queued live writes, also when they appear while it waits.
+
+    Given: A correctable zero and a live write that is queued either before the
+        correction asks for the gate or while it waits for the gate.
+    When: The publisher correction step runs.
+    Then: It defers without a write call and leaves the gate free.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    preflight_done = asyncio.Event()
+
+    def correctable(rows: list[CandleUpsertRow], dry_run: bool = False) -> list[CandleUpsertRow]:
+        """Report the zero as correctable and tell the test the preflight returned."""
+        preflight_done.set()
+        return list(rows)
+
+    repository.correct_false_zero_candles.side_effect = correctable
+    if phase == "before_gate":
+        publisher._candle_write_queue.put_nowait(row)
+        with pytest.raises(CatchupDeferredError, match="live writer"):
+            await publisher._correct_catchup_candle_rows([row])
+    else:
+        async with publisher._candle_identity_gate:
+            task = asyncio.create_task(publisher._correct_catchup_candle_rows([row]))
+            await preflight_done.wait()
+            publisher._candle_write_queue.put_nowait(row)
+        with pytest.raises(CatchupDeferredError, match="live writer"):
+            await task
+    assert repository.correct_false_zero_candles.await_count == 1
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["pass", "sweep"])
 async def test_native_scheduler_records_live_deferral_without_repair_success(phase: str) -> None:
     """An admission hold remains an explicit retryable deferral in either scheduling phase.
@@ -1930,7 +2365,8 @@ async def test_native_scheduler_records_live_deferral_without_repair_success(pha
     worker._callbacks = replace(worker._callbacks, insert_missing=insert)
     with patch("snapper.messaging.publishers.kraken_candle_catchup.logger.info") as logged:
         if phase == "sweep":
-            await worker.run_sweep()
+            with patch.object(worker, "run_pass", new=AsyncMock()):
+                await worker.run_sweep()
         else:
             await worker.run_pass()
     insert.assert_awaited_once()
@@ -1955,7 +2391,8 @@ async def test_native_worker_acknowledges_all_bounded_chunks_once() -> None:
     await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
     batches = [call.args[0] for call in fixture.repository.insert_missing_candles.await_args_list]
     assert list(map(len, batches)) == [100, 100, 1]
-    assert [row["open_at"] for batch in batches for row in batch] == [
+    minutes = [
         candle.interval_begin for candle in fixture.client.get_closed_1m_candles.return_value
     ]
-    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW)
+    assert [row["open_at"] for batch in batches for row in batch] == minutes
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset(minutes))

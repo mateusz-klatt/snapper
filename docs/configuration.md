@@ -605,62 +605,96 @@ Use `/api/market/cache/health` and `/api/market/coverage` to verify the
 effective persisted universe.
 
 In Kraken Spot `trade_built` mode, a supervised history worker starts alongside
-the live consumers and reconciles the last 120 closed minutes for persisted,
-subscribed instruments. A publisher running as its own process receives no
+the live consumers and reconciles recent closed minutes for persisted, subscribed
+instruments: the last 719 minutes for priority symbols and the last 120 minutes
+for every other symbol. A publisher running as its own process receives no
 injected persistence policy; its live writes then persist every row, and the
-worker covers the whole subscribed roster to match. Each pass visits at most three symbols fairly, with a
-five-second attempt bound and a twenty-second pass bound. The typed
-`CatchupPolicy.priority_symbols` defaults to `BTC-USD`, `ETH-USD` and `EUR-USD`,
-restricted to the actual persisted subscription roster. Its first pass visits
-those three immediately. Later passes reserve two rotating priority slots and
-one independent fair slot, reusing spare capacity when either pool is small.
-The fair attempt comes first so an expired pass budget cannot repeatedly skip
-it; pool cursors advance only when a symbol actually begins work. Normal passes are
-spaced sixty seconds apart; reconnect notifications coalesce and retain at
-least five seconds of spacing. These are finite source policy bounds, not
-additional database settings.
+worker covers the whole subscribed roster to match. Each pass visits at most
+three symbols, with a five-second attempt bound and a twenty-second pass bound.
+The typed `CatchupPolicy.priority_symbols` defaults to `XRP-EUR`, `EUR-USD`,
+`BTC-EUR`, `BTC-USD` and `ETH-USD`, restricted to the actual persisted
+subscription roster. The list is fixed in code and does not follow the wallet's
+holdings. The first pass visits the first three priority symbols immediately. Later passes
+reserve two rotating priority slots and one independent fair slot, reusing spare
+capacity when either pool is small. The fair attempt comes first so an expired
+pass budget cannot repeatedly skip it; pool cursors advance only when a symbol
+actually begins work. Regular passes are spaced sixty seconds apart; reconnect
+notifications coalesce and retain at least five seconds of spacing. These are
+finite source policy bounds, not additional database settings.
 
-Fair passes alone do not cover a large wildcard roster: 1,500 nonpriority
-instruments need at least 1,500 passes, far beyond the 120-minute history
-window. The worker therefore starts with a sweep, and runs another after
+The 719-minute priority lookback (`CatchupPolicy.priority_history_minutes`) is
+the longest window that one native REST response returns. Minutes missed by a
+failed request or a restart can be recovered while they remain within that
+window, without a retry cursor or a backlog table. Older gaps stay outside
+automatic recovery.
+
+The fair slot of each regular pass cannot cover a large wildcard roster: 1,500
+nonpriority instruments need at least 1,500 passes, far beyond the 120-minute
+history window. The worker therefore starts with a sweep, and runs another after
 every reconnect notification. A sweep visits every persisted, subscribed
 symbol once, in name order, pausing three seconds
 (`CatchupPolicy.sweep_spacing_seconds`) after each attempt. Each symbol uses
-its own 120-minute window ending at the current closed minute. With 1,853
-spot symbols a sweep takes about 95 minutes, so minutes lost to a restart or
-reconnect are repaired for the whole roster while still inside the window.
-Each symbol commits in its own short transaction that shares the live writer's
-identity gate; a one-second pause measurably delayed live candles, so the
-pause trades sweep duration for live-write headroom. A
-reconnect during a sweep schedules a new sweep after it. Intervals older than
-the window remain unavailable and need separately reviewed recovery. Priority scheduling keeps the default dashboard pairs prompt without
-silently expanding the request budget or claiming all wildcard gaps healed.
+its own window ending at the latest closed minute. With 1,853 spot symbols a
+sweep takes about 95 minutes. It attempts to recover missing minutes across the
+whole roster while those minutes remain within each symbol's window. A sweep runs a
+regular pass before its first request and again whenever the sixty-second pass
+interval has elapsed, so the priority symbols, and a retry of a failed priority
+attempt, do not wait for the sweep to finish. All requests stay serial. Each
+symbol commits in short transactions that share the live writer's identity
+gate; a one-second pause measurably delayed live candles, so the pause trades
+sweep duration for live-write headroom. A reconnect during a sweep schedules a
+new sweep after it. Intervals older than the window remain unavailable and need
+separately reviewed recovery. Priority scheduling keeps the valuation pairs
+prompt without silently expanding the request budget or claiming all wildcard
+gaps healed.
 
 The worker reads the full native REST OHLC fields, including VWAP and trade
-count, and inserts only genuinely absent minute keys with `source = native`.
-Existing versions are preserved. Acquisition and write time remain current;
-the earlier minute is business time, so earlier `as_of` cuts still show the
-original absence. An unfinished venue entry, an unreturned minute, or history
-outside the bounded window stays unavailable. No historical carried-close
-bars or synthetic trade counts are introduced. The live builder resets its
-observation boundary on connection breaks and keeps refusing unproven leading
-minutes, including a late first event received after its minute elapsed.
+count, and inserts genuinely absent minute keys with `source = native`. It also
+corrects one kind of existing row. The live builder writes a flat synthesized
+bar with zero volume and zero trades for a minute it believed had no trades.
+When the native row for that minute reports trades and was acquired after the
+zero version became known, the zero is replaced. The zero is not corrected if
+any version of that minute has a source other than `synthesized`, a nonzero
+volume, a nonzero trade count or an unknown trade count; the current bar must
+also be flat. A native no-trade row or an unavailable minute leaves the zero
+unchanged. The correction ends the zero version's knowledge interval
+(`timestamp` to `known_to`) and inserts a native version under the same public
+ID. An `as_of` read within the zero version's interval still returns the zero;
+a read before any version became known still returns no row. Replaying
+unchanged data creates no new version. Acquisition and write times are not
+backdated to the candle's minute, which is its business time. An unfinished
+venue entry, an unreturned minute, or history outside the bounded window stays
+unavailable. No historical carried-close bars or synthetic trade counts are
+introduced. The live builder resets its observation boundary on connection
+breaks and keeps refusing unproven leading minutes, including a late first event
+received after its minute elapsed.
 
 Recovered history is not published as fresh live strategy input. A symbol's
-catchup schedules higher-timeframe repairs only when its missing-only insert
-commits at least one new minute; an empty insert schedules no repairs, while
-identity reservation retirement still runs. Repairs require every committed
-complete minute in their canonical window and await an owned guarded
-transaction's COMMIT acknowledgement before pending work clears. That
-transaction inserts an absent target or versions
+catchup schedules higher-timeframe repairs only when an insertion or a zero
+correction commits; a replay that changes nothing schedules no repairs, while
+identity reservation retirement still runs. Each repair requires a complete set
+of committed one-minute candles for the target candle's interval, and its
+pending work is cleared only after the repair transaction's commit is
+acknowledged. A complete window that holds a minute changed by catchup gets a
+new pending repair object, so an attempt that had already read the old minute
+cannot clear that request. Only windows whose minutes are all committed are
+queued. Known limitation: if catchup corrects a minute while the live
+aggregator is still building its window, or has sealed the window but not yet
+given its live output an author timestamp, that live output retains the zero's
+contribution. A later acknowledged catchup change for the same symbol can queue
+a historical repair once all source minutes for that window are committed; the
+stored synthesized candle is corrected only after that repair commits. The
+repair transaction inserts an absent target or versions
 an existing synthesized target; native and calculated targets remain unchanged,
 and unchanged synthesized business values do not acquire a new version.
 Whole-window reads expand to enclosing UTC days but remain
 bounded to 2,880 source rows per symbol. Historical-only repairs use the normal
 settle grace and require an exact full minute grid even before a new live
-aggregator frontier exists. After an uncertain insertion acknowledgement, a later
-bounded pass schedules repairs only if it inserts another missing minute.
-Older gaps and incorrect existing rows require a separate reviewed recovery.
+aggregator frontier exists. If an insertion or correction commits but its
+acknowledgement is lost, replaying unchanged data schedules no repair, so an
+affected higher-timeframe aggregate can remain stale until a later change
+causes that window to be repaired. Older gaps and other incorrect existing rows
+require a separate reviewed recovery.
 
 ### Publisher Micro-Batch
 

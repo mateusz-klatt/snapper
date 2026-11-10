@@ -16,6 +16,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -3176,14 +3177,24 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         counted_minutes: frozenset[datetime],
         *,
         historical_only: bool = False,
+        revised: bool = False,
     ) -> None:
-        """Add or refresh one source-gated seeded-incomplete repair key.
+        """Add or refresh one pending repair gated on its expected source minutes.
+
+        A pending repair is matched to its result by object identity. A revised
+        source minute leaves the set of minutes unchanged, so the refresh
+        stores a new pending object: an attempt that already read the old
+        minute then finishes against the old object and cannot clear the new
+        request, which runs again.
 
         Args:
             key: Synthesized candle natural key to repair.
             counted_minutes: Distinct complete 1m minutes folded live or from
                 the seed before the bucket was suppressed.
             historical_only: Persist repair output without live strategy publication.
+            revised: Whether a source minute in this window changed, requiring
+                a new pending object so an earlier attempt cannot clear the
+                refreshed request.
         """
         pending = self._pending_candle_repairs.get(key)
         if pending is not None:
@@ -3203,6 +3214,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     pending.expected_minute_count = len(merged_minutes)
                     pending.last_observed_minute_count = None
                     pending.attempts = 0
+            if revised:
+                self._forget_candle_repair_output(pending)
+                self._set_pending_candle_repair(
+                    key, replace(pending, attempts=0, last_observed_minute_count=None)
+                )
             self._candle_repair_event.set()
             return
         if len(self._pending_candle_repairs) >= _CANDLE_REPAIR_PENDING_MAX:

@@ -1891,6 +1891,13 @@ class DummyRepository(Repository):
         del rows, session
         return []
 
+    async def correct_false_zero_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Return no corrected rows for the dummy repository."""
+        del rows, dry_run
+        return []
+
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles - no-op returning 0."""
         return 0
@@ -3062,6 +3069,13 @@ class _MinimalRepository(Repository):
     ) -> list[CandleUpsertRow]:
         """Return no inserted rows for the minimal repository."""
         del rows, session
+        return []
+
+    async def correct_false_zero_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Return no corrected rows for the minimal repository."""
+        del rows, dry_run
         return []
 
     async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
