@@ -3803,6 +3803,31 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def correct_false_zero_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Replace flat synthesized zero minutes that native trade evidence disproves.
+
+        A current version is replaced only when it is a flat synthesized bar
+        with zero volume and zero trades; no version of that minute has a
+        source other than synthesized, a nonzero volume, a nonzero trade count
+        or an unknown trade count; and the native row for the same minute
+        reports trades and was acquired after the zero version became known.
+        The zero is closed and the native row is inserted under the same public
+        ID, so ``as_of`` reads for times when the zero was current still return
+        it. Batches contain at most 720 distinct native minutes; nothing is
+        published.
+
+        Args:
+            rows: Complete closed native minutes stamped at actual acquisition.
+            dry_run: Return the correctable rows without a writer fence or a write.
+
+        Returns:
+            Correctable rows in dry-run, otherwise corrected rows after commit.
+        """
+        ...
+
+    @abstractmethod
     async def insert_missing_native_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11535,6 +11560,103 @@ class SQLAlchemyRepository(Repository):
             await owned.commit()
             return inserted
 
+    async def correct_false_zero_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Recheck each correction candidate under the candle writer fence before replacing it.
+
+        The read-only preflight keeps replays without a correctable minute out
+        of the fence. A live or catchup writer can version a minute between the
+        preflight and the fence, so the owned transaction repeats the proof for
+        the preflight candidates before it closes any zero.
+
+        Args:
+            rows: At most 720 complete closed native one-minute candidates.
+            dry_run: Return correctable rows without acquiring a writer fence.
+
+        Returns:
+            Normalized correctable rows in dry-run, otherwise the corrected rows
+            after commit acknowledgement.
+        """
+        if not rows:
+            return []
+        normalized = self._validate_missing_candle_batch(rows)
+        async with self.session() as preflight:
+            targets = await self._false_zero_targets(preflight, normalized)
+        if dry_run or not targets:
+            return [row for row, _ in targets]
+        async with self.session() as owned:
+            await self._begin_candle_reconciliation_write(owned, sqlite_write_lock=True)
+            targets = await self._false_zero_targets(owned, [row for row, _ in targets])
+            for row, existing in targets:
+                await self._replace_synthesized_candle_version(owned, row, existing)
+            await owned.commit()
+            return [row for row, _ in targets]
+
+    @classmethod
+    async def _false_zero_targets(
+        cls, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[tuple[CandleUpsertRow, CandleVersionRow]]:
+        """Pair each native row with the current flat zero it disproves.
+
+        One indexed read loads the current synthesized zero versions. If a
+        native row disproves at least one zero, a second read excludes the
+        candidate minutes whose history holds a source other than synthesized,
+        a nonzero volume, a nonzero trade count or an unknown trade count.
+        """
+        keys = [cls._candle_natural_key(row) for row in rows]
+        natural_key = tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at)
+        result = await session.execute(
+            select(Candle.__table__).where(
+                natural_key.in_(keys),
+                Candle.known_to == KNOWN_TO_MAX,
+                Candle.source == "synthesized",
+                Candle.volume == 0,
+                Candle.trades == 0,
+            )
+        )
+        zeros: dict[_CandleNaturalKey, CandleVersionRow] = {}
+        for stored in result.mappings().all():
+            existing = cast(CandleVersionRow, dict(stored))
+            zeros[cls._candle_natural_key(existing)] = existing
+        targets = [
+            (row, zeros[key])
+            for row, key in zip(rows, keys, strict=True)
+            if key in zeros and cls._disproves_false_zero(zeros[key], row)
+        ]
+        if not targets:
+            return []
+        protected = await session.execute(
+            select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
+                natural_key.in_([cls._candle_natural_key(row) for row, _ in targets]),
+                or_(
+                    Candle.source != "synthesized",
+                    Candle.volume != 0,
+                    Candle.trades != 0,
+                    Candle.trades.is_(None),
+                ),
+            )
+        )
+        protected_keys = set(protected.all())
+        return [
+            (row, existing)
+            for row, existing in targets
+            if cls._candle_natural_key(row) not in protected_keys
+        ]
+
+    @staticmethod
+    def _disproves_false_zero(existing: CandleVersionRow, row: CandleUpsertRow) -> bool:
+        """Accept only a flat empty synthesized bar learned before native trade evidence."""
+        return (
+            existing["source"] == "synthesized"
+            and existing["volume"] == 0
+            and existing["trades"] == 0
+            and existing["open"] == existing["high"] == existing["low"] == existing["close"]
+            and existing["timestamp"] < row["timestamp"]
+            and row["trades"] is not None
+            and row["trades"] > 0
+        )
+
     async def insert_missing_native_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11903,6 +12025,14 @@ class SQLAlchemyRepository(Repository):
         )
         if all(before[field] == candidate[field] for field in business):
             return 0
+        await SQLAlchemyRepository._replace_synthesized_candle_version(session, row, existing)
+        return 1
+
+    @staticmethod
+    async def _replace_synthesized_candle_version(
+        session: AsyncSession, row: CandleUpsertRow, existing: CandleVersionRow
+    ) -> None:
+        """Close exactly the fenced synthesized version and insert its successor under its ID."""
         closed = await session.execute(
             update(Candle)
             .where(
@@ -11919,10 +12049,9 @@ class SQLAlchemyRepository(Repository):
             .returning(Candle.public_id)
         )
         if closed.scalar_one_or_none() is None:
-            raise RuntimeError("historical synthesis lost its exact source-owned version")
+            raise RuntimeError("candle replacement lost its exact source-owned version")
         row["public_id"] = existing["public_id"]
         await session.execute(insert(Candle).values(**row))
-        return 1
 
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None

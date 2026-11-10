@@ -1256,9 +1256,12 @@ earlier row in that group can create the version a later row must close.
 Lookup batches are chunked to stay below SQLite parameter limits.
 
 Native minute catchup validates the entire response before committing independent
-chunks of at most 100 rows. Read-only preflight checks every knowledge version
-before entering the publisher identity gate. A fully present replay with no pending
-publication identity takes neither the local gate nor the database writer fence.
+chunks of at most 100 rows. A read-only preflight checks all stored versions of
+each candidate minute before acquiring the publisher's local identity gate. The
+gate orders candle identity choices inside the publisher; the database writer
+fence orders concurrent candle writes. A replay with no absent minute, no
+correctable zero and no pending publication identity takes neither the local gate
+nor the database writer fence.
 Pending identities still require the existing writer-fenced canonical readback,
 including recovery after an unknown commit acknowledgement.
 
@@ -1271,6 +1274,23 @@ Catchup explicitly defers while live writes are queued, in flight or recovering,
 then retries on its bounded scheduler cadence. If an earlier chunk committed before
 a later failure or deferral, repair still reads the complete committed minute grid;
 partial input never proves a complete higher-timeframe candle.
+
+After the insertion, the same chunk can correct a false zero: a current flat
+synthesized minute with zero volume and zero trades whose native row reports
+trades and was acquired after the zero version became known, and whose history
+contains no version with a source other than `synthesized`, a nonzero volume, a
+nonzero trade count or an unknown trade count. The correction runs in its own
+owned transaction: it takes the same writer fence (`BEGIN IMMEDIATE` on SQLite),
+repeats the proof, closes the zero by its exact version and inserts the native
+row under the zero's public ID. An `as_of` read for a time when the zero was
+current still returns it. Scheduling repairs then creates a new pending repair
+object for each complete window containing a changed minute; an attempt
+associated with the previous object cannot clear the new request. Known
+limitation: if catchup corrects a minute while the live aggregator is still
+building its window, or has sealed it but not yet authored its live output,
+that output retains the zero's contribution. A later catchup change can queue a
+historical repair once all source minutes for that window are committed; the
+stored synthesized candle is corrected only after that repair commits.
 
 Append-only batch writes do NOT use the SCD2 close-insert pattern and
 split into two shapes:

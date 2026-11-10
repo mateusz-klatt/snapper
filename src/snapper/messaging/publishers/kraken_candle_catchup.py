@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from time import monotonic
 
 from loguru import logger
 
@@ -40,18 +41,20 @@ class CatchupPolicy:
     """Finite history, symbol, wall-time and scheduling budgets for one worker."""
 
     history_minutes: int = 120
+    priority_history_minutes: int = 719
     symbols_per_pass: int = 3
     attempt_seconds: float = 5.0
     pass_seconds: float = 20.0
     interval_seconds: float = 60.0
     minimum_spacing_seconds: float = 5.0
-    priority_symbols: tuple[str, ...] = ("BTC-USD", "ETH-USD", "EUR-USD")
+    priority_symbols: tuple[str, ...] = ("XRP-EUR", "EUR-USD", "BTC-EUR", "BTC-USD", "ETH-USD")
     sweep_spacing_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         """Reject policies that would remove a resource or pacing bound."""
         values = (
             self.history_minutes,
+            self.priority_history_minutes,
             self.symbols_per_pass,
             self.attempt_seconds,
             self.pass_seconds,
@@ -61,7 +64,10 @@ class CatchupPolicy:
         )
         if any(not math.isfinite(value) or value <= 0 for value in values):
             raise ValueError("Kraken catchup budgets must be positive and finite")
-        if self.history_minutes > 719 or self.minimum_spacing_seconds > self.interval_seconds:
+        if (
+            not self.history_minutes <= self.priority_history_minutes <= 719
+            or self.minimum_spacing_seconds > self.interval_seconds
+        ):
             raise ValueError("Kraken catchup exceeds its history or scheduling bound")
         if self.priority_symbols and self.symbols_per_pass < 2:
             raise ValueError("Kraken priority catchup must retain a fair symbol slot")
@@ -71,17 +77,18 @@ class CatchupPolicy:
 
 @dataclass(frozen=True)
 class CatchupCallbacks:
-    """Publisher boundaries with inserted rows gating committed repair scheduling."""
+    """Publisher callbacks for identity, persistence and repairs after acknowledged changes."""
 
     symbols: Callable[[], list[str]]
     resolve: Callable[[str], Awaitable[str | None]]
-    committed: Callable[[str, datetime, datetime], Awaitable[None]]
+    committed: Callable[[str, datetime, datetime, frozenset[datetime]], Awaitable[None]]
     active: Callable[[], bool]
     tracker: SequenceTracker
     clock: Callable[[], datetime] = _now
     insert_missing: Callable[[list[CandleUpsertRow]], Awaitable[list[CandleUpsertRow]]] | None = (
         None
     )
+    correct_zero: Callable[[list[CandleUpsertRow]], Awaitable[list[CandleUpsertRow]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -180,10 +187,11 @@ class KrakenCandleCatchup:
         callbacks: CatchupCallbacks,
         policy: CatchupPolicy = CatchupPolicy(),
     ) -> None:
-        """Bind existing routed transport and a committed missing-only repository.
+        """Bind the publisher's routed REST transport, candle repository, callbacks and policy.
 
         Args:
-            repository: Canonical candle store with atomic missing-only insertion.
+            repository: Canonical candle store that inserts absent minutes and
+                corrects disproved synthesized zeros.
             client: Existing publisher client owning routed public REST transport.
             callbacks: Publisher identity, provenance and repair boundaries.
             policy: Finite per-pass and scheduling budgets.
@@ -262,20 +270,31 @@ class KrakenCandleCatchup:
                 )
 
     async def run_sweep(self) -> None:
-        """Visit every permitted symbol once, paced, after startup or a feed break.
+        """Run a regular pass first and between paced steps of a full roster sweep.
 
-        A fair pass reaches only a few symbols per minute, so most symbols would
-        never be revisited inside the history window after a restart. The sweep
-        gives each symbol its own closed-minute horizon, so minutes lost while
-        the publisher was down or reconnecting are repaired for the whole roster
-        within one REST request per symbol. A request during the sweep schedules
-        another sweep, because symbols already visited missed that break.
+        Regular passes reach only a few symbols per minute, so most symbols of a
+        large roster would not be revisited within their history window after a
+        restart. The sweep makes one REST request per symbol, for that symbol's
+        window ending at the latest closed minute, and so attempts to recover
+        minutes missed while the publisher was down or reconnecting. A reconnect
+        notification during the sweep schedules another sweep, so symbols
+        already visited are checked again for that connection break.
+
+        A full sweep takes over an hour, so the priority symbols cannot wait
+        for it: a regular pass runs before the first sweep request and again
+        whenever the regular pass interval has elapsed, which also retries a
+        failed priority attempt. All requests remain serial.
         """
+        next_pass = await self._sweep_pass()
         for symbol in sorted(set(self._callbacks.symbols())):
             if not self._callbacks.active():
                 return
+            if monotonic() >= next_pass:
+                next_pass = await self._sweep_pass()
+                if not self._callbacks.active():
+                    return
             end = _floor(self._callbacks.clock(), 60)
-            start = end - timedelta(minutes=self._policy.history_minutes)
+            start = self._history_start(symbol, end)
             try:
                 async with asyncio.timeout(self._policy.attempt_seconds):
                     await self._reconcile_symbol(symbol, start, end)
@@ -291,6 +310,37 @@ class KrakenCandleCatchup:
                 )
             await asyncio.sleep(self._policy.sweep_spacing_seconds)
 
+    async def _sweep_pass(self) -> float:
+        """Run one regular pass inside a sweep and return the time the next one is due.
+
+        A failed pass is logged and the sweep continues; the pause afterwards
+        keeps the sweep's pacing for live writes.
+
+        Returns:
+            Monotonic time at which the sweep should run its next regular pass.
+        """
+        try:
+            await self.run_pass()
+        except Exception as error:
+            logger.warning("Kraken candle catchup pass unresolved: {}", _failure_label(error))
+        next_pass = monotonic() + self._policy.interval_seconds
+        await asyncio.sleep(self._policy.sweep_spacing_seconds)
+        return next_pass
+
+    def _history_start(self, symbol: str, end: datetime) -> datetime:
+        """Reach back further for priority symbols, still within one native response.
+
+        Args:
+            symbol: Canonical native symbol about to be reconciled.
+            end: Exclusive UTC end of the requested closed-minute window.
+
+        Returns:
+            Inclusive start of the requested history window.
+        """
+        if symbol in self._policy.priority_symbols:
+            return end - timedelta(minutes=self._policy.priority_history_minutes)
+        return end - timedelta(minutes=self._policy.history_minutes)
+
     async def run_pass(self) -> None:
         """Visit a bounded fair slice of persisted symbols without inline retries."""
         symbols = sorted(set(self._callbacks.symbols()))
@@ -298,7 +348,6 @@ class KrakenCandleCatchup:
             return
         selected = self._select_symbols(symbols)
         end = _floor(self._callbacks.clock(), 60)
-        start = end - timedelta(minutes=self._policy.history_minutes)
         async with asyncio.timeout(self._policy.pass_seconds):
             for symbol, priority in selected:
                 if not self._callbacks.active():
@@ -306,7 +355,7 @@ class KrakenCandleCatchup:
                 self._record_attempt(priority)
                 try:
                     async with asyncio.timeout(self._policy.attempt_seconds):
-                        await self._reconcile_symbol(symbol, start, end)
+                        await self._reconcile_symbol(symbol, self._history_start(symbol, end), end)
                 except CatchupDeferredError as error:
                     logger.info(
                         "Kraken candle catchup deferred: symbol={} reason={}", symbol, error
@@ -319,12 +368,20 @@ class KrakenCandleCatchup:
                     )
 
     async def _reconcile_symbol(self, symbol: str, start: datetime, end: datetime) -> None:
-        """Insert absent native keys and reconcile repairs only when new rows commit.
+        """Reconcile native minutes and schedule repairs only when a change commits.
+
+        The first repository call validates the whole response; if any row is
+        invalid, the symbol is refused before any chunk commits. Each chunk of
+        at most 100 rows then inserts its absent minutes and afterwards
+        corrects its disproved zeros, in two independent commits. Each commit
+        counts as soon as it is acknowledged, so repairs still follow when a
+        later step fails or defers; they receive every changed minute, so a
+        repair that already read a corrected minute's old version runs again.
 
         Args:
             symbol: Canonical native symbol selected by persistence policy.
-            start: Inclusive UTC business bound.
-            end: Exclusive closed-minute horizon.
+            start: Inclusive UTC start of the requested history window.
+            end: Exclusive UTC end of the requested closed-minute window.
 
         Raises:
             ValueError: When the persisted instrument has no canonical identity.
@@ -339,16 +396,18 @@ class KrakenCandleCatchup:
         author = self._callbacks.clock()
         rows = [self._row(candle, instrument, author) for candle in candles]
         await self._repository.filter_missing_candles(rows)
-        committed = False
+        changed: set[datetime] = set()
         insert = self._callbacks.insert_missing or self._repository.insert_missing_candles
+        correct = self._callbacks.correct_zero or self._repository.correct_false_zero_candles
         try:
             for offset in range(0, len(rows), 100):
-                inserted = await insert(rows[offset : offset + 100])
-                committed = committed or bool(inserted)
+                chunk = rows[offset : offset + 100]
+                changed.update(row["open_at"] for row in await insert(chunk))
+                changed.update(row["open_at"] for row in await correct(chunk))
                 await asyncio.sleep(0)
         finally:
-            if committed:
-                await self._callbacks.committed(symbol, start, end)
+            if changed:
+                await self._callbacks.committed(symbol, start, end, frozenset(changed))
 
     def _row(self, candle: CandleUpdate, instrument: str, author: datetime) -> CandleUpsertRow:
         """Preserve venue fields with actual knowledge time and producer provenance.
@@ -359,7 +418,7 @@ class KrakenCandleCatchup:
             author: Actual time the native response was learned.
 
         Returns:
-            A native complete row for atomic missing-only insertion.
+            A native complete row for insertion or a false-zero correction.
         """
         return {
             "instrument_public_id": instrument,

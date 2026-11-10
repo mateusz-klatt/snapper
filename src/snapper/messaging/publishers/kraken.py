@@ -541,6 +541,32 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             await self._retire_acknowledged_candle_identities(prepared)
             return inserted
 
+    async def _correct_catchup_candle_rows(
+        self, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Correct false zeros with the same live-writer checks and identity gate as inserts.
+
+        A correction keeps the zero's public ID, so it never chooses a new
+        identity. It still waits for the live writer and takes the local gate,
+        like a native insert; a read-only preflight skips both when the chunk
+        has nothing to correct.
+
+        Args:
+            rows: Full closed native observations acquired outside the local gate.
+
+        Returns:
+            Corrected rows after acknowledgement, empty when nothing was correctable.
+        """
+        repository = self._require_repository()
+        if not await repository.correct_false_zero_candles(rows, dry_run=True):
+            return []
+        self._defer_catchup_for_live_writes()
+        async with self._candle_identity_gate:
+            self._defer_catchup_for_live_writes()
+            corrected = await repository.correct_false_zero_candles(rows)
+            self._release_committed_candle_identities(corrected)
+            return corrected
+
     def _defer_catchup_for_live_writes(self) -> None:
         """Yield admission while live rows are queued, in flight or awaiting writer recovery.
 
@@ -637,13 +663,19 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             and has_kraken_candle_history_identity(symbol)
         )
 
-    async def _reconcile_catchup_repairs(self, symbol: str, start: datetime, end: datetime) -> None:
-        """Queue historical-only repairs proved by every committed source minute.
+    async def _reconcile_catchup_repairs(
+        self, symbol: str, start: datetime, end: datetime, changed: frozenset[datetime]
+    ) -> None:
+        """Queue historical-only repairs for windows with a complete set of committed minutes.
 
         Args:
             symbol: Canonical symbol whose bounded acquisition completed.
-            start: Inclusive business-time bound of the history reconciliation.
-            end: Exclusive closed-minute horizon of the history reconciliation.
+            start: Inclusive UTC start of the requested history window.
+            end: Exclusive UTC end of the requested closed-minute window.
+            changed: Minutes inserted or corrected by this reconciliation whose
+                commits were acknowledged. Each complete window containing one
+                of these minutes receives a new pending repair object that an
+                earlier attempt cannot clear.
         """
         if self._candle_aggregator is None:
             return
@@ -665,6 +697,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                 _CandleRepairKey(symbol, window.timeframe, window.begin),
                 window.minutes,
                 historical_only=True,
+                revised=not window.minutes.isdisjoint(changed),
             )
 
     async def _start_extra_background_tasks(
@@ -694,6 +727,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                     active=lambda: self.running,
                     tracker=self._tracker,
                     insert_missing=self._insert_catchup_candle_rows,
+                    correct_zero=self._correct_catchup_candle_rows,
                 ),
             )
             return [asyncio.create_task(self._candle_catchup.run())]
