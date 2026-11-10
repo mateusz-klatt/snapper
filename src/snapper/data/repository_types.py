@@ -2675,6 +2675,14 @@ class AccrualLedgerRow(TypedDict):
     sequence_id: int
 
 
+class AccrualRetirementScope(TypedDict):
+    """Wallet, instrument and mode whose current accrual versions retire together."""
+
+    wallet_public_id: str
+    instrument_public_id: str
+    mode: str
+
+
 class AccrualLedgerInsertRow(TypedDict):
     """Insert params for insert_accrual.
 
