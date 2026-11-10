@@ -114,7 +114,8 @@ def parse_closed_candles(payload: object, request: ClosedCandleRequest) -> list[
     bounded one-minute inclusive edge permits 720 closed rows plus that final
     unfinished row, as observed in frozen native captures.
     A window in which the product did not trade is answered with one all-zero
-    row at minute zero; it yields no candles.
+    row at minute zero, or with no rows at all for a tokenized product; either
+    yields no candles.
 
     Args:
         payload: Untrusted native REST response.
@@ -132,9 +133,9 @@ def parse_closed_candles(payload: object, request: ClosedCandleRequest) -> list[
     if not isinstance(result, dict) or set(result) != {request.pair, "last"}:
         raise ValueError("Kraken OHLC response identity differs from the requested product")
     rows = result[request.pair]
-    if not isinstance(rows, list) or not 1 <= len(rows) <= 721:
+    if not isinstance(rows, list) or len(rows) > 721:
         raise ValueError("Kraken OHLC response exceeds its bounded native contract")
-    if _is_untraded_window(rows):
+    if not rows or _is_untraded_window(rows):
         return []
     candles = [_candle(row, request.symbol) for row in rows]
     if any(

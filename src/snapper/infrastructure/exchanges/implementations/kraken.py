@@ -970,6 +970,33 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"Failed to get ticker for {symbol}: {e}")
             raise
 
+    def _closed_candle_pair(self, symbol: str) -> str:
+        """Resolve the REST pair name that closed candle history is requested by.
+
+        The generic client lists currency pairs only. Tokenized products are
+        absent from it and are named by their catalog REST alias instead.
+
+        Args:
+            symbol: Canonical native instrument.
+
+        Returns:
+            The native REST pair name, which is also the response key.
+
+        Raises:
+            ValueError: When neither catalog names the product or they disagree.
+        """
+        try:
+            canonical_symbol = native_to_ccxt(symbol)
+        except ValueError:
+            return native_to_kraken_rest(symbol)
+        market = self._ccxt_client.market(canonical_symbol)
+        if market.get("symbol") != canonical_symbol:
+            raise ValueError("Kraken OHLC market differs from the requested canonical symbol")
+        pair = market.get("id")
+        if not isinstance(pair, str) or not pair:
+            raise ValueError("Kraken OHLC product has no canonical REST identity")
+        return pair
+
     async def get_closed_1m_candles(
         self, symbol: str, start: datetime, end: datetime
     ) -> list[CandleUpdate]:
@@ -987,13 +1014,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             ValueError: When the request or native identity/fields disagree.
             Exception: Propagates the single routed acquisition failure.
         """
-        canonical_symbol = native_to_ccxt(symbol)
-        market = self._ccxt_client.market(canonical_symbol)
-        if market.get("symbol") != canonical_symbol:
-            raise ValueError("Kraken OHLC market differs from the requested canonical symbol")
-        pair = market.get("id")
-        if not isinstance(pair, str) or not pair:
-            raise ValueError("Kraken OHLC product has no canonical REST identity")
+        pair = self._closed_candle_pair(symbol)
         request = ClosedCandleRequest(symbol, pair, start, end, datetime.now(UTC))
         parameters: dict[str, str | int] = {
             "pair": pair,

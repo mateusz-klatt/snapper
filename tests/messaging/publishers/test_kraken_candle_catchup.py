@@ -1,6 +1,7 @@
 """Bounded startup/outage reconciliation preserves data and live-event boundaries."""
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -36,6 +37,7 @@ from snapper.messaging.publishers.kraken_candle_catchup import CatchupCallbacks
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupDeferredError
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupPolicy
 from snapper.messaging.publishers.kraken_candle_catchup import KrakenCandleCatchup
+from snapper.messaging.publishers.kraken_candle_catchup import _failure_label
 from snapper.messaging.publishers.kraken_candle_catchup import complete_repair_windows
 from snapper.messaging.publishers.kraken_candle_catchup import repair_read_start
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
@@ -501,6 +503,48 @@ def _publisher() -> KrakenMarketDataPublisher:
     settings.trade_built_finalize_grace_seconds = 12
     publisher.settings = settings
     return publisher
+
+
+@pytest.fixture(autouse=True)
+def _every_symbol_has_a_rest_name() -> Iterator[MagicMock]:
+    """Keep roster tests independent of the symbol catalog unless they override it."""
+    with patch(
+        "snapper.messaging.publishers.kraken.has_kraken_candle_history_identity",
+        return_value=True,
+    ) as identity:
+        yield identity
+
+
+def test_catchup_roster_leaves_out_products_without_a_rest_name() -> None:
+    """History cannot be requested for a product known only by its WebSocket alias.
+
+    Given: A roster where one product has no REST pair name, with and without a policy.
+    When: Catchup resolves its roster.
+    Then: That product is left out and the others remain.
+    """
+    publisher = _publisher()
+    named = "snapper.messaging.publishers.kraken.has_kraken_candle_history_identity"
+    with patch(named, side_effect=lambda symbol: symbol != "AAPLX-USD"):
+        assert publisher._catchup_symbols(["AAPLX-USD", "BTC-USD"]) == ["BTC-USD"]
+        policy = MagicMock()
+        policy.iter_persisted_instruments.return_value = [
+            (ExchangeEnum.KRAKEN, "AAPLX-USD"),
+            (ExchangeEnum.KRAKEN, "BTC-USD"),
+        ]
+        policy.should_persist.return_value = True
+        publisher.set_persist_policy(policy)
+        assert publisher._catchup_symbols(["*"]) == ["BTC-USD"]
+
+
+def test_failure_label_explains_validation_refusals_only() -> None:
+    """A validation refusal is logged with its reason; other failures by class alone.
+
+    Given: A validation refusal and a transport failure carrying remote text.
+    When: Each is named for the unresolved log line.
+    Then: Only the validation refusal includes its message.
+    """
+    assert _failure_label(ValueError("no REST identity")) == "ValueError: no REST identity"
+    assert _failure_label(TimeoutError("remote text")) == "TimeoutError"
 
 
 def test_catchup_roster_without_policy_matches_live_persistence() -> None:

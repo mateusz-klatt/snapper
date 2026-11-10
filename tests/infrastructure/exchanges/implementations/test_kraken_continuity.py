@@ -146,6 +146,73 @@ async def test_closed_history_rejects_unbound_catalog_identity_before_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_closed_history_names_a_tokenized_product_by_its_catalog_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A product the generic client does not list is requested by its REST alias.
+
+    Given: A tokenized product absent from the generic client but present in the catalog,
+    When: Native closed history is requested,
+    Then: The catalog REST alias and asset class are sent without a market lookup.
+    """
+    client = _client()
+    start = datetime(2026, 10, 28, 21, 18, tzinfo=UTC)
+    end = datetime(2026, 10, 28, 21, 30, tzinfo=UTC)
+    native_get = MagicMock(return_value={"error": [], "result": {"AAPLxUSD": [], "last": 0}})
+    market = MagicMock()
+    client._ccxt_client = SimpleNamespace(market=market, publicGetOHLC=native_get)
+
+    async def dispatch(
+        *,
+        operation: str,
+        kind: KrakenRestOperationKind,
+        target: RestProxyTarget,
+        sync_call: Callable[[], object],
+    ) -> object:
+        return sync_call()
+
+    client._dispatch_routed_rest = AsyncMock(side_effect=dispatch)
+    monkeypatch.setattr(kr, "native_to_ccxt", MagicMock(side_effect=ValueError("unknown")))
+    monkeypatch.setattr(kr, "native_to_kraken_rest", lambda symbol: "AAPLxUSD")
+    monkeypatch.setattr(kr, "native_to_kraken_asset_class", lambda symbol: "tokenized_asset")
+
+    assert await client.get_closed_1m_candles("AAPL", start, end) == []
+
+    market.assert_not_called()
+    native_get.assert_called_once_with(
+        {
+            "pair": "AAPLxUSD",
+            "interval": 1,
+            "since": int(start.timestamp()) - 60,
+            "asset_class": "tokenized_asset",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_history_refuses_a_product_without_any_rest_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A product known only by its WebSocket alias cannot be requested.
+
+    Given: Neither the generic client nor the catalog names the product over REST,
+    When: Native closed history is requested,
+    Then: The catalog refusal propagates before any routed network dispatch.
+    """
+    client = _client()
+    client._ccxt_client = SimpleNamespace(market=MagicMock())
+    client._dispatch_routed_rest = AsyncMock()
+    monkeypatch.setattr(kr, "native_to_ccxt", MagicMock(side_effect=ValueError("unknown")))
+    monkeypatch.setattr(
+        kr, "native_to_kraken_rest", MagicMock(side_effect=ValueError("Unknown native symbol"))
+    )
+    start = datetime(2026, 10, 28, 21, 18, tzinfo=UTC)
+    with pytest.raises(ValueError, match="Unknown native symbol"):
+        await client.get_closed_1m_candles("AAPLX-USD", start, start + timedelta(minutes=1))
+    client._dispatch_routed_rest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_closed_history_propagates_one_acquisition_failure_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

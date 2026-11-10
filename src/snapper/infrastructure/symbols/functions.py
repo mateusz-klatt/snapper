@@ -186,6 +186,23 @@ def native_to_kraken_rest(native_symbol: str) -> str:
         raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
 
 
+def has_kraken_candle_history_identity(native_symbol: str) -> bool:
+    """Tell whether closed candle history can name the product over Kraken REST.
+
+    Closed history is requested by the market identity of the generic client
+    or, for products that client does not list, by the catalog REST alias. A
+    product known solely by its WebSocket alias has neither.
+
+    Args:
+        native_symbol: Native identity of a Kraken Spot product.
+
+    Returns:
+        True when a REST pair name can be resolved for the product.
+    """
+    mapper = _get_db_mapper()
+    return native_symbol in mapper.native_to_ccxt or native_symbol in mapper.native_to_kraken_rest
+
+
 def native_to_kraken_asset_class(native_symbol: str) -> str:
     """Return the active Kraken Spot catalog's order asset class.
 
