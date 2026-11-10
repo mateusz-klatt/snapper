@@ -106,6 +106,23 @@ def _floor(value: datetime, seconds: int) -> datetime:
     return datetime.fromtimestamp(int(value.timestamp()) // seconds * seconds, UTC)
 
 
+def _failure_label(error: Exception) -> str:
+    """Name a failed attempt, adding the reason only for a validation refusal.
+
+    Validation refusals carry fixed wording about the product or its response.
+    Other failures are named by class alone, because transport errors can quote
+    arbitrary remote content.
+
+    Args:
+        error: The failure that left a symbol or pass unresolved.
+
+    Returns:
+        The exception class, followed by its message for a ValueError.
+    """
+    name = type(error).__name__
+    return f"{name}: {error}" if isinstance(error, ValueError) else name
+
+
 def repair_read_start(start: datetime, timeframes: list[str]) -> datetime:
     """Include full enclosing windows when reconciling committed minute inputs.
 
@@ -236,7 +253,7 @@ class KrakenCandleCatchup:
             try:
                 await (self.run_sweep() if sweep else self.run_pass())
             except Exception as error:
-                logger.warning("Kraken candle catchup pass unresolved: {}", type(error).__name__)
+                logger.warning("Kraken candle catchup pass unresolved: {}", _failure_label(error))
             await asyncio.sleep(self._policy.minimum_spacing_seconds)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
@@ -270,7 +287,7 @@ class KrakenCandleCatchup:
                 logger.warning(
                     "Kraken candle catchup sweep unresolved: symbol={} error={}",
                     symbol,
-                    type(error).__name__,
+                    _failure_label(error),
                 )
             await asyncio.sleep(self._policy.sweep_spacing_seconds)
 
@@ -298,7 +315,7 @@ class KrakenCandleCatchup:
                     logger.warning(
                         "Kraken candle catchup symbol unresolved: symbol={} error={}",
                         symbol,
-                        type(error).__name__,
+                        _failure_label(error),
                     )
 
     async def _reconcile_symbol(self, symbol: str, start: datetime, end: datetime) -> None:

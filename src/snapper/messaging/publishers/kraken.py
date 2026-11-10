@@ -63,6 +63,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_res
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
+from snapper.infrastructure.symbols.functions import has_kraken_candle_history_identity
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import _WRITER_RECONNECT_INITIAL_BACKOFF_S
@@ -613,12 +614,14 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         Returns:
             Canonical persisted Spot symbols. Without an injected policy, as in
             every subprocess-mode publisher, live writes persist every row, so
-            catchup covers the whole subscribed roster too.
+            catchup covers the whole subscribed roster too. Products without a
+            REST pair name are left out, because history cannot be requested
+            for them.
         """
         policy = self._persist_policy
         if policy is None:
             roster = get_available_kraken_symbols() if "*" in subscribed else subscribed
-            return sorted(set(roster))
+            return sorted(filter(has_kraken_candle_history_identity, set(roster)))
         selected = {
             symbol
             for exchange, symbol in policy.iter_persisted_instruments("candles")
@@ -631,6 +634,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             for symbol in selected
             if ("*" in subscribed or symbol in subscribed)
             and policy.should_persist(ExchangeEnum.KRAKEN, "candles", symbol)
+            and has_kraken_candle_history_identity(symbol)
         )
 
     async def _reconcile_catchup_repairs(self, symbol: str, start: datetime, end: datetime) -> None:

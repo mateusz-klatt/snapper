@@ -231,11 +231,11 @@ def test_malformed_or_mismatched_envelopes_fail_closed(payload: object) -> None:
         parse_closed_candles(payload, _request())
 
 
-@pytest.mark.parametrize("rows", [None, {}, [], [None] * 722])
+@pytest.mark.parametrize("rows", [None, {}, [None] * 722])
 def test_native_row_count_remains_bounded(rows: object) -> None:
     """Require the unfinished edge and enforce the verified wire-row bound.
 
-    Given: Native rows are absent, malformed or exceed 721 entries,
+    Given: Native rows are malformed or exceed 721 entries,
     When: The native history envelope is parsed,
     Then: The response is rejected before any row can be used.
     """
@@ -348,3 +348,13 @@ def test_finite_native_json_numbers_are_preserved() -> None:
     assert candles[0].vwap == 101.25
     assert candles[0].volume == 0.0
     assert candles[0].trades == 7
+
+
+def test_window_answered_with_no_rows_yields_no_candles() -> None:
+    """A tokenized product that did not trade is answered with an empty row list.
+
+    Given: A valid envelope whose product key holds no rows at all,
+    When: The native history envelope is parsed,
+    Then: No candles are returned and nothing is rejected.
+    """
+    assert parse_closed_candles(_payload([]), _request()) == []
