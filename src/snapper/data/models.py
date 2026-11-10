@@ -4405,6 +4405,11 @@ class ExecutionPlanCheckpoint(TemporalMixin, Base):
     Plan params change rarely, but evaluator state (trailing peak, current
     quote, next wake time) changes on every tick. Separating high-churn state
     avoids SCD2 row explosion on the main plan table.
+
+    Every reader wants the version of one plan that is still open at a given
+    instant. ``ix_epc_plan_known_to`` narrows that lookup to the open versions:
+    closed versions sort below the instant and are never visited, however long
+    the plan's history has grown.
     """
 
     __tablename__ = "execution_plan_checkpoints"
@@ -4412,6 +4417,11 @@ class ExecutionPlanCheckpoint(TemporalMixin, Base):
         Index(
             "ix_epc_plan_public_id",
             "plan_public_id",
+        ),
+        Index(
+            "ix_epc_plan_known_to",
+            "plan_public_id",
+            "known_to",
         ),
         Index(
             "ix_epc_public_id",
