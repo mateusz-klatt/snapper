@@ -78,6 +78,34 @@ def _candle(row: object, symbol: str) -> CandleUpdate:
     )
 
 
+def _is_untraded_window(rows: list[object]) -> bool:
+    """Recognize the venue's answer for a window in which the product did not trade.
+
+    Kraken answers a ``since`` request for such a window with exactly one row
+    whose minute is zero and whose prices, VWAP, volume and trade count are all
+    zero. The row names no minute, so it is an empty result rather than a
+    malformed candle. The unfiltered history can still hold flat bars for the
+    same minutes; this acquisition does not fetch them.
+
+    Args:
+        rows: Native rows of the requested product, already bounded in count.
+
+    Returns:
+        True when the response is that single all-zero row.
+
+    Raises:
+        ValueError: When a lone row at minute zero carries a non-numeric field.
+    """
+    if len(rows) != 1:
+        return False
+    row = rows[0]
+    if not isinstance(row, list) or len(row) != 8:
+        return False
+    if type(row[0]) is not int or row[0] != 0 or type(row[7]) is not int or row[7] != 0:
+        return False
+    return all(_number(value) == 0 for value in row[1:7])
+
+
 def parse_closed_candles(payload: object, request: ClosedCandleRequest) -> list[CandleUpdate]:
     """Return bounded closed candles with exact response identity and native fields.
 
@@ -85,6 +113,8 @@ def parse_closed_candles(payload: object, request: ClosedCandleRequest) -> list[
     reported business timestamp would otherwise pass the frozen bound. The
     bounded one-minute inclusive edge permits 720 closed rows plus that final
     unfinished row, as observed in frozen native captures.
+    A window in which the product did not trade is answered with one all-zero
+    row at minute zero; it yields no candles.
 
     Args:
         payload: Untrusted native REST response.
@@ -104,6 +134,8 @@ def parse_closed_candles(payload: object, request: ClosedCandleRequest) -> list[
     rows = result[request.pair]
     if not isinstance(rows, list) or not 1 <= len(rows) <= 721:
         raise ValueError("Kraken OHLC response exceeds its bounded native contract")
+    if _is_untraded_window(rows):
+        return []
     candles = [_candle(row, request.symbol) for row in rows]
     if any(
         left.interval_begin >= right.interval_begin
