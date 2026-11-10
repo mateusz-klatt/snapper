@@ -31,6 +31,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -41,6 +42,7 @@ from typing import cast
 from uuid import uuid7
 
 from loguru import logger
+from sqlalchemy.exc import DBAPIError
 
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
@@ -69,6 +71,7 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import _WRITER_RECONNECT_INITIAL_BACKOFF_S
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _CandleRepairKey
+from snapper.messaging.publishers.base import _database_sqlstate
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupCallbacks
 from snapper.messaging.publishers.kraken_candle_catchup import CatchupDeferredError
@@ -536,7 +539,9 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         async with self._candle_identity_gate:
             self._defer_catchup_for_live_writes()
             prepared = self._bind_pending_candle_identities(rows)
-            inserted = await self._require_repository().insert_missing_candles(prepared)
+            inserted = await self._defer_on_candle_fence_timeout(
+                self._require_repository().insert_missing_candles(prepared)
+            )
             self._release_committed_candle_identities(inserted)
             await self._retire_acknowledged_candle_identities(prepared)
             return inserted
@@ -563,9 +568,40 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._defer_catchup_for_live_writes()
         async with self._candle_identity_gate:
             self._defer_catchup_for_live_writes()
-            corrected = await repository.correct_false_zero_candles(rows)
+            corrected = await self._defer_on_candle_fence_timeout(
+                repository.correct_false_zero_candles(rows)
+            )
             self._release_committed_candle_identities(corrected)
             return corrected
+
+    @staticmethod
+    async def _defer_on_candle_fence_timeout(
+        write: Awaitable[list[CandleUpsertRow]],
+    ) -> list[CandleUpsertRow]:
+        """Report a catchup write that hit a lock timeout as a deferral.
+
+        Each wrapped write runs in one owned transaction. A lock timeout
+        (SQLSTATE 55P03) anywhere in it, usually on the candle writer fence,
+        rolls the whole transaction back, so nothing committed: the attempt
+        yielded to a concurrent writer, like an admission deferral. Only the
+        write itself is wrapped; a lock timeout in a later step, after a
+        commit, stays the error it is.
+
+        Args:
+            write: The pending repository insert or correction.
+
+        Returns:
+            The rows the write committed.
+
+        Raises:
+            CatchupDeferredError: When the write's transaction hit a lock timeout.
+        """
+        try:
+            return await write
+        except DBAPIError as error:
+            if _database_sqlstate(error) != "55P03":
+                raise
+            raise CatchupDeferredError("candle writer fence busy: lock timeout") from error
 
     def _defer_catchup_for_live_writes(self) -> None:
         """Yield admission while live rows are queued, in flight or awaiting writer recovery.
