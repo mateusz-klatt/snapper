@@ -32,10 +32,13 @@ mark-incomplete valuation without tainting mark-independent cumulatives.
 API reads set :attr:`PnlSeriesReadPolicy.carry_valuation`, the operator's 2026-11-09
 decision that availability outranks minute-exact proof. A minute with no exact
 evidence then uses the latest earlier close on the same plane or series inside a
-bound, and the point discloses that input and its age. Exact evidence always wins,
-contradictory exact evidence stays withheld, and no candle is written. Plane
-election still counts only exact-consuming minutes, so a carried minute can never
-change which plane an exact minute uses. The snapshotter and anchor derivation stay
+bound, and the point discloses that input and its age. Exact evidence always wins:
+a conflicted or invalid exact FX rate stays withheld, an invalid exact candle is not
+replaced by an older one, and no candle is written. Two disagreeing rows for one
+exact mark minute still resolve to the last row, as they did before carry; only a
+carried source requires its rows to agree. Plane election still counts only
+exact-consuming minutes, so a carried minute can never change which plane an exact
+minute uses. The snapshotter and anchor derivation stay
 exact-only, which keeps persisted samples and the activation anchor on their
 existing contracts.
 
@@ -3198,8 +3201,8 @@ async def _load_mark_predecessors(
 async def _plan_mark_carry(repo: Repository, request: _MarkCarryRequest) -> _MarkCarryPlan:
     """Choose earlier closes for held minutes without a bar of their own.
 
-    One read per instrument at most: the demand after the first minute is served
-    by closes already inside the chart window.
+    At most one search per instrument, of up to three widening reads: the demand
+    after the first minute is served by closes already inside the chart window.
 
     Args:
         repo: Repository providing the unchanged timeline candle read.
@@ -3960,6 +3963,38 @@ class _SeriesFxEvidence:
     used_planes: set[tuple[FxPairKey, PnlFxRatePlane]]
 
 
+@dataclass(frozen=True, slots=True)
+class _FxMinuteSets:
+    """One request's FX minutes, viewed for the different jobs they do.
+
+    Attributes:
+        exact: Minutes consumed by an exact mark or an event, by instrument and pair.
+        consumers: Who must receive a plane, which also includes carried marks.
+        voters: Minutes that decide between planes; a carried mark votes only on
+            a pair nobody consumes exactly.
+        mark_reads: Mark minutes per pair that bound discovery and candle loading.
+    """
+
+    exact: _FxInstrumentRequirements
+    consumers: _FxInstrumentRequirements
+    voters: _FxInstrumentRequirements
+    mark_reads: _FxMinuteRequirements
+
+
+def _fx_minute_sets(request: _FxRequest) -> _FxMinuteSets:
+    """Derive every view of a request's FX minutes that an election needs."""
+    carried = request.carried_mark_requirements
+    exact = _merge_instrument_fx_minutes(request.mark_requirements, request.event_requirements)
+    return _FxMinuteSets(
+        exact=exact,
+        consumers=_merge_instrument_fx_minutes(exact, carried),
+        voters=_election_fx_minutes(exact, carried),
+        mark_reads=_collapse_fx_minutes(
+            _merge_instrument_fx_minutes(request.mark_requirements, carried)
+        ),
+    )
+
+
 def _election_fx_minutes(
     exact: Mapping[str, _FxMinuteRequirements],
     carried: Mapping[str, _FxMinuteRequirements],
@@ -4047,31 +4082,20 @@ async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection
     Returns:
         Exact rates, per-instrument selections and the evidence behind them.
     """
-    mark_requirements = request.mark_requirements
     event_requirements = request.event_requirements
     identity_planes = request.identity_planes
     as_of = request.as_of
     valuation_ccy = request.valuation_ccy
-    instrument_requirements = _merge_instrument_fx_minutes(
-        mark_requirements,
-        event_requirements,
-    )
-    consumer_requirements = _merge_instrument_fx_minutes(
-        instrument_requirements,
-        request.carried_mark_requirements,
-    )
-    mark_pair_requirements = _collapse_fx_minutes(
-        _merge_instrument_fx_minutes(mark_requirements, request.carried_mark_requirements)
-    )
+    minute_sets = _fx_minute_sets(request)
+    instrument_requirements = minute_sets.exact
+    consumer_requirements = minute_sets.consumers
+    mark_pair_requirements = minute_sets.mark_reads
     event_pair_requirements = _collapse_fx_minutes(event_requirements)
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
         return _FxElection({}, {}, set(), [], {}, {})
     event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
-    general_requirements = _general_fx_minutes(
-        _election_fx_minutes(instrument_requirements, request.carried_mark_requirements),
-        identity_planes,
-    )
+    general_requirements = _general_fx_minutes(minute_sets.voters, identity_planes)
     general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
