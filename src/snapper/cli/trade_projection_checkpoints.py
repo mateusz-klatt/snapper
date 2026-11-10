@@ -4,58 +4,15 @@ import asyncio
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
-from typing import NoReturn
-from typing import cast
 
 import typer
-from sqlalchemy.engine import make_url
 
+from snapper.cli.operator_support import configured_repository
+from snapper.cli.operator_support import database_identity
+from snapper.cli.operator_support import refuse
 from snapper.config.settings import get_bootstrap_settings
-from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import dispose_repositories
-from snapper.data.repository import get_repository
 from snapper.data.repository_types import TradeProjectionCheckpointRow
-
-
-def _fatal(message: str) -> NoReturn:
-    """Print a refusal and terminate the command.
-
-    Args:
-        message: Refusal shown to the operator.
-
-    Raises:
-        typer.Exit: Always, with a non-zero status.
-    """
-    typer.echo(message, err=True)
-    raise typer.Exit(code=1)
-
-
-def _database_identity(db_url: str) -> str:
-    """Render a credential-free database identity.
-
-    Args:
-        db_url: Configured SQLAlchemy database URL.
-
-    Returns:
-        Dialect, host and database without user, password, port or query.
-    """
-    url = make_url(db_url)
-    return (
-        f"dialect={url.get_backend_name()} "
-        f"host={url.host or '(local)'} database={url.database or '(none)'}"
-    )
-
-
-def _repository(db_url: str) -> SQLAlchemyRepository:
-    """Resolve the configured repository.
-
-    Args:
-        db_url: Configured SQLAlchemy database URL.
-
-    Returns:
-        Cached repository for the target database.
-    """
-    return cast(SQLAlchemyRepository, get_repository(db_url))
 
 
 def _echo_candidates(candidates: list[TradeProjectionCheckpointRow]) -> None:
@@ -81,7 +38,7 @@ async def _run_retirement(db_url: str, shard_key: str | None, confirm: bool) -> 
         shard_key: Exact shard selection, or None for all active checkpoints.
         confirm: Whether the separately supplied confirmation flag was present.
     """
-    repository = _repository(db_url)
+    repository = configured_repository(db_url)
     try:
         candidates = await repository.get_trade_projection_checkpoint_retirement_candidates(
             shard_key, datetime.now(UTC)
@@ -98,10 +55,10 @@ async def _run_retirement(db_url: str, shard_key: str | None, confirm: bool) -> 
             shard_key, expected, datetime.now(UTC)
         )
         if closed != len(candidates):
-            _fatal(f"close count mismatch: previewed={len(candidates)} closed={closed}")
+            refuse(f"close count mismatch: previewed={len(candidates)} closed={closed}")
         typer.echo(f"closed {closed} checkpoint rows")
     except ValueError as error:
-        _fatal(f"refused: {error}")
+        refuse(f"refused: {error}")
     finally:
         await dispose_repositories()
 
@@ -134,7 +91,7 @@ def retire_trade_projection_checkpoints(
         confirm: Separately acknowledge closing the previewed versions.
     """
     if (shard_key is None) == (not all_checkpoints):
-        _fatal("refused: supply exactly one of --shard-key or --all")
+        refuse("refused: supply exactly one of --shard-key or --all")
     db_url = get_bootstrap_settings().db_url
-    typer.echo(f"target database: {_database_identity(db_url)}")
+    typer.echo(f"target database: {database_identity(db_url)}")
     asyncio.run(_run_retirement(db_url, shard_key, confirm))

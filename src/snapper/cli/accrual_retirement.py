@@ -19,17 +19,16 @@ from decimal import Decimal
 from decimal import InvalidOperation
 from typing import Annotated
 from typing import Final
-from typing import NoReturn
-from typing import cast
 from uuid import UUID
 
 import typer
-from sqlalchemy.engine import make_url
 
+from snapper.cli.operator_support import configured_repository
+from snapper.cli.operator_support import database_identity
+from snapper.cli.operator_support import refuse
 from snapper.config.settings import get_bootstrap_settings
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import dispose_repositories
-from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AccrualRetirementScope
 
@@ -63,47 +62,6 @@ class _Retirement:
     confirm: bool
 
 
-def _fatal(message: str) -> NoReturn:
-    """Print a refusal and terminate the command.
-
-    Args:
-        message: Refusal shown to the operator.
-
-    Raises:
-        typer.Exit: Always, with a non-zero status.
-    """
-    typer.echo(message, err=True)
-    raise typer.Exit(code=1)
-
-
-def _database_identity(db_url: str) -> str:
-    """Render a credential-free database identity.
-
-    Args:
-        db_url: Configured SQLAlchemy database URL.
-
-    Returns:
-        Dialect, host and database without user, password, port or query.
-    """
-    url = make_url(db_url)
-    return (
-        f"dialect={url.get_backend_name()} "
-        f"host={url.host or '(local)'} database={url.database or '(none)'}"
-    )
-
-
-def _repository(db_url: str) -> SQLAlchemyRepository:
-    """Resolve the configured repository.
-
-    Args:
-        db_url: Configured SQLAlchemy database URL.
-
-    Returns:
-        Cached repository for the target database.
-    """
-    return cast(SQLAlchemyRepository, get_repository(db_url))
-
-
 def _canonical_id(option: str, value: str) -> str:
     """Return the canonical spelling of one public id.
 
@@ -117,7 +75,7 @@ def _canonical_id(option: str, value: str) -> str:
     try:
         return str(UUID(value))
     except ValueError:
-        _fatal(f"refused: {option} is not a public id: {value!r}")
+        refuse(f"refused: {option} is not a public id: {value!r}")
 
 
 def _asserted_ids(values: Sequence[str]) -> tuple[str, ...]:
@@ -131,7 +89,7 @@ def _asserted_ids(values: Sequence[str]) -> tuple[str, ...]:
     """
     canonical = tuple(_canonical_id("--accrual", value) for value in values)
     if len(set(canonical)) != len(canonical):
-        _fatal("refused: an --accrual id is repeated")
+        refuse("refused: an --accrual id is repeated")
     return canonical
 
 
@@ -148,13 +106,13 @@ def _expected_total(text: str | None) -> tuple[Decimal, str] | None:
         return None
     parts = text.split()
     if len(parts) != 2:
-        _fatal('refused: --expect-total takes an amount and an asset, for example "0.0031 EUR"')
+        refuse('refused: --expect-total takes an amount and an asset, for example "0.0031 EUR"')
     try:
         amount = Decimal(parts[0])
     except InvalidOperation:
         amount = Decimal("NaN")
     if not amount.is_finite():
-        _fatal(f"refused: --expect-total amount is not a finite decimal: {parts[0]!r}")
+        refuse(f"refused: --expect-total amount is not a finite decimal: {parts[0]!r}")
     return amount, parts[1]
 
 
@@ -203,7 +161,7 @@ def _refuse_foreign_rows(rows: Sequence[AccrualLedgerRow]) -> None:
         if (row["exchange"], row["accrual_type"]) != (CONTAINED_EXCHANGE, _CONTAINED_ACCRUAL_TYPE)
     ]
     if foreign:
-        _fatal(
+        refuse(
             f"refused: rows are not {CONTAINED_EXCHANGE} {_CONTAINED_ACCRUAL_TYPE} accruals: "
             f"{foreign}"
         )
@@ -220,7 +178,7 @@ def _refuse_set_difference(rows: Sequence[AccrualLedgerRow], asserted: tuple[str
     unasserted = sorted(current - set(asserted))
     not_current = sorted(set(asserted) - current)
     if unasserted or not_current:
-        _fatal(
+        refuse(
             "refused: asserted set differs from the current rows; "
             f"current but not asserted={unasserted} asserted but not current={not_current}"
         )
@@ -240,7 +198,7 @@ def _refuse_total_difference(
     amount, asset = expected
     assets = sorted({row["amount_asset"] for row in rows})
     if assets != [asset] or _total(rows) != amount:
-        _fatal(
+        refuse(
             f"refused: --expect-total {amount} {asset} differs from the rows: "
             f"total={_total(rows)} assets={assets}"
         )
@@ -263,7 +221,7 @@ async def _close(
         closed = await repository.retire_accruals(request.scope, rows, retired_at)
     except ValueError as error:
         typer.echo(f"detail: {error}", err=True)
-        _fatal("refused: rows changed concurrently, nothing was written")
+        refuse("refused: rows changed concurrently, nothing was written")
     typer.echo(f"closed {closed} accrual version(s) at {retired_at.isoformat()}")
     receipt: dict[str, str | int | list[str]] = {
         "wallet_public_id": request.scope["wallet_public_id"],
@@ -287,14 +245,14 @@ async def _run(db_url: str, request: _Retirement) -> None:
         db_url: Configured database URL.
         request: Validated operator request.
     """
-    repository = _repository(db_url)
+    repository = configured_repository(db_url)
     try:
         spec = await repository.get_instrument_spec(
             request.scope["instrument_public_id"], datetime.now(UTC)
         )
         funding_type = None if spec is None else spec["funding_type"]
         if funding_type != CONTAINED_FUNDING_TYPE:
-            _fatal(
+            refuse(
                 f"refused: instrument funding type is {funding_type!r}; only "
                 f"{CONTAINED_FUNDING_TYPE} accruals of {CONTAINED_MODE} {CONTAINED_EXCHANGE} "
                 "are retired here"
@@ -362,5 +320,5 @@ def retire_accruals(
         confirm=confirm,
     )
     db_url = get_bootstrap_settings().db_url
-    typer.echo(f"target database: {_database_identity(db_url)}")
+    typer.echo(f"target database: {database_identity(db_url)}")
     asyncio.run(_run(db_url, request))

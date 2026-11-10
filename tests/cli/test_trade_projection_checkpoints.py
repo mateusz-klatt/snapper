@@ -48,7 +48,9 @@ def repository(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         ]
     )
     mocked.retire_trade_projection_checkpoints = AsyncMock(return_value=2)
-    monkeypatch.setattr(trade_projection_checkpoints, "_repository", lambda db_url: mocked)
+    monkeypatch.setattr(
+        trade_projection_checkpoints, "configured_repository", lambda db_url: mocked
+    )
     monkeypatch.setattr(
         trade_projection_checkpoints,
         "dispose_repositories",
@@ -192,25 +194,6 @@ def test_writer_count_mismatch_fails_loudly(repository: MagicMock) -> None:
 
     assert result.exit_code == 1
     assert "close count mismatch: previewed=2 closed=1" in result.stderr
-
-
-def test_repository_resolution_uses_the_configured_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repository resolution passes through the exact configured URL.
-
-    Given: A patched repository factory and one database URL.
-    When: The CLI repository helper resolves it.
-    Then: It returns the factory result and passes the URL unchanged.
-    """
-    resolved = MagicMock()
-    factory = MagicMock(return_value=resolved)
-    monkeypatch.setattr(trade_projection_checkpoints, "get_repository", factory)
-
-    result = trade_projection_checkpoints._repository("sqlite+aiosqlite:///fixture.db")
-
-    assert result is resolved
-    factory.assert_called_once_with("sqlite+aiosqlite:///fixture.db")
 
 
 def test_writer_refusal_is_printed_and_exits_nonzero(repository: MagicMock) -> None:

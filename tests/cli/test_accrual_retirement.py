@@ -57,7 +57,7 @@ def repository(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         return_value=[_row(_FIRST, -0.001025), _row(_SECOND, -2.4345249852042447e-12)]
     )
     mocked.retire_accruals = AsyncMock(return_value=2)
-    monkeypatch.setattr(accrual_retirement, "_repository", lambda db_url: mocked)
+    monkeypatch.setattr(accrual_retirement, "configured_repository", lambda db_url: mocked)
     monkeypatch.setattr(accrual_retirement, "dispose_repositories", AsyncMock())
     monkeypatch.setattr(
         accrual_retirement,
@@ -326,21 +326,6 @@ def test_reports_rows_that_changed_between_preview_and_write(repository: MagicMo
     assert "refused: rows changed concurrently, nothing was written" in result.stderr
     assert "closed" not in result.stdout
     accrual_retirement.dispose_repositories.assert_awaited_once()
-
-
-def test_repository_is_resolved_from_the_configured_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The command uses the shared repository cache for its target database.
-
-    Given: A repository factory that records the URL it is asked for.
-    When: The command resolves its repository.
-    Then: It returns the factory's repository for exactly that URL.
-    """
-    resolved = MagicMock()
-    factory = MagicMock(return_value=resolved)
-    monkeypatch.setattr(accrual_retirement, "get_repository", factory)
-
-    assert accrual_retirement._repository("sqlite+aiosqlite:///./data/dev.db") is resolved
-    factory.assert_called_once_with("sqlite+aiosqlite:///./data/dev.db")
 
 
 def test_the_served_route_is_the_one_the_coordinator_contains() -> None:
