@@ -103,6 +103,48 @@ def test_only_an_unfinished_row_returns_no_closed_history() -> None:
     assert parse_closed_candles(_payload([_row(request.end)]), request) == []
 
 
+def test_an_untraded_window_returns_no_closed_history() -> None:
+    """The venue's all-zero answer for an untraded window is an empty result.
+
+    Given: A response holding exactly one row at minute zero whose prices,
+        VWAP, volume and trade count are all zero, as Kraken returns when the
+        product did not trade since the requested instant,
+    When: Closed history is requested,
+    Then: No candle is returned and nothing is raised.
+    """
+    untraded = [0, "0.00000", "0.00000", "0.00000", "0.00000", "0.00000", "0.00000", 0]
+
+    assert parse_closed_candles(_payload([untraded]), _request()) == []
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            [0, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", 0],
+            [0, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", 0],
+        ],
+        [[0, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", 3]],
+        [[0, "0.0", "0.0", "0.0", "0.1", "0.0", "0.0", 0]],
+        [[0, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0"]],
+        [[False, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", 0]],
+        [[0, "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", False]],
+        [[0, "0.0", "0.0", None, "0.0", "0.0", "0.0", 0]],
+        ["untraded"],
+    ],
+)
+def test_only_the_exact_untraded_marker_is_an_empty_result(rows: list[object]) -> None:
+    """A response that merely resembles the untraded marker still fails closed.
+
+    Given: A repeated marker, a marker with trades or a price, a short row, a
+        boolean minute or trade count, a non-numeric field, or a non-row,
+    When: Closed history is requested,
+    Then: The response is rejected instead of being read as an empty window.
+    """
+    with pytest.raises(ValueError, match="Kraken OHLC"):
+        parse_closed_candles(_payload(rows), _request())
+
+
 @pytest.mark.parametrize("identity", ["", " ", " BTC-USD", "BTC-USD "])
 @pytest.mark.parametrize("field", ["symbol", "pair"])
 def test_request_requires_exact_nonempty_product_identity(field: str, identity: str) -> None:
