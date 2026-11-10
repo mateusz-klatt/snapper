@@ -299,6 +299,7 @@ from snapper.data.repository_types import PNL_SAMPLE_NEVER_PERSIST_REASONS
 from snapper.data.repository_types import PNL_SAMPLE_REASON_CODES
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
+from snapper.data.repository_types import AccrualRetirementScope
 from snapper.data.repository_types import AiDelegateRow
 from snapper.data.repository_types import AiResearchRoundInsertRow
 from snapper.data.repository_types import AiResearchRoundRow
@@ -26291,6 +26292,118 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             return [self._accrual_row_to_dict(row) for row in result.scalars().all()]
+
+    @staticmethod
+    def _current_accrual_scope(
+        scope: AccrualRetirementScope,
+    ) -> tuple[ColumnElement[bool], ...]:
+        """Select the current accrual versions of one wallet, instrument and mode.
+
+        Current means the open knowledge end, the predicate recovery
+        certification uses, so a retirement sees exactly the rows that keep
+        a shard uncertified.
+        """
+        return (
+            AccrualLedger.wallet_public_id == scope["wallet_public_id"],
+            AccrualLedger.instrument_public_id == scope["instrument_public_id"],
+            AccrualLedger.mode == scope["mode"],
+            AccrualLedger.known_to == KNOWN_TO_MAX,
+        )
+
+    @staticmethod
+    def _accrual_version_identity(
+        row: AccrualLedgerRow,
+    ) -> tuple[str, datetime, datetime, str, float, str]:
+        """Name one stored accrual version by identity, version start and charge."""
+        return (
+            row["public_id"],
+            row["timestamp"],
+            row["accrued_at"],
+            row["accrual_type"],
+            row["amount"],
+            row["amount_asset"],
+        )
+
+    async def get_accrual_retirement_candidates(
+        self, scope: AccrualRetirementScope
+    ) -> list[AccrualLedgerRow]:
+        """Return the current accrual versions an operator may retire.
+
+        Args:
+            scope: Wallet, instrument and mode to read.
+
+        Returns:
+            Current accrual rows ordered by economic time, then public id.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(AccrualLedger)
+                .where(*self._current_accrual_scope(scope))
+                .order_by(AccrualLedger.accrued_at, AccrualLedger.public_id)
+            )
+            return [self._accrual_row_to_dict(row) for row in result.scalars().all()]
+
+    async def retire_accruals(
+        self,
+        scope: AccrualRetirementScope,
+        previewed: Sequence[AccrualLedgerRow],
+        retired_at: datetime,
+    ) -> int:
+        """SCD2-close exactly the current accrual versions the operator previewed.
+
+        The writer reselects the scope's current rows under lock and refuses
+        unless they are the previewed versions, compared by public id, version
+        start, economic time, type, amount and asset. A row added, closed or
+        replaced since the preview therefore stops the write. Only ``known_to``
+        changes, by physical row id, and the affected-row count is verified
+        before the commit. Closed versions stay readable for every knowledge
+        instant before ``retired_at``; nothing is deleted.
+
+        Args:
+            scope: Wallet, instrument and mode whose current rows are retired.
+            previewed: Rows returned by the preview, in preview order.
+            retired_at: Knowledge time stamped onto ``known_to``.
+
+        Returns:
+            Number of accrual versions closed.
+
+        Raises:
+            ValueError: If the current rows differ from the preview or the
+                affected-row count differs from the previewed count.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(AccrualLedger)
+                .where(*self._current_accrual_scope(scope))
+                .order_by(AccrualLedger.accrued_at, AccrualLedger.public_id)
+                .with_for_update()
+            )
+            rows = result.scalars().all()
+            current = [self._accrual_row_to_dict(row) for row in rows]
+            if [self._accrual_version_identity(row) for row in current] != [
+                self._accrual_version_identity(row) for row in previewed
+            ]:
+                raise ValueError(
+                    "accrual versions changed after preview; nothing was written: "
+                    f"previewed={[row['public_id'] for row in previewed]!r} "
+                    f"current={[row['public_id'] for row in current]!r}"
+                )
+            update_result = await session.execute(
+                update(AccrualLedger)
+                .where(
+                    AccrualLedger.id.in_([int(row.id) for row in rows]),
+                    AccrualLedger.known_to == KNOWN_TO_MAX,
+                )
+                .values(known_to=retired_at)
+            )
+            closed = cast(CursorResult[Any], update_result).rowcount
+            if closed != len(rows):
+                raise ValueError(
+                    "accrual close count mismatch; transaction rolled back: "
+                    f"previewed={len(rows)} closed={closed}"
+                )
+            await session.commit()
+            return closed
 
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.

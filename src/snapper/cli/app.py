@@ -140,6 +140,7 @@ from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdate
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
+from snapper.cli.accrual_retirement import retire_accruals
 from snapper.cli.android_push import android_push_state
 from snapper.cli.candle_audit import audit_candles
 from snapper.cli.daily_partitions import daily_partitions_app
@@ -3013,6 +3014,7 @@ def notify() -> None:
 
 app.command(name="android-push-state")(android_push_state)
 app.command(name="dev-mint-pat")(dev_mint_pat)
+app.command(name="retire-accruals")(retire_accruals)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.add_typer(annulment_app, name="annulment")
 app.add_typer(daily_partitions_app, name="daily-partitions")

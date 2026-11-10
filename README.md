@@ -414,6 +414,7 @@ snapper db-upgrade          # Alembic migrations
 snapper db-downgrade        # Rollback migrations
 snapper db-seed             # Seed profile data
 snapper retire-trade-projection-checkpoints --all  # Dry-run checkpoint retirement
+snapper retire-accruals --wallet W --instrument I --accrual A  # Dry-run accrual retirement
 ```
 
 ### Configuration and Maintenance

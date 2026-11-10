@@ -311,6 +311,54 @@ accumulated under older projection semantics. A confirmed invocation still
 prints the full preview before writing, revalidates that exact set in the
 repository transaction, and refuses if it changed.
 
+### `retire-accruals`
+
+Preview and SCD2-close schedule-based rollover accruals that a live Kraken spot
+shard still carries. Actual live Kraken spot financing costs come only from
+native postings; the coordinator no longer writes schedule estimates for that
+route, but rows written earlier stay current, and any current accrual row keeps
+the shard uncertified at recovery. The command closes the current knowledge
+interval of the asserted rows by setting `known_to`. It never deletes a row,
+never writes a balancing row, and does not touch fills, checkpoints or balances.
+
+```bash
+snapper retire-accruals --wallet <wallet-public-id> --instrument <instrument-public-id> \
+    --accrual <accrual-public-id> --accrual <accrual-public-id>
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--wallet` | Wallet public id of the shard. Required. |
+| `--instrument` | Instrument public id of the shard. Required. |
+| `--accrual` | Public id of one current accrual to close. Required; repeat it for every row. |
+| `--expect-total` | Optional asserted sum and asset in one value, for example `"-0.0031 EUR"`. |
+| `--confirm` | Close the previewed rows. Without it the command is a read-only preview. |
+
+The mode is always `live`. Every invocation prints the credential-free database
+identity, every current accrual of the wallet and instrument, and their exact
+sum, spelled so that it can be pasted back as `--expect-total`. The checks run
+in this order and the first failure exits `1` without writing:
+
+1. Every identity is a public id and no `--accrual` is repeated; `--expect-total`
+    is one finite amount and one asset code.
+2. The instrument's funding type is `spot_margin_rollover`, and every current
+    row is a `kraken` rollover accrual.
+3. The asserted ids are exactly the current rows. The refusal lists rows that
+    are current but not asserted and ids that are asserted but not current.
+4. The asserted total and asset, when given, equal those of the rows.
+
+With `--confirm` the repository reselects the rows under lock, refuses if any
+version differs from the preview, closes them at one instant and prints a JSON
+receipt with the scope, the retired ids, that instant and the count. A second
+run with the same ids refuses at check 3, because those ids are no longer
+current.
+
+Closed accruals stop counting for recovery certification and for P&L read at or
+after the closure; a P&L read as known before the closure still returns them.
+The coordinator certifies the shard at its next start, so recreate the API
+container after a retirement. Durable evidence that the wallet used margin is
+kept on purpose: retirement does not change the reconciliation method.
+
 ### `annulment`
 
 Host-side execution-ledger correction commands use the configured `DB_URL`.
