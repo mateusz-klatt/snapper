@@ -1256,7 +1256,8 @@ earlier row in that group can create the version a later row must close.
 Lookup batches are chunked to stay below SQLite parameter limits.
 
 Native minute catchup validates the entire response before committing independent
-chunks of at most 100 rows. A read-only preflight checks all stored versions of
+chunks of at most 100 rows, newest minutes first, so an attempt deadline or a
+deferral leaves the oldest minutes for a later pass. A read-only preflight checks all stored versions of
 each candidate minute before acquiring the publisher's local identity gate. The
 gate orders candle identity choices inside the publisher; the database writer
 fence orders concurrent candle writes. A replay with no absent minute, no
@@ -1271,7 +1272,11 @@ with `unnest` and retains the recursive `SHARE ROW EXCLUSIVE` fence, READ COMMIT
 requirement and bounded lock timeout. SQLite uses typed candidate values and its
 existing empty-update writer reservation so caller rollback remains effective.
 Catchup explicitly defers while live writes are queued, in flight or recovering,
-then retries on its bounded scheduler cadence. If an earlier chunk committed before
+then retries on its bounded scheduler cadence. A catchup insert or correction
+that hits a lock timeout (SQLSTATE 55P03), usually on its writer fence, is
+reported as a deferral as well: the timeout rolls back that write's whole
+transaction, so nothing committed. A lock timeout in a later step, after a
+commit, stays an error. If an earlier chunk committed before
 a later failure or deferral, repair still reads the complete committed minute grid;
 partial input never proves a complete higher-timeframe candle.
 

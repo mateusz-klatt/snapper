@@ -373,10 +373,13 @@ class KrakenCandleCatchup:
         The first repository call validates the whole response; if any row is
         invalid, the symbol is refused before any chunk commits. Each chunk of
         at most 100 rows then inserts its absent minutes and afterwards
-        corrects its disproved zeros, in two independent commits. Each commit
-        counts as soon as it is acknowledged, so repairs still follow when a
-        later step fails or defers; they receive every changed minute, so a
-        repair that already read a corrected minute's old version runs again.
+        corrects its disproved zeros, in two independent commits. Chunks run
+        newest minutes first, so an attempt deadline or a deferral leaves the
+        oldest minutes for a later pass rather than the newest ones, which
+        valuation reads first. Each commit counts as soon as it is
+        acknowledged, so repairs still follow when a later step fails or
+        defers; they receive every changed minute, so a repair that already
+        read a corrected minute's old version runs again.
 
         Args:
             symbol: Canonical native symbol selected by persistence policy.
@@ -399,9 +402,10 @@ class KrakenCandleCatchup:
         changed: set[datetime] = set()
         insert = self._callbacks.insert_missing or self._repository.insert_missing_candles
         correct = self._callbacks.correct_zero or self._repository.correct_false_zero_candles
+        newest_first = sorted(rows, key=lambda row: row["open_at"], reverse=True)
         try:
-            for offset in range(0, len(rows), 100):
-                chunk = rows[offset : offset + 100]
+            for offset in range(0, len(newest_first), 100):
+                chunk = newest_first[offset : offset + 100]
                 changed.update(row["open_at"] for row in await insert(chunk))
                 changed.update(row["open_at"] for row in await correct(chunk))
                 await asyncio.sleep(0)

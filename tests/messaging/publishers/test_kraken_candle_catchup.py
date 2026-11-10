@@ -7,6 +7,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 
 from snapper.config.app import AppSettings
 from snapper.core.types import ExchangeEnum
@@ -214,7 +216,9 @@ async def test_repairs_require_newly_inserted_rows(
     await worker._reconcile_symbol("BTC-USD", START, NOW)
     fixture.repository.insert_missing_candles.assert_awaited_once()
     if insert_count:
-        fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset({START}))
+        fixture.committed.assert_awaited_once_with(
+            "BTC-USD", START, NOW, frozenset({START.replace(minute=26)})
+        )
     else:
         fixture.committed.assert_not_awaited()
 
@@ -2396,3 +2400,101 @@ async def test_native_worker_acknowledges_all_bounded_chunks_once() -> None:
     ]
     assert [row["open_at"] for batch in batches for row in batch] == minutes
     fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset(minutes))
+
+
+@pytest.mark.asyncio
+async def test_native_worker_commits_the_newest_chunk_first() -> None:
+    """A deadline or a deferral leaves the oldest minutes, never the newest ones.
+
+    Given: An oldest-first response of 201 minutes and a deferral on the second chunk.
+    When: The worker reconciles the symbol.
+    Then: The first commit holds the newest 100 minutes, newest first, and only
+        those minutes reach the repair callback.
+    """
+    fixture = _Fixture()
+    candles = [
+        replace(_candle(), interval_begin=START - timedelta(minutes=offset))
+        for offset in reversed(range(201))
+    ]
+    fixture.client.get_closed_1m_candles.return_value = candles
+    batches: list[list[datetime]] = []
+
+    async def insert(rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+        """Acknowledge the first chunk and defer the second."""
+        batches.append([row["open_at"] for row in rows])
+        if len(batches) == 2:
+            raise CatchupDeferredError("live writer outstanding=1")
+        return rows
+
+    fixture.repository.insert_missing_candles.side_effect = insert
+    with pytest.raises(CatchupDeferredError):
+        await fixture.worker()._reconcile_symbol("BTC-USD", START, NOW)
+    newest = sorted((candle.interval_begin for candle in candles), reverse=True)
+    assert batches[0] == newest[:100]
+    assert batches[1] == newest[100:200]
+    fixture.committed.assert_awaited_once_with("BTC-USD", START, NOW, frozenset(newest[:100]))
+
+
+def _lock_timeout() -> DBAPIError:
+    """Build the driver error PostgreSQL raises when the candle fence lock times out."""
+    return DBAPIError("LOCK TABLE public.candles", {}, SimpleNamespace(sqlstate="55P03"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["insert", "correct"])
+async def test_fence_lock_timeout_defers_the_catchup_write(step: str) -> None:
+    """A catchup write that cannot take the candle fence in time yields like a deferral.
+
+    Given: A missing minute, or a correctable zero, whose write hits the lock timeout.
+    When: The publisher runs the insert or the correction step.
+    Then: The step raises a deferral chained to the database error and frees the gate.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    if step == "insert":
+        repository.insert_missing_candles.side_effect = _lock_timeout()
+        operation = publisher._insert_catchup_candle_rows
+    else:
+
+        async def correct(
+            rows: list[CandleUpsertRow], *, dry_run: bool = False
+        ) -> list[CandleUpsertRow]:
+            """Report the zero in preflight and time out on the fenced write."""
+            if dry_run:
+                return list(rows)
+            raise _lock_timeout()
+
+        repository.correct_false_zero_candles.side_effect = correct
+        operation = publisher._correct_catchup_candle_rows
+    with pytest.raises(CatchupDeferredError, match="lock timeout") as deferred:
+        await operation([row])
+    assert isinstance(deferred.value.__cause__, DBAPIError)
+    assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["other_sqlstate", "after_commit"])
+async def test_other_database_errors_and_post_commit_lock_timeouts_stay_errors(
+    failure: str,
+) -> None:
+    """Only a lock timeout of the write itself is a deferral.
+
+    Given: A write failing with another SQLSTATE, or a completed insert that
+        leaves a pending identity whose lookup afterwards hits the lock timeout.
+    When: The publisher runs the insert step.
+    Then: The original database error propagates unchanged.
+    """
+    publisher, repository = _identity_publisher()
+    row = _native_identity_row(publisher)
+    if failure == "other_sqlstate":
+        repository.insert_missing_candles.side_effect = DBAPIError(
+            "INSERT", {}, SimpleNamespace(sqlstate="40001")
+        )
+    else:
+        key = (row["instrument_public_id"], row["timeframe"], row["open_at"])
+        publisher._pending_candle_identities[key] = "pending-id"
+        repository.insert_missing_candles.return_value = []
+        repository.get_canonical_candle_public_id.side_effect = _lock_timeout()
+    with pytest.raises(DBAPIError):
+        await publisher._insert_catchup_candle_rows([row])
+    assert not publisher._candle_identity_gate.locked()

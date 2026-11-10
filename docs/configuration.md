@@ -626,7 +626,9 @@ The 719-minute priority lookback (`CatchupPolicy.priority_history_minutes`) is
 the longest window that one native REST response returns. Minutes missed by a
 failed request or a restart can be recovered while they remain within that
 window, without a retry cursor or a backlog table. Older gaps stay outside
-automatic recovery.
+automatic recovery. A response is committed in chunks of at most 100 minutes,
+newest first, so an attempt that runs out of its five seconds or defers to the
+live writer leaves the oldest minutes, not the newest, for a later pass.
 
 The fair slot of each regular pass cannot cover a large wildcard roster: 1,500
 nonpriority instruments need at least 1,500 passes, far beyond the 120-minute
