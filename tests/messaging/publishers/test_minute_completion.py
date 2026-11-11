@@ -1976,6 +1976,7 @@ class _StreamRig:
         client._trade_candle_popped_through = None
         client._trade_candle_overflow = None
         client._trade_candle_pending_break = None
+        client._trade_candle_reset_listener = None
         client._trade_candle_last_tick_at = None
         client._trade_candle_overflows = 0
         client._trade_candle_discards = 0
@@ -2526,6 +2527,28 @@ async def _until(predicate: Callable[[], bool]) -> None:
     raise AssertionError("condition not reached")
 
 
+def _builder_holding(symbol: str, minute: int) -> TradeCandleBuilder:
+    """Build a trade candle builder that holds one positive trade of a minute.
+
+    The builder withholds the first minute in which it observes a symbol, so a
+    trade of the previous minute establishes the symbol's history first.
+
+    Args:
+        symbol: Native symbol of the trades.
+        minute: UNIX start of the minute the builder must hold.
+
+    Returns:
+        A builder retaining exactly one bucket, for ``minute``.
+    """
+    builder = TradeCandleBuilder(interval_seconds=60)
+    for at in (minute - _MINUTE + 5, minute + 30):
+        builder.update(
+            TradeUpdate(symbol, "buy", 1.0, 102.0, "market", _at(at)), observed_at=_at(at)
+        )
+    assert builder.retained_buckets == 1
+    return builder
+
+
 class TestResetWhileTheLoopWaits:
     """A reset while the candle loop is already waiting for its next item."""
 
@@ -2555,10 +2578,8 @@ class TestResetWhileTheLoopWaits:
         await _until(
             lambda: queue.empty() and rig.publisher._completion_through == _at(w + 2 * _MINUTE)
         )
-        rig.client._trade_built_candle_builder.update(
-            TradeUpdate("S1-EUR", "buy", 1.0, 102.0, "market", _at(w + 2 * _MINUTE + 5)),
-            observed_at=_at(w + 2 * _MINUTE + 5),
-        )
+        builder = _builder_holding("S1-EUR", w + 2 * _MINUTE)
+        rig.client._trade_built_candle_builder = builder
         rig.client._ws_client = MagicMock(close=AsyncMock())
         rig.client._ws_connected = True
 
@@ -2573,3 +2594,48 @@ class TestResetWhileTheLoopWaits:
         windows = [m for topic, m in rig.recorder.published if topic.endswith(".5m")]
         assert not [m for m in windows if m.open_at == _at(w) and m.complete]
         assert rig.client.trade_candle_generation() == 2
+
+
+class TestResetInWallMode:
+    """The client's own reset reaches a wall-clock consumer before its next sweep."""
+
+    @pytest.mark.asyncio
+    async def test_the_idle_wall_sweep_never_flattens_a_minute_the_reset_discarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No stale close is carried into a minute whose retained trade a reset discarded.
+
+        Given a wall-clock loop waiting on an empty queue with a known close, a
+            witnessed minute M, a trade of M retained only by the builder, and a
+            sweep cursor just before M,
+        When the client's own socket close resets the stream with no producer
+            tick after it, and the wall clock then passes M's settle,
+        Then the idle sweep considers M and refuses it, and no flat bar is
+            published for M.
+        """
+        m = _recent_minute()
+        rig = _StreamRig(monkeypatch, follows=False)
+        rig.witness(m - 3 * _MINUTE, m + 2 * _MINUTE)
+        clock = [float(m) + _SPOT_SETTLE_S + 2.0]
+        monkeypatch.setattr(base_module, "wall_clock", lambda: clock[0])
+        rig.tick(m + 13, [_bar("S1-EUR", m - _MINUTE, 101.0)])
+        loop = asyncio.create_task(rig.publisher._candle_loop(["*"], "1m"))
+        queue = rig.client._trade_built_candle_queue
+        await _until(lambda: queue.empty() and "S1-EUR" in rig.emitter._last_close)
+        builder = _builder_holding("S1-EUR", m)
+        rig.client._trade_built_candle_builder = builder
+        rig.client._ws_client = MagicMock(close=AsyncMock())
+        rig.client._ws_connected = True
+
+        await rig.client._close_ws_client()
+        clock[0] = float(m) + _MINUTE + _SPOT_SETTLE_S + 2.0
+        await _until(lambda: rig.emitter.counters()["last_swept_minute"] == _at(m).isoformat())
+        rig.publisher.running = False
+        await asyncio.wait_for(loop, timeout=5.0)
+
+        flats = [(s, opened) for s, opened, trades, _c, _a in rig.published() if not trades]
+        assert ("S1-EUR", _at(m)) not in flats
+        refused = rig.emitter.counters()[SKIP_FEED_BREAK]
+        assert isinstance(refused, int)
+        assert refused >= 1
+        assert rig.publisher._completion_clock is CompletionClock.WALL

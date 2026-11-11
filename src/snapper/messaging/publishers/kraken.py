@@ -328,11 +328,16 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         Args:
             symbols: Native Spot symbols to subscribe.
 
+        The client's own resets are handled synchronously by the discard path,
+        so no wall-clock sweep or flush can emit from state the reset made stale
+        while its break would still be waiting in the stream.
+
         Yields:
             Trade-built 1m candle updates, completion marks and breaks from the
             exchange client, in queue order. Only a bar marks candle liveness.
         """
         client = cast(KrakenExchangeClient, self._exchange_client)
+        client.set_trade_candle_reset_listener(self._handle_trade_candle_break)
         async for item in client.subscribe_trade_built_stream(symbols):
             if isinstance(item, CandleUpdate):
                 self._mark_candle_liveness_progress()

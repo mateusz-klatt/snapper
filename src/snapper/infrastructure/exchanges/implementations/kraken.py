@@ -770,6 +770,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._trade_candle_popped_through: datetime | None = None
         self._trade_candle_overflow: LostBars | None = None
         self._trade_candle_pending_break: TradeCandleBreak | None = None
+        self._trade_candle_reset_listener: Callable[[TradeCandleBreak], None] | None = None
         self._trade_candle_last_tick_at: datetime | None = None
         self._trade_candle_overflows: int = 0
         self._trade_candle_discards: int = 0
@@ -914,7 +915,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         client = self._ws_client
         if not client:
             return
-        self._reset_trade_candle_epoch_in_band()
+        self._reset_trade_candle_epoch_for_feed_break()
         was_connected = self._ws_connected
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
@@ -927,7 +928,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             await force_close_ws_client(client)
         finally:
             if self._ws_client is client:
-                self._reset_trade_candle_epoch_in_band()
+                self._reset_trade_candle_epoch_for_feed_break()
                 self._ws_client = None
                 self._ws_connected = False
                 if was_connected:
@@ -1062,12 +1063,28 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
         return brk
 
-    def _reset_trade_candle_epoch_in_band(self) -> None:
+    def set_trade_candle_reset_listener(
+        self, listener: Callable[[TradeCandleBreak], None] | None
+    ) -> None:
+        """Register the consumer that handles the client's own resets synchronously.
+
+        The live consumer then invalidates its completion and synthesis state at
+        the instant of the reset, before any other task can emit from it, in
+        either completion mode.
+
+        Args:
+            listener: Called with the break of every client-detected reset that
+                lost evidence, or ``None`` to deliver those breaks in-band.
+        """
+        self._trade_candle_reset_listener = listener
+
+    def _reset_trade_candle_epoch_for_feed_break(self) -> None:
         """Reset the epoch for a feed break the client detected on its own socket.
 
-        No publisher hook sees these resets, so the break is delivered in-band:
-        the stream yields it before any item of the new generation. Breaks not
-        yet delivered are combined into one.
+        No publisher hook sees these resets. The registered listener therefore
+        receives the break synchronously; without one, the break is delivered
+        in-band, and the stream yields it before any item of the new generation.
+        Breaks not yet delivered in-band are combined into one.
 
         A reset before the stream has observed anything, such as the first
         connection at startup, loses nothing and is not delivered: the consumer
@@ -1080,6 +1097,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         )
         brk = self.reset_trade_candle_epoch()
         if not observed:
+            return
+        listener = self._trade_candle_reset_listener
+        if listener is not None:
+            listener(brk)
             return
         pending = self._trade_candle_pending_break
         self._trade_candle_pending_break = brk if pending is None else pending.followed_by(brk)
@@ -3764,7 +3785,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             BaseException: Whatever ``start()`` or the subscription replay
                 raised, re-raised after teardown.
         """
-        self._reset_trade_candle_epoch_in_band()
+        self._reset_trade_candle_epoch_for_feed_break()
         client = SpotWSClient(
             key=self.api_key or "",
             secret=self.api_secret or "",

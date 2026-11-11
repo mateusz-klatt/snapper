@@ -98,6 +98,7 @@ def _client() -> KrakenExchangeClient:
     client._trade_candle_popped_through = None
     client._trade_candle_overflow = None
     client._trade_candle_pending_break = None
+    client._trade_candle_reset_listener = None
     client._trade_candle_last_tick_at = None
     client._trade_candle_overflows = 0
     client._trade_candle_discards = 0
@@ -10193,8 +10194,8 @@ class TestTradeBuiltInBandResets:
         monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
         client._trade_candle_popped_through = _MINUTE_M
         client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
-        client._reset_trade_candle_epoch_in_band()
-        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_for_feed_break()
+        client._reset_trade_candle_epoch_for_feed_break()
         client._trade_candle_overflow = LostBars()
         stream = client.subscribe_trade_built_stream(["*"])
 
@@ -10233,7 +10234,7 @@ class TestTradeBuiltInBandResets:
         warning = MagicMock()
         monkeypatch.setattr(kr.logger, "warning", warning)
         client._trade_candle_popped_through = _MINUTE_M
-        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_for_feed_break()
         client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
         stream = client.subscribe_trade_built_candles(["*"], "1m")
 
@@ -10270,7 +10271,7 @@ class TestTradeBuiltInBandResets:
         waiting = asyncio.create_task(_first())
         await asyncio.sleep(0.02)
 
-        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_for_feed_break()
         mark = TradeCandleMark(through=_MINUTE_M, generation=1, produced_at=_TICK_NOW)
         client._trade_built_candle_queue.put_nowait(mark)
         first = await waiting
@@ -10291,7 +10292,7 @@ class TestTradeBuiltInBandResets:
             generation.
         """
         client = _client()
-        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_for_feed_break()
         assert client._trade_candle_pending_break is None
         assert client.trade_candle_generation() == 1
 
@@ -10299,7 +10300,26 @@ class TestTradeBuiltInBandResets:
             TradeUpdate("BTC-EUR", "buy", 1.0, 100.0, "market", _TICK_NOW),
             observed_at=_TICK_NOW,
         )
-        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_for_feed_break()
         pending = client._trade_candle_pending_break
         assert pending is not None
         assert (pending.reason, pending.generation) == (TradeCandleBreakReason.RESET, 2)
+
+    def test_a_registered_listener_handles_the_reset_synchronously(self) -> None:
+        """The live consumer learns of the reset at its instant, not in the stream.
+
+        Given a client that has observed a tick and a registered listener,
+        When the client detects a reset,
+        Then the listener receives the break at once and nothing is pending.
+        """
+        client = _client()
+        client._trade_candle_popped_through = _MINUTE_M
+        received: list[TradeCandleBreak] = []
+        client.set_trade_candle_reset_listener(received.append)
+
+        client._reset_trade_candle_epoch_for_feed_break()
+
+        assert [(brk.reason, brk.generation) for brk in received] == [
+            (TradeCandleBreakReason.RESET, 1)
+        ]
+        assert client._trade_candle_pending_break is None

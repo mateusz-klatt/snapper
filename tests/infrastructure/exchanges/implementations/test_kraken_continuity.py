@@ -42,6 +42,7 @@ def _client() -> KrakenExchangeClient:
     client._trade_candle_popped_through = None
     client._trade_candle_overflow = None
     client._trade_candle_pending_break = None
+    client._trade_candle_reset_listener = None
     client._trade_candle_discards = 0
     client._trade_candle_lost_bars = 0
     return client

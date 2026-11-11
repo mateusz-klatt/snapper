@@ -114,6 +114,7 @@ class _ShadowClient:
         self.items: list[TradeCandleItem] = list(candles)
         self.calls: list[tuple[list[str], str]] = []
         self.stream_calls: list[list[str]] = []
+        self.listener: Callable[[TradeCandleBreak], None] | None = None
         self.native_calls: list[tuple[list[str], str]] = []
         self.native_stream = self._iter_candles()
 
@@ -144,6 +145,16 @@ class _ShadowClient:
         """
         self.calls.append((symbols, timeframe))
         return self._iter_candles()
+
+    def set_trade_candle_reset_listener(
+        self, listener: Callable[[TradeCandleBreak], None] | None
+    ) -> None:
+        """Record the registered reset listener.
+
+        Args:
+            listener: Listener registered by the publisher.
+        """
+        self.listener = listener
 
     def subscribe_trade_built_stream(self, symbols: list[str]) -> AsyncIterator[TradeCandleItem]:
         """Return an async iterator of the live trade-built stream.
@@ -403,6 +414,7 @@ class TestKrakenMarketDataPublisher:
         assert client.stream_calls == [["BTC-USD"], ["BTC-USD"]]
         assert client.calls == []
         assert client.native_calls == []
+        assert client.listener == publisher._handle_trade_candle_break
 
     @pytest.mark.asyncio
     async def test_trade_built_liveness_watchdog_stays_quiet_when_candles_flow(
@@ -1579,6 +1591,40 @@ async def _until(predicate: Callable[[], bool]) -> None:
     raise AssertionError("condition not reached")
 
 
+def _real_trade_built_client(
+    monkeypatch: pytest.MonkeyPatch, settings: _ShadowSettings, *, maxsize: int
+) -> KrakenExchangeClient:
+    """Build a real client whose trade-built stream the test drives by hand.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        settings: Settings the client reads.
+        maxsize: Capacity of the trade-built queue.
+
+    Returns:
+        A client with an idle producer and an empty bounded queue.
+    """
+    client = KrakenExchangeClient.__new__(KrakenExchangeClient)
+    client.settings = cast(AppSettings, settings)
+    client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+    client._trade_built_candle_queue = asyncio.Queue(maxsize=maxsize)
+    client._trade_built_candle_aggregator_task = None
+    client._trade_built_candles_enabled = False
+    client._trade_candle_generation = 0
+    client._trade_candle_marked_through = None
+    client._trade_candle_popped_through = None
+    client._trade_candle_overflow = None
+    client._trade_candle_pending_break = None
+    client._trade_candle_reset_listener = None
+    client._trade_candle_last_tick_at = None
+    client._trade_candle_overflows = 0
+    client._trade_candle_discards = 0
+    client._trade_candle_lost_bars = 0
+    client._trade_candle_producer_restarts = 0
+    monkeypatch.setattr(client, _PRODUCER, _idle_producer)
+    return client
+
+
 class TestShadowConsumerOnTheRealStream:
     """Native mode: the shadow consumer reads the real bars-only iterator."""
 
@@ -1595,23 +1641,7 @@ class TestShadowConsumerOnTheRealStream:
             the break, writes no mark, and the break counts the two bars it lost.
         """
         settings = _ShadowSettings(True, "native")
-        client = KrakenExchangeClient.__new__(KrakenExchangeClient)
-        client.settings = cast(AppSettings, settings)
-        client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
-        client._trade_built_candle_queue = asyncio.Queue(maxsize=3)
-        client._trade_built_candle_aggregator_task = None
-        client._trade_built_candles_enabled = False
-        client._trade_candle_generation = 0
-        client._trade_candle_marked_through = None
-        client._trade_candle_popped_through = None
-        client._trade_candle_overflow = None
-        client._trade_candle_pending_break = None
-        client._trade_candle_last_tick_at = None
-        client._trade_candle_overflows = 0
-        client._trade_candle_discards = 0
-        client._trade_candle_lost_bars = 0
-        client._trade_candle_producer_restarts = 0
-        monkeypatch.setattr(client, _PRODUCER, _idle_producer)
+        client = _real_trade_built_client(monkeypatch, settings, maxsize=3)
         publisher = KrakenMarketDataPublisher(symbols=["*"])
         publisher.settings = cast(AppSettings, settings)
         repository = _ShadowRepository()
