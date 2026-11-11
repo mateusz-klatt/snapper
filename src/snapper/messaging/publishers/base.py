@@ -21,6 +21,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from enum import Enum
+from enum import StrEnum
 from functools import partial
 from time import monotonic
 from time import perf_counter_ns
@@ -65,6 +66,9 @@ from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
 from snapper.infrastructure.network.egress_observability import resolve_egress_container_id
 from snapper.infrastructure.network.egress_pool import get_egress_pool
@@ -539,6 +543,23 @@ type TickPayloadValue = float | bool | None
 """Union of every value type in the tick payload deduplication tuple."""
 
 
+class CompletionClock(StrEnum):
+    """What moves minute completion and the higher-timeframe flush.
+
+    ``WALL`` is the wall clock, the only state of a publisher whose completion
+    does not follow its consumer. The other two exist only while it does.
+    """
+
+    WALL = "wall"
+    """The wall clock drives the sweep and the flush."""
+
+    WAITING = "waiting"
+    """Nothing moves until a mark of the current generation is handled."""
+
+    PROGRESS = "progress"
+    """The newest handled mark of the current generation drives both."""
+
+
 @dataclass(frozen=True)
 class VenueFeedHealth:
     """Venue-specific health facts a publisher folds into its heartbeat.
@@ -810,7 +831,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             maxsize=_CANDLE_WRITE_QUEUE_MAX
         )
         self._candle_consumer_tasks: list[asyncio.Task[None]] = []
-        self._candle_aggregator: CandleAggregator | None = None
+        self._initialize_completion_state()
         self._candle_flush_loop_task: asyncio.Task[None] | None = None
         self._candle_repair_loop_task: asyncio.Task[None] | None = None
         self._pending_candle_repairs: dict[_CandleRepairKey, _PendingCandleRepair] = {}
@@ -839,6 +860,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._committed_candle_write_sequences: set[int] = set()
         self._candle_write_sequence_references: dict[int, int] = {}
         self._candle_repair_output_keys: dict[int, _CandleRepairKey] = {}
+
+    def _initialize_completion_state(self) -> None:
+        """Initialize the aggregator slot and the state of consumer-driven completion.
+
+        Completion starts on the wall clock. The first synchronization of a
+        publisher whose completion follows its consumer moves it to waiting for
+        the first mark.
+        """
+        self._candle_aggregator: CandleAggregator | None = None
+        self._completion_clock: CompletionClock = CompletionClock.WALL
+        self._completion_through: datetime | None = None
+        self._stale_trade_candle_marks: int = 0
+        self._consumer_lag_s: float | None = None
+        self._consumer_lag_max_s: float | None = None
 
     def _initialize_trade_pipeline_state(self) -> None:
         """Initialize the trade queue, writer handles, retained batch, and counters."""
@@ -1875,6 +1910,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         A no-op when no aggregator exists (native-candle venues, or before
         synthesis is configured), so every venue can call it unconditionally.
         """
+        self._suspend_aggregator_across_break()
+
+    def _suspend_aggregator_across_break(self) -> None:
+        """Re-arm only the aggregator's live epoch, without any venue-side reset.
+
+        The discard path of the trade-built stream calls this directly: its
+        builder is kept, so the venue override's builder reset must not run.
+        """
         aggregator = self._candle_aggregator
         if aggregator is None:
             return
@@ -2150,7 +2193,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     def _subscribe_candle_stream(
         self, symbols: list[str], timeframe: str
-    ) -> AsyncIterator[CandleUpdate]:
+    ) -> AsyncIterator[TradeCandleItem]:
         """Subscribe to the live candle stream for a timeframe.
 
         Args:
@@ -2158,7 +2201,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             timeframe: Candle timeframe interval.
 
         Returns:
-            Async iterator of candle updates from the exchange client.
+            Async iterator of candle updates from the exchange client. A venue
+            whose completion follows its consumer also yields completion marks
+            and breaks.
         """
         return cast(T, self._exchange_client).subscribe_candles(symbols, timeframe)
 
@@ -2349,6 +2394,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         a self-emitted bar can never forge feed liveness for the dark-feed
         watchdog or hide a dark symbol from the heartbeat's lag figure.
 
+        It first supervises the venue's candle producer, then synchronizes the
+        completion mode; while completion follows the consumer the marks drive
+        the sweep instead, so the wall clock sweeps nothing.
+
         Args:
             exchange: Data exchange stamped on outbound/persisted rows.
             timeframe: Native timeframe of the stream being consumed.
@@ -2356,6 +2405,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             None.
         """
+        self._supervise_candle_producer()
+        if self._sync_completion_mode():
+            return
         emitter = self._minute_emitter
         if emitter is None or timeframe != "1m":
             return
@@ -2363,6 +2415,244 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             await self._publish_one_flat_bar(flat, exchange, emitter)
             if index % _SWEEP_YIELD_EVERY == _SWEEP_YIELD_EVERY - 1:
                 await asyncio.sleep(0)
+
+    def _completion_follows_consumer(self) -> bool:
+        """Whether minute completion and the flush follow the consumer's marks.
+
+        Read on every call. The base publisher has no completion marks, so its
+        completion always follows the wall clock.
+
+        Returns:
+            ``False``; a venue with an in-band completion stream overrides it.
+        """
+        return False
+
+    def _supervise_candle_producer(self) -> None:
+        """Restart a venue-side candle producer that stopped on its own.
+
+        A no-op in the base, which has no such producer.
+        """
+
+    def _current_trade_candle_generation(self) -> int | None:
+        """Return the generation of the venue's trade-built candle stream.
+
+        Returns:
+            ``None`` in the base, which has no such stream, so no mark is ever
+            current.
+        """
+        return None
+
+    def _discard_trade_candle_backlog(self) -> TradeCandleBreak | None:
+        """Discard the venue's queued candle backlog for a lagging consumer.
+
+        Returns:
+            ``None`` in the base, which has no such queue.
+        """
+        return None
+
+    def _max_consumer_lag_seconds(self) -> int:
+        """Return the bound on the candle consumer's lag, or ``0`` to disable it.
+
+        Returns:
+            ``0`` in the base.
+        """
+        return 0
+
+    def _request_candle_catchup(self) -> None:
+        """Ask the venue's native-history catchup to reconcile lost minutes.
+
+        A no-op in the base, which has no catchup.
+        """
+
+    def _trade_candle_health(self) -> JsonObject:
+        """Return the venue's trade-built candle stream health for the heartbeat.
+
+        Returns:
+            An empty object in the base, which has no such stream.
+        """
+        return {}
+
+    def _sync_completion_mode(self) -> bool:
+        """Bring the completion state and the aggregator's authoring in line with the mode.
+
+        Reads :meth:`_completion_follows_consumer` once. A switch to the wall
+        clock takes effect at once; a switch from it waits for the next mark of
+        the current generation. Called before every emission entry point, so no
+        emission is authored in a mode other than its own.
+
+        Returns:
+            Whether completion follows the consumer.
+        """
+        follows = self._completion_follows_consumer()
+        if not follows:
+            self._completion_clock = CompletionClock.WALL
+            self._completion_through = None
+        elif self._completion_clock is CompletionClock.WALL:
+            self._completion_clock = CompletionClock.WAITING
+        aggregator = self._candle_aggregator
+        if aggregator is not None:
+            aggregator.authoring = follows
+        return follows
+
+    def _mark_is_current(self, mark: TradeCandleMark) -> bool:
+        """Return whether a mark may still move the completion state.
+
+        Re-reads the mode, so a switch to the wall clock or a break while an
+        earlier minute of the mark was being published stops the mark.
+
+        Args:
+            mark: The completion mark being handled.
+
+        Returns:
+            True while completion follows the consumer and the mark belongs to
+            the stream's current generation, which every break advances.
+        """
+        if not self._sync_completion_mode():
+            return False
+        return mark.generation == self._current_trade_candle_generation()
+
+    async def _advance_completion(
+        self, mark: TradeCandleMark, exchange: MarketDataExchange
+    ) -> None:
+        """Sweep, seal and fill everything a completion mark certifies, then record it.
+
+        The mark is handled completely before the loop asks for the next item,
+        so every minute it certifies is swept, and every window ending at it is
+        sealed, before any later bar of its generation is observed. A mark of
+        another generation is ignored and counted. The state moves only if the
+        mark is still current after its sweep and its flush.
+
+        Args:
+            mark: The completion mark taken off the stream.
+            exchange: Data exchange stamped on outbound/persisted rows.
+        """
+        if not self._sync_completion_mode():
+            return
+        if not self._mark_is_current(mark):
+            self._stale_trade_candle_marks += 1
+            return
+        aggregator = self._candle_aggregator
+        if aggregator is not None:
+            aggregator.certify(mark.through, mark.produced_at)
+        if not await self._sweep_marked_minutes(mark, exchange):
+            return
+        if aggregator is not None:
+            flushed = aggregator.flush_through(mark.through, mark.produced_at)
+            self._drain_aggregator_repair_signals()
+            for tf_label, synth in flushed:
+                await self._publish_synthesized_candle(synth, exchange, tf_label)
+        if self._mark_is_current(mark):
+            self._completion_clock = CompletionClock.PROGRESS
+            self._completion_through = mark.through
+
+    async def _sweep_marked_minutes(
+        self, mark: TradeCandleMark, exchange: MarketDataExchange
+    ) -> bool:
+        """Publish the flat bars of every minute a mark certifies, one minute at a time.
+
+        Args:
+            mark: The completion mark being handled.
+            exchange: Data exchange stamped on outbound/persisted rows.
+
+        Returns:
+            True when every minute was considered with the mark still current;
+            False when the mark stopped being current, leaving the remaining
+            minutes to the cursor.
+        """
+        emitter = self._minute_emitter
+        through = mark.through.timestamp()
+        while self._mark_is_current(mark):
+            step = (
+                None
+                if emitter is None
+                else emitter.next_flat_minute(through, acquired_at=mark.produced_at)
+            )
+            if emitter is None or step is None:
+                return True
+            for index, flat in enumerate(step[1]):
+                await self._publish_one_flat_bar(flat, exchange, emitter)
+                if index % _SWEEP_YIELD_EVERY == _SWEEP_YIELD_EVERY - 1:
+                    await asyncio.sleep(0)
+        return False
+
+    def _handle_trade_candle_break(self, brk: TradeCandleBreak) -> None:
+        """Run the discard path for an overflow or a lag discard of the stream.
+
+        The builder was kept, so only the aggregator is suspended: no window
+        spanning the lost minutes is published as complete. The emitter bars
+        the settle window and arms its floor, the state waits for the new
+        generation's first mark, and the catchup is asked to reconcile.
+
+        Args:
+            brk: The break, from the stream or from a lag discard.
+        """
+        self._suspend_aggregator_across_break()
+        self._note_trade_candle_break(brk)
+        self._request_candle_catchup()
+        logger.warning(
+            f"{self._get_exchange_name()}: trade-built candle stream break "
+            f"reason={brk.reason.value} generation={brk.generation} lost_bars={brk.lost_bars} "
+            f"lost_from={brk.lost_from} lost_through={brk.lost_through} "
+            f"arm_after={brk.arm_after}"
+        )
+
+    def _note_trade_candle_break(self, brk: TradeCandleBreak) -> None:
+        """Record a break of the trade-built stream in the completion state and the emitter.
+
+        Unless completion follows the wall clock, it waits for the new
+        generation. In both modes the emitter forgets every carried close and
+        arms its floor, because a carried close is stale after any break.
+
+        Args:
+            brk: The break of the stream.
+        """
+        if self._completion_clock is not CompletionClock.WALL:
+            self._completion_clock = CompletionClock.WAITING
+            self._completion_through = None
+        emitter = self._minute_emitter
+        if emitter is None:
+            return
+        arm_after = None if brk.arm_after is None else int(brk.arm_after.timestamp())
+        emitter.mark_trade_break(arm_after=arm_after)
+
+    def _check_consumer_lag(self, item_at: datetime | None) -> None:
+        """Record the consumer's lag at an item, and discard a backlog beyond the bound.
+
+        The lag is the wall clock at consumption minus the item's acquisition or
+        production. Beyond a positive bound the queued backlog is discarded and
+        the discard path runs; the item in hand is then handled as usual. A
+        negative lag, from a backward clock step, reads as zero.
+
+        Args:
+            item_at: The item's acquisition or production time, or ``None`` for
+                an item that carries neither.
+        """
+        if item_at is None:
+            return
+        lag = max(0.0, wall_clock() - item_at.timestamp())
+        self._consumer_lag_s = lag
+        worst = self._consumer_lag_max_s
+        self._consumer_lag_max_s = lag if worst is None else max(worst, lag)
+        bound = self._max_consumer_lag_seconds()
+        if bound <= 0 or lag <= bound:
+            return
+        brk = self._discard_trade_candle_backlog()
+        if brk is not None:
+            self._handle_trade_candle_break(brk)
+
+    def _take_consumer_lag(self) -> JsonObject:
+        """Return the consumer-lag figures and restart the maximum.
+
+        Called once per heartbeat, so the maximum covers the interval since the
+        previous heartbeat.
+
+        Returns:
+            The lag at the newest consumed item and the maximum since the last
+            call, in seconds, or ``None`` before any item.
+        """
+        worst = self._consumer_lag_max_s
+        self._consumer_lag_max_s = None
+        return {"consumer_lag_s": self._consumer_lag_s, "consumer_lag_max_s": worst}
 
     async def _publish_one_flat_bar(
         self,
@@ -2814,7 +3104,16 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         if candle is _STREAM_END:
             return False
+        if isinstance(candle, TradeCandleMark):
+            self._check_consumer_lag(candle.produced_at)
+            await self._advance_completion(candle, exchange)
+            return True
+        if isinstance(candle, TradeCandleBreak):
+            self._handle_trade_candle_break(candle)
+            return True
         candle_update = cast(CandleUpdate, candle)
+        self._check_consumer_lag(candle_update.acquired_at)
+        self._sync_completion_mode()
         self._note_real_1m_bar(candle_update, timeframe)
         synthesized: list[tuple[str, CandleUpdate]] = []
         aggregator = self._candle_aggregator
@@ -3049,6 +3348,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         the routine path: a dense 1m plane leaves no higher-TF window empty, so
         the forward-fill branch only fires across an outage.
 
+        While completion follows the consumer its ticks do nothing: every mark
+        seals and fills inline, so the wall clock never gets ahead of the queue.
+
         Args:
             exchange: Exchange name for message provenance.
         """
@@ -3057,7 +3359,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await asyncio.sleep(_CANDLE_FLUSH_INTERVAL_S)
                 if not self.running:
                     break
-                if self._candle_aggregator is None:
+                if self._candle_aggregator is None or self._sync_completion_mode():
                     continue
                 flushed = self._candle_aggregator.flush(datetime.now(UTC))
                 self._drain_aggregator_repair_signals()
@@ -3652,6 +3954,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle = await self._derive_repaired_synthesized_candle(key, expected_source_minutes)
             if candle is None:
                 return False
+            if self._completion_follows_consumer():
+                candle = replace(candle, acquired_at=datetime.now(UTC))
             if pending is not None and pending.historical_only:
                 return await self._commit_historical_candle_repair(candle, exchange, key.timeframe)
             output_sequence = await self._publish_synthesized_candle(
@@ -3700,7 +4004,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "instrument_public_id": instrument,
             "timeframe": timeframe,
             "open_at": candle.interval_begin,
-            "timestamp": datetime.now(UTC),
+            "timestamp": datetime.now(UTC) if candle.acquired_at is None else candle.acquired_at,
             "session_id": self._tracker.session_id,
             "sequence_id": self._tracker.next_sequence("candles.historical_repair"),
             "open": candle.open,
@@ -3944,7 +4248,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         candle_msg = CandleData(
             public_id=public_id,
-            timestamp=received_at,
+            timestamp=received_at if candle.acquired_at is None else candle.acquired_at,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(topic),
             exchange=exchange,
@@ -4022,7 +4326,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         candle_msg = CandleData(
             public_id=public_id,
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC) if candle.acquired_at is None else candle.acquired_at,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(topic),
             exchange=exchange,
@@ -4888,10 +5192,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             The venue's extra ``meta`` keys and its degraded flag; empty and
             healthy when the publisher contributes nothing.
         """
+        meta: JsonObject = {}
         emitter = self._minute_emitter
-        if emitter is None:
-            return VenueFeedHealth(meta={}, degraded=False)
-        return VenueFeedHealth(meta={"minute_completion": emitter.counters()}, degraded=False)
+        if emitter is not None:
+            meta["minute_completion"] = emitter.counters()
+        trade_candles = self._trade_candle_health()
+        if trade_candles:
+            meta["trade_candles"] = trade_candles
+        return VenueFeedHealth(meta=meta, degraded=False)
 
     async def _heartbeat_tick(self, component_name: str) -> None:
         """Compute and publish one heartbeat with honest status.

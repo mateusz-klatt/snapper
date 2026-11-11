@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.registry import get_registered_processes
@@ -23,12 +24,18 @@ from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBu
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.messaging.publishers import kraken as kraken_module
+from snapper.messaging.publishers.base import CompletionClock
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.minute_completion import MINUTE_SWEEP_MARGIN_S
+from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitter
 
 
 class _ShadowSettings:
@@ -44,6 +51,8 @@ class _ShadowSettings:
         self.spot_trade_built_shadow_enabled = enabled
         self.spot_candle_source = source
         self.candle_identity_window_snapshot = False
+        self.spot_completion_follows_consumer = False
+        self.trade_built_max_consumer_lag_seconds = 0
 
 
 class _ShadowRepository:
@@ -97,7 +106,9 @@ class _ShadowClient:
             candles: Candle updates to yield.
         """
         self.candles = candles
+        self.items: list[TradeCandleItem] = list(candles)
         self.calls: list[tuple[list[str], str]] = []
+        self.stream_calls: list[list[str]] = []
         self.native_calls: list[tuple[list[str], str]] = []
         self.native_stream = self._iter_candles()
 
@@ -129,6 +140,18 @@ class _ShadowClient:
         self.calls.append((symbols, timeframe))
         return self._iter_candles()
 
+    def subscribe_trade_built_stream(self, symbols: list[str]) -> AsyncIterator[TradeCandleItem]:
+        """Return an async iterator of the live trade-built stream.
+
+        Args:
+            symbols: Symbols passed by the publisher.
+
+        Returns:
+            Async iterator over the configured stream items.
+        """
+        self.stream_calls.append(symbols)
+        return self._iter_items()
+
     async def _iter_candles(self) -> AsyncIterator[CandleUpdate]:
         """Yield configured candles.
 
@@ -137,6 +160,15 @@ class _ShadowClient:
         """
         for candle in self.candles:
             yield candle
+
+    async def _iter_items(self) -> AsyncIterator[TradeCandleItem]:
+        """Yield configured stream items.
+
+        Yields:
+            Bars, marks and breaks in configured order.
+        """
+        for item in self.items:
+            yield item
 
 
 def _arm_liveness(publisher: KrakenMarketDataPublisher) -> None:
@@ -337,22 +369,34 @@ class TestKrakenMarketDataPublisher:
     async def test_subscribe_candle_stream_trade_built_mode_uses_trade_built(self) -> None:
         """Trade-built mode delegates the live candle stream to trades.
 
-        Given a Kraken Spot publisher in trade-built mode,
+        Given a Kraken Spot publisher in trade-built mode and a stream holding a
+            completion mark before a bar,
         When the candle stream hook is called,
-        Then the exchange client's trade-built candle subscription is used.
+        Then the exchange client's trade-built stream is used, the mark and the
+            bar pass through in order, and only the bar marks candle liveness.
 
         Returns:
             None.
         """
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         candle = _shadow_candle()
+        mark = TradeCandleMark(
+            through=candle.interval_begin, generation=0, produced_at=candle.interval_begin
+        )
         client = _ShadowClient([candle])
+        client.items = [mark]
         publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
         publisher._exchange_client = cast(KrakenExchangeClient, client)
-        stream = publisher._subscribe_candle_stream(["BTC-USD"], "1m")
-        observed = [item async for item in stream]
-        assert observed == [candle]
-        assert client.calls == [(["BTC-USD"], "1m")]
+        publisher._last_candle_msg_at = -1.0
+        observed = [item async for item in publisher._subscribe_candle_stream(["BTC-USD"], "1m")]
+        assert observed == [mark]
+        assert publisher._last_candle_msg_at == -1.0
+        client.items = [mark, candle]
+        observed = [item async for item in publisher._subscribe_candle_stream(["BTC-USD"], "1m")]
+        assert observed == [mark, candle]
+        assert publisher._last_candle_msg_at > 0
+        assert client.stream_calls == [["BTC-USD"], ["BTC-USD"]]
+        assert client.calls == []
         assert client.native_calls == []
 
     @pytest.mark.asyncio
@@ -1275,3 +1319,231 @@ class TestKrakenStartupLiveness:
         with patch.object(MarketDataPublisherService, "start", base_start):
             await publisher.start()
         assert observed == [False]
+
+
+def _trade_built_publisher(*, follows: bool = True) -> KrakenMarketDataPublisher:
+    """Build a trade-built Spot publisher over a mocked exchange client.
+
+    Args:
+        follows: Value of ``spot_completion_follows_consumer``.
+
+    Returns:
+        The publisher; its client is a ``KrakenExchangeClient`` mock.
+    """
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    settings = _ShadowSettings(False, "trade_built")
+    settings.spot_completion_follows_consumer = follows
+    settings.trade_built_max_consumer_lag_seconds = 300
+    publisher.settings = cast(AppSettings, settings)
+    client = MagicMock(spec=KrakenExchangeClient)
+    client.trade_candle_generation.return_value = 4
+    client.trade_candle_queue_depth.return_value = 7
+    client.trade_candle_producer_alive.return_value = True
+    client.trade_candle_last_tick_age.return_value = 0.5
+    client.trade_candle_producer_health.return_value = {"producer_alive": True}
+    publisher._exchange_client = client
+    return publisher
+
+
+def _client_of(publisher: KrakenMarketDataPublisher) -> MagicMock:
+    """Return a publisher's mocked exchange client.
+
+    Args:
+        publisher: Publisher built by :func:`_trade_built_publisher`.
+
+    Returns:
+        Its client mock.
+    """
+    return cast(MagicMock, publisher._exchange_client)
+
+
+class TestSpotCompletionOverrides:
+    """Spot completion follows its consumer only in trade-built mode."""
+
+    def test_native_mode_keeps_every_hook_inert(self) -> None:
+        """With the native OHLC source nothing of the trade-built stream applies.
+
+        Given a Spot publisher with the native candle source,
+        When the completion hooks are read,
+        Then completion follows the wall clock, no generation, discard, bound or
+            health exists, and supervision touches no client.
+        """
+        publisher = _trade_built_publisher()
+        publisher.settings.spot_candle_source = "native"
+
+        publisher._supervise_candle_producer()
+
+        assert publisher._completion_follows_consumer() is False
+        assert publisher._current_trade_candle_generation() is None
+        assert publisher._discard_trade_candle_backlog() is None
+        assert publisher._max_consumer_lag_seconds() == 0
+        assert publisher._trade_candle_health() == {}
+        _client_of(publisher).ensure_trade_candle_producer.assert_not_called()
+
+    def test_trade_built_mode_reads_the_live_settings_and_the_client(self) -> None:
+        """The mode, the bound and the generation come from settings and client.
+
+        Given a trade-built Spot publisher,
+        When the hooks are read, with the follow setting on and then off,
+        Then they report the setting, the client's generation and the bound.
+        """
+        publisher = _trade_built_publisher()
+
+        assert publisher._completion_follows_consumer() is True
+        assert publisher._current_trade_candle_generation() == 4
+        assert publisher._max_consumer_lag_seconds() == 300
+        publisher.settings.spot_completion_follows_consumer = False
+        assert publisher._completion_follows_consumer() is False
+
+    def test_a_discard_needs_a_backlog(self) -> None:
+        """An empty queue discards nothing.
+
+        Given a trade-built Spot publisher whose queue holds items, then none,
+        When a backlog discard is asked for each time,
+        Then the client discards only the non-empty queue.
+        """
+        publisher = _trade_built_publisher()
+        client = _client_of(publisher)
+        client.discard_trade_candle_backlog.return_value = "lag-break"
+
+        assert publisher._discard_trade_candle_backlog() == "lag-break"
+        client.trade_candle_queue_depth.return_value = 0
+        assert publisher._discard_trade_candle_backlog() is None
+        client.discard_trade_candle_backlog.assert_called_once()
+
+    def test_catchup_is_requested_only_when_it_runs(self) -> None:
+        """The discard path asks the bounded catchup to reconcile.
+
+        Given a publisher without and then with a catchup,
+        When catchup is requested each time,
+        Then only the running catchup receives the request.
+        """
+        publisher = _trade_built_publisher()
+        publisher._request_candle_catchup()
+        catchup = MagicMock()
+        publisher._candle_catchup = catchup
+
+        publisher._request_candle_catchup()
+
+        catchup.request.assert_called_once()
+
+    def test_the_health_reports_state_queue_lag_and_producer(self) -> None:
+        """The heartbeat can tell a lagging consumer from a stalled producer.
+
+        Given a trade-built publisher progressing through 15:03 with one stale
+            mark and a recorded lag,
+        When its stream health is read twice,
+        Then it reports the state, boundary, generation, queue depth, stale
+            marks, lag and producer health, and the maximum lag restarts.
+        """
+        publisher = _trade_built_publisher()
+        publisher._completion_clock = CompletionClock.PROGRESS
+        publisher._completion_through = datetime(2026, 11, 11, 15, 3, tzinfo=UTC)
+        publisher._stale_trade_candle_marks = 1
+        publisher._consumer_lag_s = 2.0
+        publisher._consumer_lag_max_s = 9.0
+
+        assert publisher._trade_candle_health() == {
+            "state": "progress",
+            "completed_through": "2026-11-11T15:03:00+00:00",
+            "generation": 4,
+            "queue_depth": 7,
+            "stale_marks": 1,
+            "consumer_lag_s": 2.0,
+            "consumer_lag_max_s": 9.0,
+            "producer_alive": True,
+        }
+        publisher._completion_through = None
+        health = publisher._trade_candle_health()
+        assert (health["completed_through"], health["consumer_lag_max_s"]) == (None, None)
+
+    def test_a_reset_is_recorded_as_a_break_of_the_stream(self) -> None:
+        """A feed break waits for the new generation and arms the emitter.
+
+        Given a progressing trade-built publisher with an emitter and a catchup,
+        When the spot feed break suspension runs,
+        Then the client's reset break is noted, the state waits, the emitter's
+            trade break is armed at its popped boundary, and catchup is
+            requested.
+        """
+        publisher = _trade_built_publisher()
+        publisher._completion_clock = CompletionClock.PROGRESS
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        publisher._minute_emitter = emitter
+        catchup = MagicMock()
+        publisher._candle_catchup = catchup
+        popped = datetime(2026, 11, 11, 15, 3, tzinfo=UTC)
+        _client_of(publisher).reset_trade_candle_epoch.return_value = TradeCandleBreak(
+            reason=TradeCandleBreakReason.RESET,
+            generation=5,
+            lost_bars=0,
+            lost_from=None,
+            lost_through=None,
+            builder_kept=False,
+            arm_after=popped,
+        )
+
+        publisher._suspend_candle_synthesis_across_break()
+
+        assert publisher._completion_clock is CompletionClock.WAITING
+        emitter.mark_trade_break.assert_called_once_with(arm_after=int(popped.timestamp()))
+        catchup.request.assert_called_once()
+
+
+class TestSpotProducerSupervision:
+    """A stopped producer is restarted; a stalled one is reported."""
+
+    def test_a_stalled_producer_warns_at_most_once_a_minute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An alive producer without ticks is visible without flooding the log.
+
+        Given an alive producer whose last tick is 11 s old,
+        When supervision runs three times, the last one minute later,
+        Then the producer is ensured each time and the warning fires twice.
+        """
+        publisher = _trade_built_publisher()
+        client = _client_of(publisher)
+        client.trade_candle_last_tick_age.return_value = 11.0
+        clock = [100.0]
+        monkeypatch.setattr(kraken_module, "monotonic", lambda: clock[0])
+        warnings: list[str] = []
+        sink = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+        try:
+            publisher._supervise_candle_producer()
+            clock[0] = 130.0
+            publisher._supervise_candle_producer()
+            clock[0] = 161.0
+            publisher._supervise_candle_producer()
+        finally:
+            logger.remove(sink)
+
+        assert client.ensure_trade_candle_producer.call_count == 3
+        assert sum("last tick is 11.0s old" in line for line in warnings) == 2
+
+    @pytest.mark.parametrize(
+        ("alive", "age"),
+        [(True, 10.0), (True, None), (False, 30.0)],
+    )
+    def test_a_ticking_unstarted_or_dead_producer_does_not_warn(
+        self, alive: bool, age: float | None
+    ) -> None:
+        """Only an alive producer that stopped ticking is stalled.
+
+        Given a producer that ticked within the bound, never ticked, or died,
+        When supervision runs,
+        Then the producer is ensured and nothing is logged as stalled.
+
+        Args:
+            alive: Whether the producer task is alive.
+            age: Age of its last tick, or ``None``.
+        """
+        publisher = _trade_built_publisher()
+        client = _client_of(publisher)
+        client.trade_candle_producer_alive.return_value = alive
+        client.trade_candle_last_tick_age.return_value = age
+
+        publisher._supervise_candle_producer()
+
+        client.ensure_trade_candle_producer.assert_called_once()
+        assert publisher._producer_stall_warned_at is None

@@ -1118,6 +1118,27 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         return self._trade_built_candle_queue.qsize()
 
+    def trade_candle_producer_alive(self) -> bool:
+        """Return whether the trade-built producer task is running.
+
+        Returns:
+            True while a producer task exists and has not finished.
+        """
+        task = self._trade_built_candle_aggregator_task
+        return task is not None and not task.done()
+
+    def trade_candle_last_tick_age(self, now: datetime) -> float | None:
+        """Return the age of the producer's last completed tick.
+
+        Args:
+            now: Current UTC wall clock.
+
+        Returns:
+            Seconds since the last completed tick, or ``None`` before the first.
+        """
+        last = self._trade_candle_last_tick_at
+        return None if last is None else round((now - last).total_seconds(), 3)
+
     def trade_candle_producer_health(self, now: datetime) -> JsonObject:
         """Return the trade-built producer's health for the heartbeat.
 
@@ -1128,12 +1149,10 @@ class KrakenExchangeClient(ExchangeClientBase):
             Whether the producer task is alive, its restarts, the age of its last
             completed tick, and the overflow, discard and lost-bar counters.
         """
-        task = self._trade_built_candle_aggregator_task
-        last = self._trade_candle_last_tick_at
         return {
-            "producer_alive": task is not None and not task.done(),
+            "producer_alive": self.trade_candle_producer_alive(),
             "producer_restarts": self._trade_candle_producer_restarts,
-            "last_tick_age_s": None if last is None else round((now - last).total_seconds(), 3),
+            "last_tick_age_s": self.trade_candle_last_tick_age(now),
             "overflows": self._trade_candle_overflows,
             "discards": self._trade_candle_discards,
             "lost_bars": self._trade_candle_lost_bars,

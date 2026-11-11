@@ -9,6 +9,7 @@ today's sparse plane, never toward a fabricated bar.
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -23,6 +24,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionStatus
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -30,6 +32,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 from snapper.messaging.publishers import base as base_module
 from snapper.messaging.publishers.base import _SWEEP_YIELD_EVERY
+from snapper.messaging.publishers.base import CompletionClock
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
@@ -137,6 +140,8 @@ class _CompletionSettings:
         self.spot_candle_source = candle_source
         self.trade_built_finalize_grace_seconds = finalize_grace
         self.candle_identity_window_snapshot = False
+        self.spot_completion_follows_consumer = False
+        self.trade_built_max_consumer_lag_seconds = 0
 
 
 async def _resolve_instrument(native_symbol: str) -> str:
@@ -1899,3 +1904,416 @@ class TestPublisherEmitterWiring:
         assert timeframes.count("1m") == 7
         assert "5m" in timeframes
         assert all(candle.symbol == "BTC-USD" for candle, _timeframe in sent)
+
+
+_PRODUCER_TASK = "_trade_built_candle_aggregator"
+"""Name of the client's producer coroutine, replaced by the stream rig."""
+
+_POP = "pop_completed"
+"""Name of the builder method the stream rig scripts per tick."""
+
+
+async def _idle_producer() -> None:
+    """Stand in for the producer task; the rig runs every producer tick itself."""
+    await asyncio.Event().wait()
+
+
+class _StreamSettings(_CompletionSettings):
+    """Settings double for a trade-built Spot publisher and its client."""
+
+    def __init__(self, *, follows: bool, lag_bound: int = 0) -> None:
+        """Store trade-built settings with minute completion on.
+
+        Args:
+            follows: Value of ``spot_completion_follows_consumer``.
+            lag_bound: Value of ``trade_built_max_consumer_lag_seconds``.
+        """
+        super().__init__()
+        self.spot_completion_follows_consumer = follows
+        self.trade_built_max_consumer_lag_seconds = lag_bound
+
+
+class _StreamRig:
+    """A Spot publisher consuming a real trade-built stream in its real candle loop.
+
+    The producer's ticks are run by the test with scripted bars, so the queue
+    holds exactly the marks and bars the real producer enqueues for them.
+    """
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        follows: bool,
+        aggregator: CandleAggregator | None = None,
+        lag_bound: int = 0,
+    ) -> None:
+        """Wire a real client, emitter and candle loop.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+            follows: Whether completion follows the consumer.
+            aggregator: Higher-timeframe aggregator, if any.
+            lag_bound: Consumer lag bound in seconds.
+        """
+        self._monkeypatch = monkeypatch
+        settings = _StreamSettings(follows=follows, lag_bound=lag_bound)
+        client = KrakenExchangeClient.__new__(KrakenExchangeClient)
+        client.settings = cast(AppSettings, settings)
+        client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+        client._trade_built_candle_queue = asyncio.Queue()
+        client._trade_built_candle_aggregator_task = None
+        client._trade_built_candles_enabled = False
+        client._trade_candle_generation = 0
+        client._trade_candle_marked_through = None
+        client._trade_candle_popped_through = None
+        client._trade_candle_overflow = None
+        client._trade_candle_last_tick_at = None
+        client._trade_candle_overflows = 0
+        client._trade_candle_discards = 0
+        client._trade_candle_lost_bars = 0
+        client._trade_candle_producer_restarts = 0
+        monkeypatch.setattr(client, _PRODUCER_TASK, _idle_producer)
+        self.client = client
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher.settings = cast(AppSettings, settings)
+        publisher.running = True
+        publisher._exchange_client = client
+        repository = MagicMock(spec=Repository)
+        repository.get_canonical_candle_public_id = AsyncMock(return_value=None)
+        publisher.repository = repository
+        publisher._candle_aggregator = aggregator
+        self.emitter = MinuteCompletionEmitter(
+            roster=lambda: {"S1-EUR", "S2-EUR"},
+            enabled=lambda: True,
+            settle_seconds=_SPOT_SETTLE_S,
+            resubscribe_settle_seconds=90.0,
+        )
+        publisher._minute_emitter = self.emitter
+        self.recorder = _Recorder()
+        monkeypatch.setattr(publisher, "_publish_message", self.recorder)
+        monkeypatch.setattr(publisher, "_ensure_instrument", _resolve_instrument)
+        self.publisher = publisher
+
+    def witness(self, first: int, last: int) -> None:
+        """Witness the feed live across a range of minutes.
+
+        Args:
+            first: UNIX start of the first witnessed minute.
+            last: UNIX start of the last witnessed minute.
+        """
+        for minute in range(first, last + _MINUTE, _MINUTE):
+            _witness_minute(self.emitter, minute)
+
+    def tick(self, at: int, bars: list[CandleUpdate]) -> None:
+        """Run one producer tick that pops exactly these bars.
+
+        Args:
+            at: UNIX time of the tick.
+            bars: Bars the builder pops at this tick.
+        """
+        self._monkeypatch.setattr(
+            self.client._trade_built_candle_builder, _POP, lambda _cutoff: bars
+        )
+        self.client._produce_trade_candle_tick(datetime.fromtimestamp(at, UTC))
+
+    async def consume(self, *, wall_flush: bool = False) -> None:
+        """Run the candle loop until the queue is drained.
+
+        Args:
+            wall_flush: Whether one wall-clock flush tick runs after every item,
+                as the periodic flush task may.
+        """
+        publisher = self.publisher
+        sweep = publisher._sweep_completed_minute
+        client = self.client
+
+        async def _sweep_then_stop(exchange: ExchangeEnum, timeframe: str) -> None:
+            """Sweep as the loop does, optionally flush, and stop once drained.
+
+            Args:
+                exchange: Data exchange of the loop.
+                timeframe: Timeframe of the loop.
+            """
+            await sweep(exchange, timeframe)
+            if wall_flush:
+                await self._wall_flush_tick()
+            if client._trade_built_candle_queue.empty() and client._trade_candle_overflow is None:
+                publisher.running = False
+
+        self._monkeypatch.setattr(publisher, "_sweep_completed_minute", _sweep_then_stop)
+        await asyncio.wait_for(publisher._candle_loop(["*"], "1m"), timeout=10.0)
+
+    async def _wall_flush_tick(self) -> None:
+        """Run the body of one periodic flush tick at the real wall clock."""
+        publisher = self.publisher
+        aggregator = publisher._candle_aggregator
+        if aggregator is None or publisher._sync_completion_mode():
+            return
+        flushed = aggregator.flush(datetime.now(UTC))
+        publisher._drain_aggregator_repair_signals()
+        for tf_label, synth in flushed:
+            await publisher._publish_synthesized_candle(synth, ExchangeEnum.KRAKEN, tf_label)
+
+    def published(self, timeframe: str = "1m") -> list[tuple[str, datetime, int, float, datetime]]:
+        """Return the published candles of one timeframe, in order.
+
+        Args:
+            timeframe: Timeframe to select.
+
+        Returns:
+            Symbol, opening, trades, close and author of each message.
+        """
+        return [
+            (message.instrument, message.open_at, message.trades, message.close, message.timestamp)
+            for topic, message in self.recorder.published
+            if topic.endswith(f".candles.{timeframe}")
+        ]
+
+
+def _bar(symbol: str, minute: int, close: float) -> CandleUpdate:
+    """Build a real trade-built bar of one symbol and minute.
+
+    Args:
+        symbol: Native symbol.
+        minute: UNIX start of the minute.
+        close: Bar close.
+
+    Returns:
+        A complete 1m bar with one trade.
+    """
+    return CandleUpdate(
+        symbol=symbol,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        vwap=close,
+        trades=1,
+        volume=1.0,
+        interval_begin=datetime.fromtimestamp(minute, UTC),
+        interval=_MINUTE,
+        complete=True,
+    )
+
+
+def _recent_minute(*, minutes_ago: int = 40, align: int = _MINUTE) -> int:
+    """Return a minute far enough behind the wall clock to model a lagging consumer.
+
+    Args:
+        minutes_ago: How far behind the wall clock the data runs.
+        align: Alignment of the returned boundary in seconds.
+
+    Returns:
+        UNIX start of an aligned minute that many minutes ago.
+    """
+    return int((time.time() - minutes_ago * _MINUTE) // align) * align
+
+
+def _at(second: int) -> datetime:
+    """Return the UTC instant of a UNIX second.
+
+    Args:
+        second: UNIX time.
+
+    Returns:
+        The UTC datetime.
+    """
+    return datetime.fromtimestamp(second, UTC)
+
+
+class TestCompletionFollowsTheConsumer:
+    """The real stream iterator with the real candle loop, 40 minutes behind."""
+
+    @pytest.mark.asyncio
+    async def test_a_tradeless_symbol_gets_its_flat_bar_before_a_later_real_bar(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sparse symbols: the sweep follows the queue, not the wall clock.
+
+        Given closes for S1 and S2, then a tick with no bars, then a tick with
+            S1's bar for the following minute,
+        When the consumer drains the queue,
+        Then both symbols get their flat bar for the tradeless minute before
+            S1's next real bar is observed, S2 gets the next flat bar after it,
+            every flat bar carries its symbol's close, and each is authored by
+            the mark that swept it.
+        """
+        rig = _StreamRig(monkeypatch, follows=True)
+        m = _recent_minute()
+        rig.witness(m - 3 * _MINUTE, m + 4 * _MINUTE)
+        rig.tick(m + 13, [_bar("S1-EUR", m - _MINUTE, 101.0), _bar("S2-EUR", m - _MINUTE, 201.0)])
+        rig.tick(m + 73, [])
+        rig.tick(m + 133, [_bar("S1-EUR", m + _MINUTE, 102.0)])
+
+        await rig.consume()
+
+        assert rig.published() == [
+            ("S1-EUR", _at(m - _MINUTE), 1, 101.0, _at(m + 13)),
+            ("S2-EUR", _at(m - _MINUTE), 1, 201.0, _at(m + 13)),
+            ("S1-EUR", _at(m), 0, 101.0, _at(m + 73)),
+            ("S2-EUR", _at(m), 0, 201.0, _at(m + 73)),
+            ("S1-EUR", _at(m + _MINUTE), 1, 102.0, _at(m + 133)),
+            ("S2-EUR", _at(m + _MINUTE), 0, 201.0, _at(m + 133)),
+        ]
+        assert rig.publisher._completion_clock is CompletionClock.PROGRESS
+        assert rig.publisher._completion_through == _at(m + 2 * _MINUTE)
+
+    @pytest.mark.asyncio
+    async def test_every_minute_is_swept_once_in_order_across_a_jump(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Consecutive marks and a tick that jumps three minutes sweep each minute once.
+
+        Given a close for S1, a tick without bars, and a tick three minutes later,
+        When the consumer drains the queue,
+        Then S1 gets exactly one flat bar for each of the four minutes, in order.
+        """
+        rig = _StreamRig(monkeypatch, follows=True)
+        m = _recent_minute()
+        rig.witness(m - 3 * _MINUTE, m + 6 * _MINUTE)
+        rig.tick(m + 13, [_bar("S1-EUR", m - _MINUTE, 101.0)])
+        rig.tick(m + 73, [])
+        rig.tick(m + 253, [])
+
+        await rig.consume()
+
+        flats = [(opened, close) for _s, opened, trades, close, _a in rig.published() if not trades]
+        assert flats == [(_at(m + n * _MINUTE), 101.0) for n in range(4)]
+
+    @pytest.mark.asyncio
+    async def test_a_window_is_sealed_only_by_the_mark_that_passes_its_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A higher-timeframe window waits for its last minute's bars.
+
+        Given five traded minutes of a 5m window, each popped by its own tick,
+        When the consumer drains the queue,
+        Then the window is published after its last minute's bar, complete,
+            with all five minutes, authored by the mark that passed its end.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 6 * _MINUTE)
+        for n in range(5):
+            rig.tick(w + (n + 1) * _MINUTE + 13, [_bar("S1-EUR", w + n * _MINUTE, 100.0 + n)])
+
+        await rig.consume()
+
+        order = [
+            (topic.rsplit(".", 1)[1], message.open_at) for topic, message in rig.recorder.published
+        ]
+        assert order.index(("5m", _at(w))) == order.index(("1m", _at(w + 4 * _MINUTE))) + 1
+        window = [message for topic, message in rig.recorder.published if topic.endswith(".5m")]
+        assert [(m.open_at, m.volume, m.close, m.complete) for m in window] == [
+            (_at(w), 5.0, 104.0, True)
+        ]
+        assert window[0].timestamp == _at(w + 5 * _MINUTE + 13)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("follows", [True, False])
+    async def test_the_2026_11_10_lag_produces_no_late_drop_when_completion_follows(
+        self, monkeypatch: pytest.MonkeyPatch, follows: bool
+    ) -> None:
+        """Regression: a lagging consumer with a running flush.
+
+        Given real bars of two symbols for six minutes, consumed 40 minutes
+            late while a wall-clock flush tick runs after every item,
+        When completion follows the consumer,
+        Then no late drop is recorded, no symbol and minute gets both a flat
+            and a real bar, and the flat bars carry the right closes; on the
+            wall clock the same lag drops real bars as late, as before.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+            follows: Whether completion follows the consumer.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=follows, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 8 * _MINUTE)
+        traded = {0: ("S1-EUR", "S2-EUR"), 1: ("S1-EUR",), 2: ("S1-EUR", "S2-EUR")}
+        traded |= {3: ("S1-EUR",), 4: ("S1-EUR",), 5: ("S1-EUR", "S2-EUR")}
+        for n in range(6):
+            bars = [_bar(s, w + n * _MINUTE, 100.0 + n) for s in traded[n]]
+            rig.tick(w + (n + 1) * _MINUTE + 13, bars)
+        rig.tick(w + 7 * _MINUTE + 13, [])
+
+        await rig.consume(wall_flush=True)
+
+        if not follows:
+            assert aggregator.late_rolls_after_close > 0
+            return
+        assert aggregator.late_rolls_after_close == 0
+        real = {(s, opened) for s, opened, trades, _c, _a in rig.published() if trades}
+        flats = {
+            (s, opened): close for s, opened, trades, close, _a in rig.published() if not trades
+        }
+        assert not real & set(flats)
+        assert flats == {
+            ("S2-EUR", _at(w + _MINUTE)): 100.0,
+            ("S2-EUR", _at(w + 3 * _MINUTE)): 102.0,
+            ("S2-EUR", _at(w + 4 * _MINUTE)): 102.0,
+            ("S1-EUR", _at(w + 6 * _MINUTE)): 105.0,
+            ("S2-EUR", _at(w + 6 * _MINUTE)): 105.0,
+        }
+
+
+class TestStreamBreaksInTheLoop:
+    """Breaks of the real stream reach the real loop's discard path."""
+
+    @pytest.mark.asyncio
+    async def test_an_overflow_publishes_no_window_spanning_the_lost_minute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An overflow evicts nothing, and its lost minute completes no window.
+
+        Given a queue of three items that refuses the bars of the window's third
+            minute,
+        When the consumer drains the queue,
+        Then it handles one overflow break and the window is never published
+            as complete.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.client._trade_built_candle_queue = asyncio.Queue(maxsize=3)
+        rig.witness(w - 2 * _MINUTE, w + 8 * _MINUTE)
+        rig.tick(w + _MINUTE + 13, [_bar("S1-EUR", w, 100.0)])
+        rig.tick(w + 2 * _MINUTE + 13, [_bar("S1-EUR", w + _MINUTE, 101.0)])
+
+        await rig.consume()
+        rig.publisher.running = True
+        for n in range(2, 6):
+            rig.tick(w + (n + 1) * _MINUTE + 13, [_bar("S1-EUR", w + n * _MINUTE, 100.0 + n)])
+        await rig.consume()
+
+        assert rig.client._trade_candle_overflows >= 1
+        assert rig.client._trade_candle_lost_bars >= 1
+        windows = [m for topic, m in rig.recorder.published if topic.endswith(".5m")]
+        assert not [m for m in windows if m.open_at == _at(w) and m.complete]
+
+    @pytest.mark.asyncio
+    async def test_a_lag_beyond_the_bound_discards_and_the_mark_in_hand_is_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A2: an old-generation mark in the loop's hands moves nothing.
+
+        Given a bound of one second and a queue 40 minutes behind,
+        When the consumer takes its first item, a mark,
+        Then the backlog is discarded with a lag break, the mark in hand is
+            ignored as stale, the state waits, and no discarded bar is
+            published.
+        """
+        rig = _StreamRig(monkeypatch, follows=True, lag_bound=1)
+        m = _recent_minute()
+        rig.tick(m + 13, [_bar("S1-EUR", m - _MINUTE, 101.0)])
+
+        await rig.consume()
+
+        assert rig.client._trade_candle_discards == 1
+        assert rig.client._trade_candle_lost_bars == 1
+        assert rig.publisher._stale_trade_candle_marks == 1
+        assert rig.publisher._completion_clock is CompletionClock.WAITING
+        assert rig.published() == []
