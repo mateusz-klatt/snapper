@@ -1,10 +1,14 @@
 """Unit tests for KrakenMarketDataPublisher."""
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -53,6 +57,7 @@ class _ShadowSettings:
         self.candle_identity_window_snapshot = False
         self.spot_completion_follows_consumer = False
         self.trade_built_max_consumer_lag_seconds = 0
+        self.trade_built_finalize_grace_seconds = 12
 
 
 class _ShadowRepository:
@@ -1547,3 +1552,121 @@ class TestSpotProducerSupervision:
 
         client.ensure_trade_candle_producer.assert_called_once()
         assert publisher._producer_stall_warned_at is None
+
+
+_PRODUCER = "_trade_built_candle_aggregator"
+"""Name of the client's producer coroutine, replaced by the shadow-stream test."""
+
+
+async def _idle_producer() -> None:
+    """Stand in for the producer task; the test runs every producer tick itself."""
+    await asyncio.Event().wait()
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    """Yield to the loop until a condition holds.
+
+    Args:
+        predicate: Condition to wait for.
+
+    Raises:
+        AssertionError: When the condition does not hold within two seconds.
+    """
+    for _attempt in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+class TestShadowConsumerOnTheRealStream:
+    """Native mode: the shadow consumer reads the real bars-only iterator."""
+
+    @pytest.mark.asyncio
+    async def test_every_surviving_bar_reaches_the_shadow_table_and_nothing_else(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Marks never reach the shadow table, and an overflow loses only what it says.
+
+        Given a queue of three items and producer ticks whose marks and bars
+            overflow it once,
+        When the shadow consumer reads the stream,
+        Then it writes every bar that was queued before the overflow or after
+            the break, writes no mark, and the break counts the two bars it lost.
+        """
+        settings = _ShadowSettings(True, "native")
+        client = KrakenExchangeClient.__new__(KrakenExchangeClient)
+        client.settings = cast(AppSettings, settings)
+        client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+        client._trade_built_candle_queue = asyncio.Queue(maxsize=3)
+        client._trade_built_candle_aggregator_task = None
+        client._trade_built_candles_enabled = False
+        client._trade_candle_generation = 0
+        client._trade_candle_marked_through = None
+        client._trade_candle_popped_through = None
+        client._trade_candle_overflow = None
+        client._trade_candle_last_tick_at = None
+        client._trade_candle_overflows = 0
+        client._trade_candle_discards = 0
+        client._trade_candle_lost_bars = 0
+        client._trade_candle_producer_restarts = 0
+        monkeypatch.setattr(client, _PRODUCER, _idle_producer)
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        publisher.settings = cast(AppSettings, settings)
+        repository = _ShadowRepository()
+        publisher.repository = cast(Repository, repository)
+        publisher._exchange_client = client
+        publisher.running = True
+        publisher._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-7000-8000-000000000501"
+        )
+        publisher._should_persist_row = MagicMock(return_value=True)
+        m = datetime(2026, 11, 11, 15, 0, tzinfo=UTC)
+
+        def _tick(minutes_after: int, bars: list[CandleUpdate]) -> None:
+            """Run one producer tick that pops exactly these bars.
+
+            Args:
+                minutes_after: Whole minutes after the reference minute, plus 13 s.
+                bars: Bars the builder pops at this tick.
+            """
+            monkeypatch.setattr(
+                client._trade_built_candle_builder, "pop_completed", lambda _cutoff: bars
+            )
+            client._produce_trade_candle_tick(m + timedelta(minutes=minutes_after, seconds=13))
+
+        def _minute_bar(symbol: str, minutes_after: int) -> CandleUpdate:
+            """Build a trade-built bar of a symbol and minute.
+
+            Args:
+                symbol: Native symbol.
+                minutes_after: Whole minutes after the reference minute.
+
+            Returns:
+                A complete 1m bar.
+            """
+            return replace(
+                _shadow_candle(symbol), interval_begin=m + timedelta(minutes=minutes_after)
+            )
+
+        _tick(1, [_minute_bar("BTC-USD", 0)])
+        loop = asyncio.create_task(publisher._shadow_candle_loop(["*"]))
+        await _until(lambda: len(repository.shadow_rows) == 1)
+        _tick(2, [_minute_bar("BTC-USD", 1), _minute_bar("ETH-USD", 1)])
+        _tick(3, [_minute_bar("BTC-USD", 2)])
+        await _until(lambda: client._trade_candle_generation == 1)
+        _tick(4, [_minute_bar("BTC-USD", 3)])
+        await _until(lambda: len(repository.shadow_rows) == 3)
+        loop.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop
+
+        written = [(rows[0]["open_at"], rows[0]["timestamp"]) for rows in repository.shadow_rows]
+        assert [opened for opened, _author in written] == [
+            m,
+            m + timedelta(minutes=1),
+            m + timedelta(minutes=3),
+        ]
+        assert client._trade_candle_overflows == 1
+        assert client._trade_candle_lost_bars == 2
+        assert repository.live_rows == []
