@@ -177,9 +177,12 @@ is at most about 14,500 rows a minute, and about half that when both
 calls use their full budget. Measured ingestion is about 2,700 to 2,900
 trades a minute outside the US session, a weekday average of 6,700 to
 12,600, and about 45,000 a minute during the US session, mostly
-equities. For much of a weekday `I` therefore exceeds `X`: a pass cannot
-complete, completed-coverage lag grows, and the lag warning fires until
-the pass design changes. Adaptive page reductions lower `X` further.
+equities. For much of a weekday `I` therefore exceeds `X`. A pass keeps
+a fixed end and can still complete, but while ingestion meets or exceeds
+sweep throughput, successive passes take longer, completed-coverage lag
+has no finite steady state, and the lag warning keeps firing until the
+pass design changes. A completed pass is no proof of sufficient
+capacity. Adaptive page reductions lower `X` further.
 A newly settled cursor-only violation is detected once a pass reaches
 its bus time. A pass keeps its end fixed, so a row that settles just
 after a pass started waits for the rest of that pass and for the next
