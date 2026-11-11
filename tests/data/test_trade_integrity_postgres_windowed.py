@@ -32,6 +32,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -69,6 +70,8 @@ _FIRST_DAY_OFFSET = -12
 _LAST_DAY_OFFSET = 12
 _CANDIDATE_TIME = _ANCHOR + timedelta(hours=12)
 _OUT_OF_WINDOW_DAYS = (-12, -9, 9, 12)
+_SHIFTED_TIME = _CANDIDATE_TIME + timedelta(days=3)
+_EXPECTED_LOOPS = {0: 2, -12: 0, -9: 0, 9: 1, 12: 0}
 _ACTIVE_LITERAL = "TIMESTAMPTZ '9999-12-31 23:59:59+00'"
 _SESSION_ID = "40000000-0000-0000-0000-000000000001"
 _BUDGET_NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
@@ -276,42 +279,62 @@ async def _insert_trade(
     )
 
 
-async def _stage_witness_rows(engine: AsyncEngine) -> tuple[str, str]:
-    """Stage one candidate identity, its control row and out-of-window rows.
+@dataclass(frozen=True, slots=True)
+class _Witness:
+    """Identities of the two clean witness candidates.
 
-    The control row at the candidate's own time lies in the anchor day's
-    partition. Rows of the same venue identity and public id, active, lie in
-    the partitions of days -12, -9, +9 and +12, so each would be a finding if
-    its partition were read.
+    Attributes:
+        instrument: Instrument shared by both candidates.
+        anchored_public_id: Public id of the candidate at the anchor time.
+        shifted_public_id: Public id of the candidate three days later.
+    """
+
+    instrument: str
+    anchored_public_id: str
+    shifted_public_id: str
+
+
+async def _stage_witness_rows(engine: AsyncEngine) -> _Witness:
+    """Stage two clean candidates whose windows cover different partitions.
+
+    The anchored candidate ``witness-a`` has its control row at its own time
+    in the anchor day's partition, and rows of the same venue identity and
+    public id, active, in the partitions of days -12, -9, +9 and +12, so each
+    would be a finding if its partition were read for it. The shifted
+    candidate ``witness-b``, three days later, has only its control row; its
+    window covers day +9 but not days -12, -9 or +12.
 
     Args:
         engine: Engine bound to the private schema.
 
     Returns:
-        The instrument id and the public id of the candidate identity.
+        The identities of both candidates.
     """
-    instrument = str(uuid4())
-    public_id = str(uuid4())
+    witness = _Witness(
+        instrument=str(uuid4()),
+        anchored_public_id=str(uuid4()),
+        shifted_public_id=str(uuid4()),
+    )
     async with async_sessionmaker(engine)() as session:
-        await _insert_trade(
-            session,
-            public_id=public_id,
-            instrument_public_id=instrument,
-            trade_id="witness",
-            executed_at=_CANDIDATE_TIME,
-        )
-        for offset in _OUT_OF_WINDOW_DAYS:
+        for offset in (0, *_OUT_OF_WINDOW_DAYS):
             await _insert_trade(
                 session,
-                public_id=public_id,
-                instrument_public_id=instrument,
-                trade_id="witness",
+                public_id=witness.anchored_public_id,
+                instrument_public_id=witness.instrument,
+                trade_id="witness-a",
                 executed_at=_CANDIDATE_TIME + timedelta(days=offset),
             )
+        await _insert_trade(
+            session,
+            public_id=witness.shifted_public_id,
+            instrument_public_id=witness.instrument,
+            trade_id="witness-b",
+            executed_at=_SHIFTED_TIME,
+        )
         await session.commit()
     async with engine.begin() as connection:
         await connection.execute(text("ANALYZE trades"))
-    return instrument, public_id
+    return witness
 
 
 def _numbered(statement: str, names: Sequence[str]) -> str:
@@ -384,14 +407,17 @@ async def _explain_executed(
 
 
 def _assert_pruned(loops: dict[str, int]) -> None:
-    """Require skipped out-of-window partitions and a scanned control partition.
+    """Require partition scans that follow each candidate's own window.
+
+    The anchor partition lies in both windows and is scanned once per
+    candidate. Day +9 lies only in the shifted candidate's window, and days
+    -12, -9 and +12 lie in neither, so their populated scans never execute.
 
     Args:
         loops: Actual loops per scanned relation.
     """
-    assert loops.get(_partition_name(0), 0) >= 1, loops
-    for offset in _OUT_OF_WINDOW_DAYS:
-        assert loops.get(_partition_name(offset), 0) == 0, (offset, loops)
+    observed = {offset: loops.get(_partition_name(offset), 0) for offset in _EXPECTED_LOOPS}
+    assert observed == _EXPECTED_LOOPS, loops
 
 
 @pytest.mark.parametrize("plan_cache_mode", ["force_custom_plan", "force_generic_plan"])
@@ -399,20 +425,24 @@ async def test_windowed_m1_never_executes_out_of_window_partitions(
     schema_engine: AsyncEngine,
     plan_cache_mode: str,
 ) -> None:
-    """Prune populated M1 partitions outside the window for a clean candidate.
+    """Prune populated M1 partitions per candidate, outside each one's window.
 
-    Given: A candidate identity with its own row in the anchor partition and
-        conflicting rows in four populated partitions outside the window.
+    Given: Two clean venue identities three days apart, the first with
+        conflicting rows in four populated partitions outside its window, one
+        of which lies inside the second candidate's window.
     When: The windowed M1 statement runs prepared with the driver's types
         under a custom and under a forced generic plan, and through the probe.
-    Then: The probe finds nothing, the out-of-window partition scans never
-        execute, and the control partition is scanned.
+    Then: The probe finds nothing, and each partition is scanned exactly for
+        the candidates whose window covers it.
     """
-    instrument, _ = await _stage_witness_rows(schema_engine)
+    witness = await _stage_witness_rows(schema_engine)
     async with async_sessionmaker(schema_engine)() as session:
         findings = await _find_m1_windowed_postgresql(
             session,
-            [_M1WindowCandidate(instrument, "witness", _CANDIDATE_TIME)],
+            [
+                _M1WindowCandidate(witness.instrument, "witness-a", _CANDIDATE_TIME),
+                _M1WindowCandidate(witness.instrument, "witness-b", _SHIFTED_TIME),
+            ],
             _FindingCollector(),
         )
 
@@ -424,8 +454,10 @@ async def test_windowed_m1_never_executes_out_of_window_partitions(
             + _numbered(_M1_WINDOWED_POSTGRES_QUERY.text, _M1_PARAMETERS)
         ),
         execute=(
-            f"EXECUTE witness(ARRAY['{instrument}']::text[], ARRAY['witness']::text[], "
-            f"ARRAY['{_CANDIDATE_TIME.isoformat()}']::timestamptz[], interval '7 days', 20)"
+            f"EXECUTE witness(ARRAY['{witness.instrument}', '{witness.instrument}']::text[], "
+            "ARRAY['witness-a', 'witness-b']::text[], "
+            f"ARRAY['{_CANDIDATE_TIME.isoformat()}', '{_SHIFTED_TIME.isoformat()}']"
+            "::timestamptz[], interval '7 days', 20)"
         ),
     )
 
@@ -438,20 +470,24 @@ async def test_windowed_m2_never_executes_out_of_window_partitions(
     schema_engine: AsyncEngine,
     plan_cache_mode: str,
 ) -> None:
-    """Prune populated M2 partitions outside the window for a clean candidate.
+    """Prune populated M2 partitions per candidate, outside each one's window.
 
-    Given: A candidate public id with one active row in the anchor partition
-        and four more active rows in populated partitions outside the window.
+    Given: Two clean public ids three days apart, the first with four more
+        active rows in populated partitions outside its window, one of which
+        lies inside the second candidate's window.
     When: The windowed M2 statement runs prepared with the driver's types
         under a custom and under a forced generic plan, and through the probe.
-    Then: The probe finds nothing, the out-of-window partition scans never
-        execute, and the control partition is scanned.
+    Then: The probe finds nothing, and each partition is scanned exactly for
+        the candidates whose window covers it.
     """
-    _, public_id = await _stage_witness_rows(schema_engine)
+    witness = await _stage_witness_rows(schema_engine)
     async with async_sessionmaker(schema_engine)() as session:
         findings = await _find_m2_windowed_postgresql(
             session,
-            [_M2WindowCandidate(public_id, _CANDIDATE_TIME)],
+            [
+                _M2WindowCandidate(witness.anchored_public_id, _CANDIDATE_TIME),
+                _M2WindowCandidate(witness.shifted_public_id, _SHIFTED_TIME),
+            ],
             _FindingCollector(),
         )
 
@@ -463,8 +499,10 @@ async def test_windowed_m2_never_executes_out_of_window_partitions(
             + _numbered(_M2_WINDOWED_POSTGRES_QUERY.text, _M2_PARAMETERS)
         ),
         execute=(
-            f"EXECUTE witness(ARRAY['{public_id}']::text[], "
-            f"ARRAY['{_CANDIDATE_TIME.isoformat()}']::timestamptz[], interval '7 days', 20)"
+            f"EXECUTE witness(ARRAY['{witness.anchored_public_id}', "
+            f"'{witness.shifted_public_id}']::text[], "
+            f"ARRAY['{_CANDIDATE_TIME.isoformat()}', '{_SHIFTED_TIME.isoformat()}']"
+            "::timestamptz[], interval '7 days', 20)"
         ),
     )
 

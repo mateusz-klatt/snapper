@@ -108,15 +108,18 @@ First startup does not pre-credit the window: completed coverage starts
 at the overlap boundary and becomes current only after the full initial
 pass completes.
 
-For rows reached through the recent sweep, both checks consider only
+For rows reached through the recent sweep, each probe considers only
 stored rows whose `executed_at` lies within seven days
 (`TRADE_INTEGRITY_PROBE_WINDOW`) before or after the swept row's own
-`executed_at`, so each probe reads only the daily `trades` partitions
-around it. Durable worklog obligations from restore, import and replay,
-including obligations without an execution time, are still checked
-exactly, over every partition. A conflict between two rows whose
-execution times are more than seven days apart is therefore detected
-only through the worklog, and completed sweep coverage certifies only
+`executed_at`, so it reads only the daily `trades` partitions around
+that row. M1 reports a swept row only when another row of its venue
+identity lies within seven days of it. M2 reports a swept row's public
+id only when two of its active rows lie within seven days of the swept
+row, so those two rows can be up to fourteen days apart. Anything
+outside those bounds is found only through the worklog: durable
+worklog obligations from restore, import and replay, including
+obligations without an execution time, are still checked exactly, over
+every partition. Completed sweep coverage therefore certifies only
 conflicts inside the window. Heartbeat metadata reports the window as
 `probe_window_days`.
 
@@ -152,26 +155,40 @@ heartbeats, two seconds apart, on
 HEALTHY frame. The existing `critical_system_error` rule handles the
 three-frame gate, hourly deduplication, and operator fan-out. With
 successful calls and an available publisher, a committed worklog
-identity with no backlog is detected at the next tick: M1 reports it
-after one cadence interval plus its own call, and M2, which runs after
-M1, also waits for M1's call. Worst tick ordering with successful calls
-consuming their full 45-second timeout is about 109 seconds for M1 and
+identity with no backlog is reported by the next call of its monitor
+that reads the worklog. M1 runs before M2 in every tick, and every
+tick ends with the scheduled wait. An obligation committed just after
+its monitor read the worklog waits for the rest of that call, the other
+monitor's call, the wait and its own next call. With every call using
+its full 45-second timeout and four-second warning bursts, the third
+warning frame follows the commit by at most about 207 seconds for
+either monitor, publication overhead excluded. Counted from the start
+of the scheduled wait, the bounds are about 109 seconds for M1 and
 158 seconds for M2.
 
 Sweep coverage advances one page per monitor per tick, and every pass
 rereads the six-hour overlap. With `X` swept rows processed per minute
 (one page divided by the tick duration, including both monitors,
-publication and the wait) and an ingestion rate `I`, a steady pass lasts
-about `6 h × r / (1 − r)` with `r = I / X`, and the reported lag rises
-from about that duration towards twice it before each pass completes.
-At about 5,100 trades a minute and the default 15,000-row page, the
-estimated `X` of 8,000 to 9,000 rows a minute gives passes of roughly
-8 to 10 hours, so the three-hour lag warning is expected in steady
-operation at that rate. Adaptive page reductions lengthen passes
-further. A newly settled cursor-only violation is detected once the
-pass reaches its bus time, after the five-minute settlement grace and
-up to one pass duration. These are operational bounds, not mathematical
-guarantees: the live publisher retries retained batches without a time limit, so a
+publication and the wait) and an ingestion rate `I` across all venues,
+a steady pass lasts about `T = 6 h × r / (1 − r)` with `r = I / X` while
+`I` stays below `X`, and the reported lag rises from about `T` towards
+`2 × T` before each pass completes. At the default 15,000-row page, `X`
+is at most about 14,500 rows a minute, and about half that when both
+calls use their full budget. Measured ingestion is about 2,700 to 2,900
+trades a minute outside the US session, a weekday average of 6,700 to
+12,600, and about 45,000 a minute during the US session, mostly
+equities. For much of a weekday `I` therefore exceeds `X`: a pass cannot
+complete, completed-coverage lag grows, and the lag warning fires until
+the pass design changes. Adaptive page reductions lower `X` further.
+A newly settled cursor-only violation is detected once a pass reaches
+its bus time. A pass keeps its end fixed, so a row that settles just
+after a pass started waits for the rest of that pass and for the next
+pass to traverse the six-hour overlap: in steady state up to about
+`(2 − r) × T` after settlement, plus the five-minute settlement grace
+counted from its bus time. Passes after a cursor move are transient and
+do not follow these steady-state formulas. These are operational
+bounds, not mathematical guarantees: the live publisher retries
+retained batches without a time limit, so a
 commit stalled for more than the six-hour overlap is outside enforced
 live-row coverage. Archive restore, historical paper replay, and the
 local-UAT trade import do not share that exposure because their trade
