@@ -1133,7 +1133,31 @@ class TestConflictDiagnostics:
         candles = builder.pop_all()
         assert len(lines) == 1
         assert (builder.refused_trades, builder.duplicate_trades) == (1, 2)
-        assert [(c.interval_begin, c.volume, c.trades, c.open, c.close) for c in candles] == [
-            (_CONFLICT_MINUTE, 1.0, 1, 6500.25, 6500.25),
-            (_CONFLICT_MINUTE + timedelta(minutes=2), 2.0, 2, 6500.25, 6500.25),
+        assert candles == [
+            CandleUpdate(
+                symbol="MESZ6-CME",
+                open=6500.25,
+                high=6500.25,
+                low=6500.25,
+                close=6500.25,
+                vwap=6500.25,
+                trades=1,
+                volume=1.0,
+                interval_begin=_CONFLICT_MINUTE,
+                interval=60,
+                complete=True,
+            ),
+            CandleUpdate(
+                symbol="MESZ6-CME",
+                open=6500.25,
+                high=6500.25,
+                low=6500.25,
+                close=6500.25,
+                vwap=6500.25,
+                trades=2,
+                volume=2.0,
+                interval_begin=_CONFLICT_MINUTE + timedelta(minutes=2),
+                interval=60,
+                complete=True,
+            ),
         ]
