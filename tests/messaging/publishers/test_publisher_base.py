@@ -12661,7 +12661,7 @@ def _consumer_driven() -> Any:
     """
     pub: Any = ConsumerDrivenPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     return pub
 
@@ -13262,7 +13262,7 @@ def _stored_row(*, timeframe: str, source: str, author: datetime, close: float) 
         A complete candle row opening at the reference window.
     """
     return {
-        "instrument_public_id": "inst-1",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
         "open_at": _WINDOW,
         "timestamp": author,
         "timeframe": timeframe,
