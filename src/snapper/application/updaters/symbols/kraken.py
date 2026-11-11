@@ -1070,6 +1070,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         base = instrument["base"]
         return (
             self._is_tokenized_base(base)
+            and any(character.isupper() for character in base)
             and self._normalize_currency(instrument["quote"]) == "USD"
             and instrument["symbol"] == f"{base.removesuffix('x')}SPV/USD"
             and f"{base}/USD" in verified_tokenized_aliases
@@ -1332,7 +1333,16 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             channels: tuple[AliasChannelEnum, ...] = (AliasChannelEnum.WS, AliasChannelEnum.REST)
             if not _BTNL_REST_IDENTITY_ENABLED:
                 channels = (AliasChannelEnum.WS,)
-                self._withdraw_btnl_rest_alias(session, symbol_public_id, now)
+                self._withdraw_btnl_rest_alias(
+                    session,
+                    KrakenAliasWrite(
+                        symbol_public_id,
+                        symbol_data["native_symbol"],
+                        AliasChannelEnum.WS,
+                        ws_symbol,
+                        now,
+                    ),
+                )
             for channel in channels:
                 result = self._write_kraken_alias(
                     session,
@@ -1378,32 +1388,42 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
         return created, updated
 
-    @staticmethod
-    def _withdraw_btnl_rest_alias(
-        session: SyncSession, symbol_public_id: str, now: datetime
-    ) -> None:
+    def _withdraw_btnl_rest_alias(self, session: SyncSession, owner: KrakenAliasWrite) -> None:
         """Close a Bitnomial product's Kraken REST alias, and nothing else.
 
         The reviewed rollback of item C4 (``_BTNL_REST_IDENTITY_ENABLED``).
         A plain SCD2 close: no successor is written, and the WebSocket alias
-        and the market-data capability are left as they are.
+        and the market-data capability are left as they are. Each closed
+        string is first claimed for its owner, so no other record of the
+        same run can take it over.
 
         Args:
             session: The updater transaction's session.
-            symbol_public_id: Public id of the Bitnomial product.
-            now: Timestamp of the updater transaction.
+            owner: The Bitnomial product's WebSocket alias write, giving its
+                owner, native symbol and transaction time.
         """
-        session.execute(
-            update(SymbolAlias)
-            .where(
-                SymbolAlias.symbol_public_id == symbol_public_id,
+        rest_aliases = session.scalars(
+            select(SymbolAlias).where(
+                SymbolAlias.symbol_public_id == owner.symbol_public_id,
                 SymbolAlias.exchange == ExchangeEnum.KRAKEN,
                 SymbolAlias.channel == AliasChannelEnum.REST,
-                SymbolAlias.timestamp <= now,
-                SymbolAlias.known_to > now,
+                SymbolAlias.timestamp <= owner.now,
+                SymbolAlias.known_to > owner.now,
             )
-            .values(known_to=now)
-        )
+        ).all()
+        for alias in rest_aliases:
+            self._alias_claims.claim(
+                KrakenAliasWrite(
+                    owner.symbol_public_id,
+                    owner.native_symbol,
+                    AliasChannelEnum.REST,
+                    alias.exchange_symbol,
+                    owner.now,
+                )
+            )
+            session.execute(
+                update(SymbolAlias).where(SymbolAlias.id == alias.id).values(known_to=owner.now)
+            )
 
     def _persist_rest_symbol(
         self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime

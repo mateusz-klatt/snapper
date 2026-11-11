@@ -19,21 +19,31 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from snapper.application.portfolio.spot_precision_certification import KRAKEN_INSTRUMENT_SPEC_SOURCE
 from snapper.application.updaters.symbols import kraken as kraken_module
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import _KrakenPairInfo
+from snapper.application.updaters.symbols.kraken import _spot_metadata
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.core.types import AliasChannelEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import Candle
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import Trade
 from snapper.data.repository import DatabaseRepository
+from snapper.infrastructure.symbols import functions
+from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
+_SESSION = "00000000-0000-7000-8000-0000000000a1"
 _SEEDED = datetime(2026, 10, 11, 12, tzinfo=UTC)
 _FORWARD = datetime(2026, 11, 12, 9, tzinfo=UTC)
 _REPEAT = _FORWARD + timedelta(hours=6)
@@ -154,6 +164,35 @@ class Catalog:
                 )
             ).one()
         return row[0], row[1], row[2]
+
+    def spec(self, native: str) -> tuple[float | None, float | None, float | None, str | None]:
+        """Read the active spec of a native symbol's Kraken instrument.
+
+        Args:
+            native: Native symbol.
+
+        Returns:
+            Tick size, lot size, minimum order size and spec source.
+        """
+        with self.sessions() as session:
+            row = session.execute(
+                select(
+                    InstrumentSpec.tick_size,
+                    InstrumentSpec.lot_size,
+                    InstrumentSpec.min_order_size,
+                    InstrumentSpec.spec_source,
+                )
+                .join(Instrument, Instrument.public_id == InstrumentSpec.instrument_public_id)
+                .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+                .where(
+                    Symbol.native_symbol == native,
+                    Symbol.known_to == KNOWN_TO_MAX,
+                    Instrument.exchange == "kraken",
+                    Instrument.known_to == KNOWN_TO_MAX,
+                    InstrumentSpec.known_to == KNOWN_TO_MAX,
+                )
+            ).one()
+        return row[0], row[1], row[2], row[3]
 
     def instruments(self, native: str) -> set[str]:
         """Return the public ids of a native symbol's instruments.
@@ -476,22 +515,33 @@ async def test_unlisted_transfer_aborts_the_whole_run(catalog: Catalog) -> None:
     assert catalog.updater._alias_claims.owners == {}
 
 
+@pytest.mark.parametrize("channel", ["ws", "ccxt"])
 @pytest.mark.parametrize(
     ("order", "message"),
     [(("FIRST", "SECOND"), "claimed twice"), (("SECOND", "FIRST"), "not a whitelisted")],
 )
 async def test_competing_claims_in_one_run_fail_in_either_order(
-    catalog: Catalog, order: tuple[str, str], message: str
+    catalog: Catalog, channel: str, order: tuple[str, str], message: str
 ) -> None:
-    """Two symbols cannot both claim one alias string in a run.
+    """Two symbols cannot both claim one alias string in a run, on any channel.
 
-    Given: FIRST already owning the WebSocket alias DUP/USD, so its write is unchanged,
-    When: A run writes DUP/USD for FIRST and SECOND, in either order,
+    Given: FIRST already owning the WebSocket or CCXT alias DUP/USD, so its
+        write is unchanged,
+    When: A run writes DUP/USD on that channel for FIRST and SECOND, in either order,
     Then: The run raises before committing anything.
     """
+
+    def aliases(name: str) -> tuple[str, str, str]:
+        """Return the record's aliases with DUP/USD on the tested channel."""
+        own = f"{name}/USD"
+        return (
+            "DUP/USD" if channel == "ws" else own,
+            f"{name}USD",
+            "DUP/USD" if channel == "ccxt" else own,
+        )
+
     records = {
-        "FIRST": _rest("FIRST-USD", ("FIRST", "USD"), ("DUP/USD", "FIRSTUSD", "FIRST/USD")),
-        "SECOND": _rest("SECOND-USD", ("SECOND", "USD"), ("DUP/USD", "SECONDUSD", "SECOND/USD")),
+        name: _rest(f"{name}-USD", (name, "USD"), aliases(name)) for name in ("FIRST", "SECOND")
     }
     await catalog.run([records["FIRST"]], _SEEDED)
 
@@ -575,6 +625,9 @@ def _token_mappings(updater: KrakenSymbolUpdaterService) -> dict[str, KrakenSymb
             "AAPLxUSD": _KrakenPairInfo(
                 base="AAPLx", quote="ZUSD", asset_class="tokenized_asset", wsname="AAPLx/USD"
             ),
+            "fooxUSD": _KrakenPairInfo(
+                base="foox", quote="ZUSD", asset_class="tokenized_asset", wsname="foox/USD"
+            ),
             "XXBTZUSD": _KrakenPairInfo(base="XXBT", quote="ZUSD", ccxt_symbol="BTC/USD"),
         }
     )
@@ -590,6 +643,7 @@ def _token_mappings(updater: KrakenSymbolUpdaterService) -> dict[str, KrakenSymb
         ({"symbol": "BTCSPV/USD", "base": "BTCx", "quote": "USD"}, {"BTC/USD"}, True),
         ({"symbol": "AAPLx/USD:BTNL", "base": "AAPLx", "quote": "USD"}, {"AAPLx/USD"}, True),
         ({"symbol": "AAPLSPV/EUR", "base": "AAPLx", "quote": "EUR"}, {"AAPLx/USD"}, True),
+        ({"symbol": "fooSPV/USD", "base": "foox", "quote": "USD"}, {"foox/USD"}, True),
         ({"symbol": "AAPLSPV/USD", "base": "AAPLx", "quote": "USD"}, {"AAPLx/USD"}, False),
     ],
 )
@@ -598,12 +652,12 @@ def test_spv_skip_is_bounded_to_the_observed_shape(
 ) -> None:
     """Only the exact SPV wire name of a verified token is skipped.
 
-    Given: A tokenized AAPLx/USD product and a currency BTC/USD pair from REST,
-        and one WebSocket-only candidate,
+    Given: Tokenized AAPLx/USD and lowercase-only foox/USD products and a
+        currency BTC/USD pair from REST, and one WebSocket-only candidate,
     When: The candidates are merged,
     Then: A same-leg non-SPV name, a case mismatch, an unverified twin, a standard
-        alias, a Bitnomial-shaped name and a non-USD quote are kept; only
-        AAPLSPV/USD next to a verified AAPLx/USD is skipped.
+        alias, a Bitnomial-shaped name, a non-USD quote and a lowercase-only
+        base are kept; only AAPLSPV/USD next to a verified AAPLx/USD is skipped.
     """
     with patch("snapper.application.updaters.symbols.base.get_settings"):
         updater = KrakenSymbolUpdaterService(update_threshold_hours=6)
@@ -669,23 +723,36 @@ async def test_reconciliation_guard_boundary(
     assert catalog.kraken_capability("S0-USD", _FORWARD)[0] is not delisted
 
 
-async def test_guard_passes_with_179_stale_owners(catalog: Catalog) -> None:
-    """The release's expected stale set passes the guard on its own.
+async def test_release_scenario_passes_the_guard_and_closes_every_stale_alias(
+    catalog: Catalog,
+) -> None:
+    """The release's combined stale set passes the guard at exactly one half.
 
-    Given: 179 kept symbols and 179 stale ones, the size of the expected stale set,
-    When: The next run processes the kept ones only,
-    Then: The ratio is exactly one half and all 179 are delisted.
+    Given: The production catalog with 177 SPV duplicates and 177 other products,
+    When: The first C1 run processes the ZCHF pairs and the other products,
+        and discovery has skipped the SPV names,
+    Then: Four aliases are transferred, the guard passes at 179 / 358, and the
+        two CHF symbols and all 177 SPV symbols are delisted with no Kraken
+        alias left.
     """
     keep = [
         _rest(f"K{i}-USD", (f"K{i}", "USD"), (f"K{i}/USD", f"K{i}USD", f"K{i}/USD"))
-        for i in range(179)
+        for i in range(177)
     ]
-    drop = [_ws_only(f"S{i}-USD", (f"S{i}", "USD"), f"S{i}/USD") for i in range(179)]
-    await catalog.run(keep + drop, _SEEDED)
+    spv = [_ws_only(f"S{i}X-USD", (f"S{i}x", "USD"), f"S{i}SPV/USD") for i in range(177)]
+    await catalog.run([*_PRE_C1, *keep, *spv], _SEEDED)
+    catalog.add_polygon_franc()
 
-    await catalog.run(keep, _FORWARD)
+    with patch("snapper.application.updaters.symbols.kraken_alias_transfer.logger") as transfer_log:
+        await catalog.run([*_c1_records(catalog.updater), *keep], _FORWARD)
 
-    assert all(not catalog.kraken_capability(f"S{i}-USD", _FORWARD)[0] for i in range(179))
+    assert transfer_log.warning.call_count == 4
+    stale = ["CHF-USD", "CHF-CHF", *(f"S{i}X-USD" for i in range(177))]
+    assert all(
+        catalog.kraken_capability(native, _FORWARD)[:2] == (False, False) for native in stale
+    )
+    owners = {alias[0] for alias in catalog.active_aliases(_FORWARD) if alias[1] == "kraken"}
+    assert owners.isdisjoint(stale)
 
 
 _RENDER = KrakenSymbolRecord(
@@ -741,3 +808,221 @@ async def test_scoped_rollback_closes_only_the_bitnomial_rest_alias(
         ("BTC-USD", "kraken", "ccxt", "BTC/USD"),
     }
     assert catalog.kraken_capability("RENDER-USD-BTNL", _FORWARD)[:2] == (True, False)
+
+
+async def test_first_run_promotes_the_zchf_instrument_spec(catalog: Catalog) -> None:
+    """The first C1 run brings the venue spec to the ZCHF instruments.
+
+    Given: The production catalog, whose WebSocket-only ZCHF instruments carry
+        an empty spec,
+    When: The first C1 run persists the ZCHF pairs with their CCXT market
+        metadata, as the production records carry it,
+    Then: The active spec of each ZCHF instrument carries that metadata.
+    """
+    await _seed_production(catalog)
+    market = {
+        "precision": {"price": 1e-05, "amount": 1e-05, "cost": 1e-05},
+        "limits": {"amount": {"min": 5}},
+        "active": True,
+    }
+    mappings, _ = catalog.updater._build_mappings_from_rest(
+        {
+            key: _KrakenPairInfo(
+                base="ZCHF",
+                quote=quote,
+                ccxt_symbol=ccxt,
+                metadata=_spot_metadata(market, _FORWARD),
+            )
+            for key, quote, ccxt in (
+                ("ZCHFUSD", "ZUSD", "ZCHF/USD"),
+                ("ZCHFCHF", "CHF", "ZCHF/CHF"),
+            )
+        }
+    )
+    assert catalog.spec("ZCHF-USD") == (None, None, None, None)
+
+    await catalog.run(list(mappings.values()), _FORWARD)
+
+    for native in ("ZCHF-USD", "ZCHF-CHF"):
+        assert catalog.spec(native) == (1e-05, 1e-05, 5.0, KRAKEN_INSTRUMENT_SPEC_SOURCE)
+
+
+async def test_failure_after_a_transfer_rolls_the_whole_run_back(catalog: Catalog) -> None:
+    """A failure after a whitelisted transfer restores both owners and the claims.
+
+    Given: The production catalog,
+    When: A run transfers ZCHFUSD and then fails on a later record claiming it,
+    Then: Nothing is committed: CHF-USD still owns the one ZCHFUSD row, the
+        aliases are as before, and the claims are empty.
+    """
+    await _seed_production(catalog)
+    before = catalog.active_aliases(_FORWARD)
+    late = _rest("LATE-USD", ("LATE", "USD"), ("LATE/USD", "ZCHFUSD", "LATE/USD"))
+
+    with pytest.raises(ValueError, match="claimed twice"):
+        await catalog.run([*_c1_records(catalog.updater), late], _FORWARD)
+
+    assert catalog.active_aliases(_FORWARD) == before
+    (row,) = catalog.alias_rows("ZCHFUSD", "rest")
+    assert (row.symbol_public_id, row.known_to) == (catalog.public_id("CHF-USD"), KNOWN_TO_MAX)
+    assert catalog.updater._alias_claims.owners == {}
+
+
+def _market_rows(catalog: Catalog, instrument: str) -> list[tuple[str, int, float, datetime]]:
+    """Read every candle and trade version of one instrument.
+
+    Args:
+        catalog: The catalog to read.
+        instrument: Instrument public id.
+
+    Returns:
+        ``(kind, id, price, known_to)`` per stored row.
+    """
+    with catalog.sessions() as session:
+        candles = session.execute(
+            select(Candle.id, Candle.close, Candle.known_to).where(
+                Candle.instrument_public_id == instrument
+            )
+        ).all()
+        trades = session.execute(
+            select(Trade.id, Trade.price, Trade.known_to).where(
+                Trade.instrument_public_id == instrument
+            )
+        ).all()
+    return [("candle", row[0], row[1], row[2]) for row in candles] + [
+        ("trade", row[0], row[1], row[2]) for row in trades
+    ]
+
+
+async def test_zchf_market_data_is_preserved(catalog: Catalog) -> None:
+    """The transfers leave the ZCHF instrument's stored data untouched.
+
+    Given: The production catalog with one candle and one trade stored under
+        the ZCHF-USD Kraken instrument,
+    When: The first C1 run transfers the aliases,
+    Then: The candle and the trade are unchanged.
+    """
+    await _seed_production(catalog)
+    (instrument,) = catalog.instruments("ZCHF-USD")
+    with catalog.sessions() as session:
+        session.add(
+            Candle(
+                instrument_public_id=instrument,
+                open_at=_SEEDED,
+                timeframe="1m",
+                open=1.13,
+                high=1.13,
+                low=1.13,
+                close=1.13,
+                volume=2.0,
+                vwap=1.13,
+                trades=1,
+                timestamp=_SEEDED,
+                session_id=_SESSION,
+                sequence_id=1,
+            )
+        )
+        session.add(
+            Trade(
+                instrument_public_id=instrument,
+                price=1.13,
+                size=2.0,
+                side="buy",
+                trade_id="t-1",
+                executed_at=_SEEDED,
+                timestamp=_SEEDED,
+                session_id=_SESSION,
+                sequence_id=2,
+            )
+        )
+        session.commit()
+    before = _market_rows(catalog, instrument)
+
+    await _forward(catalog, _FORWARD)
+
+    assert len(before) == 2
+    assert _market_rows(catalog, instrument) == before
+
+
+async def test_alias_of_a_symbol_without_an_active_version_fails_closed(
+    catalog: Catalog,
+) -> None:
+    """An alias whose owner has no active version is never moved.
+
+    Given: GONE-USD's REST alias GONEUSD still active while GONE-USD itself has
+        no active version,
+    When: A run writes GONEUSD for NEW-USD,
+    Then: The run raises instead of moving the alias.
+    """
+    await catalog.run(
+        [_rest("GONE-USD", ("GONE", "USD"), ("GONE/USD", "GONEUSD", "GONE/USD"))], _SEEDED
+    )
+    with catalog.sessions() as session:
+        session.execute(
+            update(Symbol)
+            .where(Symbol.native_symbol == "GONE-USD")
+            .values(known_to=_SEEDED + timedelta(hours=1))
+        )
+        session.commit()
+
+    with pytest.raises(ValueError, match="not a whitelisted transfer"):
+        await catalog.run(
+            [_rest("NEW-USD", ("NEW", "USD"), ("NEW/USD", "GONEUSD", "NEW/USD"))], _FORWARD
+        )
+
+
+async def test_bitnomial_relay_becomes_history_eligible(
+    catalog: Catalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persisted Bitnomial relay can be named for closed candle history.
+
+    Given: A Bitnomial relay persisted by the updater,
+    When: The real mapper loads its maps and classes from that catalog,
+    Then: The relay is history-eligible, by its wire name, with class currency.
+    """
+    await catalog.run([_RENDER], _SEEDED)
+    mapper = object.__new__(SymbolMapperService)
+    mapper.repository = catalog.updater.repository
+    aliases = mapper.load_mappings_from_db()
+    mapper._populate_maps_from_aliases(aliases)
+    mapper.kraken_asset_classes = mapper.load_kraken_asset_classes_from_db(aliases)
+    monkeypatch.setattr(functions, "_get_db_mapper", lambda: mapper)
+
+    assert functions.has_kraken_candle_history_identity("RENDER-USD-BTNL") is True
+    assert functions.native_to_kraken_rest("RENDER-USD-BTNL") == "RENDER/USD:BTNL"
+    assert functions.native_to_kraken_asset_class("RENDER-USD-BTNL") == "currency"
+
+
+@pytest.mark.parametrize(
+    ("order", "message"),
+    [(("RENDER", "TAKER"), "claimed twice"), (("TAKER", "RENDER"), "not a whitelisted")],
+)
+async def test_rollback_switch_keeps_the_withdrawn_alias_claimed(
+    catalog: Catalog,
+    monkeypatch: pytest.MonkeyPatch,
+    order: tuple[str, str],
+    message: str,
+) -> None:
+    """The C4 rollback cannot hand the withdrawn REST string to another product.
+
+    Given: A Bitnomial relay persisted with its REST alias, and the rollback
+        switch turned off,
+    When: The same run also writes that REST string for another product, in
+        either order,
+    Then: The run raises, and the relay's REST alias is left as it was.
+    """
+    await catalog.run([_RENDER], _SEEDED)
+    monkeypatch.setattr(kraken_module, "_BTNL_REST_IDENTITY_ENABLED", False)
+    records = {
+        "RENDER": _RENDER,
+        "TAKER": _rest(
+            "TAKER-USD", ("TAKER", "USD"), ("TAKER/USD", "RENDER/USD:BTNL", "TAKER/USD")
+        ),
+    }
+
+    with pytest.raises(ValueError, match=message):
+        await catalog.run([records[name] for name in order], _FORWARD)
+
+    assert ("RENDER-USD-BTNL", "kraken", "rest", "RENDER/USD:BTNL") in catalog.active_aliases(
+        _FORWARD
+    )
