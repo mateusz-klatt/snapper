@@ -10,6 +10,7 @@ today's sparse plane, never toward a fabricated bar.
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -31,6 +32,7 @@ from snapper.infrastructure.exchanges._subscription_health import SubscriptionSt
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -2054,7 +2056,7 @@ class _StreamRig:
         """Run the body of one periodic flush tick at the real wall clock."""
         publisher = self.publisher
         aggregator = publisher._candle_aggregator
-        if aggregator is None or publisher._sync_completion_mode():
+        if aggregator is None or not publisher._wall_clock_flush_due():
             return
         flushed = aggregator.flush(datetime.now(UTC))
         publisher._drain_aggregator_repair_signals()
@@ -2506,3 +2508,68 @@ class TestClientDetectedResetInTheLoop:
         assert ("S1-EUR", _at(w + 2 * _MINUTE)) not in flats
         windows = [m for topic, m in rig.recorder.published if topic.endswith(".5m")]
         assert not [m for m in windows if m.open_at == _at(w) and m.complete]
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    """Yield to the loop until a condition holds.
+
+    Args:
+        predicate: Condition to wait for.
+
+    Raises:
+        AssertionError: When the condition does not hold within five seconds.
+    """
+    for _attempt in range(500):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+class TestResetWhileTheLoopWaits:
+    """A reset while the candle loop is already waiting for its next item."""
+
+    @pytest.mark.asyncio
+    async def test_the_reset_is_handled_before_the_new_generation_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A minute held by the replaced builder never gets a flat bar.
+
+        Given a progressing loop waiting on an empty queue, with a forward-filling
+            aggregator and a known close, and a trade of the current minute held
+            only by the builder,
+        When the client's own socket close resets the stream and the producer
+            then ticks once in the new generation,
+        Then the loop handles the reset first, publishes no flat bar for the
+            held minute and no complete window spanning it, and progresses with
+            the new generation's mark.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 8 * _MINUTE)
+        rig.tick(w + _MINUTE + 13, [_bar("S1-EUR", w, 100.0)])
+        rig.tick(w + 2 * _MINUTE + 13, [_bar("S1-EUR", w + _MINUTE, 101.0)])
+        loop = asyncio.create_task(rig.publisher._candle_loop(["*"], "1m"))
+        queue = rig.client._trade_built_candle_queue
+        await _until(
+            lambda: queue.empty() and rig.publisher._completion_through == _at(w + 2 * _MINUTE)
+        )
+        rig.client._trade_built_candle_builder.update(
+            TradeUpdate("S1-EUR", "buy", 1.0, 102.0, "market", _at(w + 2 * _MINUTE + 5)),
+            observed_at=_at(w + 2 * _MINUTE + 5),
+        )
+        rig.client._ws_client = MagicMock(close=AsyncMock())
+        rig.client._ws_connected = True
+
+        await rig.client._close_ws_client()
+        rig.tick(w + 4 * _MINUTE + 13, [])
+        await _until(lambda: rig.publisher._completion_through == _at(w + 4 * _MINUTE))
+        rig.publisher.running = False
+        await asyncio.wait_for(loop, timeout=5.0)
+
+        flats = [(s, opened) for s, opened, trades, _c, _a in rig.published() if not trades]
+        assert ("S1-EUR", _at(w + 2 * _MINUTE)) not in flats
+        windows = [m for topic, m in rig.recorder.published if topic.endswith(".5m")]
+        assert not [m for m in windows if m.open_at == _at(w) and m.complete]
+        assert rig.client.trade_candle_generation() == 2
