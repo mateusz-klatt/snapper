@@ -494,6 +494,25 @@ class TestAppSettingsTradingProperties:
         )
         assert enabled.candle_minute_completion is True
 
+    def test_candle_identity_window_snapshot_defaults_true_and_reads_value(self) -> None:
+        """Verify candle_identity_window_snapshot defaults to True and reads the DB value.
+
+        Given a service without and with candle_identity_window_snapshot set,
+        When accessing settings.candle_identity_window_snapshot,
+        Then the default True and the configured value are returned.
+
+        On by default: the fleet decision DEC-11 ships window snapshots
+        enabled, and switching them off is the operator's live rollback.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_identity_window_snapshot is True
+        disabled = AppSettings(
+            bootstrap,
+            settings_service=MockSettingsService({"candle_identity_window_snapshot": False}),
+        )
+        assert disabled.candle_identity_window_snapshot is False
+
     def test_persist_intermediate_candles_defaults_false_and_coerces(self) -> None:
         """Verify persist_intermediate_candles defaults False and coerces values.
 

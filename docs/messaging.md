@@ -959,6 +959,50 @@ to a new interval (or falls outside the warm-up window), a fresh UUID7 is
 minted and the cache entry is replaced. This avoids any DB reads on the
 hot path.
 
+The Kraken spot publisher adds a database check before it mints, because its
+history catchup and repairs can commit a key before the live consumer
+publishes it. For a key that is neither pending in this process nor the
+newest cached key, the publisher holds its identity gate and does this:
+
+- It takes a **window identity snapshot**: one fenced read of every known
+    instrument's identity at that timeframe and opening, under the same writer
+    protocol as the per-key lookup. A snapshot answers for two monotonic
+    seconds; a key it finds absent gets a new UUID7, which is written into the
+    snapshot at once.
+- Every key with a live write of this process that is not known to be
+    committed is excluded from the read, because that write may commit while
+    the read runs. That means pending reservations, persisted resolutions not
+    yet acknowledged, and rows on the writer queue, whatever branch chose
+    their identity. A row queued while the read runs joins its exclusions; a
+    row queued after the snapshot is installed excludes its instrument unless
+    it carries the identity the snapshot holds.
+- A catchup or repair write drops the snapshots of its windows before it
+    writes, whatever the write's outcome.
+- A resolution that reaches the snapshot step with
+    `candle_identity_window_snapshot` off discards every installed snapshot.
+    Resolutions served by a pending reservation or the newest cached key return
+    earlier, so a short off-to-on cycle served only by them can still find a
+    snapshot within its lifetime, under its exclusions.
+- Every persisted resolution cleans the snapshot state at most once a second,
+    at its gated entry, whether snapshots are on and whether the resolution
+    succeeds. The 30-minute bound on unacknowledged resolution records limits
+    memory; a row still on the writer queue stays excluded through the
+    writer's own tracked rows.
+- Every other key takes the fenced per-key lookup.
+
+Measured on production on 2026-11-11, the per-key lookup alone cost 5.5 to
+9 ms a key in five statements. The consumer meets about 1,600 new 1m keys a
+minute, so that came to 8 to 15 seconds of every minute; one window read costs
+about 20 ms.
+
+The stated gap is up to two seconds of additional observation staleness. That
+includes bypassing a reconciliation wait that starts in between: another
+process's catchup or repair that takes the writer fence after the read is not
+waited for. Such a commit may not be adopted at publication. The stored row
+still keeps one id, but how long a published id can differ from the stored
+one is not bounded by the two seconds. `candle_identity_window_snapshot`
+switches the snapshot off; see [configuration](configuration.md).
+
 ### Higher-Timeframe Candle Synthesis
 
 When more than one timeframe is configured (`timeframes` setting, e.g.

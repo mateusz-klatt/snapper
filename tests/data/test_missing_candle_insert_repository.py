@@ -18,6 +18,7 @@ import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -864,6 +865,378 @@ async def test_canonical_identity_postgres_fence_precedes_bounded_all_history_lo
         assert "SELECT DISTINCT candles.public_id" in commands[3]
         assert "LIMIT 2" in commands[3]
         assert "known_to" not in commands[3] and "timestamp" not in commands[3]
+        session.commit.assert_not_awaited()
+    finally:
+        await repo.engine.dispose()
+
+
+_OTHER_INSTRUMENT = "00000000-0000-4000-8000-000000000103"
+_ABSENT_INSTRUMENT = "00000000-0000-4000-8000-000000000104"
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_read_all_history_and_omit_absent_instruments(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """One window read returns each listed instrument's sole identity across versions.
+
+    Given: One instrument with a closed and a future version under one ID, a
+        second with history only at another timeframe, and a third without any.
+    When: The window's identities are read for all three, one of them twice.
+    Then: Only the first instrument is returned, with its ID, and nothing changes.
+    """
+    public_id = "00000000-0000-4000-8000-000000000801"
+    closed = _row() | {
+        "public_id": public_id,
+        "timestamp": _ACQUIRED - timedelta(days=2),
+        "known_to": _ACQUIRED - timedelta(days=1),
+    }
+    future = _row() | {
+        "public_id": public_id,
+        "timestamp": datetime.now(UTC) + timedelta(days=1),
+        "known_to": KNOWN_TO_MAX,
+    }
+    other_timeframe = _row() | {
+        "instrument_public_id": _OTHER_INSTRUMENT,
+        "timeframe": "5m",
+        "public_id": "00000000-0000-4000-8000-000000000802",
+        "known_to": KNOWN_TO_MAX,
+    }
+    async with repository.session() as session:
+        session.add_all([Candle(**closed), Candle(**future), Candle(**other_timeframe)])
+        await session.commit()
+    before = await _stored(repository)
+    found = await repository.get_canonical_candle_public_ids(
+        [_ABSENT_INSTRUMENT, _INSTRUMENT, _OTHER_INSTRUMENT, _INSTRUMENT],
+        "1m",
+        _OPEN.astimezone(timezone(timedelta(hours=2))),
+    )
+    assert found == {_INSTRUMENT: public_id}
+    assert await _stored(repository) == before
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_refuse_conflicting_historical_logical_ids(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Two logical identities in one instrument's history refuse the whole window read.
+
+    Given: One instrument whose history holds two different public IDs.
+    When: Its window is read together with another instrument.
+    Then: The read refuses with a conflict instead of choosing one.
+    """
+    first = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000803",
+        "known_to": _ACQUIRED + timedelta(days=1),
+    }
+    second = _row() | {
+        "public_id": "00000000-0000-4000-8000-000000000804",
+        "timestamp": _ACQUIRED + timedelta(days=1),
+        "known_to": KNOWN_TO_MAX,
+    }
+    async with repository.session() as session:
+        session.add_all([Candle(**first), Candle(**second)])
+        await session.commit()
+    with pytest.raises(RuntimeError, match="conflicting public identities"):
+        await repository.get_canonical_candle_public_ids(
+            [_INSTRUMENT, _OTHER_INSTRUMENT], "1m", _OPEN
+        )
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_read_sqlite_in_bounded_chunks(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite reads a long instrument list in chunks and still returns every identity.
+
+    Given: A lookup chunk size of one and three listed instruments.
+    When: Their window is read on SQLite.
+    Then: Three reads run and both stored identities are returned.
+    """
+    monkeypatch.setattr("snapper.data.repository._CANDLE_LOOKUP_CHUNK_SIZE", 1)
+    rows = [
+        _row() | {"public_id": "00000000-0000-4000-8000-000000000805", "known_to": KNOWN_TO_MAX},
+        _row()
+        | {
+            "instrument_public_id": _OTHER_INSTRUMENT,
+            "public_id": "00000000-0000-4000-8000-000000000806",
+            "known_to": KNOWN_TO_MAX,
+        },
+    ]
+    async with repository.session() as session:
+        session.add_all([Candle(**row) for row in rows])
+        await session.commit()
+    reads: list[str] = []
+
+    def _record(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        """Record each candle identity read sent to SQLite."""
+        if statement.lstrip().upper().startswith("SELECT DISTINCT"):
+            reads.append(statement)
+
+    event.listen(repository.engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        found = await repository.get_canonical_candle_public_ids(
+            [_OTHER_INSTRUMENT, _INSTRUMENT, _ABSENT_INSTRUMENT], "1m", _OPEN
+        )
+    finally:
+        event.remove(repository.engine.sync_engine, "before_cursor_execute", _record)
+    assert found == {
+        _INSTRUMENT: "00000000-0000-4000-8000-000000000805",
+        _OTHER_INSTRUMENT: "00000000-0000-4000-8000-000000000806",
+    }
+    assert len(reads) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_batch_identities_wait_for_the_native_transaction_outcome(
+    repository: SQLAlchemyRepository, committed: bool
+) -> None:
+    """A pending native transaction must finish before a window read can report absence.
+
+    Given: A native insert of the key that is not yet committed.
+    When: A window read starts and the insert then commits or rolls back.
+    Then: The read waits for the outcome and reports exactly that outcome.
+    """
+    async with repository.session() as native:
+        inserted = await repository.insert_missing_candles([_row()], session=native)
+        read = asyncio.create_task(
+            repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert not read.done()
+            if committed:
+                await native.commit()
+            else:
+                await native.rollback()
+            expected = {_INSTRUMENT: inserted[0]["public_id"]} if committed else {}
+            assert await read == expected
+        finally:
+            if not read.done():
+                read.cancel()
+                await asyncio.gather(read, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_cancellation_never_reports_uncommitted_absence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Cancellation during the writer wait propagates without reporting any window.
+
+    Given: A native insert of the key that is not yet committed.
+    When: A window read waiting behind it is cancelled and the insert commits.
+    Then: The read raises the cancellation, and a later read finds the commit.
+    """
+    async with repository.session() as native:
+        staged = await repository.insert_missing_candles([_row()], session=native)
+        read = asyncio.create_task(
+            repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+        )
+        await asyncio.sleep(0.05)
+        assert not read.done()
+        read.cancel()
+        await native.commit()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+    assert await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN) == {
+        _INSTRUMENT: staged[0]["public_id"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_cancellation_in_a_later_chunk_propagates(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation raised by a later SQLite chunk propagates with no partial answer.
+
+    Given: A chunk size of one and a caller session whose second chunk is cancelled.
+    When: Two instruments' window is read in that session.
+    Then: The cancellation propagates after the fence and the first chunk ran.
+    """
+    monkeypatch.setattr("snapper.data.repository._CANDLE_LOOKUP_CHUNK_SIZE", 1)
+    session = AsyncMock(spec=AsyncSession)
+    first = MagicMock()
+    first.all.return_value = []
+    session.execute.side_effect = [MagicMock(), first, asyncio.CancelledError()]
+    with pytest.raises(asyncio.CancelledError):
+        await repository.get_canonical_candle_public_ids(
+            [_INSTRUMENT, _OTHER_INSTRUMENT], "1m", _OPEN, session=cast(AsyncSession, session)
+        )
+    assert session.execute.await_count == 3
+
+
+class _CancelledExit:
+    """Owned-session stand-in whose transaction exit is cancelled."""
+
+    def __init__(self, session: AsyncMock) -> None:
+        """Hold the session the read runs in.
+
+        Args:
+            session: Session double answering the read.
+        """
+        self.session = session
+
+    async def __aenter__(self) -> AsyncMock:
+        """Enter the owned transaction.
+
+        Returns:
+            The session double.
+        """
+        return self.session
+
+    async def __aexit__(self, *_exc: object) -> None:
+        """Cancel while the owned transaction ends.
+
+        Raises:
+            asyncio.CancelledError: Always, as a cancelled commit or close.
+        """
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_cancellation_at_transaction_exit_propagates(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation while the owned transaction ends propagates instead of answering.
+
+    Given: An owned session whose exit is cancelled after a successful read.
+    When: The window is read.
+    Then: The cancellation propagates and no answer is returned.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    rows = MagicMock()
+    rows.all.return_value = [(_INSTRUMENT, _SESSION)]
+    session.execute.side_effect = [MagicMock(), rows]
+    monkeypatch.setattr(repository, "session", lambda: _CancelledExit(session))
+    with pytest.raises(asyncio.CancelledError):
+        await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_retain_caller_transaction_ownership(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A writing caller can read its staged ID through a window read and still roll back.
+
+    Given: A caller transaction that staged a native insert.
+    When: The caller reads the window in its own transaction and rolls back.
+    Then: The read saw the staged ID, and afterwards the window is empty.
+    """
+    async with repository.session() as session:
+        staged = await repository.insert_missing_candles([_row()], session=session)
+        found = await repository.get_canonical_candle_public_ids(
+            [_INSTRUMENT], "1m", _OPEN, session=session
+        )
+        assert found == {_INSTRUMENT: staged[0]["public_id"]}
+        await session.rollback()
+    assert await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("instruments", "timeframe", "opening"),
+    [
+        ([""], "1m", _OPEN),
+        ([_INSTRUMENT], "", _OPEN),
+        ([_INSTRUMENT], "1m", _OPEN.replace(tzinfo=None)),
+    ],
+)
+async def test_batch_identities_invalid_key_refuses_before_database_work(
+    repository: SQLAlchemyRepository, instruments: list[str], timeframe: str, opening: datetime
+) -> None:
+    """An incomplete or naive window key never acquires a database writer fence.
+
+    Given: An empty instrument, an empty timeframe or a naive opening.
+    When: The window read is requested.
+    Then: It refuses before any statement is sent.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    with pytest.raises(ValueError):
+        await repository.get_canonical_candle_public_ids(
+            instruments, timeframe, opening, session=cast(AsyncSession, session)
+        )
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_without_instruments_touch_no_database(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An empty instrument list answers empty without any statement.
+
+    Given: No instruments to read.
+    When: The window read is requested.
+    Then: It returns an empty mapping and sends nothing.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    assert (
+        await repository.get_canonical_candle_public_ids(
+            [], "1m", _OPEN, session=cast(AsyncSession, session)
+        )
+        == {}
+    )
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_unsupported_dialect_refuses_without_queries() -> None:
+    """A window read cannot fall back to an unreviewed writer protocol.
+
+    Given: An engine outside the reviewed SQLite and PostgreSQL protocols.
+    When: The window read is requested.
+    Then: It refuses before any statement is sent.
+    """
+    repo = _UnsupportedDialectRepository("sqlite+aiosqlite:///:memory:")
+    session = AsyncMock(spec=AsyncSession)
+    try:
+        with pytest.raises(NotImplementedError):
+            await repo.get_canonical_candle_public_ids(
+                [_INSTRUMENT], "1m", _OPEN, session=cast(AsyncSession, session)
+            )
+        session.execute.assert_not_awaited()
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_postgres_fence_then_jit_off_then_one_bound_array_read() -> None:
+    """PostgreSQL waits under the writer protocol, disables JIT and reads one bound array.
+
+    Given: The PostgreSQL protocol over a recorded session.
+    When: Two instruments' window is read.
+    Then: The fence statements come first, then JIT off, then one read whose
+        instrument list is a single bound array, and nothing is committed.
+    """
+    repo = _PostgresDialectRepository("sqlite+aiosqlite:///:memory:")
+    session = AsyncMock(spec=AsyncSession)
+    isolation = MagicMock()
+    isolation.scalar_one.return_value = "read committed"
+    identities = MagicMock()
+    identities.all.return_value = [(_INSTRUMENT, _SESSION)]
+    session.execute.side_effect = [isolation, MagicMock(), MagicMock(), MagicMock(), identities]
+    try:
+        found = await repo.get_canonical_candle_public_ids(
+            [_OTHER_INSTRUMENT, _INSTRUMENT], "1m", _OPEN, session=cast(AsyncSession, session)
+        )
+        assert found == {_INSTRUMENT: _SESSION}
+        statements = [call.args[0] for call in session.execute.await_args_list]
+        assert len(statements) == 5
+        assert str(statements[0]) == "SHOW transaction_isolation"
+        assert "ROW EXCLUSIVE" in str(statements[2])
+        assert str(statements[3]) == "SET LOCAL jit = off"
+        compiled = statements[4].compile(dialect=postgresql.dialect())
+        assert "ANY" in str(compiled)
+        assert "known_to" not in str(compiled)
+        assert compiled.params["candle_instrument_ids"] == [_INSTRUMENT, _OTHER_INSTRUMENT]
         session.commit.assert_not_awaited()
     finally:
         await repo.engine.dispose()

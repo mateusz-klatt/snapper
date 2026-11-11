@@ -729,6 +729,27 @@ class AppSettings:
         return self._get_db_setting("candle_minute_completion", False)
 
     @property
+    def candle_identity_window_snapshot(self) -> bool:
+        """Return whether live candle identities are read once per window.
+
+        When ``True`` (default), the Kraken spot publisher resolves the public
+        id of a new candle key from one fenced read of every known
+        instrument's identity at that timeframe and opening, which answers for
+        two monotonic seconds, instead of one fenced lookup per key. The
+        concession is up to two seconds of additional observation staleness,
+        including bypassing a reconciliation wait that another process starts
+        in between, so such a commit may not be adopted at publication; the
+        stored row still keeps one id. ``False`` restores the per-key lookup
+        for every later resolution without a restart, and cannot change ids
+        already published.
+
+        Returns:
+            ``True`` to resolve from window snapshots; ``False`` to look up
+            every key on its own.
+        """
+        return self._get_db_setting("candle_identity_window_snapshot", True)
+
+    @property
     def persist_intermediate_candles(self) -> bool:
         """Return whether in-progress (non-final) native candle bars are persisted.
 

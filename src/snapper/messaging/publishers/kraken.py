@@ -32,10 +32,12 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from functools import partial
+from time import monotonic
 from typing import Any
 from typing import Final
 from typing import cast
@@ -47,6 +49,8 @@ from sqlalchemy.exc import DBAPIError
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
@@ -70,6 +74,7 @@ from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import _WRITER_RECONNECT_INITIAL_BACKOFF_S
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import VenueFeedHealth
 from snapper.messaging.publishers.base import _CandleRepairKey
 from snapper.messaging.publishers.base import _database_sqlstate
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
@@ -122,6 +127,60 @@ silently while ticks and trades keep the shared message watchdog satisfied (the
 venue-wide candle silence past 300 s (>> the ~60 s cadence, <<< the 21 h outage)
 is an unambiguous channel stall and triggers the WS-restart recovery that
 re-subscribes the dead channel."""
+
+IDENTITY_SNAPSHOT_TTL_S: Final[float] = 2.0
+"""Monotonic seconds a window identity snapshot may answer live resolutions.
+
+One fenced read per timeframe and opening replaces one fenced lookup per
+candle key, which cost the consumer 8 to 15 seconds of every minute on
+production on 2026-11-11 (5.5 to 9 ms per key across five statements). The
+answer is never used after this bound. The concession is up to two seconds of
+additional observation staleness, including bypassing a reconciliation wait
+that another process starts in between. A burst of keys at one opening
+usually fits one lifetime, and a longer burst reads again once per occupied
+lifetime."""
+
+_IDENTITY_SAMPLE_SIZE: Final[int] = 5
+"""Snapshot reservations kept on the heartbeat for the published-equals-stored check."""
+
+_IDENTITY_PRUNE_INTERVAL_S: Final[float] = 1.0
+"""Monotonic seconds between two cleanups of the identity snapshot state.
+
+The cleanup runs at the gated entry of every persisted resolution, at most this
+often, whether window snapshots are switched on and whether the resolution
+then succeeds, so expired snapshots, failure records and stale unacknowledged
+entries stay bounded."""
+
+_UNACKNOWLEDGED_IDENTITY_MAX_AGE_S: Final[float] = 1800.0
+"""Monotonic seconds a resolution record keeps its key out of window snapshots.
+
+A key this process resolved for persistence is excluded from every window
+snapshot until its writer acknowledges a commit for it, because that first
+write can land while a snapshot read runs. A row that never commits, such as
+one evicted from a full writer queue or never queued, would otherwise keep its
+record for good, so the record is dropped after this bound. The bound limits
+memory; it is not a proof that the write will not commit. A row still on the
+writer queue stays excluded through the writer's own tracked rows, which never
+age out."""
+
+
+@dataclass(slots=True)
+class _IdentitySnapshot:
+    """One fenced read of every known instrument's identity at a timeframe and opening.
+
+    Attributes:
+        taken_at: ``monotonic()`` reading taken before the read began.
+        covered: Instruments the read included.
+        excluded: Instruments whose key was pending in this process when the
+            read began; their own writer's commit could land during the read.
+        identities: Stored identities found by the read, plus identities this
+            process reserved from the snapshot afterwards.
+    """
+
+    taken_at: float
+    covered: frozenset[str]
+    excluded: frozenset[str]
+    identities: dict[str, str]
 
 
 @register_process(
@@ -411,11 +470,24 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._candle_catchup: KrakenCandleCatchup | None = None
         self._candle_identity_gate = asyncio.Lock()
         self._pending_candle_identities: dict[tuple[str, str, datetime], str] = {}
+        self._identity_snapshots: dict[tuple[str, datetime], _IdentitySnapshot] = {}
+        self._identity_read_failures: dict[tuple[str, datetime], float] = {}
+        self._unacknowledged_live_identities: dict[tuple[str, datetime], dict[str, float]] = {}
+        self._identity_snapshot_builds: dict[tuple[str, datetime], set[str]] = {}
+        self._identity_last_prune: float | None = None
+        self._identity_counters: dict[str, int] = {}
+        self._identity_samples: deque[JsonObject] = deque(maxlen=_IDENTITY_SAMPLE_SIZE)
+        self._identity_last_read_ms: float | None = None
 
     async def _resolve_live_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime, native_symbol: str
     ) -> str:
         """Adopt committed identities or reserve one bounded UUID before publication.
+
+        Pending reservations and the newest cached key answer first. A key
+        they do not settle is answered from a window identity snapshot when
+        one covers it (:meth:`_window_identity_snapshot`), and otherwise by
+        the fenced per-key lookup.
 
         Args:
             instrument_public_id: Canonical instrument identity.
@@ -433,20 +505,359 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
         async with self._candle_identity_gate:
             key = (instrument_public_id, timeframe, open_at)
-            pending = self._pending_candle_identities.get(key)
-            if pending is not None:
-                return pending
-            cached = self._candle_id_cache.get((instrument_public_id, timeframe))
-            if cached is not None and cached[0] == open_at:
-                return cached[1]
-            public_id = await self._require_repository().get_canonical_candle_public_id(
-                instrument_public_id, timeframe, open_at
-            )
+            self._prune_identity_state_on_cadence()
+            public_id = await self._resolve_persisted_candle_identity(key)
+            self._note_unacknowledged_live_identity(key)
+            return public_id
+
+    async def _resolve_persisted_candle_identity(self, key: tuple[str, str, datetime]) -> str:
+        """Answer a persisted key from its reservation, the cache, or the database.
+
+        The caller holds the identity gate.
+
+        Args:
+            key: Natural key about to be published and persisted.
+
+        Returns:
+            The identity this key is published and persisted under.
+
+        Raises:
+            RuntimeError: When unresolved reservations exhaust the writer capacity.
+        """
+        instrument_public_id, timeframe, open_at = key
+        pending = self._pending_candle_identities.get(key)
+        if pending is not None:
+            return pending
+        cached = self._candle_id_cache.get((instrument_public_id, timeframe))
+        if cached is not None and cached[0] == open_at:
+            return cached[1]
+        public_id = await self._resolve_uncached_candle_identity(key)
+        if cached is None or cached[0] <= open_at:
+            self._candle_id_cache[(instrument_public_id, timeframe)] = (open_at, public_id)
+        return public_id
+
+    def _note_unacknowledged_live_identity(self, key: tuple[str, str, datetime]) -> None:
+        """Exclude a resolved key from window snapshots until its write is acknowledged.
+
+        Every persisted resolution counts, whichever branch answered it: an
+        identity taken from the cache carries no reservation, yet its first
+        write can still be uncommitted, for example after persistence was
+        switched on for an instrument whose identity was chosen while it was
+        off. Such a write could land while a later snapshot read runs and be
+        missed by it.
+
+        Args:
+            key: Natural key just resolved for publication and persistence.
+        """
+        instrument_public_id, timeframe, open_at = key
+        window = self._unacknowledged_live_identities.setdefault((timeframe, open_at), {})
+        window[instrument_public_id] = monotonic()
+
+    def _prune_identity_state_on_cadence(self) -> None:
+        """Clean the identity snapshot state at most once per prune interval.
+
+        Runs at the gated entry of every persisted resolution, before its first
+        await, so the bound holds even when that resolution then fails: a
+        window read and its per-key fallback that both raise, or a reservation
+        refused because the writer's capacity is exhausted.
+        """
+        now = monotonic()
+        last = self._identity_last_prune
+        if last is not None and now - last < _IDENTITY_PRUNE_INTERVAL_S:
+            return
+        self._identity_last_prune = now
+        self._prune_identity_snapshots(now)
+
+    def _forget_acknowledged_live_identities(self, rows: list[CandleUpsertRow]) -> None:
+        """Re-admit keys to window snapshots once a commit for them is acknowledged.
+
+        Args:
+            rows: Rows whose commit the live writer acknowledged.
+        """
+        for row in rows:
+            window_key = (row["timeframe"], row["open_at"])
+            window = self._unacknowledged_live_identities.get(window_key)
+            if window is None:
+                continue
+            window.pop(row["instrument_public_id"], None)
+            if not window:
+                del self._unacknowledged_live_identities[window_key]
+
+    async def _resolve_uncached_candle_identity(self, key: tuple[str, str, datetime]) -> str:
+        """Answer one key from its window snapshot, or look it up on its own.
+
+        The caller holds the identity gate. A snapshot answer that finds no
+        stored identity reserves one and writes it into the snapshot at once,
+        so a second resolution of the key within the snapshot's lifetime
+        returns the same identity.
+
+        Args:
+            key: Natural key that neither a pending reservation nor the newest
+                cached key settled.
+
+        Returns:
+            The stored identity, or a new reservation when the key has none.
+
+        Raises:
+            RuntimeError: When unresolved reservations exhaust the writer capacity.
+        """
+        snapshot, reason = await self._window_identity_snapshot(key)
+        if snapshot is None:
+            self._bump_identity_counter(f"per_key_lookups.{reason}")
+            public_id = await self._require_repository().get_canonical_candle_public_id(*key)
             if public_id is None:
                 public_id = self._reserve_live_candle_identity(key)
-            if cached is None or cached[0] <= open_at:
-                self._candle_id_cache[(instrument_public_id, timeframe)] = (open_at, public_id)
             return public_id
+        self._bump_identity_counter("snapshot_answers")
+        instrument_public_id, timeframe, open_at = key
+        stored = snapshot.identities.get(instrument_public_id)
+        if stored is not None:
+            return stored
+        public_id = self._reserve_live_candle_identity(key)
+        snapshot.identities[instrument_public_id] = public_id
+        self._identity_samples.append(
+            {
+                "instrument_public_id": instrument_public_id,
+                "timeframe": timeframe,
+                "open_at": open_at.isoformat(),
+                "public_id": public_id,
+            }
+        )
+        return public_id
+
+    async def _window_identity_snapshot(
+        self, key: tuple[str, str, datetime]
+    ) -> tuple[_IdentitySnapshot | None, str]:
+        """Return a valid snapshot that may answer for this key, or why there is none.
+
+        A snapshot answers for at most :data:`IDENTITY_SNAPSHOT_TTL_S` monotonic
+        seconds after its read began, and only for instruments it covered and
+        did not exclude. An expired or dropped snapshot is read again; a read
+        that failed is not retried within the same bound. A resolution that
+        reaches this step with the setting off discards every installed
+        snapshot. Resolutions answered by a pending reservation or the newest
+        cached key return before this step, so a short off-to-on cycle served
+        only by them can find a snapshot still within its lifetime; its
+        exclusions keep it safe.
+
+        Args:
+            key: Natural key about to be resolved, with the identity gate held.
+
+        Returns:
+            The snapshot and an empty reason, or ``None`` and one of
+            ``disabled``, ``not_covered``, ``read_failed``, ``read_expired`` or
+            ``excluded_unacknowledged``.
+        """
+        if not self.settings.candle_identity_window_snapshot:
+            self._identity_snapshots.clear()
+            return None, "disabled"
+        instrument_public_id, timeframe, open_at = key
+        window = (timeframe, open_at)
+        now = monotonic()
+        snapshot = self._identity_snapshots.get(window)
+        if snapshot is None or now - snapshot.taken_at > IDENTITY_SNAPSHOT_TTL_S:
+            failed_at = self._identity_read_failures.get(window)
+            if failed_at is not None and now - failed_at <= IDENTITY_SNAPSHOT_TTL_S:
+                return None, "read_failed"
+            if not self._instrument_cache:
+                return None, "not_covered"
+            snapshot, reason = await self._read_window_identity_snapshot(window, now)
+            if snapshot is None:
+                return None, reason
+        if instrument_public_id not in snapshot.covered:
+            return None, "not_covered"
+        if instrument_public_id in snapshot.excluded:
+            return None, "excluded_unacknowledged"
+        return snapshot, ""
+
+    async def _read_window_identity_snapshot(
+        self, window: tuple[str, datetime], now: float
+    ) -> tuple[_IdentitySnapshot | None, str]:
+        """Read every known instrument's identity at one timeframe and opening.
+
+        Instruments with a pending reservation or an unacknowledged resolution
+        at this window are excluded: their own live write can commit while the
+        read runs, and a read that began earlier would then report a stale
+        absence. Nothing else in this process can write meanwhile, because the
+        read holds the identity gate that every reconciliation write also
+        takes. Cancellation propagates and installs nothing; an ordinary
+        failure installs nothing and falls back to the per-key lookup, after
+        the failed transaction has ended.
+
+        Args:
+            window: Timeframe and opening shared by every key of the read.
+            now: ``monotonic()`` reading taken before the read began.
+
+        Returns:
+            The installed snapshot and an empty reason, or ``None`` and
+            ``read_failed`` (remembered for the snapshot lifetime) or
+            ``read_expired`` when the read itself outlasted the lifetime.
+        """
+        timeframe, open_at = window
+        covered = frozenset(self._instrument_cache.values())
+        excluded = self._window_identity_exclusions(window)
+        self._identity_snapshot_builds[window] = excluded
+        try:
+            identities = await self._require_repository().get_canonical_candle_public_ids(
+                sorted(covered), timeframe, open_at
+            )
+        except Exception as error:
+            self._identity_read_failures[window] = now
+            self._bump_identity_counter("snapshot_read_failures")
+            logger.warning(
+                "Kraken candle identity snapshot read failed: timeframe={} open_at={} error={}",
+                timeframe,
+                open_at.isoformat(),
+                type(error).__name__,
+            )
+            return None, "read_failed"
+        finally:
+            self._identity_snapshot_builds.pop(window, None)
+        finished = monotonic()
+        self._identity_last_read_ms = round((finished - now) * 1000.0, 3)
+        self._bump_identity_counter("snapshot_reads")
+        if finished - now > IDENTITY_SNAPSHOT_TTL_S:
+            self._bump_identity_counter("snapshot_reads_expired")
+            return None, "read_expired"
+        snapshot = _IdentitySnapshot(
+            taken_at=now,
+            covered=covered,
+            excluded=frozenset(excluded),
+            identities=dict(identities),
+        )
+        self._identity_snapshots[window] = snapshot
+        return snapshot, ""
+
+    def _window_identity_exclusions(self, window: tuple[str, datetime]) -> set[str]:
+        """Return the instruments whose own write at this window may still commit.
+
+        Three records together see every live write of this process that is
+        not known to be committed: pending reservations, persisted resolutions
+        not yet acknowledged, and rows tracked on the writer queue whatever
+        branch chose their identity.
+
+        Args:
+            window: Timeframe and opening of the read about to begin.
+
+        Returns:
+            Instruments with any such write at the window.
+        """
+        timeframe, open_at = window
+        excluded = {
+            instrument
+            for instrument, pending_timeframe, pending_open in self._pending_candle_identities
+            if pending_timeframe == timeframe and pending_open == open_at
+        }
+        excluded.update(self._unacknowledged_live_identities.get(window, {}))
+        for tracked in self._candle_write_sequence_by_row_id.values():
+            if tracked.row["timeframe"] == timeframe and tracked.row["open_at"] == open_at:
+                excluded.add(tracked.row["instrument_public_id"])
+        return excluded
+
+    def _assign_candle_write_sequence(self, row: CandleUpsertRow) -> int:
+        """Track a queued live row and keep it out of identity snapshots of its window.
+
+        Both enqueue sites of the live writer call this before a row is
+        queued, whichever branch chose the row's identity. A row queued while
+        its window is being read joins that read's exclusions; a row queued
+        after its window's snapshot was installed excludes its instrument
+        there unless it carries the identity the snapshot holds.
+
+        Args:
+            row: Candle row about to be placed on the writer queue.
+
+        Returns:
+            Monotonic publisher-local write sequence.
+        """
+        sequence = super()._assign_candle_write_sequence(row)
+        window = (row["timeframe"], row["open_at"])
+        instrument_public_id = row["instrument_public_id"]
+        build = self._identity_snapshot_builds.get(window)
+        if build is not None:
+            build.add(instrument_public_id)
+        snapshot = self._identity_snapshots.get(window)
+        if snapshot is not None and snapshot.identities.get(instrument_public_id) != row.get(
+            "public_id"
+        ):
+            snapshot.excluded = snapshot.excluded | {instrument_public_id}
+        return sequence
+
+    def _prune_identity_snapshots(self, now: float) -> None:
+        """Forget snapshots, read failures and unacknowledged keys past their bounds.
+
+        Args:
+            now: Current ``monotonic()`` reading.
+        """
+        for window, snapshot in tuple(self._identity_snapshots.items()):
+            if now - snapshot.taken_at > IDENTITY_SNAPSHOT_TTL_S:
+                del self._identity_snapshots[window]
+        for window, failed_at in tuple(self._identity_read_failures.items()):
+            if now - failed_at > IDENTITY_SNAPSHOT_TTL_S:
+                del self._identity_read_failures[window]
+        for window_key, resolved in tuple(self._unacknowledged_live_identities.items()):
+            for instrument, resolved_at in tuple(resolved.items()):
+                if now - resolved_at > _UNACKNOWLEDGED_IDENTITY_MAX_AGE_S:
+                    del resolved[instrument]
+            if not resolved:
+                del self._unacknowledged_live_identities[window_key]
+
+    def _drop_identity_snapshots(self, rows: list[CandleUpsertRow]) -> None:
+        """Forget every snapshot a reconciliation write is about to make stale.
+
+        Called with the identity gate held, immediately before the write, and
+        whatever the write's outcome: the next resolution of any of these keys
+        then reads again, and its fenced read waits for the write to finish.
+
+        Args:
+            rows: Rows of the reconciliation write about to start.
+        """
+        windows = {(row["timeframe"], row["open_at"]) for row in rows}
+        for window in windows:
+            if self._identity_snapshots.pop(window, None) is not None:
+                self._bump_identity_counter("snapshot_drops_by_reconciliation")
+
+    def _bump_identity_counter(self, name: str) -> None:
+        """Add one to a cumulative identity-resolution counter.
+
+        Args:
+            name: Counter name.
+        """
+        self._identity_counters[name] = self._identity_counters.get(name, 0) + 1
+
+    def _identity_health(self) -> JsonObject:
+        """Return the identity-resolution ledger for the heartbeat.
+
+        Returns:
+            Cumulative counters, the latest snapshot read latency, the number of
+            live snapshots and of unacknowledged keys, and the newest identities
+            reserved from snapshots with their natural keys. A reserved identity
+            is not yet proof of publication or persistence; the published-equals-
+            stored check compares it with storage once the key is persisted.
+        """
+        counters: JsonObject = {}
+        for name, count in sorted(self._identity_counters.items()):
+            counters[name] = count
+        reserved: list[JsonValue] = list(self._identity_samples)
+        return {
+            "counters": counters,
+            "last_read_ms": self._identity_last_read_ms,
+            "snapshots": len(self._identity_snapshots),
+            "unacknowledged_keys": sum(
+                len(window) for window in self._unacknowledged_live_identities.values()
+            ),
+            "reserved_sample": reserved,
+        }
+
+    def _venue_feed_health(self) -> VenueFeedHealth:
+        """Add the candle identity ledger to the base publisher's venue facts.
+
+        Returns:
+            The base facts with a ``candle_identity`` entry; never degraded by it.
+        """
+        health = super()._venue_feed_health()
+        meta: JsonObject = dict(health.meta)
+        meta["candle_identity"] = self._identity_health()
+        return VenueFeedHealth(meta=meta, degraded=health.degraded)
 
     def _reserve_live_candle_identity(self, key: tuple[str, str, datetime]) -> str:
         """Retain unresolved publication identities within queue and in-flight capacity.
@@ -515,6 +926,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         super()._mark_candle_writes_committed(rows)
         self._release_committed_candle_identities(rows)
+        self._forget_acknowledged_live_identities(rows)
 
     async def _insert_catchup_candle_rows(
         self, rows: list[CandleUpsertRow]
@@ -538,6 +950,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._defer_catchup_for_live_writes()
         async with self._candle_identity_gate:
             self._defer_catchup_for_live_writes()
+            self._drop_identity_snapshots(rows)
             prepared = self._bind_pending_candle_identities(rows)
             inserted = await self._defer_on_candle_fence_timeout(
                 self._require_repository().insert_missing_candles(prepared)
@@ -568,6 +981,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._defer_catchup_for_live_writes()
         async with self._candle_identity_gate:
             self._defer_catchup_for_live_writes()
+            self._drop_identity_snapshots(rows)
             corrected = await self._defer_on_candle_fence_timeout(
                 repository.correct_false_zero_candles(rows)
             )
@@ -631,6 +1045,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             rows: Full historically derived synthesized candidate rows.
         """
         async with self._candle_identity_gate:
+            self._drop_identity_snapshots(rows)
             prepared = self._bind_pending_candle_identities(rows)
             await self._require_repository().upsert_historical_synthesized_candles(prepared)
             await self._retire_acknowledged_candle_identities(prepared)

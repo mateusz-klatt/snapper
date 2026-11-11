@@ -3778,6 +3778,26 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_canonical_candle_public_ids(
+        self,
+        instrument_public_ids: list[str],
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> dict[str, str]:
+        """Resolve one opening's identities for many instruments under writer participation.
+
+        The batch twin of :meth:`get_canonical_candle_public_id`. It waits for
+        reconciliation writers exactly as the per-key lookup does, then reads
+        all knowledge history of every listed instrument at one timeframe and
+        opening in one transaction. An instrument without history is absent
+        from the result, and an instrument whose history holds more than one
+        logical identity is refused. It allocates no identity and changes no
+        candle value.
+        """
+        ...
+
+    @abstractmethod
     async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
         """Validate up to 720 native minutes and return copies of apparently absent keys.
 
@@ -11475,6 +11495,117 @@ class SQLAlchemyRepository(Repository):
         if len(identities) > 1:
             raise RuntimeError("canonical candle natural key has conflicting public identities")
         return identities[0] if identities else None
+
+    async def get_canonical_candle_public_ids(
+        self,
+        instrument_public_ids: list[str],
+        timeframe: str,
+        open_at: datetime,
+        session: AsyncSession | None = None,
+    ) -> dict[str, str]:
+        """Resolve one opening's identities for many instruments after pending writers finish.
+
+        Args:
+            instrument_public_ids: Canonical instrument identities to read.
+            timeframe: Exact candle timeframe label shared by every key.
+            open_at: Aware business-time opening shared by every key.
+            session: Optional caller-owned short writer transaction.
+
+        Returns:
+            Each listed instrument that has candle history at this key, mapped
+            to its sole historical public identity.
+
+        Raises:
+            ValueError: When a key part is empty or the opening is naive.
+            NotImplementedError: When the engine has no reviewed writer protocol.
+            RuntimeError: When one instrument's history holds multiple identities.
+            Exception: Propagates writer-lock, cancellation and database failures.
+        """
+        if not timeframe or not all(instrument_public_ids):
+            raise ValueError("canonical candle identities require complete natural keys")
+        opening = self._aware_missing_candle_time(open_at)
+        if self.dialect_name not in {"sqlite", "postgresql"}:
+            raise NotImplementedError("canonical candle identity requires a supported writer fence")
+        instruments = sorted(set(instrument_public_ids))
+        if not instruments:
+            return {}
+        if session is not None:
+            return await self._canonical_candle_public_ids_in_session(
+                session, instruments, timeframe, opening
+            )
+        async with self.session() as owned:
+            return await self._canonical_candle_public_ids_in_session(
+                owned, instruments, timeframe, opening
+            )
+
+    async def _canonical_candle_public_ids_in_session(
+        self, session: AsyncSession, instruments: list[str], timeframe: str, open_at: datetime
+    ) -> dict[str, str]:
+        """Wait under the existing writer protocol, then read every listed instrument's IDs.
+
+        PostgreSQL reads the whole list in one statement with a bound array and
+        JIT off for this transaction: a measured production read of 1,608
+        instruments plans in one day partition and runs in milliseconds, while
+        JIT alone would add more than the read costs. SQLite reads in bounded
+        chunks of the shared lookup size.
+
+        Args:
+            session: Short writer transaction owned by the caller or this repository.
+            instruments: Sorted distinct instrument identities.
+            timeframe: Exact candle timeframe label.
+            open_at: Normalized UTC opening.
+
+        Returns:
+            Instrument identities mapped to their sole historical public identity.
+
+        Raises:
+            RuntimeError: When one instrument's history holds multiple identities.
+        """
+        await self._prepare_live_candle_write(session, [])
+        if self.dialect_name == "postgresql":
+            await session.execute(text("SET LOCAL jit = off"))
+            chunks = [instruments]
+        else:
+            chunks = [
+                instruments[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
+                for offset in range(0, len(instruments), _CANDLE_LOOKUP_CHUNK_SIZE)
+            ]
+        found: dict[str, str] = {}
+        for chunk in chunks:
+            result = await session.execute(
+                select(Candle.instrument_public_id, Candle.public_id)
+                .where(
+                    self._candle_instrument_membership(chunk),
+                    Candle.timeframe == timeframe,
+                    Candle.open_at == open_at,
+                )
+                .distinct()
+            )
+            for instrument, public_id in result.all():
+                if found.setdefault(instrument, public_id) != public_id:
+                    raise RuntimeError(
+                        "canonical candle natural key has conflicting public identities"
+                    )
+        return found
+
+    def _candle_instrument_membership(self, instruments: list[str]) -> ColumnElement[bool]:
+        """Match candle rows of the listed instruments in this engine's best form.
+
+        Args:
+            instruments: Instrument identities of one read.
+
+        Returns:
+            ``= ANY(:ids)`` over one bound array on PostgreSQL, ``IN`` elsewhere.
+        """
+        if self.dialect_name == "postgresql":
+            return Candle.instrument_public_id == any_(
+                bindparam(
+                    "candle_instrument_ids",
+                    value=instruments,
+                    type_=ARRAY(Candle.instrument_public_id.type),
+                )
+            )
+        return Candle.instrument_public_id.in_(instruments)
 
     async def filter_missing_candles(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
         """Read all-version key presence without locking writers or allocating public IDs.
