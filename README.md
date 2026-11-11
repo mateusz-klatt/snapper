@@ -415,6 +415,7 @@ snapper db-downgrade        # Rollback migrations
 snapper db-seed             # Seed profile data
 snapper retire-trade-projection-checkpoints --all  # Dry-run checkpoint retirement
 snapper retire-accruals --wallet W --instrument I --accrual A  # Dry-run accrual retirement
+snapper repair-candles --source trades --exchange kraken --symbol S --start T --end T --output-dir D  # Dry-run 1m candle repair
 ```
 
 ### Configuration and Maintenance

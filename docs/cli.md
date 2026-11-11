@@ -359,6 +359,109 @@ The coordinator certifies the shard at its next start, so recreate the API
 container after a retirement. Durable evidence that the wallet used margin is
 kept on purpose: retirement does not change the reconciliation method.
 
+### `repair-candles`
+
+Repair one-minute candles that are wrong in exactly two ways: a minute with
+trades and no candle row of any version (`insert`), and a current flat
+synthesized candle with volume 0 and no trades for a minute that had trades
+(`correct`). The correct bars come from a saved Kraken REST OHLC snapshot or
+from stored trades. Rows are written only through the guarded repository writers
+`insert_missing_native_candles`, `insert_missing_calculated_candles` and
+`correct_false_zero_candles`, which never close, update or replace a native or
+calculated row. Higher timeframes are not repaired.
+
+```bash
+snapper repair-candles --source snapshot --snapshot-dir <snapshot-root> --all-mapped \
+    --start 2026-11-10T09:00:00Z --end 2026-11-10T22:00:00Z --output-dir <new-dir>
+snapper repair-candles --source trades --exchange kraken --symbol XRP-EUR \
+    --start 2026-10-29T00:00:00Z --end 2026-11-10T00:00:00Z --output-dir <new-dir>
+```
+
+To write, repeat the same options with a new `--output-dir` and add
+`--confirm --voted-preview <dry-run-dir> --expect-digest <digest>`.
+
+| Option | Meaning |
+| ------ | ------- |
+| `--source` | `snapshot` or `trades`. Required. |
+| `--snapshot-dir` | Snapshot root holding `ohlc/` and `ohlc_tokenized/`, one `<pair key>.json.gz` per pair. Snapshot source only. |
+| `--exchange` | Exchange of the stored trades. Trades source only. |
+| `--symbol` | Native symbol; repeat it for every symbol. |
+| `--all-mapped` | Every snapshot file whose pair key maps to an instrument, instead of `--symbol`. Snapshot source only. |
+| `--start`, `--end` | UTC minutes with an explicit offset. The window is `[start, end)` and must end at least 180 minutes before the run. Required. |
+| `--output-dir` | New or empty directory for this run's files. Required. |
+| `--confirm` | Write the voted rows. Needs `--voted-preview` and `--expect-digest`. |
+| `--voted-preview` | Output directory of the voted dry run. |
+| `--expect-digest` | sha256 of the voted `approval.json`. |
+| `--max-rows` | Most rows this write applies; a later write with the same vote applies the rest. |
+| `--chunk-pause-seconds` | Pause between write chunks. Default `1.0`. |
+| `--max-consecutive-lock-timeouts` | Consecutive lock timeouts that stop a write. Default `3`. |
+
+Every invocation prints the credential-free database identity. A usage error or
+a refusal prints one `refused:` line and exits `1`; any other failure prints the
+error's class and SQLSTATE only, never its text.
+
+The approval binds the database the run reaches, so the configured `DB_URL` must
+name it completely. A PostgreSQL URL must name one host, a port from 1 to 65535
+and its database, and may carry no query option except `ssl`: a missing field or
+a port of 0 would fall back to `PGHOST`, `PGPORT`, `PGDATABASE`, `PGSERVICE` or
+another default, and query options such as `database`, `host` or `port` replace
+the URL's own fields. A SQLite target must be a database file named without
+query options. Any other URL is refused.
+
+**Sources.** A snapshot file is valid when `error` is empty, `fetched_at` is a
+finite epoch time no later than the run and no earlier than the file's newest
+row, and `result` holds exactly the pair key and `last`. The pair key maps to
+one instrument through an active `kraken` `rest` alias of exactly that name;
+invalid, unmapped and ambiguous files are reported in the summary and skipped.
+The file's window, `[max(oldest row, --start), min(fetched_at to the minute,
+--end))`, is parsed in windows of at most 719 minutes. The last row, still open
+at `fetched_at`, and rows with a trade count of 0 are dropped; a minute missing
+from a file is unknown and never treated as untraded. Two files with equal bars
+for a minute make one candidate known at the later `fetched_at`; different bars
+are skipped as `conflicting_snapshot_files`. Stored trades are folded per
+instrument and UTC day through the live trade candle builder, with the same row
+mapping as `backfill-candles-from-trades`; a trade at a window's exclusive end
+belongs to the next window.
+
+**Plan.** Each minute is classified against every stored version of its candle
+as `insert`, `correct`, `equal`, `differs` (another native or calculated row) or
+`skip` with a reason. The guarded writers then confirm the planned writes in a
+dry run, 100 rows at a time; a row they drop becomes `refused_by_guard`. The run
+writes these files with mode `0600`, never over an existing file:
+
+- `preview.csv`: one line per minute, sorted by instrument and minute, with the
+    current version and the new bar; floats are written with `repr`.
+- `approval.json`: canonical JSON holding the sha256 of `preview.csv`, the
+    database endpoint (dialect, host, port and database name, or the SQLite
+    file's absolute path), the request, the resolved instruments, every
+    contributing snapshot file with its sha256 and `fetched_at`, and the sha256
+    of the installed source files that decide what is written.
+- `summary.json`: counts per action, reason, symbol and UTC day.
+
+The digest to vote on is the sha256 of `approval.json`.
+
+**Write.** Before any database read, a write refuses unless the voted
+`approval.json` hashes to `--expect-digest` and binds the voted `preview.csv`.
+It then refuses if that approval names another database, request, instrument
+set, snapshot file or source revision. It rebuilds the plan and applies only the
+rows the vote holds with the same action and values and, for a correction, the
+same zero version, which the writer checks again under its lock. Other planned
+writes are reported as `not_voted`; voted rows that no longer need a write are
+reported as `already_applied` or `changed`. Inserts come first, then
+corrections, in chunks of at most 100 rows. A chunk is retried, with at most
+four attempts and backoffs of 0.25, 0.5 and 1.0 seconds, only after a lock
+timeout, a serialization failure, a deadlock or a conflict on the candle
+natural-key index. Any other error makes the chunk uncertain: one read without a
+table lock reports its rows as `applied`, `applied_superseded` or `uncertain`,
+and the write stops. `receipt.jsonl` gets one line per chunk as soon as the
+chunk ends. `receipt.json` counts the rows the vote selected, the rows this run
+`scheduled` (at most `--max-rows`) and the rows in chunks it `reached`, lists every
+attempt and row outcome, and is written even when the write fails or is
+cancelled. A write that stops before its end exits `1`.
+
+Each correction chunk takes `SHARE ROW EXCLUSIVE` on `candles`, so live candle
+writers wait up to one second per chunk: run writes in quiet hours.
+
 ### `annulment`
 
 Host-side execution-ledger correction commands use the configured `DB_URL`.
