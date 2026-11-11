@@ -959,6 +959,32 @@ to a new interval (or falls outside the warm-up window), a fresh UUID7 is
 minted and the cache entry is replaced. This avoids any DB reads on the
 hot path.
 
+The Kraken spot publisher adds a database check before it mints, because its
+history catchup and repairs can commit a key before the live consumer
+publishes it. For a key that is neither pending in this process nor the
+newest cached key, the publisher holds its identity gate and does this:
+
+- It takes a **window identity snapshot**: one fenced read of every known
+    instrument's identity at that timeframe and opening, under the same writer
+    protocol as the per-key lookup. A snapshot answers for two monotonic
+    seconds; a key it finds absent gets a new UUID7, which is written into the
+    snapshot at once.
+- Keys pending in this process when the read begins are excluded, because
+    their own writer may commit during the read.
+- A catchup or repair write drops the snapshots of its windows before it
+    writes, whatever the write's outcome.
+- Every other key takes the fenced per-key lookup.
+
+Measured on production on 2026-11-11, the per-key lookup alone cost 5.5 to
+9 ms a key in five statements. The consumer meets about 1,600 new 1m keys a
+minute, so that came to 8 to 15 seconds of every minute; one window read costs
+about 20 ms.
+
+The stated gap: a commit by another process that lands less than two seconds
+before a key's resolution may not be adopted at publication. The stored row
+still keeps one id. `candle_identity_window_snapshot` switches the snapshot
+off; see [configuration](configuration.md).
+
 ### Higher-Timeframe Candle Synthesis
 
 When more than one timeframe is configured (`timeframes` setting, e.g.

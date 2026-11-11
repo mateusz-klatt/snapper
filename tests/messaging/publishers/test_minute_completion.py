@@ -132,6 +132,7 @@ class _CompletionSettings:
         self.candle_minute_completion = minute_completion
         self.spot_candle_source = candle_source
         self.trade_built_finalize_grace_seconds = finalize_grace
+        self.candle_identity_window_snapshot = False
 
 
 async def _resolve_instrument(native_symbol: str) -> str:
@@ -1542,17 +1543,17 @@ class TestPublisherSweep:
         assert health.degraded is False
 
     def test_heartbeat_is_unchanged_without_an_emitter(self) -> None:
-        """Publishers that do not complete minutes contribute nothing.
+        """Publishers that do not complete minutes contribute no completion ledger.
 
-        Given a publisher with no emitter,
+        Given a Kraken spot publisher with no emitter,
         When its venue feed health is read,
-        Then the meta is empty, so its heartbeat is byte-identical to before
-            this hook existed.
+        Then the meta carries only the candle identity ledger, which the spot
+            publisher reports whether or not it completes minutes.
         """
         publisher = self._publisher()
         publisher._minute_emitter = None
         health = publisher._venue_feed_health()
-        assert health.meta == {}
+        assert set(health.meta) == {"candle_identity"}
         assert health.degraded is False
 
 

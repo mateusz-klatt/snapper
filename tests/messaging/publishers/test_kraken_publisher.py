@@ -43,6 +43,7 @@ class _ShadowSettings:
         """
         self.spot_trade_built_shadow_enabled = enabled
         self.spot_candle_source = source
+        self.candle_identity_window_snapshot = False
 
 
 class _ShadowRepository:
