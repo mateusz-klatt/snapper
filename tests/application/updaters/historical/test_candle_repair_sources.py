@@ -267,8 +267,40 @@ def test_postgresql_url_without_one_explicit_host_port_or_database_refuses(url: 
     When: Its endpoint is taken.
     Then: It is refused.
     """
-    with pytest.raises(RepairRefusedError, match="must name one host, its port and its database"):
+    with pytest.raises(
+        RepairRefusedError, match="must name one host, a port from 1 to 65535 and its database"
+    ):
         database_endpoint(url)
+
+
+@pytest.mark.parametrize("port", ["0", "00000", "65536"])
+def test_postgresql_port_outside_1_to_65535_refuses_whatever_pgport_names(
+    port: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A port of 0 is dropped from the driver's arguments and 65536 is no port at all.
+
+    Given: PGPORT naming another port, and a URL whose port is 0, written as 0 or 00000,
+        or 65536.
+    When: Its endpoint is taken.
+    Then: It is refused, naming the port range.
+    """
+    monkeypatch.setenv("PGPORT", "6543")
+    with pytest.raises(RepairRefusedError, match="a port from 1 to 65535"):
+        database_endpoint(
+            f"postgresql+asyncpg://snapper_repair:Pa55-w0rd@db.internal:{port}/snapper_prod"
+        )
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_postgresql_ports_1_and_65535_are_bound_as_written(port: int) -> None:
+    """The lowest and the highest port are explicit ports.
+
+    Given: The production URL with port 1 or 65535.
+    When: Its endpoint is taken.
+    Then: It is accepted with that port as written.
+    """
+    url = f"postgresql+asyncpg://snapper_repair:Pa55-w0rd@db.internal:{port}/snapper_prod"
+    assert database_endpoint(url) == _PRODUCTION_ENDPOINT | {"port": port}
 
 
 def test_allowed_ssl_option_is_accepted_and_leaves_the_endpoint_unchanged() -> None:

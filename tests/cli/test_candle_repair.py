@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 from click.testing import Result
 from loguru import logger
@@ -573,3 +574,37 @@ def test_trades_dry_run_rebuilds_bars_from_stored_trades(database: str, tmp_path
     preview = (tmp_path / "out" / "preview.csv").read_text().splitlines()[1:]
     assert [line.split(",")[3] for line in preview] == ["insert", "correct"]
     assert {line.split(",")[10] for line in preview} == {"calculated"}
+
+
+def test_port_zero_refuses_before_any_connection_is_acquired(
+    snapshot: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A port of 0 would let PGPORT decide the destination, so the run refuses first.
+
+    Given: PGPORT naming another port, a configured PostgreSQL URL with port 0, the real
+        repository factory and a driver connect that records every call.
+    When: A dry run starts.
+    Then: It refuses with exit 1 naming the port range, and no connection was requested.
+    """
+    connects: list[dict[str, object]] = []
+
+    async def record_connect(*arguments: object, **options: object) -> object:
+        """Record a connection request and refuse it."""
+        del arguments
+        connects.append(options)
+        raise AssertionError("a connection was requested")
+
+    monkeypatch.setenv("PGPORT", "6543")
+    monkeypatch.setattr(asyncpg, "connect", record_connect)
+    monkeypatch.setattr(
+        candle_repair_cli,
+        "get_bootstrap_settings",
+        lambda: SimpleNamespace(db_url="postgresql+asyncpg://repair:secret@db.internal:0/snapper"),
+    )
+    result = _invoke(*_snapshot_arguments(snapshot, tmp_path / "out"))
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        "refused: a PostgreSQL target URL must name one host, a port from 1 to 65535 "
+        "and its database"
+    )
+    assert connects == []

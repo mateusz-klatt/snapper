@@ -654,11 +654,12 @@ def canonical_json(document: JsonValue) -> bytes:
 def database_endpoint(db_url: str) -> JsonObject:
     """Name the database the run will reach, exactly as its URL writes it, without credentials.
 
-    A PostgreSQL URL must itself name one host, its port and its database,
-    and may carry no query option other than those in
+    A PostgreSQL URL must itself name one host, a port from 1 to 65535 and
+    its database, and may carry no query option other than those in
     :data:`POSTGRESQL_URL_OPTIONS`, which is ``ssl`` alone. A missing field
     would fall back to an environment or service-file default (``PGHOST``,
-    ``PGPORT``, ``PGDATABASE``, ``PGSERVICE`` and the like), and query options
+    ``PGPORT``, ``PGDATABASE``, ``PGSERVICE`` and the like); SQLAlchemy drops a
+    port of 0 from the driver's arguments, so it falls back too. Query options
     such as ``database``, ``host``, ``port`` or ``service`` replace the URL's
     own fields, so the approval could name a database other than the one
     written. With all three fields explicit, the driver uses them over every
@@ -696,9 +697,15 @@ def _sqlite_endpoint(url: URL) -> JsonObject:
 
 def _postgresql_endpoint(url: URL) -> JsonObject:
     """Name a PostgreSQL database by the explicit host, port and database of its URL."""
-    if not url.host or "," in url.host or url.port is None or not url.database:
+    if (
+        not url.host
+        or "," in url.host
+        or url.port is None
+        or not 1 <= url.port <= 65535
+        or not url.database
+    ):
         raise RepairRefusedError(
-            "a PostgreSQL target URL must name one host, its port and its database"
+            "a PostgreSQL target URL must name one host, a port from 1 to 65535 and its database"
         )
     options = sorted(set(url.query) - POSTGRESQL_URL_OPTIONS)
     if options:

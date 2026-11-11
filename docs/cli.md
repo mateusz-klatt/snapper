@@ -401,12 +401,12 @@ a refusal prints one `refused:` line and exits `1`; any other failure prints the
 error's class and SQLSTATE only, never its text.
 
 The approval binds the database the run reaches, so the configured `DB_URL` must
-name it completely. A PostgreSQL URL must name one host, its port and its
-database, and may carry no query option except `ssl`: a missing field would fall
-back to `PGHOST`, `PGPORT`, `PGDATABASE`, `PGSERVICE` or another default, and query
-options such as `database`, `host` or `port` replace the URL's own fields. A
-SQLite target must be a database file named without query options. Any other URL
-is refused.
+name it completely. A PostgreSQL URL must name one host, a port from 1 to 65535
+and its database, and may carry no query option except `ssl`: a missing field or
+a port of 0 would fall back to `PGHOST`, `PGPORT`, `PGDATABASE`, `PGSERVICE` or
+another default, and query options such as `database`, `host` or `port` replace
+the URL's own fields. A SQLite target must be a database file named without
+query options. Any other URL is refused.
 
 **Sources.** A snapshot file is valid when `error` is empty, `fetched_at` is a
 finite epoch time no later than the run and no earlier than the file's newest
