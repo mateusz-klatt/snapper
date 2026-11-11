@@ -1073,6 +1073,28 @@ class KrakenExchangeClient(ExchangeClientBase):
         pending = self._trade_candle_pending_break
         self._trade_candle_pending_break = brk if pending is None else pending.followed_by(brk)
 
+    def _take_pending_trade_candle_break(self) -> TradeCandleBreak | None:
+        """Take the break of a client-detected reset that is not yet delivered.
+
+        Returns:
+            The pending break, or ``None``.
+        """
+        pending = self._trade_candle_pending_break
+        self._trade_candle_pending_break = None
+        return pending
+
+    def _next_trade_candle_break(self) -> TradeCandleBreak | None:
+        """Return the break to deliver before the next dequeue, if any.
+
+        Returns:
+            A client-detected reset first, then a break for refused items, or
+            ``None`` when the stream has no break to deliver.
+        """
+        pending = self._take_pending_trade_candle_break()
+        if pending is not None or self._trade_candle_overflow is None:
+            return pending
+        return self._take_trade_candle_break(TradeCandleBreakReason.OVERFLOW, builder_kept=True)
+
     def discard_trade_candle_backlog(self) -> TradeCandleBreak:
         """Discard the queued backlog of a lagging consumer, keeping the builder.
 
@@ -2592,7 +2614,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         Yields:
             Bars and marks in queue order; before the next dequeue, a break the
             client detected on its own socket, then a break for items the queue
-            refused.
+            refused. A reset detected while this iterator waits for an item is
+            yielded before that item, which already belongs to the new
+            generation because the reset emptied the queue.
         """
         self._trade_built_candles_enabled = True
         if (
@@ -2604,21 +2628,19 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
         try:
             while True:
-                pending = self._trade_candle_pending_break
-                if pending is not None:
-                    self._trade_candle_pending_break = None
-                    yield pending
-                    continue
-                if self._trade_candle_overflow is not None:
-                    yield self._take_trade_candle_break(
-                        TradeCandleBreakReason.OVERFLOW, builder_kept=True
-                    )
+                brk = self._next_trade_candle_break()
+                if brk is not None:
+                    yield brk
                     continue
                 try:
                     item = await asyncio.wait_for(self._trade_built_candle_queue.get(), timeout=0.1)
-                    yield item
                 except TimeoutError:
                     await asyncio.sleep(0.01)
+                    continue
+                pending = self._take_pending_trade_candle_break()
+                if pending is not None:
+                    yield pending
+                yield item
         finally:
             self._trade_built_candles_enabled = False
             task = self._trade_built_candle_aggregator_task

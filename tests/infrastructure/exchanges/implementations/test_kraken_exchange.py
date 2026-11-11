@@ -10241,3 +10241,31 @@ class TestTradeBuiltInBandResets:
 
         assert isinstance(bar, CandleUpdate)
         assert warning.call_args.args[1] == "reset"
+
+    @pytest.mark.asyncio
+    async def test_a_reset_while_the_stream_waits_precedes_the_new_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A consumer already waiting for an item still sees the reset first.
+
+        Given a stream waiting on an empty queue,
+        When the client detects a reset and the producer then queues a mark of
+            the new generation,
+        Then the waiting read yields the reset, and the next read the mark.
+        """
+        client = _client()
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        stream = client.subscribe_trade_built_stream(["*"])
+        waiting = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0.02)
+
+        client._reset_trade_candle_epoch_in_band()
+        mark = TradeCandleMark(through=_MINUTE_M, generation=1, produced_at=_TICK_NOW)
+        client._trade_built_candle_queue.put_nowait(mark)
+        first = await waiting
+        second = await anext(stream)
+        await stream.aclose()
+
+        assert isinstance(first, TradeCandleBreak)
+        assert (first.reason, first.generation) == (TradeCandleBreakReason.RESET, 1)
+        assert second == mark
