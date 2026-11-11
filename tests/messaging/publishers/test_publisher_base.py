@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +38,10 @@ from snapper.application.process_manager.launcher import _TOTAL_RESET_UPTIME_S
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import HealthStatusEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
@@ -13193,3 +13198,143 @@ class TestAcquisitionAuthorship:
         assert await pub._commit_historical_candle_repair(window, ExchangeEnum.KRAKEN, "5m")
 
         assert persisted[0][0]["timestamp"] == _MARK_PRODUCED
+
+
+async def _active_candles(repo: SQLAlchemyRepository) -> list[tuple[str, str, datetime, float]]:
+    """Read every active candle version.
+
+    Args:
+        repo: Repository under test.
+
+    Returns:
+        Timeframe, source, author and close of each active row, by opening.
+    """
+    async with repo.session() as session:
+        result = await session.execute(
+            select(Candle.timeframe, Candle.source, Candle.timestamp, Candle.close)
+            .where(Candle.known_to == KNOWN_TO_MAX)
+            .order_by(Candle.open_at, Candle.timeframe)
+        )
+        return [
+            (timeframe, source, author.replace(tzinfo=UTC), close)
+            for timeframe, source, author, close in result.all()
+        ]
+
+
+_WINDOW = datetime(2026, 11, 11, 15, 5, tzinfo=UTC)
+"""Opening of the 5m window the repository authorship tests write."""
+
+
+def _stored_row(*, timeframe: str, source: str, author: datetime, close: float) -> CandleUpsertRow:
+    """Build a stored candle row of the reference instrument and window.
+
+    Args:
+        timeframe: Candle timeframe.
+        source: Row provenance.
+        author: Row author.
+        close: Row close.
+
+    Returns:
+        A complete candle row opening at the reference window.
+    """
+    return {
+        "instrument_public_id": "inst-1",
+        "open_at": _WINDOW,
+        "timestamp": author,
+        "timeframe": timeframe,
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 1.0,
+        "vwap": close,
+        "trades": 1,
+        "source": source,
+        "complete": True,
+        "price_basis": "last",
+        "session_id": "session-author",
+        "sequence_id": 1,
+    }
+
+
+class TestAuthorshipAgainstTheRepository:
+    """The live writer's guard keeps a strictly later author, whatever arrives later."""
+
+    @pytest.mark.asyncio
+    async def test_a_delayed_bar_does_not_supersede_a_later_native_row(
+        self, tmp_path: Path
+    ) -> None:
+        """A bar processed late is authored when its evidence became final.
+
+        Given a native row authored 30 minutes after a calculated bar's
+            acquisition,
+        When the delayed calculated bar is processed and written,
+        Then the native row stays active.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'authors.db'}")
+        await repo.create_all()
+        try:
+            native_at = _MARK_PRODUCED + timedelta(minutes=30)
+            await repo.upsert_candles(
+                [_stored_row(timeframe="1m", source="native", author=native_at, close=10.0)]
+            )
+            pub = _consumer_driven()
+            pub._candle_source_for = lambda _tf: "calculated"
+            bar = replace(_candle_update(begin=_WINDOW, close=9.0), acquired_at=_MARK_PRODUCED)
+            row = await pub._process_candle(bar, cast(Any, "kraken"), "1m")
+            assert row is not None
+
+            await repo.upsert_candles([row])
+
+            assert await _active_candles(repo) == [("1m", "native", native_at, 10.0)]
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("repair_first", [True, False])
+    async def test_a_repair_beats_a_window_certified_before_it_in_both_orders(
+        self, tmp_path: Path, repair_first: bool
+    ) -> None:
+        """A window keeps its certification as author, so a later repair wins.
+
+        Given a window certified at C whose closing bar was acquired at A, and a
+            repair authored at R with C < R < A,
+        When the live window and the repair are written in either order,
+        Then the window is authored at C, never at A, and the repair stays.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+            repair_first: Whether the repair is written first.
+        """
+        certified = _WINDOW + timedelta(minutes=5, seconds=12)
+        repaired = certified + timedelta(seconds=30)
+        closing = certified + timedelta(minutes=2)
+        aggregator = CandleAggregator(["5m"], live_epoch=_WINDOW - timedelta(minutes=10))
+        aggregator.authoring = True
+        for minute in range(5):
+            begin = _WINDOW + timedelta(minutes=minute)
+            acquired = begin + timedelta(minutes=1, seconds=12)
+            aggregator.fold(replace(_candle_update(begin=begin), acquired_at=acquired))
+        aggregator.certify(_WINDOW + timedelta(minutes=5), certified)
+        aggregator.fold(
+            replace(
+                _candle_update(begin=_WINDOW + timedelta(minutes=5)),
+                acquired_at=closing - timedelta(minutes=1),
+            )
+        )
+        emitted = aggregator.fold(
+            replace(_candle_update(begin=_WINDOW + timedelta(minutes=6)), acquired_at=closing)
+        )
+        window = emitted[0][1]
+        assert window.acquired_at == certified
+        live = _stored_row(timeframe="5m", source="synthesized", author=certified, close=100.0)
+        repair = _stored_row(timeframe="5m", source="synthesized", author=repaired, close=101.0)
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'repair.db'}")
+        await repo.create_all()
+        try:
+            for row in [repair, live] if repair_first else [live, repair]:
+                await repo.upsert_candles([row])
+
+            assert await _active_candles(repo) == [("5m", "synthesized", repaired, 101.0)]
+        finally:
+            await repo.engine.dispose()
