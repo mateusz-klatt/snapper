@@ -33,6 +33,26 @@ stays coherent), but the dedicated-account falsification does not reach it.
 ``history_window_reached_genesis`` records which strength was proven, and the
 anchor's ``provenance`` carries ``:genesis`` (the page held the entire history)
 or ``:windowed`` — a durable, per-anchor record of the claim actually made.
+
+OWNERSHIP (the seal page only): every row on the page, all at or below the cut
+``H0``, is classified against the owned order set ``S`` of one database
+snapshot, never by ``orderedBy``. The unresolved-submit gate runs first; while
+it refuses (``own_submit_unresolved``) no row is classified at all, because an
+incomplete ``S`` cannot tell an own fill from an external one. Then, in order:
+a correcting entry refuses; a row whose order id lies in ``S`` but whose
+operation is neither MARKET_FX nor COMMISSION refuses; MARKET_FX and COMMISSION
+rows without an order id refuse as manual and unattributed; rows of an order in
+``S`` are owned (MARKET_FX through the witness bijection, COMMISSION through the
+witness builder's commission proof); rows with an order id outside ``S`` are
+external; PAYIN, PAYOUT, TRANSFER and DIRECT_FX rows are external only without
+an order id and only while the adapter pins that this system initiates none of
+them; anything else refuses as unsupported. External economics need no
+arithmetic here: they are already inside the independently read seed balances,
+and the anchor's provenance gains ``:external_observed`` when any were seen.
+The classification is a bootstrap rule only; after the cut the anchored history
+certificate keeps refusing every row this system does not own. Owned and
+external alike rest on the venue's order-id guarantee, so the seal refuses
+``venue_ownership_guarantee_unrecorded`` until that guarantee is recorded.
 """
 
 import json
@@ -42,10 +62,15 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
+from typing import Final
 from typing import Literal
 
+from snapper.application.portfolio.spot_anchor_ownership import is_venue_order_id
+from snapper.application.portfolio.spot_anchor_ownership import own_submit_unresolved
+from snapper.application.portfolio.spot_anchor_witness import WitnessRefusal
 from snapper.application.portfolio.spot_anchor_witness import witness_bijection_holds
 from snapper.application.portfolio.spot_anchor_witness import witness_reverse_coverage_holds
+from snapper.data.repository_types import SpotOwnedOrderPopulation
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 
 type SpotAnchorRefusal = Literal[
@@ -55,9 +80,11 @@ type SpotAnchorRefusal = Literal[
     "balance_reads_disagree",
     "balances_not_venue_raw",
     "boundary_window_inverted",
+    "execution_order_id_foreign",
     "inventory_not_observed",
     "local_execution_not_in_venue_history",
     "margin_not_proven_cash",
+    "own_submit_unresolved",
     "scope_without_committed_execution",
     "venue_cursor_malformed",
     "venue_cursor_regressed",
@@ -66,7 +93,10 @@ type SpotAnchorRefusal = Literal[
     "venue_fill_not_ingested",
     "venue_history_advanced",
     "venue_history_balance_chain_mismatch",
+    "venue_history_correcting_entry",
     "venue_history_manual_unattributed",
+    "venue_history_unsupported_operation",
+    "venue_ownership_guarantee_unrecorded",
     "venue_reserved_funds_present",
     "watermark_advanced",
 ]
@@ -77,6 +107,11 @@ _ANCHOR_MARGIN_STATUS = "cash"
 _ANCHOR_WATERMARK_KIND = "scope_sequence"
 _VENUE_CURSOR_KIND = "account_history_item_id"
 _VENUE_CURSOR_SCHEMES = {"walutomat": "walutomat:api-v2.0.0:account/history:v1"}
+_EXTERNAL_OBSERVED_SUFFIX: Final = ":external_observed"
+_MARKET_FX: Final = "MARKET_FX"
+_COMMISSION: Final = "COMMISSION"
+_OWNABLE_OPERATIONS: Final = frozenset({_MARKET_FX, _COMMISSION})
+_EXTERNAL_ONLY_OPERATIONS: Final = frozenset({"PAYIN", "PAYOUT", "TRANSFER", "DIRECT_FX"})
 
 
 @dataclass(frozen=True)
@@ -86,8 +121,11 @@ class VenueHistoryItem:
     ``item_id`` is the venue's monotone, per-entry history id — the unit of the
     fill-level join, since one order carries several partial fills.
     ``is_market_fx`` marks a balance-affecting FX leg; ``is_api_attributed``
-    marks it as created by our API key (``orderedBy`` prefixed ``API/``).
-    ``balance_after`` is the venue's own post-event balance for ``currency``.
+    marks it as created by our API key (``orderedBy`` prefixed ``API/``), which
+    is evidence only and never decides ownership. ``balance_after`` is the
+    venue's own post-event balance for ``currency``. ``operation_type``,
+    ``order_id`` and ``correcting_entry`` are the raw row's fields, verbatim,
+    that the ownership classification reads.
     """
 
     item_id: int
@@ -95,6 +133,9 @@ class VenueHistoryItem:
     is_api_attributed: bool
     currency: str
     balance_after: Decimal
+    operation_type: str
+    order_id: str | None
+    correcting_entry: bool
 
 
 @dataclass(frozen=True)
@@ -126,6 +167,20 @@ class SpotAnchorObservation:
     A terminal (order-close) execution owns no new fill and shares its active
     predecessor's legs, so the witnessed item ids are deduplicated before the
     bijection while every execution still maps to a non-empty leg set.
+
+    The ownership evidence follows the read-order fields, and every one of them
+    defaults to its fail-closed value, so an observation that omits one can never
+    seal. ``balances_reserved`` is the first balance read's reserved funds and
+    ``balances_reserved_2`` the second read's, ``None`` when that read did not
+    report a reservation for every currency. ``ownership`` is the owned-order
+    population, read after the history and watermark captures; ``None`` means it
+    was not read and refuses as ``own_submit_unresolved``.
+    ``ownership_guarantee_version`` is the recorded venue order-id guarantee's
+    version, ``None`` while it is unrecorded. ``external_only_operations_initiated``
+    is ``False`` only when the venue adapter pins that this system initiates no
+    PAYIN, PAYOUT, TRANSFER or DIRECT_FX. ``witness_refusals`` are the owned
+    witness builder's refusals, whose ownership conjunctions the module turns
+    into seal refusals.
     """
 
     public_id: str
@@ -162,6 +217,11 @@ class SpotAnchorObservation:
     second_request_started_at: datetime
     second_request_completed_at: datetime
     timestamp: datetime
+    balances_reserved_2: Mapping[str, Decimal] | None = None
+    ownership: SpotOwnedOrderPopulation | None = None
+    ownership_guarantee_version: str | None = None
+    external_only_operations_initiated: bool = True
+    witness_refusals: tuple[WitnessRefusal, ...] = ()
 
 
 class SpotAnchorNotCertifiableError(Exception):
@@ -215,15 +275,99 @@ def _boundary_window_inverted(observation: SpotAnchorObservation) -> bool:
     return any(utc[index] > utc[index + 1] for index in range(len(utc) - 1))
 
 
-def _attributed_fills_at_or_before(
-    page: Sequence[VenueHistoryItem], tip: int
+def _is_owned(item: VenueHistoryItem, owned_order_ids: frozenset[str]) -> bool:
+    """Return whether a page row's order id lies in the owned order set ``S``."""
+    return item.order_id is not None and item.order_id in owned_order_ids
+
+
+def _owned_fills_at_or_before(
+    page: Sequence[VenueHistoryItem], tip: int, owned_order_ids: frozenset[str]
 ) -> list[VenueHistoryItem]:
-    """Return the API-attributed MARKET_FX page items with id at or below the tip."""
+    """Return the owned MARKET_FX page rows with id at or below the tip."""
     return [
         item
         for item in page
-        if item.is_market_fx and item.is_api_attributed and item.item_id <= tip
+        if item.operation_type == _MARKET_FX
+        and _is_owned(item, owned_order_ids)
+        and item.item_id <= tip
     ]
+
+
+def _row_refusal(
+    item: VenueHistoryItem, owned_order_ids: frozenset[str], external_only_initiated: bool
+) -> SpotAnchorRefusal | None:
+    """Classify one seal-page row, returning its refusal or ``None`` when accepted.
+
+    The order is fixed: correcting entries first, then the ownership guard (an
+    owned-looking row may never be anything but MARKET_FX or COMMISSION), then
+    the operation table. An accepted row is owned when its order id lies in
+    ``S`` and external otherwise.
+
+    Args:
+        item: One normalized row of the seal page.
+        owned_order_ids: The owned order set ``S``.
+        external_only_initiated: Whether the adapter fails to pin that this
+            system initiates no external-only operation.
+
+    Returns:
+        The row's refusal, or ``None`` when the row is owned or external.
+    """
+    if item.correcting_entry:
+        return "venue_history_correcting_entry"
+    owned = _is_owned(item, owned_order_ids)
+    if owned and item.operation_type not in _OWNABLE_OPERATIONS:
+        return "venue_history_unsupported_operation"
+    if item.operation_type in _OWNABLE_OPERATIONS:
+        return None if is_venue_order_id(item.order_id) else "venue_history_manual_unattributed"
+    if (
+        item.operation_type in _EXTERNAL_ONLY_OPERATIONS
+        and not external_only_initiated
+        and item.order_id is None
+    ):
+        return None
+    return "venue_history_unsupported_operation"
+
+
+def _page_classification(
+    page: Sequence[VenueHistoryItem],
+    owned_order_ids: frozenset[str],
+    external_only_initiated: bool,
+) -> tuple[set[SpotAnchorRefusal], bool]:
+    """Classify every seal-page row against the owned order set.
+
+    Args:
+        page: The normalized seal page.
+        owned_order_ids: The owned order set ``S``.
+        external_only_initiated: Whether the adapter fails to pin that this
+            system initiates no external-only operation.
+
+    Returns:
+        Every row refusal, and whether any accepted row is external.
+    """
+    refusals: set[SpotAnchorRefusal] = set()
+    external_observed = False
+    for item in page:
+        refusal = _row_refusal(item, owned_order_ids, external_only_initiated)
+        if refusal is not None:
+            refusals.add(refusal)
+        elif not _is_owned(item, owned_order_ids):
+            external_observed = True
+    return refusals, external_observed
+
+
+def _reserved_funds_present(observation: SpotAnchorObservation) -> bool:
+    """Return whether either balance read shows, or cannot exclude, reserved funds.
+
+    A reservation is checked on both reads, so a manual order opened between
+    them cannot survive; a second read that did not report every currency's
+    reservation cannot prove there is none.
+    """
+    second = observation.balances_reserved_2
+    if second is None:
+        return True
+    return any(reserved != 0 for reserved in observation.balances_reserved.values()) or any(
+        reserved != 0 for reserved in second.values()
+    )
 
 
 def _venue_history_balance_chain_mismatch(
@@ -279,7 +423,9 @@ def _scope_observation_refusals(
         refusals.add("scope_without_committed_execution")
     if observation.exchange not in _VENUE_CURSOR_SCHEMES:
         refusals.add("venue_cursor_scheme_unregistered")
-    if any(reserved != 0 for reserved in observation.balances_reserved.values()):
+    if observation.ownership_guarantee_version is None:
+        refusals.add("venue_ownership_guarantee_unrecorded")
+    if _reserved_funds_present(observation):
         refusals.add("venue_reserved_funds_present")
     if not observation.watermark_unchanged:
         refusals.add("watermark_advanced")
@@ -303,29 +449,74 @@ def _cursor_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefusa
     return refusals
 
 
+def _ownership_refusals(
+    observation: SpotAnchorObservation,
+    tip: VenueHistoryTip,
+    owned_order_ids: frozenset[str],
+) -> set[SpotAnchorRefusal]:
+    """Collect the seal-page classification and owned-witness refusals.
+
+    Runs only after the unresolved-submit gate passed. The bijection holds
+    between the deduplicated witnessed item ids and the owned MARKET_FX rows at
+    or below the tip; the witness builder's ownership conjunctions surface as
+    ``execution_order_id_foreign`` and, for an unproven owned commission,
+    ``venue_fill_not_ingested``.
+
+    Args:
+        observation: The gathered bootstrap evidence.
+        tip: The seal page's tip.
+        owned_order_ids: The owned order set ``S`` the gate accepted.
+
+    Returns:
+        The classification and owned-witness refusals.
+    """
+    refusals, _ = _page_classification(
+        tip.page, owned_order_ids, observation.external_only_operations_initiated
+    )
+    owned_ids = sorted(
+        item.item_id for item in _owned_fills_at_or_before(tip.page, tip.item_id, owned_order_ids)
+    )
+    if not witness_bijection_holds(observation.execution_witnesses, owned_ids):
+        refusals.add("venue_fill_not_ingested")
+    if "execution_order_id_foreign" in observation.witness_refusals:
+        refusals.add("execution_order_id_foreign")
+    if "owned_commission_unproven" in observation.witness_refusals:
+        refusals.add("venue_fill_not_ingested")
+    return refusals
+
+
 def _history_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefusal]:
-    """Collect venue-page integrity and execution-witness refusals."""
+    """Collect venue-page integrity, ownership, and execution-witness refusals.
+
+    The page-integrity, balance-chain, and reverse-coverage checks need no
+    ownership. The unresolved-submit gate then decides whether ``S`` may be
+    trusted; while it refuses, no row is classified, so an incomplete owned set
+    can never turn an own fill into external activity.
+
+    Args:
+        observation: The gathered bootstrap evidence.
+
+    Returns:
+        The applicable history refusals.
+    """
     refusals: set[SpotAnchorRefusal] = set()
     tip = observation.tip_0
     if tip is None:
         return refusals
     if tip.item_id <= 0:
         refusals.add("venue_cursor_malformed")
-    if any(item.is_market_fx and not item.is_api_attributed for item in tip.page):
-        refusals.add("venue_history_manual_unattributed")
     if _venue_history_balance_chain_mismatch(tip.page, observation.balances_1):
         refusals.add("venue_history_balance_chain_mismatch")
-    attributed_ids = sorted(
-        item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
-    )
-    witnesses = observation.execution_witnesses
     if not witness_reverse_coverage_holds(
-        witnesses,
+        observation.execution_witnesses,
         range(1, observation.source_watermark + 1),
     ):
         refusals.add("local_execution_not_in_venue_history")
-    if not witness_bijection_holds(witnesses, attributed_ids):
-        refusals.add("venue_fill_not_ingested")
+    ownership = observation.ownership
+    if ownership is None or own_submit_unresolved(ownership):
+        refusals.add("own_submit_unresolved")
+        return refusals
+    refusals |= _ownership_refusals(observation, tip, ownership["owned_order_ids"])
     return refusals
 
 
@@ -365,7 +556,8 @@ def build_spot_anchor(observation: SpotAnchorObservation) -> SpotReconciliationA
     """
     tip = observation.tip_0
     scheme = _VENUE_CURSOR_SCHEMES.get(observation.exchange)
-    if tip is None or scheme is None:
+    ownership = observation.ownership
+    if tip is None or scheme is None or ownership is None:
         raise SpotAnchorNotCertifiableError(spot_anchor_bootstrap_refusals(observation))
     refusals = spot_anchor_bootstrap_refusals(observation)
     if refusals:
@@ -377,6 +569,12 @@ def build_spot_anchor(observation: SpotAnchorObservation) -> SpotReconciliationA
         sort_keys=True,
     )
     window = "genesis" if observation.history_window_reached_genesis else "windowed"
+    _, external_observed = _page_classification(
+        tip.page, ownership["owned_order_ids"], observation.external_only_operations_initiated
+    )
+    provenance = f"spot_anchor_bootstrap:v1:{scheme}:{window}"
+    if external_observed:
+        provenance += _EXTERNAL_OBSERVED_SUFFIX
     return {
         "public_id": observation.public_id,
         "wallet_public_id": observation.wallet_public_id,
@@ -394,7 +592,7 @@ def build_spot_anchor(observation: SpotAnchorObservation) -> SpotReconciliationA
         "boundary_status": _ANCHOR_BOUNDARY_STATUS,
         "inventory_status": _ANCHOR_INVENTORY_STATUS,
         "margin_status": _ANCHOR_MARGIN_STATUS,
-        "provenance": f"spot_anchor_bootstrap:v1:{scheme}:{window}",
+        "provenance": provenance,
         "session_id": observation.session_id,
         "sequence_id": observation.sequence_id,
         "timestamp": observation.timestamp,

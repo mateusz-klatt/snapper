@@ -316,9 +316,10 @@ by composition (the immutable exec-id cumulative partitions each order's
 `market_fx/orders` cumulative totals in exact `Decimal`), and
 `spot_anchor_bootstrap.py` proves the full obligation set — quiescence
 (`H0 == H1`, equal double balance read), a reverse-coverage bijection between
-the sealed prefix and the attributed history page, per-asset precision
-certification, cash-only margin, and a ten-instant read-order chain the schema
-also CHECK-enforces. The writer (`record_spot_reconciliation_anchor`) re-reads
+the sealed prefix and the owned fills of the history page, no reserved funds on
+either balance read, per-asset precision certification, cash-only margin, and a
+ten-instant read-order chain the schema also CHECK-enforces. The writer
+(`record_spot_reconciliation_anchor`) re-reads
 the committed `max(scope_sequence)` inside its insert transaction and refuses
 unless it equals the anchor watermark, so the certified range is empty at
 birth. Everything fails closed: any missing read, unmappable exec id, witness
@@ -326,6 +327,44 @@ inconsistency, or named refusal degrades to no-anchor-retry-next-cycle (the
 observer's balance snapshot is never at risk), and only a fully proven
 observation is sealed — once, immutably. The anchor's `venue_cursor_value`
 (`H0`) is the left endpoint for the subsequent replay-range proof.
+
+Every row of the seal page (the newest history rows, all at or below `H0`) is
+classified by ownership, never by `orderedBy`. The owned order set `S` comes
+from one database snapshot read after both captures
+(`spot_anchor_ownership.py`): every current Order of the wallet and mode,
+left-joined to its current Instrument. An Order whose Instrument is missing,
+dangling, multiply active, or conflicting blocks the bootstrap for every
+exchange; only resolved Orders of the account's exchange contribute their venue
+order ids to `S`, and trade commands never assign ownership. Because Order
+persistence is best effort after the venue accepts, an unresolved-submit gate
+settles each create or submit command only through a terminal status whose
+venue order id lies in `S`; anything else — an Order or command without a venue
+order id, a live status, a status outside the closed set — refuses
+`own_submit_unresolved` before any row is classified, so an own order whose
+acceptance is not yet persisted can never pass as external. Then a correcting
+entry refuses; a row of an order in `S` must be MARKET_FX, witnessed by a
+committed execution, or COMMISSION, proven against that order's venue totals and
+witnessed fills; MARKET_FX or COMMISSION without an order id refuses as manual
+and unattributed; a row with an order id outside `S` is external, and so are
+PAYIN, PAYOUT, TRANSFER and DIRECT_FX rows without an order id while the venue
+adapter pins that it initiates none of them; anything else refuses. Each
+execution's decoded venue order id must also equal its Order's venue order id
+in `S`. External economics are already inside the independently read balances,
+and the anchor's provenance gains `:external_observed` when any were seen.
+
+This classification exists only at the cut: after it, the anchored certificate
+still refuses any activity Snapper does not own. Owned and external rows alike
+rest on two venue premises — order ids are never reused across the account's
+instruments, and every order placed through the API carries its order id in the
+history — recorded in the reviewed `walutomat_order_ownership_artifact.py`. It
+ships unrecorded, so every Walutomat seal refuses
+`venue_ownership_guarantee_unrecorded` until a reviewed change records the
+venue's answer. Without order-finality seals, an owned order's economics that
+the venue's totals already show beyond the cut refuse the seal, while a fill or
+fee that becomes visible only after the totals were read lets the seal stand
+and then refuses the first anchored certificate. That never yields a false
+`matched`, but the immutable anchor stays uncertified, with no automatic
+re-anchor.
 
 Once an anchor exists, spot execution replay is live: the dispatch
 feeds the evaluator a transactionally consistent bundle — the anchor, the

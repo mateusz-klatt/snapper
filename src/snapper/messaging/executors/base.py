@@ -39,12 +39,16 @@ from snapper.application.portfolio.account_view import build_portfolio_account_s
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
-from snapper.application.portfolio.spot_anchor_assembly import build_witnesses_from_reads
+from snapper.application.portfolio.spot_anchor_assembly import build_owned_witnesses_from_reads
+from snapper.application.portfolio.spot_anchor_assembly import owned_page_order_ids
 from snapper.application.portfolio.spot_anchor_assembly import parse_observed_balances
 from snapper.application.portfolio.spot_anchor_assembly import venue_history_tip_from_raw
 from snapper.application.portfolio.spot_anchor_bootstrap import SpotAnchorNotCertifiableError
 from snapper.application.portfolio.spot_anchor_bootstrap import SpotAnchorObservation
 from snapper.application.portfolio.spot_anchor_bootstrap import build_spot_anchor
+from snapper.application.portfolio.spot_anchor_ownership import authoritative_execution_order_ids
+from snapper.application.portfolio.spot_anchor_ownership import is_venue_order_id
+from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
 from snapper.application.portfolio.spot_precision_certification import (
     is_spot_precision_plane_certified,
 )
@@ -53,6 +57,9 @@ from snapper.application.portfolio.spot_precision_evidence import (
 )
 from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
 from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
+from snapper.application.portfolio.walutomat_order_ownership_artifact import (
+    recorded_walutomat_order_ownership_guarantee_version,
+)
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_material import require_consistent_execution_command
@@ -116,9 +123,11 @@ from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import SpotExecutionWitnessRow
+from snapper.data.repository_types import SpotOwnedOrderPopulation
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
+from snapper.data.repository_types import VenueAccountStateRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -392,6 +401,35 @@ class _SpotHistoryTipCapture:
     anchor: SpotReconciliationAnchorRow
     anchor_item_id: int
     tip_item_id: int
+
+
+@dataclass(frozen=True)
+class _SpotAnchorBalanceReads:
+    """The bootstrap's two whole-balance reads, each with its reserved funds.
+
+    ``state_row`` is the persisted observer attempt (the first read), parsed into
+    exact ``balances_1`` and ``reserved_1``. ``balances_2`` and ``reserved_2``
+    are the reconciliation-time re-read; ``reserved_2`` is ``None`` when that
+    read did not report a reservation for every currency, which the pure
+    bootstrap refuses rather than assume zero.
+    """
+
+    state_row: VenueAccountStateRow
+    balances_1: dict[str, Decimal]
+    reserved_1: dict[str, Decimal]
+    venue_raw: bool
+    balances_2: dict[str, Decimal]
+    reserved_2: dict[str, Decimal] | None
+    second_request_started_at: datetime
+    second_request_completed_at: datetime
+
+
+@dataclass(frozen=True)
+class _SpotAnchorOwnedWitness:
+    """The owned-order population and the owned witness outcome built against it."""
+
+    population: SpotOwnedOrderPopulation
+    witnesses: WitnessOutcome
 
 
 @dataclass(frozen=True)
@@ -4751,21 +4789,128 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     @staticmethod
     def _spot_anchor_has_unattributed_market_fx(tip: VenueAccountHistoryTip) -> bool:
-        """Return whether the captured history contains unattributed market FX."""
+        """Return whether the captured page holds a MARKET_FX row without an order id.
+
+        Attribution is the order id, never ``orderedBy``: a MARKET_FX row with
+        no usable order id can be neither owned nor external, so the pure
+        bootstrap refuses it as manual and unattributed.
+
+        Args:
+            tip: The captured ``H0`` history page.
+
+        Returns:
+            Whether any MARKET_FX row lacks a usable order id.
+        """
         return any(
-            item.operation_type == "MARKET_FX" and not item.ordered_by.startswith("API/")
+            item.operation_type == "MARKET_FX" and not is_venue_order_id(item.order_id)
             for item in tip.items
+        )
+
+    @classmethod
+    def _spot_anchor_page_refuses_early(cls, tip: VenueAccountHistoryTip) -> bool:
+        """Return whether the captured page holds a row the bootstrap must refuse.
+
+        The cheap pre-read skip: a MARKET_FX or COMMISSION row without an order
+        id, or any correcting entry, refuses whatever the owned order set is, so
+        the cycle spends no further reads. The pure bootstrap refuses the same
+        rows on its own.
+
+        Args:
+            tip: The captured ``H0`` history page.
+
+        Returns:
+            Whether the page dooms the bootstrap before any other read.
+        """
+        return cls._spot_anchor_has_unattributed_market_fx(tip) or any(
+            item.correcting_entry
+            or (item.operation_type == "COMMISSION" and not is_venue_order_id(item.order_id))
+            for item in tip.items
+        )
+
+    @staticmethod
+    def _spot_anchor_second_read(
+        entries: list[NativeBalanceEntry],
+    ) -> tuple[dict[str, Decimal], dict[str, Decimal] | None]:
+        """Parse the reconciliation-time balance re-read into totals and reservations.
+
+        Each amount prefers the venue's exact decimal and falls back to the float
+        rendering; an entry reporting no reservation at all leaves the whole
+        reservation map ``None``, because zero cannot be assumed.
+
+        Args:
+            entries: The re-read's native balance entries.
+
+        Returns:
+            The exact per-currency totals and reservations, or ``None`` for the
+            reservations when any entry lacks one.
+        """
+        totals = {
+            entry.currency: (
+                Decimal(entry.total_decimal)
+                if entry.total_decimal is not None
+                else Decimal(str(entry.total))
+            )
+            for entry in entries
+        }
+        reserved: dict[str, Decimal] = {}
+        for entry in entries:
+            if entry.used_decimal is not None:
+                reserved[entry.currency] = Decimal(entry.used_decimal)
+            elif entry.used is not None:
+                reserved[entry.currency] = Decimal(str(entry.used))
+            else:
+                return totals, None
+        return totals, reserved
+
+    async def _read_spot_anchor_balances(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        state_id: int,
+        exchange: str,
+    ) -> _SpotAnchorBalanceReads | None:
+        """Read both whole-balance reads, keeping each read's reserved funds.
+
+        Args:
+            repository: The durable repository holding the observer attempt.
+            client: The account's exchange client for the re-read.
+            state_id: The observed account-state version id.
+            exchange: The account's exchange scope, for logging.
+
+        Returns:
+            Both reads, or ``None`` (logged) when the first read is unusable.
+        """
+        state_row = await repository.get_venue_account_state_version(state_id)
+        if state_row is None or state_row["balances_json"] is None:
+            logger.info(f"[{exchange}] spot anchor skipped: account state version unavailable")
+            return None
+        balances_1, reserved_1, venue_raw = parse_observed_balances(state_row["balances_json"])
+        if not balances_1:
+            logger.info(f"[{exchange}] spot anchor skipped: no exact venue-raw balances")
+            return None
+        second_request_started_at = datetime.now(UTC)
+        balances_2, reserved_2 = self._spot_anchor_second_read(await client.read_native_balances())
+        second_request_completed_at = datetime.now(UTC)
+        return _SpotAnchorBalanceReads(
+            state_row=state_row,
+            balances_1=balances_1,
+            reserved_1=reserved_1,
+            venue_raw=venue_raw,
+            balances_2=balances_2,
+            reserved_2=reserved_2,
+            second_request_started_at=second_request_started_at,
+            second_request_completed_at=second_request_completed_at,
         )
 
     @staticmethod
     async def _read_spot_anchor_order_totals(
         client: ExchangeClientBase,
-        parsed: list[tuple[int, str, int, bool]],
+        order_ids: set[str],
         exchange: str,
     ) -> dict[str, VenueOrderFillLegs] | None:
         """Read lifetime fill totals or log the first venue-unknown order."""
         order_totals: dict[str, VenueOrderFillLegs] = {}
-        for order_id in {entry[1] for entry in parsed}:
+        for order_id in sorted(order_ids):
             legs = await client.read_order_fill_legs(order_id)
             if legs is None:
                 logger.info(
@@ -4775,14 +4920,82 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order_totals[order_id] = legs
         return order_totals
 
+    async def _gather_spot_anchor_owned_witness(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        identity: _PortfolioReconciliationKey,
+        source_watermark: int,
+        tip: VenueAccountHistoryTip,
+    ) -> _SpotAnchorOwnedWitness | None:
+        """Read the owned-order population and compose the owned witness map.
+
+        The population is read after the history and watermark captures, so an
+        own submit whose acceptance is not yet persisted leaves an unresolved
+        Order or command, and an acceptance already persisted puts its order id
+        into ``S``, where its fills need a witness inside the fixed watermark.
+        Venue totals are read for every executed order and every owned order on
+        the page. Witness refusals are logged and still handed to the pure
+        bootstrap, which turns its ownership conjunctions into seal refusals.
+
+        Args:
+            repository: The durable repository.
+            client: The account's exchange client.
+            identity: The reconciliation work's account identity.
+            source_watermark: The sealed-prefix watermark ``W``.
+            tip: The captured ``H0`` history page.
+
+        Returns:
+            The population and witness outcome, or ``None`` (logged) when the
+            prefix cannot be decoded or a venue order is unknown.
+        """
+        wallet, exchange, mode, _, _ = identity
+        witness_rows = await repository.get_spot_execution_witness_rows(
+            wallet, exchange, mode, source_watermark
+        )
+        population = await repository.get_spot_anchor_owned_order_population(wallet, exchange, mode)
+        parsed = self._parse_spot_anchor_witness_rows(client, witness_rows, exchange)
+        if parsed is None:
+            return None
+        owned_order_ids = population["owned_order_ids"]
+        order_ids = {entry[1] for entry in parsed} | owned_page_order_ids(tip, owned_order_ids)
+        order_totals = await self._read_spot_anchor_order_totals(client, order_ids, exchange)
+        if order_totals is None:
+            return None
+        witnesses = build_owned_witnesses_from_reads(
+            tip,
+            parsed,
+            order_totals,
+            owned_order_ids,
+            authoritative_execution_order_ids(witness_rows, population),
+        )
+        if witnesses.refusals:
+            logger.info(f"[{exchange}] spot anchor witness unresolved: {list(witnesses.refusals)}")
+        return _SpotAnchorOwnedWitness(population=population, witnesses=witnesses)
+
+    @staticmethod
+    def _spot_anchor_ownership_guarantee_version(exchange: str) -> str | None:
+        """Return the recorded venue order-id guarantee's version for one exchange.
+
+        Args:
+            exchange: The account's exchange scope.
+
+        Returns:
+            The recorded Walutomat guarantee's version, or ``None`` for any
+            other exchange or while the guarantee is unrecorded.
+        """
+        if exchange != ExchangeEnum.WALUTOMAT.value:
+            return None
+        return recorded_walutomat_order_ownership_guarantee_version()
+
     async def _bootstrap_spot_anchor(
         self, work: _PortfolioReconciliationWork, evaluated_at: datetime
     ) -> None:
         """Gather the remaining evidence, certify, and seal one bootstrap anchor.
 
         Every read that yields no usable data returns early (no anchor, retry next
-        cycle); a witness or pure-module refusal is logged with its named reasons.
-        Only a fully proven observation is sealed.
+        cycle); a pure-module refusal is logged with its named reasons. Only a
+        fully proven observation is sealed.
 
         Args:
             work: The reconciliation work carrying the ``H0`` capture and boundary.
@@ -4795,36 +5008,21 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if client is None or capture is None or boundary is None:
             return
         wallet, exchange, mode, session_id, sequence_id = work.identity
-        if self._spot_anchor_has_unattributed_market_fx(capture.tip):
+        if self._spot_anchor_page_refuses_early(capture.tip):
             logger.info(
-                f"[{exchange}] spot anchor skipped: manual/unattributed MARKET_FX activity "
-                f"on the history window (venue_history_manual_unattributed)"
+                f"[{exchange}] spot anchor skipped: the history window holds a MARKET_FX or "
+                f"COMMISSION row without an order id, or a correcting entry"
             )
             return
-        state_row = await repository.get_venue_account_state_version(work.state_id)
-        if state_row is None or state_row["balances_json"] is None:
-            logger.info(f"[{exchange}] spot anchor skipped: account state version unavailable")
+        reads = await self._read_spot_anchor_balances(repository, client, work.state_id, exchange)
+        if reads is None:
             return
-        balances_1, reserved, venue_raw = parse_observed_balances(state_row["balances_json"])
-        if not balances_1:
-            logger.info(f"[{exchange}] spot anchor skipped: no exact venue-raw balances")
-            return
-        second_request_started_at = datetime.now(UTC)
-        balances_2 = {
-            entry.currency: (
-                Decimal(entry.total_decimal)
-                if entry.total_decimal is not None
-                else Decimal(str(entry.total))
-            )
-            for entry in await client.read_native_balances()
-        }
-        second_request_completed_at = datetime.now(UTC)
         tip_1 = await client.read_account_history_tip(_SPOT_ANCHOR_HISTORY_LIMIT)
         venue_cursor_confirmed_at = datetime.now(UTC)
         if tip_1 is None:
             logger.info(f"[{exchange}] spot anchor skipped: confirming history read unavailable")
             return
-        assets = sorted(balances_1)
+        assets = sorted(reads.balances_1)
         evidence = await repository.get_spot_asset_precision_evidence(
             exchange, assets, evaluated_at
         )
@@ -4846,19 +5044,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             execution_chain_genesis(wallet, exchange, mode),
             boundary.source_watermark,
         )
-        witness_rows = await repository.get_spot_execution_witness_rows(
-            wallet, exchange, mode, boundary.source_watermark
+        owned = await self._gather_spot_anchor_owned_witness(
+            repository, client, work.identity, boundary.source_watermark, capture.tip
         )
-        parsed = self._parse_spot_anchor_witness_rows(client, witness_rows, exchange)
-        if parsed is None:
+        if owned is None:
             return
-        order_totals = await self._read_spot_anchor_order_totals(client, parsed, exchange)
-        if order_totals is None:
-            return
-        witnesses = build_witnesses_from_reads(capture.tip, parsed, order_totals)
-        if witnesses.refusals:
-            logger.info(f"[{exchange}] spot anchor witness unresolved: {list(witnesses.refusals)}")
-            return
+        state_row = reads.state_row
         anchor_timestamp = datetime.now(UTC)
         observation = SpotAnchorObservation(
             public_id=str(uuid7()),
@@ -4867,7 +5058,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             mode=mode,
             anchor_exists=False,
             balance_status=state_row["balance_status"],
-            balances_are_venue_raw=venue_raw,
+            balances_are_venue_raw=reads.venue_raw,
             balance_read_bound_to_scope=(
                 state_row["wallet_public_id"] == wallet
                 and state_row["exchange"] == exchange
@@ -4880,9 +5071,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ),
             session_id=session_id,
             sequence_id=sequence_id,
-            balances_1=balances_1,
-            balances_2=balances_2,
-            balances_reserved=reserved,
+            balances_1=reads.balances_1,
+            balances_2=reads.balances_2,
+            balances_reserved=reads.reserved_1,
             source_watermark=boundary.source_watermark,
             watermark_unchanged=boundary.watermark_unchanged,
             source_chain_tip=chain_tip,
@@ -4891,7 +5082,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             history_window_reached_genesis=capture.tip.reached_genesis,
             precision_certified=precision_certified,
             margin_signal=margin_signal,
-            execution_witnesses=witnesses.witnesses,
+            execution_witnesses=owned.witnesses.witnesses,
             venue_cursor_requested_at=capture.requested_at,
             venue_cursor_observed_at=capture.observed_at,
             venue_cursor_confirmed_at=venue_cursor_confirmed_at,
@@ -4899,9 +5090,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             source_watermark_captured_at=boundary.watermark_captured_at,
             first_request_started_at=boundary.request_started_at,
             first_request_completed_at=boundary.request_completed_at,
-            second_request_started_at=second_request_started_at,
-            second_request_completed_at=second_request_completed_at,
+            second_request_started_at=reads.second_request_started_at,
+            second_request_completed_at=reads.second_request_completed_at,
             timestamp=anchor_timestamp,
+            balances_reserved_2=reads.reserved_2,
+            ownership=owned.population,
+            ownership_guarantee_version=self._spot_anchor_ownership_guarantee_version(exchange),
+            external_only_operations_initiated=(
+                client.initiates_external_only_history_operations is not False
+            ),
+            witness_refusals=owned.witnesses.refusals,
         )
         try:
             anchor_row = build_spot_anchor(observation)
