@@ -146,20 +146,22 @@ _IDENTITY_SAMPLE_SIZE: Final[int] = 5
 _IDENTITY_PRUNE_INTERVAL_S: Final[float] = 1.0
 """Monotonic seconds between two cleanups of the identity snapshot state.
 
-The cleanup runs from every persisted resolution, at most this often, whether
-window snapshots are switched on and whether their reads succeed, so expired
-snapshots, failure records and stale unacknowledged entries stay bounded."""
+The cleanup runs at the gated entry of every persisted resolution, at most this
+often, whether window snapshots are switched on and whether the resolution
+then succeeds, so expired snapshots, failure records and stale unacknowledged
+entries stay bounded."""
 
 _UNACKNOWLEDGED_IDENTITY_MAX_AGE_S: Final[float] = 1800.0
-"""Monotonic seconds a resolved key stays excluded from window snapshots unacknowledged.
+"""Monotonic seconds a resolution record keeps its key out of window snapshots.
 
 A key this process resolved for persistence is excluded from every window
 snapshot until its writer acknowledges a commit for it, because that first
 write can land while a snapshot read runs. A row that never commits, such as
-one evicted from a full writer queue, would keep its key excluded for good;
-after this bound such an entry is dropped. A live first write that is still
-uncommitted thirty minutes after its resolution means the writer is stalled,
-and the feed's own health then degrades."""
+one evicted from a full writer queue or never queued, would otherwise keep its
+record for good, so the record is dropped after this bound. The bound limits
+memory; it is not a proof that the write will not commit. A row still on the
+writer queue stays excluded through the writer's own tracked rows, which never
+age out."""
 
 
 @dataclass(slots=True)
@@ -503,6 +505,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
         async with self._candle_identity_gate:
             key = (instrument_public_id, timeframe, open_at)
+            self._prune_identity_state_on_cadence()
             public_id = await self._resolve_persisted_candle_identity(key)
             self._note_unacknowledged_live_identity(key)
             return public_id
@@ -547,15 +550,23 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             key: Natural key just resolved for publication and persistence.
         """
         instrument_public_id, timeframe, open_at = key
-        now = monotonic()
         window = self._unacknowledged_live_identities.setdefault((timeframe, open_at), {})
-        window[instrument_public_id] = now
-        if (
-            self._identity_last_prune is None
-            or now - self._identity_last_prune >= _IDENTITY_PRUNE_INTERVAL_S
-        ):
-            self._identity_last_prune = now
-            self._prune_identity_snapshots(now)
+        window[instrument_public_id] = monotonic()
+
+    def _prune_identity_state_on_cadence(self) -> None:
+        """Clean the identity snapshot state at most once per prune interval.
+
+        Runs at the gated entry of every persisted resolution, before its first
+        await, so the bound holds even when that resolution then fails: a
+        window read and its per-key fallback that both raise, or a reservation
+        refused because the writer's capacity is exhausted.
+        """
+        now = monotonic()
+        last = self._identity_last_prune
+        if last is not None and now - last < _IDENTITY_PRUNE_INTERVAL_S:
+            return
+        self._identity_last_prune = now
+        self._prune_identity_snapshots(now)
 
     def _forget_acknowledged_live_identities(self, rows: list[CandleUpsertRow]) -> None:
         """Re-admit keys to window snapshots once a commit for them is acknowledged.
@@ -622,9 +633,12 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         A snapshot answers for at most :data:`IDENTITY_SNAPSHOT_TTL_S` monotonic
         seconds after its read began, and only for instruments it covered and
         did not exclude. An expired or dropped snapshot is read again; a read
-        that failed is not retried within the same bound. With the setting off
-        every installed snapshot is discarded, so switching it back on starts
-        from fresh reads.
+        that failed is not retried within the same bound. A resolution that
+        reaches this step with the setting off discards every installed
+        snapshot. Resolutions answered by a pending reservation or the newest
+        cached key return before this step, so a short off-to-on cycle served
+        only by them can find a snapshot still within its lifetime; its
+        exclusions keep it safe.
 
         Args:
             key: Natural key about to be resolved, with the identity gate held.

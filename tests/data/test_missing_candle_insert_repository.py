@@ -1052,6 +1052,76 @@ async def test_batch_identities_cancellation_never_reports_uncommitted_absence(
 
 
 @pytest.mark.asyncio
+async def test_batch_identities_cancellation_in_a_later_chunk_propagates(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation raised by a later SQLite chunk propagates with no partial answer.
+
+    Given: A chunk size of one and a caller session whose second chunk is cancelled.
+    When: Two instruments' window is read in that session.
+    Then: The cancellation propagates after the fence and the first chunk ran.
+    """
+    monkeypatch.setattr("snapper.data.repository._CANDLE_LOOKUP_CHUNK_SIZE", 1)
+    session = AsyncMock(spec=AsyncSession)
+    first = MagicMock()
+    first.all.return_value = []
+    session.execute.side_effect = [MagicMock(), first, asyncio.CancelledError()]
+    with pytest.raises(asyncio.CancelledError):
+        await repository.get_canonical_candle_public_ids(
+            [_INSTRUMENT, _OTHER_INSTRUMENT], "1m", _OPEN, session=cast(AsyncSession, session)
+        )
+    assert session.execute.await_count == 3
+
+
+class _CancelledExit:
+    """Owned-session stand-in whose transaction exit is cancelled."""
+
+    def __init__(self, session: AsyncMock) -> None:
+        """Hold the session the read runs in.
+
+        Args:
+            session: Session double answering the read.
+        """
+        self.session = session
+
+    async def __aenter__(self) -> AsyncMock:
+        """Enter the owned transaction.
+
+        Returns:
+            The session double.
+        """
+        return self.session
+
+    async def __aexit__(self, *_exc: object) -> None:
+        """Cancel while the owned transaction ends.
+
+        Raises:
+            asyncio.CancelledError: Always, as a cancelled commit or close.
+        """
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_batch_identities_cancellation_at_transaction_exit_propagates(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation while the owned transaction ends propagates instead of answering.
+
+    Given: An owned session whose exit is cancelled after a successful read.
+    When: The window is read.
+    Then: The cancellation propagates and no answer is returned.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    rows = MagicMock()
+    rows.all.return_value = [(_INSTRUMENT, _SESSION)]
+    session.execute.side_effect = [MagicMock(), rows]
+    monkeypatch.setattr(repository, "session", lambda: _CancelledExit(session))
+    with pytest.raises(asyncio.CancelledError):
+        await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_batch_identities_retain_caller_transaction_ownership(
     repository: SQLAlchemyRepository,
 ) -> None:

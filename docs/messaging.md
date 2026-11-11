@@ -975,14 +975,19 @@ newest cached key, the publisher holds its identity gate and does this:
     yet acknowledged, and rows on the writer queue, whatever branch chose
     their identity. A row queued while the read runs joins its exclusions; a
     row queued after the snapshot is installed excludes its instrument unless
-    it carries the identity the snapshot holds. An unacknowledged resolution
-    older than thirty minutes is dropped, since such a write is not coming.
+    it carries the identity the snapshot holds.
 - A catchup or repair write drops the snapshots of its windows before it
     writes, whatever the write's outcome.
-- Switching `candle_identity_window_snapshot` off discards every installed
-    snapshot, so switching it back on starts from fresh reads. Every persisted
-    resolution cleans the snapshot state at most once a second, whether
-    snapshots are on and whether their reads succeed.
+- A resolution that reaches the snapshot step with
+    `candle_identity_window_snapshot` off discards every installed snapshot.
+    Resolutions served by a pending reservation or the newest cached key return
+    earlier, so a short off-to-on cycle served only by them can still find a
+    snapshot within its lifetime, under its exclusions.
+- Every persisted resolution cleans the snapshot state at most once a second,
+    at its gated entry, whether snapshots are on and whether the resolution
+    succeeds. The 30-minute bound on unacknowledged resolution records limits
+    memory; a row still on the writer queue stays excluded through the
+    writer's own tracked rows.
 - Every other key takes the fenced per-key lookup.
 
 Measured on production on 2026-11-11, the per-key lookup alone cost 5.5 to

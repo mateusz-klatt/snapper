@@ -1943,6 +1943,74 @@ async def test_identity_state_is_pruned_without_a_successful_read(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_runs_while_reservations_are_refused(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """The cleanup bound holds while the writer's reservation capacity is exhausted.
+
+    Given: No reservation capacity, so every snapshot answer that must reserve raises.
+    When: Keys of four new windows are resolved one second apart.
+    Then: Each attempt raises, and the oldest snapshot is pruned before the last read.
+    """
+    publisher, _repository = _snapshot_publisher()
+    publisher._candle_write_queue = asyncio.Queue(maxsize=0)
+    publisher._candle_batch_max_rows = 0
+    for offset in range(4):
+        with pytest.raises(RuntimeError, match="bounded writer capacity"):
+            await _resolve_test_identity(publisher, offset)
+        monotonic_clock.now += 1.0
+    assert ("1m", START) not in publisher._identity_snapshots
+    assert len(publisher._identity_snapshots) == 3
+    assert publisher._unacknowledged_live_identities == {}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_runs_while_the_read_and_its_fallback_both_fail(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """Failure records stay bounded when every resolution fails.
+
+    Given: A window read and a per-key lookup that both raise.
+    When: Keys of four new windows are resolved one second apart.
+    Then: Each resolution raises, and the oldest failure record is pruned.
+    """
+    publisher, repository = _snapshot_publisher()
+    repository.get_canonical_candle_public_ids.side_effect = RuntimeError("read")
+    repository.get_canonical_candle_public_id.side_effect = TimeoutError("fence")
+    for offset in range(4):
+        with pytest.raises(TimeoutError):
+            await _resolve_test_identity(publisher, offset)
+        monotonic_clock.now += 1.0
+    assert ("1m", START) not in publisher._identity_read_failures
+    assert len(publisher._identity_read_failures) == 3
+    assert publisher._unacknowledged_live_identities == {}
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_served_only_by_fast_paths_keeps_the_snapshot_safely(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A short off-to-on cycle answered only by a reservation reuses a live snapshot.
+
+    Given: A snapshot installed while reserving one key.
+    When: The setting goes off, that key is resolved again from its pending
+        reservation, and the setting comes back on within the lifetime.
+    Then: The snapshot stays installed, and a new key of the window is answered
+        from it without a second read or any per-key lookup.
+    """
+    publisher, repository = _snapshot_publisher()
+    reserved = await _resolve_test_identity(publisher)
+    publisher.settings.candle_identity_window_snapshot = False
+    assert await _resolve_test_identity(publisher) == reserved
+    assert ("1m", START) in publisher._identity_snapshots
+    publisher.settings.candle_identity_window_snapshot = True
+    monotonic_clock.now += 0.5
+    await _resolve_other_identity(publisher)
+    repository.get_canonical_candle_public_ids.assert_awaited_once()
+    repository.get_canonical_candle_public_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_an_unacknowledged_key_is_released_after_its_age_bound(
     monotonic_clock: _MonotonicClock,
 ) -> None:
