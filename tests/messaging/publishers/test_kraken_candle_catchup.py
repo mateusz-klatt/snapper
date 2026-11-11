@@ -3280,3 +3280,62 @@ async def test_the_heartbeat_reports_the_cutover_the_resolver_used() -> None:
     assert isinstance(after, dict)
     assert before["deterministic_from"] is None
     assert after["deterministic_from"] == START.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_two_publishers_publish_the_id_that_storage_keeps_after_the_cutover(
+    tmp_path: Path,
+) -> None:
+    """Two processes agree with storage on a post-cutover key without reading each other.
+
+    Given: Two publishers sharing one real SQLite database, with a cutover at the test
+        opening.
+    When: Both resolve the same key, the first writes it through the writer's upsert,
+        and the second writes a revised version of it.
+    Then: Both published the key's deterministic id, and the stored active version
+        carries exactly that id.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'shared.db'}")
+    await repository.create_all()
+    try:
+        first, second = _publisher(), _publisher()
+        for publisher in (first, second):
+            publisher.repository = repository
+            publisher.settings.candle_identity_deterministic_from = START
+        published = [
+            await publisher._resolve_live_candle_public_id(INSTRUMENT_ID, "1m", START, "BTC-USD")
+            for publisher in (first, second)
+        ]
+        row: CandleUpsertRow = {
+            "instrument_public_id": INSTRUMENT_ID,
+            "open_at": START,
+            "timestamp": START + timedelta(minutes=1, seconds=12),
+            "timeframe": "1m",
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.0,
+            "close": 11.0,
+            "volume": 3.0,
+            "vwap": 10.75,
+            "trades": 7,
+            "source": "calculated",
+            "complete": True,
+            "session_id": "00000000-0000-4000-8000-0000000c0009",
+            "sequence_id": 1,
+            "public_id": published[0],
+        }
+        await repository.upsert_candles([row])
+        revised = row | {
+            "close": 11.5,
+            "timestamp": START + timedelta(minutes=1, seconds=20),
+            "sequence_id": 2,
+            "public_id": published[1],
+        }
+        await repository.upsert_candles([revised])
+
+        stored = await repository.get_canonical_candle_public_id(INSTRUMENT_ID, "1m", START)
+    finally:
+        await repository.engine.dispose()
+
+    assert published == [deterministic_candle_public_id(INSTRUMENT_ID, "1m", START)] * 2
+    assert stored == published[0]

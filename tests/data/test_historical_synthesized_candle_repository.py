@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.repository import SQLAlchemyRepository
@@ -22,6 +23,7 @@ from snapper.data.repository_types import CandleUpsertRow
 
 _OPEN = datetime(2026, 1, 10, 12, tzinfo=UTC)
 _AUTHOR = datetime(2026, 7, 1, tzinfo=UTC)
+_LEGACY_ID = "0197ffff-0000-7000-8000-00000000c0de"
 
 
 def _row(offset: int = 0) -> CandleUpsertRow:
@@ -69,8 +71,16 @@ async def _snapshot(repo: SQLAlchemyRepository) -> list[dict[str, object]]:
 async def test_insert_noop_and_synthesized_revision_preserve_prior_asof_and_logical_id(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Historical synthesis commits real changes and leaves every earlier projection intact."""
+    """Historical synthesis commits real changes and leaves every earlier projection intact.
+
+    Given: A synthesized window stored under a legacy random id.
+    When: It is replayed unchanged, replayed with a later author, then revised by
+        rows that carry no id of their own.
+    Then: Only the revision versions it, every earlier projection is intact, and the
+        successor keeps the legacy id rather than the key's deterministic id.
+    """
     candidate = _row()
+    candidate["public_id"] = _LEGACY_ID
     assert await repository.upsert_historical_synthesized_candles([candidate]) == 1
     before = await _snapshot(repository)
     assert await repository.upsert_historical_synthesized_candles([candidate]) == 0
@@ -85,7 +95,13 @@ async def test_insert_noop_and_synthesized_revision_preserve_prior_asof_and_logi
     after = await _snapshot(repository)
     assert len(after) == 2
     assert after[0] == before[0] | {"known_to": replacement["timestamp"]}
-    assert after[1]["public_id"] == before[0]["public_id"]
+    assert after[1]["public_id"] == before[0]["public_id"] == _LEGACY_ID
+    assert (
+        deterministic_candle_public_id(
+            replacement["instrument_public_id"], replacement["timeframe"], replacement["open_at"]
+        )
+        != _LEGACY_ID
+    )
     assert after[1]["close"] == 10.5
     assert after[1]["known_to"] == KNOWN_TO_MAX
     horizon = _AUTHOR + timedelta(hours=1)
@@ -94,7 +110,7 @@ async def test_insert_noop_and_synthesized_revision_preserve_prior_asof_and_logi
         for r in after
         if cast(datetime, r["timestamp"]) <= horizon < cast(datetime, r["known_to"])
     ] == [11.0]
-    assert candidate == _row()
+    assert candidate == _row() | {"public_id": _LEGACY_ID}
 
 
 @pytest.mark.asyncio

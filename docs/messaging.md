@@ -1018,8 +1018,10 @@ database read, and counts it as `deterministic_answers`. Every writer has
 minted that id since before the cutover, so storage holds the same id, in any
 process, and the two-second concession does not apply to those keys. Keys that
 opened before the cutover, including old frames after a reconnect, keep the
-resolution above. The heartbeat reports each publisher's effective cutover as
-`meta.venue.candle_identity.deterministic_from`, and
+resolution above. The heartbeat reports, as
+`meta.venue.candle_identity.deterministic_from`, the cutover the resolver read at
+its latest persisted resolution; it is `null` until the first one, so a rollout
+or rollback check waits for one resolution after the setting changes.
 `snapper check-candle-identities` verifies stored ids read-only (see
 [CLI](cli.md)).
 
