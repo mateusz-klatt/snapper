@@ -818,11 +818,11 @@ async def test_reconciliation_while_the_original_transaction_is_open_is_uncertai
         raise ConnectionResetError("connection lost")
 
     async def observed(
-        repo: SQLAlchemyRepository, rows: list[CandleUpsertRow], as_of: datetime
+        repo: SQLAlchemyRepository, rows: list[CandleUpsertRow], session_id: str
     ) -> dict[tuple[str, datetime], str]:
         """Reconcile while capturing the statements it sends."""
         with _statements(repository) as captured:
-            outcome = await asyncio.wait_for(original_reconcile(repo, rows, as_of), 5)
+            outcome = await asyncio.wait_for(original_reconcile(repo, rows, session_id), 5)
         statements.append(captured)
         return outcome
 
@@ -899,37 +899,117 @@ async def test_reconciliation_failure_leaves_the_chunk_uncertain(
 async def test_reconciliation_on_postgresql_reads_committed_without_a_lock() -> None:
     """On PostgreSQL the reconciliation is one READ COMMITTED read with a statement bound.
 
-    Given: A PostgreSQL repository double holding this run's version of one row.
-    When: Two rows are reconciled.
-    Then: The transaction is set to READ COMMITTED before its statement timeout and its
-        only read; the found row is applied and the other uncertain.
+    Given: A PostgreSQL repository whose session holds this run's current version of
+        one row and its superseded version of another.
+    When: Three rows are reconciled.
+    Then: READ COMMITTED and the statement timeout precede one read that selects the
+        session's versions with the sentinel test, takes no lock, and gives applied,
+        applied_superseded and uncertain.
     """
-    row = candle(XRP, OPEN) | {"session_id": "run", "sequence_id": 1, "source": "native"}
-    missing = candle(XRP, OPEN + timedelta(minutes=1)) | {"session_id": "run", "sequence_id": 2}
-    stored = row | {"id": 3, "public_id": "p", "known_to": KNOWN_TO_MAX}
+    rows = [
+        candle(XRP, OPEN + timedelta(minutes=offset), source="native", trades=1)
+        | {"session_id": "run", "sequence_id": offset + 1}
+        for offset in range(3)
+    ]
+    stored = [
+        rows[0] | {"id": 3, "public_id": "p0", "known_to": KNOWN_TO_MAX, "is_current": True},
+        rows[1] | {"id": 4, "public_id": "p1", "known_to": RUN_TIME, "is_current": False},
+    ]
     statements: list[str] = []
     result = MagicMock()
-    result.mappings.return_value = [stored]
+    result.mappings.return_value.all.return_value = stored
 
     async def execute(statement: object) -> MagicMock:
         """Record one statement."""
         statements.append(str(statement))
         return result
 
-    @asynccontextmanager
-    async def open_session() -> AsyncIterator[MagicMock]:
-        """Yield the recording session."""
-        yield MagicMock(execute=AsyncMock(side_effect=execute))
-
-    repository = MagicMock(dialect_name="postgresql", session=open_session)
-    outcomes = await reconcile(repository, [row, missing], RUN_TIME)
+    repository = _PostgresRecordingRepository(MagicMock(execute=AsyncMock(side_effect=execute)))
+    try:
+        outcomes = await reconcile(repository, rows, "run")
+    finally:
+        await repository.engine.dispose()
     assert statements[:2] == [
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
         "SET LOCAL statement_timeout = '20s'",
     ]
     assert len(statements) == 3 and statements[2].startswith("SELECT")
+    assert "AS is_current" in statements[2] and "candles.session_id =" in statements[2]
     assert not any("LOCK" in statement for statement in statements)
-    assert outcomes == {(XRP, OPEN): "applied", (XRP, OPEN + timedelta(minutes=1)): "uncertain"}
+    assert outcomes == {
+        (XRP, OPEN): "applied",
+        (XRP, OPEN + timedelta(minutes=1)): "applied_superseded",
+        (XRP, OPEN + timedelta(minutes=2)): "uncertain",
+    }
+
+
+class _PostgresRecordingRepository(SQLAlchemyRepository):
+    """A real repository that selects PostgreSQL statements on a recording session."""
+
+    def __init__(self, recording: MagicMock) -> None:
+        """Keep the recording session; the engine is never connected."""
+        super().__init__("sqlite+aiosqlite:///:memory:")
+        self._recording = recording
+
+    @property
+    def dialect_name(self) -> str:
+        """Select the PostgreSQL branch."""
+        return "postgresql"
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Yield the recording session."""
+        yield cast(AsyncSession, self._recording)
+
+
+@pytest.mark.asyncio
+async def test_supersession_after_the_clock_and_before_the_read_is_found_superseded(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """Currentness comes from the reconciliation read itself, not from an earlier clock.
+
+    Given: An insert chunk whose commit succeeds before its acknowledgement is lost, a
+        clock read when the chunk ends, and a live writer that versions one of its
+        minutes after that clock read and before the reconciliation's SELECT.
+    When: The voted plan is written.
+    Then: That minute is applied_superseded and the chunk's other minute applied.
+    """
+    digest = await _plan(repository, tmp_path)
+    original = repository.get_session_candle_versions
+    clock_reads: list[datetime] = []
+
+    def clock() -> datetime:
+        """Return the real time and remember each read."""
+        clock_reads.append(datetime.now(UTC))
+        return clock_reads[-1]
+
+    async def supersede_then_read(
+        session: AsyncSession, keys: list[tuple[str, str, datetime]], session_id: str
+    ) -> list[tuple[CandleVersionRow, bool]]:
+        """Commit a later bar for the second minute, then run the real read."""
+        later = candle(
+            XRP, OPEN + timedelta(minutes=1), source="native", close=2.0, volume=1.0, trades=1
+        )
+        await repository.upsert_candles([later | {"timestamp": datetime.now(UTC)}])
+        return await original(session, keys, session_id)
+
+    repository.get_session_candle_versions = supersede_then_read
+    with _lost_acknowledgement():
+        report = await _write(
+            replace(fixed_context(repository), clock=clock),
+            tmp_path,
+            "write",
+            _options(tmp_path, digest),
+        )
+    chunk = cast(list[JsonObject], _receipt(tmp_path, "write")["chunks"])[0]
+    assert report.stop_reason == "uncertain_acknowledgement"
+    assert clock_reads
+    assert [row["minute_utc"] for row in cast(list[JsonObject], chunk["applied"])] == [
+        (OPEN + timedelta(minutes=2)).isoformat()
+    ]
+    assert [row["minute_utc"] for row in cast(list[JsonObject], chunk["applied_superseded"])] == [
+        (OPEN + timedelta(minutes=1)).isoformat()
+    ]
 
 
 @pytest.mark.asyncio

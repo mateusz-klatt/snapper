@@ -3894,6 +3894,26 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_session_candle_versions(
+        self,
+        session: AsyncSession,
+        keys: Sequence[tuple[str, str, datetime]],
+        session_id: str,
+    ) -> list[tuple[CandleVersionRow, bool]]:
+        """Read one writer session's versions of the given candles, marking the current ones.
+
+        Args:
+            session: Caller-owned transaction; the read takes no lock.
+            keys: Natural keys (instrument, timeframe, ``open_at``) to read.
+            session_id: Writer session whose versions are returned.
+
+        Returns:
+            Each version of that session for those keys, with whether the same
+            read found it to be the current version.
+        """
+        ...
+
+    @abstractmethod
     async def insert_missing_synthesized_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11796,6 +11816,42 @@ class SQLAlchemyRepository(Repository):
             ) == (existing["id"], existing["public_id"], existing["timestamp"]):
                 kept.append((row, existing))
         return kept
+
+    async def get_session_candle_versions(
+        self,
+        session: AsyncSession,
+        keys: Sequence[tuple[str, str, datetime]],
+        session_id: str,
+    ) -> list[tuple[CandleVersionRow, bool]]:
+        """Read one writer session's versions of the given candles in a single lock-free query.
+
+        Whether a version is current is computed by the same SELECT from the
+        current-version sentinel, so a successor committed before that SELECT
+        is always seen. The caller owns the transaction and its isolation.
+
+        Args:
+            session: Caller-owned transaction; the read takes no lock.
+            keys: Natural keys (instrument, timeframe, ``open_at``) to read.
+            session_id: Writer session whose versions are returned.
+
+        Returns:
+            Each version of that session for those keys, with whether the same
+            read found it to be the current version.
+        """
+        result = await session.execute(
+            select(Candle.__table__, (Candle.known_to == KNOWN_TO_MAX).label("is_current")).where(
+                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                    list(keys)
+                ),
+                Candle.session_id == session_id,
+            )
+        )
+        versions: list[tuple[CandleVersionRow, bool]] = []
+        for stored in result.mappings().all():
+            version = dict(stored)
+            current = bool(version.pop("is_current"))
+            versions.append((cast(CandleVersionRow, version), current))
+        return versions
 
     @classmethod
     async def _false_zero_targets(

@@ -500,3 +500,36 @@ def test_retaining_expected_predecessors_without_expectations_keeps_every_target
     ]
     kept = SQLAlchemyRepository._retain_expected_predecessors(targets, None)
     assert kept is targets
+
+
+@pytest.mark.asyncio
+async def test_session_versions_are_marked_current_by_the_same_read(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """One writer session's versions of the requested keys come back with their currentness.
+
+    Given: A writer session's current minute, its minute later versioned by another
+        writer, another session's minute and the session's minute that is not requested.
+    When: The session's versions of three keys, and then of no key, are read.
+    Then: Exactly the session's two requested versions return, the first current and the
+        second superseded, without the computed column; no key returns nothing.
+    """
+    mine = "00000000-0000-4000-8000-00000000aaaa"
+    await repository.upsert_candles(
+        [_native(offset) | {"session_id": mine} for offset in (0, 1, 3)] + [_native(2)]
+    )
+    await repository.upsert_candles(
+        [_native(1) | {"timestamp": _AUTHOR + timedelta(hours=1), "close": 11.5}]
+    )
+    async with repository.session() as session:
+        versions = await repository.get_session_candle_versions(
+            session, [_key(0), _key(1), _key(2)], mine
+        )
+        nothing = await repository.get_session_candle_versions(session, [], mine)
+    assert sorted((row["open_at"], current) for row, current in versions) == [
+        (_OPEN, True),
+        (_OPEN + timedelta(minutes=1), False),
+    ]
+    assert {row["session_id"] for row, _ in versions} == {mine}
+    assert all("is_current" not in row for row, _ in versions)
+    assert nothing == []

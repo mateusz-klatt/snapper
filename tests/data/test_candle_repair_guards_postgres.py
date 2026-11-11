@@ -20,6 +20,8 @@ afterwards. Never point it at production.
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -34,6 +36,7 @@ from sqlalchemy import update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.updaters.historical.candle_repair import classify_failure
 from snapper.application.updaters.historical.candle_repair import reconcile
@@ -46,6 +49,10 @@ from snapper.data.repository_types import CandleUpsertRow
 _NOW = datetime.now(UTC).replace(second=0, microsecond=0)
 _OPEN = _NOW - timedelta(days=1, hours=3)
 _AUTHOR = _NOW - timedelta(hours=1)
+
+
+_WRITER = "00000000-0000-4000-8000-000000000b02"
+"""Writer session id of every row these tests write."""
 
 
 def _configured_backend_name() -> str:
@@ -106,7 +113,7 @@ def _row(instrument: str, offset: int = 0, source: str = "calculated") -> Candle
         "trades": 7,
         "source": source,
         "complete": True,
-        "session_id": "00000000-0000-4000-8000-000000000b02",
+        "session_id": _WRITER,
         "sequence_id": offset + 1,
     }
 
@@ -123,6 +130,39 @@ def _zero(instrument: str, offset: int = 0) -> CandleUpsertRow:
         "volume": 0.0,
         "vwap": 10.0,
         "trades": 0,
+    }
+
+
+async def _replace_zero_at_same_time(repository: SQLAlchemyRepository, instrument: str) -> None:
+    """Close the instrument's current zero and insert an identical one under a new physical id."""
+    async with repository.session() as session:
+        stored = (
+            (
+                await session.execute(
+                    select(Candle.__table__).where(
+                        Candle.instrument_public_id == instrument,
+                        Candle.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        await session.execute(
+            update(Candle).where(Candle.id == stored["id"]).values(known_to=stored["timestamp"])
+        )
+        await session.execute(
+            insert(Candle).values(**{key: value for key, value in stored.items() if key != "id"})
+        )
+        await session.commit()
+
+
+def _predecessor(version: dict[str, object]) -> CandlePredecessor:
+    """Return a stored version as an expected predecessor."""
+    return {
+        "id": cast(int, version["id"]),
+        "public_id": cast(str, version["public_id"]),
+        "timestamp": cast(datetime, version["timestamp"]),
     }
 
 
@@ -230,7 +270,7 @@ async def test_reconciliation_reads_without_a_lock_on_postgresql(
         await writer.flush()
         outcomes, live = await asyncio.wait_for(
             asyncio.gather(
-                reconcile(repository, rows, datetime.now(UTC)),
+                reconcile(repository, rows, _WRITER),
                 repository.upsert_candles([_row(instrument, 5, "native")]),
             ),
             10,
@@ -279,3 +319,43 @@ async def test_unique_violations_are_classified_by_their_postgresql_index_names(
         "natural_key_conflict",
         "unique_violation",
     ]
+
+
+@pytest.mark.asyncio
+async def test_voted_zero_replaced_between_preflight_and_lock_is_skipped_on_postgresql(
+    repository: SQLAlchemyRepository, instrument: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The expected predecessor is checked again after SHARE ROW EXCLUSIVE is granted.
+
+    Given: A voted zero that matches the preflight and is replaced at the same time by
+        another transaction just before the writer lock is requested.
+    When: The correction runs with the voted zero.
+    Then: The check under the lock skips the row and the successor zero stays current.
+    """
+    await repository.upsert_candles([_zero(instrument)])
+    voted = (await _current(repository, instrument))[0]
+    original = SQLAlchemyRepository._begin_candle_reconciliation_write
+    replaced: list[bool] = []
+
+    async def replace_then_lock(
+        self: SQLAlchemyRepository, session: AsyncSession, **options: bool | str
+    ) -> None:
+        """Replace the zero from another transaction, then take the real lock."""
+        if not replaced:
+            replaced.append(True)
+            await _replace_zero_at_same_time(repository, instrument)
+        lock = cast(Callable[..., Awaitable[None]], original)
+        await lock(self, session, **options)
+
+    monkeypatch.setattr(
+        SQLAlchemyRepository, "_begin_candle_reconciliation_write", replace_then_lock
+    )
+    result = await repository.correct_false_zero_candles(
+        [_row(instrument)],
+        source="calculated",
+        expected_predecessors={(instrument, "1m", _OPEN): _predecessor(voted)},
+    )
+    current = await _current(repository, instrument)
+    assert replaced == [True]
+    assert result == []
+    assert [(row["source"], row["id"] != voted["id"]) for row in current] == [("synthesized", True)]

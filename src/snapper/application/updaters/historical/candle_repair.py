@@ -59,7 +59,6 @@ from uuid import uuid7
 
 from sqlalchemy import select
 from sqlalchemy import text
-from sqlalchemy import tuple_
 from sqlalchemy.engine import URL
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -1898,40 +1897,36 @@ def _written_by(version: CandleVersionRow, row: CandleUpsertRow) -> bool:
 
 
 async def reconcile(
-    repository: Repository, rows: Sequence[CandleUpsertRow], as_of: datetime
+    repository: Repository, rows: Sequence[CandleUpsertRow], session_id: str
 ) -> dict[MinuteKey, str]:
     """Look for this run's versions of an uncertain chunk without taking any lock.
 
     One fresh transaction, explicitly READ COMMITTED on PostgreSQL and a plain
-    read on SQLite, reads every version of the chunk's natural keys.
+    read on SQLite, reads every version this run's writer session stored for
+    the chunk's natural keys. Whether a version is current is decided by that
+    same SELECT from the current-version sentinel, never from a clock read
+    before it, so a successor committed before the read is always seen.
 
     Args:
         repository: Repository of the target database.
         rows: The chunk's rows, with this run's session and sequence ids.
-        as_of: Time of the reconciliation.
+        session_id: This run's writer session id.
 
     Returns:
-        ``applied`` for a version current at ``as_of``, ``applied_superseded``
-        for a version later superseded, else ``uncertain``, by key.
+        ``applied`` for a version the read found current, ``applied_superseded``
+        for one it found superseded, else ``uncertain``, by key.
     """
     keys = [(row["instrument_public_id"], TIMEFRAME, row["open_at"]) for row in rows]
     async with repository.session() as session:
         if repository.dialect_name == "postgresql":
             await session.execute(text(_READ_COMMITTED))
             await session.execute(text(_STATEMENT_TIMEOUT))
-        result = await session.execute(
-            select(Candle.__table__).where(
-                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(keys)
-            )
-        )
-        versions = [cast(CandleVersionRow, dict(row)) for row in result.mappings()]
+        versions = await repository.get_session_candle_versions(session, keys, session_id)
     outcomes: dict[MinuteKey, str] = {}
     for row in rows:
-        mine = [version for version in versions if _written_by(version, row)]
+        current = [is_current for version, is_current in versions if _written_by(version, row)]
         outcomes[_guard_key(row)] = (
-            "uncertain"
-            if not mine
-            else "applied" if mine[0]["known_to"] > as_of else "applied_superseded"
+            "uncertain" if not current else "applied" if any(current) else "applied_superseded"
         )
     return outcomes
 
@@ -2067,13 +2062,19 @@ class _ChunkWriter:
     """Apply chunks with the retry policy and keep their receipts."""
 
     def __init__(
-        self, context: RunContext, source: RepairSource, options: WriteOptions, log: _ReceiptLog
+        self,
+        context: RunContext,
+        source: RepairSource,
+        options: WriteOptions,
+        log: _ReceiptLog,
+        run_id: str,
     ) -> None:
         """Bind the writer to its run."""
         self._context = context
         self._source = source
         self._options = options
         self._log = log
+        self._run_id = run_id
         self._lock_streak = 0
         self.records: list[JsonObject] = []
 
@@ -2160,7 +2161,7 @@ class _ChunkWriter:
         """Record what a plain read finds of an uncertain chunk; a failed read leaves it uncertain."""
         try:
             record.outcomes.update(
-                await reconcile(self._context.repository, chunk.rows, self._context.clock())
+                await reconcile(self._context.repository, chunk.rows, self._run_id)
             )
         except Exception as error:
             record.reconciliation_error = error_fields(error)
@@ -2230,7 +2231,7 @@ async def apply_selection(
     batch = selection.selected[: options.max_rows]
     run = _WriteRun(voted_digest, str(uuid7()), write_time, write_time, selection, len(batch))
     log = _ReceiptLog(request.output_dir / RECEIPT_LINES_FILE)
-    writer = _ChunkWriter(context, request.source, options, log)
+    writer = _ChunkWriter(context, request.source, options, log, run.run_id)
     stop_reason = "error"
     try:
         stop_reason = await writer.apply(
