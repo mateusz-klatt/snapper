@@ -1068,8 +1068,19 @@ class KrakenExchangeClient(ExchangeClientBase):
         No publisher hook sees these resets, so the break is delivered in-band:
         the stream yields it before any item of the new generation. Breaks not
         yet delivered are combined into one.
+
+        A reset before the stream has observed anything, such as the first
+        connection at startup, loses nothing and is not delivered: the consumer
+        already waits for its first mark, and the restart seed of its
+        aggregator must survive.
         """
+        observed = (
+            self._trade_built_candle_builder.update_count > 0
+            or self._trade_candle_popped_through is not None
+        )
         brk = self.reset_trade_candle_epoch()
+        if not observed:
+            return
         pending = self._trade_candle_pending_break
         self._trade_candle_pending_break = brk if pending is None else pending.followed_by(brk)
 

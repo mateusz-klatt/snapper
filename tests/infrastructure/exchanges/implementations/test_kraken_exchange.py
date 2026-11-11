@@ -10232,6 +10232,7 @@ class TestTradeBuiltInBandResets:
         monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
         warning = MagicMock()
         monkeypatch.setattr(kr.logger, "warning", warning)
+        client._trade_candle_popped_through = _MINUTE_M
         client._reset_trade_candle_epoch_in_band()
         client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
         stream = client.subscribe_trade_built_candles(["*"], "1m")
@@ -10255,6 +10256,7 @@ class TestTradeBuiltInBandResets:
         """
         client = _client()
         monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        client._trade_candle_popped_through = _MINUTE_M
         stream = client.subscribe_trade_built_stream(["*"])
         waiting = asyncio.create_task(anext(stream))
         await asyncio.sleep(0.02)
@@ -10269,3 +10271,26 @@ class TestTradeBuiltInBandResets:
         assert isinstance(first, TradeCandleBreak)
         assert (first.reason, first.generation) == (TradeCandleBreakReason.RESET, 1)
         assert second == mark
+
+    def test_a_reset_before_anything_was_observed_is_not_delivered(self) -> None:
+        """The first connection at startup is not a break of the stream.
+
+        Given a fresh client whose builder folded nothing and whose producer
+            never ticked, then the same client after one folded trade,
+        When the client detects a reset each time,
+        Then only the second reset is delivered, though both start a new
+            generation.
+        """
+        client = _client()
+        client._reset_trade_candle_epoch_in_band()
+        assert client._trade_candle_pending_break is None
+        assert client.trade_candle_generation() == 1
+
+        client._trade_built_candle_builder.update(
+            TradeUpdate("BTC-EUR", "buy", 1.0, 100.0, "market", _TICK_NOW),
+            observed_at=_TICK_NOW,
+        )
+        client._reset_trade_candle_epoch_in_band()
+        pending = client._trade_candle_pending_break
+        assert pending is not None
+        assert (pending.reason, pending.generation) == (TradeCandleBreakReason.RESET, 2)
