@@ -97,6 +97,7 @@ def _client() -> KrakenExchangeClient:
     client._trade_candle_marked_through = None
     client._trade_candle_popped_through = None
     client._trade_candle_overflow = None
+    client._trade_candle_pending_break = None
     client._trade_candle_last_tick_at = None
     client._trade_candle_overflows = 0
     client._trade_candle_discards = 0
@@ -10172,3 +10173,71 @@ class TestTradeBuiltProducerSupervision:
         }
         assert client.trade_candle_queue_depth() == 1
         assert _client().trade_candle_producer_health(_TICK_NOW)["last_tick_age_s"] is None
+
+
+class TestTradeBuiltInBandResets:
+    """Resets the client detects on its own socket reach the consumer in-band."""
+
+    @pytest.mark.asyncio
+    async def test_a_client_detected_reset_is_yielded_before_the_new_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No item of the new generation is observed before its reset.
+
+        Given a queued bar, two client-detected resets, and an overflow,
+        When the stream is read, and a mark of the new generation is queued,
+        Then it yields one combined reset counting the drained bar, then the
+            overflow break, then the mark.
+        """
+        client = _client()
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        client._trade_candle_popped_through = _MINUTE_M
+        client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
+        client._reset_trade_candle_epoch_in_band()
+        client._reset_trade_candle_epoch_in_band()
+        client._trade_candle_overflow = LostBars()
+        stream = client.subscribe_trade_built_stream(["*"])
+
+        reset = await anext(stream)
+        overflow = await anext(stream)
+        mark = TradeCandleMark(through=_MINUTE_M, generation=3, produced_at=_TICK_NOW)
+        client._trade_built_candle_queue.put_nowait(mark)
+        following = await anext(stream)
+        await stream.aclose()
+
+        assert isinstance(reset, TradeCandleBreak)
+        assert (reset.reason, reset.generation, reset.lost_bars, reset.builder_kept) == (
+            TradeCandleBreakReason.RESET,
+            2,
+            1,
+            False,
+        )
+        assert reset.arm_after == _MINUTE_M
+        assert isinstance(overflow, TradeCandleBreak)
+        assert (overflow.reason, overflow.generation) == (TradeCandleBreakReason.OVERFLOW, 3)
+        assert following == mark
+        assert client._trade_candle_pending_break is None
+
+    @pytest.mark.asyncio
+    async def test_the_bars_only_stream_logs_a_reset_with_its_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shadow consumer sees every break as one warning naming its reason.
+
+        Given a client-detected reset and then a queued bar,
+        When the bars-only stream is read,
+        Then it logs the reset by name and yields the bar.
+        """
+        client = _client()
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        warning = MagicMock()
+        monkeypatch.setattr(kr.logger, "warning", warning)
+        client._reset_trade_candle_epoch_in_band()
+        client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
+        stream = client.subscribe_trade_built_candles(["*"], "1m")
+
+        bar = await anext(stream)
+        await stream.aclose()
+
+        assert isinstance(bar, CandleUpdate)
+        assert warning.call_args.args[1] == "reset"

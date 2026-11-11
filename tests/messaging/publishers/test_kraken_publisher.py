@@ -1605,6 +1605,7 @@ class TestShadowConsumerOnTheRealStream:
         client._trade_candle_marked_through = None
         client._trade_candle_popped_through = None
         client._trade_candle_overflow = None
+        client._trade_candle_pending_break = None
         client._trade_candle_last_tick_at = None
         client._trade_candle_overflows = 0
         client._trade_candle_discards = 0

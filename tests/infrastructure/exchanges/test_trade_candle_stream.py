@@ -109,3 +109,77 @@ class TestStreamItems:
         Then: They are overflow, lag and reset.
         """
         assert [reason.value for reason in TradeCandleBreakReason] == ["overflow", "lag", "reset"]
+
+
+class TestBreakCombination:
+    """Breaks the consumer has not seen yet combine into one."""
+
+    def test_a_later_break_keeps_its_generation_and_widens_everything_else(self) -> None:
+        """Nothing either break lost is forgotten.
+
+        Given an overflow that kept the builder and a later reset that did not,
+        When the first is followed by the second,
+        Then the result has the reset's reason and generation, every lost bar,
+            the combined range, a builder that was not kept, and the higher floor.
+        """
+        overflow = TradeCandleBreak(
+            reason=TradeCandleBreakReason.OVERFLOW,
+            generation=1,
+            lost_bars=2,
+            lost_from=_MINUTE + timedelta(minutes=1),
+            lost_through=_MINUTE + timedelta(minutes=2),
+            builder_kept=True,
+            arm_after=_MINUTE + timedelta(minutes=3),
+        )
+        reset = TradeCandleBreak(
+            reason=TradeCandleBreakReason.RESET,
+            generation=2,
+            lost_bars=1,
+            lost_from=_MINUTE,
+            lost_through=_MINUTE + timedelta(minutes=1),
+            builder_kept=False,
+            arm_after=_MINUTE + timedelta(minutes=2),
+        )
+
+        assert overflow.followed_by(reset) == TradeCandleBreak(
+            reason=TradeCandleBreakReason.RESET,
+            generation=2,
+            lost_bars=3,
+            lost_from=_MINUTE,
+            lost_through=_MINUTE + timedelta(minutes=2),
+            builder_kept=False,
+            arm_after=_MINUTE + timedelta(minutes=3),
+        )
+
+    def test_missing_ranges_and_floors_take_the_other_value(self) -> None:
+        """A break that lost nothing, or had no floor, does not erase the other's.
+
+        Given a break with no lost range and no floor, and one with both,
+        When either is followed by the other,
+        Then the range and floor are the ones that exist.
+        """
+        empty = TradeCandleBreak(
+            reason=TradeCandleBreakReason.RESET,
+            generation=1,
+            lost_bars=0,
+            lost_from=None,
+            lost_through=None,
+            builder_kept=False,
+            arm_after=None,
+        )
+        full = TradeCandleBreak(
+            reason=TradeCandleBreakReason.RESET,
+            generation=2,
+            lost_bars=1,
+            lost_from=_MINUTE,
+            lost_through=_MINUTE,
+            builder_kept=False,
+            arm_after=_MINUTE,
+        )
+
+        for combined in (empty.followed_by(full), full.followed_by(empty)):
+            assert (combined.lost_from, combined.lost_through, combined.arm_after) == (
+                _MINUTE,
+                _MINUTE,
+                _MINUTE,
+            )

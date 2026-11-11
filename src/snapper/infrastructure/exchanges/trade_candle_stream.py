@@ -83,6 +83,57 @@ class TradeCandleBreak:
     builder_kept: bool
     arm_after: datetime | None
 
+    def followed_by(self, later: TradeCandleBreak) -> TradeCandleBreak:
+        """Combine this break with a later one that its consumer has not seen yet.
+
+        Args:
+            later: The next break of the stream.
+
+        Returns:
+            One break with the later reason and generation, every lost bar of
+            both, their combined minute range, the builder kept only if both
+            kept it, and the higher arming floor.
+        """
+        return TradeCandleBreak(
+            reason=later.reason,
+            generation=later.generation,
+            lost_bars=self.lost_bars + later.lost_bars,
+            lost_from=_earlier(self.lost_from, later.lost_from),
+            lost_through=_later(self.lost_through, later.lost_through),
+            builder_kept=self.builder_kept and later.builder_kept,
+            arm_after=_later(self.arm_after, later.arm_after),
+        )
+
+
+def _earlier(first: datetime | None, second: datetime | None) -> datetime | None:
+    """Return the earlier of two optional instants.
+
+    Args:
+        first: An instant, or ``None``.
+        second: An instant, or ``None``.
+
+    Returns:
+        The earlier instant, the only one given, or ``None``.
+    """
+    if first is None or second is None:
+        return second if first is None else first
+    return min(first, second)
+
+
+def _later(first: datetime | None, second: datetime | None) -> datetime | None:
+    """Return the later of two optional instants.
+
+    Args:
+        first: An instant, or ``None``.
+        second: An instant, or ``None``.
+
+    Returns:
+        The later instant, the only one given, or ``None``.
+    """
+    if first is None or second is None:
+        return second if first is None else first
+    return max(first, second)
+
 
 type TradeCandleItem = CandleUpdate | TradeCandleMark | TradeCandleBreak
 """One item of the trade-built candle stream."""

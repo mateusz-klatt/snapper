@@ -13,15 +13,20 @@ import time
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 
 from snapper.config.app import AppSettings
 from snapper.core.types import ExchangeEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionStatus
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
@@ -1968,6 +1973,7 @@ class _StreamRig:
         client._trade_candle_marked_through = None
         client._trade_candle_popped_through = None
         client._trade_candle_overflow = None
+        client._trade_candle_pending_break = None
         client._trade_candle_last_tick_at = None
         client._trade_candle_overflows = 0
         client._trade_candle_discards = 0
@@ -2069,6 +2075,22 @@ class _StreamRig:
             for topic, message in self.recorder.published
             if topic.endswith(f".candles.{timeframe}")
         ]
+
+
+_INSTRUMENT_S1 = "00000000-0000-7000-8000-0000000000a1"
+_INSTRUMENT_S2 = "00000000-0000-7000-8000-0000000000a2"
+
+
+async def _instrument_per_symbol(native_symbol: str) -> str:
+    """Resolve each rig symbol to its own instrument identity.
+
+    Args:
+        native_symbol: Native symbol the publisher is resolving.
+
+    Returns:
+        A distinct instrument public id per symbol.
+    """
+    return _INSTRUMENT_S1 if native_symbol == "S1-EUR" else _INSTRUMENT_S2
 
 
 def _bar(symbol: str, minute: int, close: float) -> CandleUpdate:
@@ -2317,3 +2339,170 @@ class TestStreamBreaksInTheLoop:
         assert rig.publisher._stale_trade_candle_marks == 1
         assert rig.publisher._completion_clock is CompletionClock.WAITING
         assert rig.published() == []
+        await rig.publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        await rig._wall_flush_tick()
+        assert rig.publisher._completion_clock is CompletionClock.WAITING
+        assert rig.recorder.published == []
+
+
+class TestCompletionStatesInTheLoop:
+    """Waiting and late real bars through the real candle loop."""
+
+    @pytest.mark.asyncio
+    async def test_at_startup_nothing_moves_until_the_first_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh publisher waits for its first mark, however far the wall clock is ahead.
+
+        Given a fresh consumer-driven publisher with a known close, a witnessed
+            feed, a forward-filling aggregator holding a window 40 minutes old,
+            and no producer tick,
+        When the minute sweep and a flush tick run,
+        Then the state waits and nothing is published.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        aggregator.fold(_bar("S1-EUR", w, 100.0))
+        aggregator.fold(_bar("S1-EUR", w + _MINUTE, 101.0))
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 4 * _MINUTE)
+        rig.emitter.observe_real_bar(_bar("S1-EUR", w, 100.0))
+
+        await rig.publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        await rig._wall_flush_tick()
+
+        assert rig.publisher._completion_clock is CompletionClock.WAITING
+        assert rig.recorder.published == []
+
+    @pytest.mark.asyncio
+    async def test_after_a_reconnect_nothing_moves_until_a_new_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reconnect waits for the new generation, however far the wall clock is ahead.
+
+        Given a progressing consumer with a forward-filling aggregator and the
+            wall clock 40 minutes ahead of its data,
+        When the feed reconnects and no producer tick follows, while the
+            wall-clock sweep and flush both run,
+        Then the state waits and nothing more is published.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 4 * _MINUTE)
+        rig.tick(w + _MINUTE + 13, [_bar("S1-EUR", w, 100.0)])
+        await rig.consume()
+        assert rig.publisher._completion_clock is CompletionClock.PROGRESS
+        published = len(rig.recorder.published)
+
+        rig.publisher._suspend_candle_synthesis_across_break()
+        await rig.publisher._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        await rig._wall_flush_tick()
+
+        assert rig.publisher._completion_clock is CompletionClock.WAITING
+        assert rig.client.trade_candle_generation() == 1
+        assert len(rig.recorder.published) == published
+
+    @pytest.mark.asyncio
+    async def test_late_trades_supersede_the_flat_bar_and_the_first_emission(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Trades beyond the grace: a late first emission and a correction both persist.
+
+        Given closes for two symbols, a tradeless minute swept with flat bars,
+            then a late first emission of S2 for that minute and a correction of
+            S1's earlier minute,
+        When the consumer drains the queue and every queued row is written in
+            order to a real repository,
+        Then S2's real bar follows and replaces its flat bar, S1's correction
+            replaces its first emission, each is authored at its own later
+            acquisition, and S2's real close is armed.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+            tmp_path: Pytest temporary directory.
+        """
+        rig = _StreamRig(monkeypatch, follows=True)
+        monkeypatch.setattr(rig.publisher, "_ensure_instrument", _instrument_per_symbol)
+        m = _recent_minute()
+        rig.witness(m - 3 * _MINUTE, m + 4 * _MINUTE)
+        rig.tick(m + 13, [_bar("S1-EUR", m - _MINUTE, 101.0), _bar("S2-EUR", m - _MINUTE, 201.0)])
+        rig.tick(m + 73, [])
+        rig.tick(m + 95, [_bar("S2-EUR", m, 202.0)])
+        rig.tick(m + 100, [_bar("S1-EUR", m - _MINUTE, 101.5)])
+
+        await rig.consume()
+
+        s2 = [
+            (opened, trades, close, author)
+            for s, opened, trades, close, author in rig.published()
+            if s == "S2-EUR"
+        ]
+        assert s2[-2:] == [(_at(m), 0, 201.0, _at(m + 73)), (_at(m), 1, 202.0, _at(m + 95))]
+        assert rig.emitter._last_close["S2-EUR"].close == 202.0
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'late.db'}")
+        await repo.create_all()
+        try:
+            queue = rig.publisher._candle_write_queue
+            while not queue.empty():
+                await repo.upsert_candles([queue.get_nowait()])
+            async with repo.session() as session:
+                active = (
+                    await session.execute(
+                        select(
+                            Candle.instrument_public_id,
+                            Candle.open_at,
+                            Candle.close,
+                            Candle.timestamp,
+                        ).where(Candle.known_to == KNOWN_TO_MAX)
+                    )
+                ).all()
+        finally:
+            await repo.engine.dispose()
+        current = {
+            (instrument, opened.replace(tzinfo=UTC)): (close, author.replace(tzinfo=UTC))
+            for instrument, opened, close, author in active
+        }
+        assert current[(_INSTRUMENT_S1, _at(m - _MINUTE))] == (101.5, _at(m + 100))
+        assert current[(_INSTRUMENT_S2, _at(m))] == (202.0, _at(m + 95))
+
+
+class TestClientDetectedResetInTheLoop:
+    """A reset the client detects on its own socket stops progress like any break."""
+
+    @pytest.mark.asyncio
+    async def test_a_drained_traded_minute_gets_no_flat_bar_and_completes_no_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The evidence a reset discards is never replaced by a flat bar.
+
+        Given a progressing consumer with a forward-filling aggregator, a queued
+            positive-volume bar of the window's third minute, the client's own
+            socket close that drains it, and marks of the new generation,
+        When the consumer drains the queue,
+        Then it waits through the reset, no flat bar is published for the
+            drained minute, and the window is never published as complete.
+        """
+        w = _recent_minute(align=300)
+        aggregator = CandleAggregator(["5m"], live_epoch=_at(w - 300), forward_fill=True)
+        rig = _StreamRig(monkeypatch, follows=True, aggregator=aggregator)
+        rig.witness(w - 2 * _MINUTE, w + 8 * _MINUTE)
+        rig.tick(w + _MINUTE + 13, [_bar("S1-EUR", w, 100.0)])
+        rig.tick(w + 2 * _MINUTE + 13, [_bar("S1-EUR", w + _MINUTE, 101.0)])
+        await rig.consume()
+        rig.publisher.running = True
+        rig.tick(w + 3 * _MINUTE + 13, [_bar("S1-EUR", w + 2 * _MINUTE, 102.0)])
+        rig.client._ws_client = MagicMock(close=AsyncMock())
+        rig.client._ws_connected = True
+        await rig.client._close_ws_client()
+        for n in range(4, 7):
+            rig.tick(w + n * _MINUTE + 13, [])
+
+        await rig.consume()
+
+        assert rig.publisher._completion_clock is CompletionClock.PROGRESS
+        assert rig.client.trade_candle_generation() == 2
+        flats = [(s, opened) for s, opened, trades, _c, _a in rig.published() if not trades]
+        assert ("S1-EUR", _at(w + 2 * _MINUTE)) not in flats
+        windows = [m for topic, m in rig.recorder.published if topic.endswith(".5m")]
+        assert not [m for m in windows if m.open_at == _at(w) and m.complete]

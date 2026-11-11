@@ -769,6 +769,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._trade_candle_marked_through: datetime | None = None
         self._trade_candle_popped_through: datetime | None = None
         self._trade_candle_overflow: LostBars | None = None
+        self._trade_candle_pending_break: TradeCandleBreak | None = None
         self._trade_candle_last_tick_at: datetime | None = None
         self._trade_candle_overflows: int = 0
         self._trade_candle_discards: int = 0
@@ -913,7 +914,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         client = self._ws_client
         if not client:
             return
-        self.reset_trade_candle_epoch()
+        self._reset_trade_candle_epoch_in_band()
         was_connected = self._ws_connected
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
@@ -926,7 +927,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             await force_close_ws_client(client)
         finally:
             if self._ws_client is client:
-                self.reset_trade_candle_epoch()
+                self._reset_trade_candle_epoch_in_band()
                 self._ws_client = None
                 self._ws_connected = False
                 if was_connected:
@@ -1060,6 +1061,17 @@ class KrakenExchangeClient(ExchangeClientBase):
         brk = self._take_trade_candle_break(TradeCandleBreakReason.RESET, builder_kept=False)
         self._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
         return brk
+
+    def _reset_trade_candle_epoch_in_band(self) -> None:
+        """Reset the epoch for a feed break the client detected on its own socket.
+
+        No publisher hook sees these resets, so the break is delivered in-band:
+        the stream yields it before any item of the new generation. Breaks not
+        yet delivered are combined into one.
+        """
+        brk = self.reset_trade_candle_epoch()
+        pending = self._trade_candle_pending_break
+        self._trade_candle_pending_break = brk if pending is None else pending.followed_by(brk)
 
     def discard_trade_candle_backlog(self) -> TradeCandleBreak:
         """Discard the queued backlog of a lagging consumer, keeping the builder.
@@ -2546,7 +2558,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                     yield item
                 elif isinstance(item, TradeCandleBreak):
                     logger.warning(
-                        "trade-built candle queue overflowed: {} bars lost from {} to {}",
+                        "trade-built candle stream break ({}): {} bars lost from {} to {}",
+                        item.reason.value,
                         item.lost_bars,
                         item.lost_from,
                         item.lost_through,
@@ -2577,8 +2590,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         iterator close, so a publisher shutdown does not leak the task.
 
         Yields:
-            Bars and marks in queue order, and a break before the first dequeue
-            after the queue refused an item.
+            Bars and marks in queue order; before the next dequeue, a break the
+            client detected on its own socket, then a break for items the queue
+            refused.
         """
         self._trade_built_candles_enabled = True
         if (
@@ -2590,6 +2604,11 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
         try:
             while True:
+                pending = self._trade_candle_pending_break
+                if pending is not None:
+                    self._trade_candle_pending_break = None
+                    yield pending
+                    continue
                 if self._trade_candle_overflow is not None:
                     yield self._take_trade_candle_break(
                         TradeCandleBreakReason.OVERFLOW, builder_kept=True
@@ -3712,7 +3731,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             BaseException: Whatever ``start()`` or the subscription replay
                 raised, re-raised after teardown.
         """
-        self.reset_trade_candle_epoch()
+        self._reset_trade_candle_epoch_in_band()
         client = SpotWSClient(
             key=self.api_key or "",
             secret=self.api_secret or "",
