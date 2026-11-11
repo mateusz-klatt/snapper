@@ -183,6 +183,7 @@ from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.command_material import COMMAND_MATERIAL_CONFLICT_EVENT
 from snapper.core.command_material import TRADE_COMMAND_LIFECYCLE_FIELDS
 from snapper.core.command_material import TradeCommandMaterialChangedError
@@ -316,6 +317,7 @@ from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
 from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CancelClaimResult
+from snapper.data.repository_types import CandleIdentityRow
 from snapper.data.repository_types import CandlePredecessor
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
@@ -12078,7 +12080,10 @@ class SQLAlchemyRepository(Repository):
         cls._validate_missing_candle_business(row, allow_unknown_statistics)
         if row.get("known_to", KNOWN_TO_MAX) != KNOWN_TO_MAX:
             raise ValueError("missing candle insert cannot create a closed historical version")
-        row.setdefault("public_id", str(uuid7()))
+        if "public_id" not in row:
+            row["public_id"] = deterministic_candle_public_id(
+                row["instrument_public_id"], row["timeframe"], row["open_at"]
+            )
         row["known_to"] = KNOWN_TO_MAX
         row.setdefault("price_basis", None)
         return row
@@ -12349,7 +12354,10 @@ class SQLAlchemyRepository(Repository):
         carrying the same public_id.  This preserves full history of
         intra-interval updates.
 
-        Rows without ``public_id`` get a generated UUID7 automatically.
+        Rows without ``public_id`` get their key's deterministic id
+        (:func:`~snapper.core.candle_identity.deterministic_candle_public_id`).
+        A row for a key that already has a version adopts the stored id
+        instead, so the fill only decides the id of a new key.
 
         ``session`` semantics mirror :meth:`upsert_ticks` and
         :meth:`upsert_trades`: when provided, the insert runs on the
@@ -12362,7 +12370,9 @@ class SQLAlchemyRepository(Repository):
             return 0
         for r in rows:
             if "public_id" not in r:
-                r["public_id"] = str(uuid7())
+                r["public_id"] = deterministic_candle_public_id(
+                    r["instrument_public_id"], r["timeframe"], r["open_at"]
+                )
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
         if session is not None:
@@ -13549,6 +13559,59 @@ class SQLAlchemyRepository(Repository):
                 }
                 for r in rows
             ]
+
+    async def iter_active_candle_identities(
+        self, start: datetime, end: datetime
+    ) -> AsyncIterator[CandleIdentityRow]:
+        """Stream the natural key and public id of every active candle opening in a range.
+
+        Reads the active version (``known_to`` at its sentinel) of every key
+        whose opening lies in ``[start, end)``, of every instrument, timeframe
+        and venue, active instrument or not. It reads one UTC day at a time, so
+        that PostgreSQL prunes to one daily partition per statement, and streams
+        each day in bounded chunks, so memory stays flat however many keys the
+        range holds. It writes nothing.
+
+        Args:
+            start: Aware inclusive lower bound on the opening.
+            end: Aware exclusive upper bound on the opening.
+
+        Yields:
+            One row per active key, in opening order within each day.
+
+        Raises:
+            ValueError: When a bound is naive.
+        """
+        lower = self._aware_missing_candle_time(start)
+        upper = self._aware_missing_candle_time(end)
+        day = lower.replace(hour=0, minute=0, second=0, microsecond=0)
+        while day < upper:
+            following = day + timedelta(days=1)
+            stmt = (
+                select(
+                    Candle.instrument_public_id,
+                    Candle.timeframe,
+                    Candle.open_at,
+                    Candle.public_id,
+                )
+                .where(
+                    Candle.open_at >= max(lower, day),
+                    Candle.open_at < min(upper, following),
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(Candle.open_at, Candle.instrument_public_id, Candle.timeframe)
+                .execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
+            )
+            async with self.session() as session:
+                stream = await session.stream(stmt)
+                async for row in stream:
+                    yield {
+                        "instrument_public_id": row.instrument_public_id,
+                        "timeframe": row.timeframe,
+                        "open_at": self._aware_missing_candle_time(row.open_at),
+                        "public_id": row.public_id,
+                    }
+            day = following
 
     async def iter_ticks(
         self,

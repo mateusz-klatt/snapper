@@ -955,9 +955,17 @@ and intervals older than the window are closed (no further updates).
 When a new tick arrives for an existing candle interval (`open_at` matches),
 the cached `public_id` is reused so the same logical candle keeps a stable
 identity across ZMQ, WebSocket, and the database.  When `open_at` advances
-to a new interval (or falls outside the warm-up window), a fresh UUID7 is
-minted and the cache entry is replaced. This avoids any DB reads on the
-hot path.
+to a new interval (or falls outside the warm-up window), the key's
+deterministic id is used and the cache entry is replaced. This avoids any DB
+reads on the hot path.
+
+A candle key's **deterministic id** is a custom UUIDv8 built from SHA-256 of
+its instrument, timeframe and opening, with the opening in Unix milliseconds as
+its first 48 bits (algorithm `snapper.candle.public_id.v1`, in
+`snapper.core.candle_identity`). Every writer that creates a key gives it this
+id: the live publishers, the catchup and repair inserts, and the historical
+loaders. A write for a key that already has a version adopts the stored id, so
+keys created before deterministic ids keep their random UUID7 ids.
 
 The Kraken spot publisher adds a database check before it mints, because its
 history catchup and repairs can commit a key before the live consumer
@@ -967,8 +975,8 @@ newest cached key, the publisher holds its identity gate and does this:
 - It takes a **window identity snapshot**: one fenced read of every known
     instrument's identity at that timeframe and opening, under the same writer
     protocol as the per-key lookup. A snapshot answers for two monotonic
-    seconds; a key it finds absent gets a new UUID7, which is written into the
-    snapshot at once.
+    seconds; a key it finds absent reserves its deterministic id, which is
+    written into the snapshot at once.
 - Every key with a live write of this process that is not known to be
     committed is excluded from the read, because that write may commit while
     the read runs. That means pending reservations, persisted resolutions not
@@ -1002,6 +1010,18 @@ waited for. Such a commit may not be adopted at publication. The stored row
 still keeps one id, but how long a published id can differ from the stored
 one is not bounded by the two seconds. `candle_identity_window_snapshot`
 switches the snapshot off; see [configuration](configuration.md).
+
+From the instant `candle_identity_deterministic_from` names, a key whose opening
+is at or after it is answered before all of the above: the publisher returns
+its deterministic id without the identity gate, a reservation, a snapshot or a
+database read, and counts it as `deterministic_answers`. Every writer has
+minted that id since before the cutover, so storage holds the same id, in any
+process, and the two-second concession does not apply to those keys. Keys that
+opened before the cutover, including old frames after a reconnect, keep the
+resolution above. The heartbeat reports each publisher's effective cutover as
+`meta.venue.candle_identity.deterministic_from`, and
+`snapper check-candle-identities` verifies stored ids read-only (see
+[CLI](cli.md)).
 
 ### Higher-Timeframe Candle Synthesis
 
