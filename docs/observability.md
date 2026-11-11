@@ -108,17 +108,32 @@ First startup does not pre-credit the window: completed coverage starts
 at the overlap boundary and becomes current only after the full initial
 pass completes.
 
-Each monitor starts with limits of 25,000 recent sweep rows and 2,000
-durable restore/import worklog rows per run, then performs targeted
-index-backed identity probes for at most 27,000 distinct candidates.
-Each probe returns at most two matching rows, but partitioned tables
-can require index probes across every partition. The repository rejects
-larger row limits. Across both monitors the scheduler requests at most
-50,000 sweep rows and 4,000 worklog rows per tick.
+For rows reached through the recent sweep, both checks consider only
+stored rows whose `executed_at` lies within seven days
+(`TRADE_INTEGRITY_PROBE_WINDOW`) before or after the swept row's own
+`executed_at`, so each probe reads only the daily `trades` partitions
+around it. Durable worklog obligations from restore, import and replay,
+including obligations without an execution time, are still checked
+exactly, over every partition. A conflict between two rows whose
+execution times are more than seven days apart is therefore detected
+only through the worklog, and completed sweep coverage certifies only
+conflicts inside the window. Heartbeat metadata reports the window as
+`probe_window_days`.
 
-Each repository call has a 30-second wall-clock timeout. PostgreSQL also
+Each monitor starts with limits of 15,000 recent sweep rows and 2,000
+durable restore/import worklog rows per run, then performs targeted
+index-backed identity probes for at most 17,000 distinct candidates,
+in chunks of at most 1,000 and with one cap of 20 findings per monitor
+and page. Each probe returns at most two matching rows. Windowed probes
+read only the partitions inside each candidate's window, while exact
+worklog probes can require index probes across every partition. The
+repository rejects sweep limits above 25,000 and worklog limits above
+2,000. Across both monitors the scheduler requests at most 30,000 sweep
+rows and 4,000 worklog rows per tick.
+
+Each repository call has a 45-second wall-clock timeout. PostgreSQL also
 sets a transaction-local statement timeout two seconds below that bound
-(28 seconds by default, with a one-second minimum). A wall-clock timeout
+(43 seconds by default, with a one-second minimum). A wall-clock timeout
 or PostgreSQL query cancellation halves that monitor's effective sweep
 and worklog limits, down to 500 and 100 rows respectively. Three
 consecutive successful passes double the limits, capped at the configured
@@ -136,21 +151,27 @@ heartbeats, two seconds apart, on
 `system.heartbeats.trade_integrity.{m1|m2}`. Clean passes publish one
 HEALTHY frame. The existing `critical_system_error` rule handles the
 three-frame gate, hourly deduplication, and operator fan-out. With
-successful calls and an available publisher, committed worklog
-identities with no backlog are normally detected in about 65 seconds
-for M1 and 99 seconds for M2 at the default cadence; worst tick ordering
-with successful calls consuming their full timeout is about 94 seconds
-for M1 and 128 seconds for M2. The raw six-hour
-overlap contains about 1.68 million rows at the current ingestion rate;
-arrivals during pagination expand a steady pass to about 2.06 million
-rows, or roughly 82 minutes at the full 25,000-row page size per minute.
-Adaptive page reductions extend these coverage times. Including the
-five-minute settlement grace, cadence, and warning spacing, a newly
-settled cursor-only violation normally takes at most about 89 minutes
-to alert. If every successful database call consumes nearly all of its
-30-second budget, the same throughput calculation grows to roughly four
-hours. These are operational bounds, not mathematical guarantees: the
-live publisher retries retained batches without a time limit, so a
+successful calls and an available publisher, a committed worklog
+identity with no backlog is detected at the next tick: M1 reports it
+after one cadence interval plus its own call, and M2, which runs after
+M1, also waits for M1's call. Worst tick ordering with successful calls
+consuming their full 45-second timeout is about 109 seconds for M1 and
+158 seconds for M2.
+
+Sweep coverage advances one page per monitor per tick, and every pass
+rereads the six-hour overlap. With `X` swept rows processed per minute
+(one page divided by the tick duration, including both monitors,
+publication and the wait) and an ingestion rate `I`, a steady pass lasts
+about `6 h × r / (1 − r)` with `r = I / X`, and the reported lag rises
+from about that duration towards twice it before each pass completes.
+At about 5,100 trades a minute and the default 15,000-row page, the
+estimated `X` of 8,000 to 9,000 rows a minute gives passes of roughly
+8 to 10 hours, so the three-hour lag warning is expected in steady
+operation at that rate. Adaptive page reductions lengthen passes
+further. A newly settled cursor-only violation is detected once the
+pass reaches its bus time, after the five-minute settlement grace and
+up to one pass duration. These are operational bounds, not mathematical
+guarantees: the live publisher retries retained batches without a time limit, so a
 commit stalled for more than the six-hour overlap is outside enforced
 live-row coverage. Archive restore, historical paper replay, and the
 local-UAT trade import do not share that exposure because their trade

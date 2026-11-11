@@ -36,6 +36,8 @@ class _Finding(Protocol):
     trade_id: str | None
     public_id: str | None
     active_count: int | None
+    expected_executed_at: datetime | None
+    conflicting_executed_at: datetime | None
 
 
 class _RunResult(Protocol):
@@ -185,7 +187,7 @@ def _enqueue_work_item(
     *,
     public_id: str,
     trade_id: str | None,
-    executed_at: datetime,
+    executed_at: datetime | None,
     monitor: _Monitor,
 ) -> None:
     """Enqueue one exact historical identity.
@@ -194,9 +196,15 @@ def _enqueue_work_item(
         path: SQLite database path.
         public_id: Logical row identity.
         trade_id: Venue trade identity, or ``None``.
-        executed_at: Execution time written by the historical mutator.
+        executed_at: Execution time written by the historical mutator, or
+            ``None`` when the obligation carries no execution time.
         monitor: Monitor that must inspect the identity.
     """
+    stored_executed_at = (
+        None
+        if executed_at is None
+        else executed_at.replace(tzinfo=None).isoformat(sep=" ", timespec="microseconds")
+    )
     connection = sqlite3.connect(path)
     connection.execute(
         """
@@ -214,10 +222,7 @@ def _enqueue_work_item(
             public_id,
             _INSTRUMENT,
             trade_id,
-            executed_at.replace(tzinfo=None).isoformat(
-                sep=" ",
-                timespec="microseconds",
-            ),
+            stored_executed_at,
             monitor == "m1",
             monitor == "m2",
         ),
@@ -739,4 +744,321 @@ async def test_finding_keeps_cursor_and_worklog_obligation_pending(tmp_path: Pat
     second_cursor = (second_result.cursor_timestamp, second_result.cursor_id)
     assert second_cursor == first_cursor
     assert pending == 1
+    await repository.engine.dispose()
+
+
+_SWEPT_BUS_TIME = _NOW - timedelta(minutes=10)
+_UNSWEPT_BUS_TIME = _NOW - timedelta(days=30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset", "found"),
+    [
+        (timedelta(days=6), True),
+        (timedelta(days=7), True),
+        (-timedelta(days=7), True),
+        (timedelta(days=7, microseconds=1), False),
+        (-timedelta(days=7, microseconds=1), False),
+    ],
+)
+async def test_m1_windowed_probe_reads_only_inside_the_window(
+    tmp_path: Path,
+    offset: timedelta,
+    found: bool,
+) -> None:
+    """Find a swept venue identity's conflict only within seven days of its time.
+
+    Given: A swept trade and an unswept row of the same venue identity whose
+        execution time differs by the parametrized offset.
+    When: M1 runs one pass.
+    Then: The conflict is a finding exactly when the offset is at most seven
+        days, with both execution times reported.
+    """
+    path = tmp_path / "m1-window.db"
+    _create_constraint_free_monitor_db(path)
+    executed_at = _NOW - timedelta(minutes=20)
+    _insert_trade(
+        path,
+        public_id="37000000-0000-0000-0000-000000000001",
+        trade_id="window-1",
+        executed_at=executed_at,
+        timestamp=_SWEPT_BUS_TIME,
+    )
+    _insert_trade(
+        path,
+        public_id="37000000-0000-0000-0000-000000000002",
+        trade_id="window-1",
+        executed_at=executed_at + offset,
+        timestamp=_UNSWEPT_BUS_TIME,
+    )
+
+    repository, result = await _run_monitor(path, "m1")
+
+    expected = [("window-1", executed_at, executed_at + offset)] if found else []
+    assert [
+        (finding.trade_id, finding.expected_executed_at, finding.conflicting_executed_at)
+        for finding in result.findings
+    ] == expected
+    assert result.sweep_rows == 1
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_m1_owed_identity_is_probed_exactly_with_worklog_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe an identity that is both swept and owed only exactly, across chunks.
+
+    Given: Single-candidate chunks, an unswept row of one venue identity eight
+        days before its swept row, a third unswept row one day after the swept
+        row, and a worklog obligation for the identity at the earliest time.
+    When: M1 runs one pass.
+    Then: One finding reports the obligation's time as expected and the swept
+        row's time as conflicting, although those rows are beyond the window;
+        the swept candidate is not probed separately, so its in-window conflict
+        does not replace the exact finding.
+    """
+    monkeypatch.setattr(integrity_module, "_CANDIDATE_CHUNK_SIZE", 1)
+    path = tmp_path / "m1-exact-precedence.db"
+    _create_constraint_free_monitor_db(path)
+    executed_at = _NOW - timedelta(minutes=20)
+    historical = executed_at - timedelta(days=8)
+    _insert_trade(
+        path,
+        public_id="38000000-0000-0000-0000-000000000001",
+        trade_id="owed-and-swept",
+        executed_at=historical,
+        timestamp=_UNSWEPT_BUS_TIME,
+    )
+    _insert_trade(
+        path,
+        public_id="38000000-0000-0000-0000-000000000002",
+        trade_id="owed-and-swept",
+        executed_at=executed_at,
+        timestamp=_SWEPT_BUS_TIME,
+    )
+    _insert_trade(
+        path,
+        public_id="38000000-0000-0000-0000-000000000003",
+        trade_id="owed-and-swept",
+        executed_at=executed_at + timedelta(days=1),
+        timestamp=_UNSWEPT_BUS_TIME + timedelta(microseconds=1),
+    )
+    _enqueue_work_item(
+        path,
+        public_id="38000000-0000-0000-0000-000000000001",
+        trade_id="owed-and-swept",
+        executed_at=historical,
+        monitor="m1",
+    )
+
+    repository, result = await _run_monitor(path, "m1")
+
+    assert [
+        (finding.trade_id, finding.expected_executed_at, finding.conflicting_executed_at)
+        for finding in result.findings
+    ] == [("owed-and-swept", historical, executed_at)]
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_m1_obligation_without_execution_time_finds_stored_identity(
+    tmp_path: Path,
+) -> None:
+    """Report any stored row of an owed identity whose obligation has no time.
+
+    Given: An unswept trade and an M1 worklog obligation for its venue identity
+        that carries no execution time.
+    When: M1 runs one pass.
+    Then: The stored row is a finding without an expected execution time, as
+        ``IS DISTINCT FROM`` reports it on PostgreSQL.
+    """
+    path = tmp_path / "m1-null-obligation.db"
+    _create_constraint_free_monitor_db(path)
+    stored = _NOW - timedelta(days=12)
+    _insert_trade(
+        path,
+        public_id="39000000-0000-0000-0000-000000000001",
+        trade_id="owed-without-time",
+        executed_at=stored,
+        timestamp=_UNSWEPT_BUS_TIME,
+    )
+    _enqueue_work_item(
+        path,
+        public_id="39000000-0000-0000-0000-000000000001",
+        trade_id="owed-without-time",
+        executed_at=None,
+        monitor="m1",
+    )
+
+    repository, result = await _run_monitor(path, "m1")
+
+    assert [
+        (finding.trade_id, finding.expected_executed_at, finding.conflicting_executed_at)
+        for finding in result.findings
+    ] == [("owed-without-time", None, stored)]
+    assert result.sweep_rows == 0
+    await repository.engine.dispose()
+
+
+def _stage_m2_rows_around_closed_candidate(path: Path, later_offset: timedelta) -> str:
+    """Stage one closed swept row and two unswept active rows of its public id.
+
+    Args:
+        path: SQLite database path.
+        later_offset: Distance of the second active row after the swept row.
+
+    Returns:
+        The shared public id.
+    """
+    public_id = "3a000000-0000-0000-0000-000000000001"
+    candidate_time = _NOW - timedelta(minutes=20)
+    _insert_trade(
+        path,
+        public_id=public_id,
+        trade_id="m2-window-closed",
+        executed_at=candidate_time,
+        timestamp=_SWEPT_BUS_TIME,
+    )
+    _close_trade(path, public_id, _NOW - timedelta(minutes=5))
+    _insert_trade(
+        path,
+        public_id=public_id,
+        trade_id="m2-window-early",
+        executed_at=candidate_time - timedelta(days=6),
+        timestamp=_UNSWEPT_BUS_TIME,
+    )
+    _insert_trade(
+        path,
+        public_id=public_id,
+        trade_id="m2-window-late",
+        executed_at=candidate_time + later_offset,
+        timestamp=_UNSWEPT_BUS_TIME + timedelta(microseconds=1),
+    )
+    return public_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("later_offset", "found"),
+    [(timedelta(days=6), True), (timedelta(days=8), False)],
+)
+async def test_m2_windowed_probe_counts_active_rows_around_its_candidate(
+    tmp_path: Path,
+    later_offset: timedelta,
+    found: bool,
+) -> None:
+    """Count only active rows within seven days of the swept candidate's time.
+
+    Given: A closed swept row at time c and two unswept active rows of its
+        public id, six days before c and the parametrized offset after c.
+    When: M2 runs one pass.
+    Then: Both active rows are a finding when they lie inside c's window,
+        although they are twelve days apart, and none when the later row
+        lies outside it.
+    """
+    path = tmp_path / "m2-window.db"
+    _create_constraint_free_monitor_db(path)
+    public_id = _stage_m2_rows_around_closed_candidate(path, later_offset)
+
+    repository, result = await _run_monitor(path, "m2")
+
+    expected = [(public_id, 2)] if found else []
+    assert [(finding.public_id, finding.active_count) for finding in result.findings] == expected
+    assert result.sweep_rows == 1
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_m2_owed_public_id_is_probed_exactly_beyond_the_window(tmp_path: Path) -> None:
+    """Pair the active rows of an owed public id over every partition.
+
+    Given: The closed swept row whose later active row lies eight days after
+        it, and an M2 worklog obligation for that public id.
+    When: M2 runs one pass.
+    Then: The exact probe reports both active rows.
+    """
+    path = tmp_path / "m2-exact.db"
+    _create_constraint_free_monitor_db(path)
+    public_id = _stage_m2_rows_around_closed_candidate(path, timedelta(days=8))
+    _enqueue_work_item(
+        path,
+        public_id=public_id,
+        trade_id="m2-window-closed",
+        executed_at=_NOW - timedelta(minutes=20),
+        monitor="m2",
+    )
+
+    repository, result = await _run_monitor(path, "m2")
+
+    assert [(finding.public_id, finding.active_count) for finding in result.findings] == [
+        (public_id, 2)
+    ]
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exact_and_windowed_chunks_share_one_finding_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop at one shared cap across the exact and windowed chunks of a page.
+
+    Given: Single-candidate chunks, a cap of three findings, two owed venue
+        identities in conflict and two swept identities in conflict inside
+        the window.
+    When: M1 runs one pass.
+    Then: The exact candidates are probed first and the page stops after the
+        first windowed finding, three findings in all.
+    """
+    monkeypatch.setattr(integrity_module, "_CANDIDATE_CHUNK_SIZE", 1)
+    monkeypatch.setattr(integrity_module, "_FINDING_LIMIT", 3)
+    path = tmp_path / "shared-cap.db"
+    _create_constraint_free_monitor_db(path)
+    for index, trade_id in enumerate(("owed-1", "owed-2")):
+        historical = _NOW - timedelta(days=20, minutes=index)
+        owed_public_id = f"3b000000-0000-0000-0000-00000000000{index}"
+        _insert_trade(
+            path,
+            public_id=owed_public_id,
+            trade_id=trade_id,
+            executed_at=historical,
+            timestamp=_UNSWEPT_BUS_TIME + timedelta(microseconds=index),
+        )
+        _insert_trade(
+            path,
+            public_id=f"3b000000-0000-0000-0000-00000000001{index}",
+            trade_id=trade_id,
+            executed_at=historical - timedelta(days=9),
+            timestamp=_UNSWEPT_BUS_TIME + timedelta(microseconds=10 + index),
+        )
+        _enqueue_work_item(
+            path,
+            public_id=owed_public_id,
+            trade_id=trade_id,
+            executed_at=historical,
+            monitor="m1",
+        )
+    for index, trade_id in enumerate(("swept-1", "swept-2")):
+        executed_at = _NOW - timedelta(minutes=20 - index)
+        _insert_trade(
+            path,
+            public_id=f"3b000000-0000-0000-0000-00000000002{index}",
+            trade_id=trade_id,
+            executed_at=executed_at,
+            timestamp=_SWEPT_BUS_TIME + timedelta(microseconds=index),
+        )
+        _insert_trade(
+            path,
+            public_id=f"3b000000-0000-0000-0000-00000000003{index}",
+            trade_id=trade_id,
+            executed_at=executed_at - timedelta(days=1),
+            timestamp=_UNSWEPT_BUS_TIME + timedelta(microseconds=20 + index),
+        )
+
+    repository, result = await _run_monitor(path, "m1")
+
+    assert [finding.trade_id for finding in result.findings] == ["owed-1", "owed-2", "swept-1"]
     await repository.engine.dispose()
