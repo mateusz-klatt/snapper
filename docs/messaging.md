@@ -969,8 +969,11 @@ newest cached key, the publisher holds its identity gate and does this:
     protocol as the per-key lookup. A snapshot answers for two monotonic
     seconds; a key it finds absent gets a new UUID7, which is written into the
     snapshot at once.
-- Keys pending in this process when the read begins are excluded, because
-    their own writer may commit during the read.
+- Keys this process resolved for persistence and whose write is not yet
+    acknowledged are excluded when the read begins, because their own writer
+    may commit during the read. That covers pending reservations and also
+    identities taken from the cache without one. An entry older than thirty
+    minutes is dropped, since such a write is not coming.
 - A catchup or repair write drops the snapshots of its windows before it
     writes, whatever the write's outcome.
 - Every other key takes the fenced per-key lookup.
@@ -980,10 +983,13 @@ Measured on production on 2026-11-11, the per-key lookup alone cost 5.5 to
 minute, so that came to 8 to 15 seconds of every minute; one window read costs
 about 20 ms.
 
-The stated gap: a commit by another process that lands less than two seconds
-before a key's resolution may not be adopted at publication. The stored row
-still keeps one id. `candle_identity_window_snapshot` switches the snapshot
-off; see [configuration](configuration.md).
+The stated gap is up to two seconds of additional observation staleness. That
+includes bypassing a reconciliation wait that starts in between: another
+process's catchup or repair that takes the writer fence after the read is not
+waited for. Such a commit may not be adopted at publication. The stored row
+still keeps one id, but how long a published id can differ from the stored
+one is not bounded by the two seconds. `candle_identity_window_snapshot`
+switches the snapshot off; see [configuration](configuration.md).
 
 ### Higher-Timeframe Candle Synthesis
 

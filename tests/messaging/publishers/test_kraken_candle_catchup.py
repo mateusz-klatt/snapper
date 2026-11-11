@@ -1613,10 +1613,18 @@ async def _resolve_other_identity(publisher: KrakenMarketDataPublisher) -> str:
     )
 
 
-def _forget_local_identity(publisher: KrakenMarketDataPublisher) -> None:
-    """Drop pending reservations and the newest-key cache, as after a later minute's commit."""
+def _acknowledge_and_advance(publisher: KrakenMarketDataPublisher) -> None:
+    """Forget local identity state as after a commit acknowledgement and a newer minute."""
     publisher._pending_candle_identities.clear()
     publisher._candle_id_cache.clear()
+    publisher._unacknowledged_live_identities.clear()
+
+
+def _committed_row(publisher: KrakenMarketDataPublisher, public_id: str) -> CandleUpsertRow:
+    """Build the acknowledged writer row of the shared test key."""
+    row = _native_identity_row(publisher)
+    row["public_id"] = public_id
+    return row
 
 
 @pytest.mark.asyncio
@@ -1654,7 +1662,7 @@ async def test_a_snapshot_reservation_is_returned_again_within_the_bound(
     """
     publisher, repository = _snapshot_publisher()
     reserved = await _resolve_test_identity(publisher)
-    _forget_local_identity(publisher)
+    _acknowledge_and_advance(publisher)
     monotonic_clock.now += 1.0
     assert await _resolve_test_identity(publisher) == reserved
     repository.get_canonical_candle_public_ids.assert_awaited_once()
@@ -1663,14 +1671,44 @@ async def test_a_snapshot_reservation_is_returned_again_within_the_bound(
 
 @pytest.mark.asyncio
 async def test_an_expired_snapshot_is_read_again(monotonic_clock: _MonotonicClock) -> None:
-    """No answer is used more than two monotonic seconds after its read began."""
+    """No answer is used more than two monotonic seconds after its read began.
+
+    Given: A window snapshot and a key whose write was since acknowledged.
+    When: The key is resolved again two and a half seconds later.
+    Then: A fresh read answers it with the committed identity.
+    """
     publisher, repository = _snapshot_publisher()
     await _resolve_test_identity(publisher)
-    _forget_local_identity(publisher)
+    _acknowledge_and_advance(publisher)
     repository.get_canonical_candle_public_ids.return_value = {"instrument": "committed-id"}
     monotonic_clock.now += 2.5
     assert await _resolve_test_identity(publisher) == "committed-id"
     assert repository.get_canonical_candle_public_ids.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_outlasts_the_bound_installs_nothing(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A window read that itself takes longer than the lifetime is never trusted.
+
+    Given: A window read that takes three monotonic seconds.
+    When: A key of that window is resolved.
+    Then: No snapshot is installed and the key takes the per-key lookup.
+    """
+    publisher, repository = _snapshot_publisher()
+
+    async def _slow_read(*_args: object) -> dict[str, str]:
+        """Return an empty window after advancing the clock past the bound."""
+        monotonic_clock.now += 3.0
+        return {}
+
+    repository.get_canonical_candle_public_ids.side_effect = _slow_read
+    await _resolve_test_identity(publisher)
+    assert publisher._identity_snapshots == {}
+    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+    assert publisher._identity_counters["per_key_lookups.read_expired"] == 1
+    assert publisher._identity_counters["snapshot_reads_expired"] == 1
 
 
 @pytest.mark.asyncio
@@ -1690,11 +1728,79 @@ async def test_a_key_pending_at_the_read_is_excluded_from_its_snapshot(
     await _resolve_other_identity(publisher)
     assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
     assert await _resolve_test_identity(publisher) == "pending-id"
-    _forget_local_identity(publisher)
+    _acknowledge_and_advance(publisher)
     repository.get_canonical_candle_public_id.return_value = "pending-id"
     assert await _resolve_test_identity(publisher) == "pending-id"
     repository.get_canonical_candle_public_id.assert_awaited_once_with(*key)
-    assert publisher._identity_counters["per_key_lookups.excluded_pending"] == 1
+    assert publisher._identity_counters["per_key_lookups.excluded_unacknowledged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cached_identity_without_reservation_is_excluded_until_acknowledged(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A first live write that carries no reservation still keeps its key out of reads.
+
+    Given: An identity chosen from the newest-key cache with no reservation,
+        as after persistence was switched on for its instrument.
+    When: Another instrument's resolution reads the window, the series cache
+        moves on, and the key is resolved again before its write is acknowledged.
+    Then: The snapshot excludes the key, the per-key lookup adopts the
+        committed identity, and an acknowledgement re-admits it to later reads.
+    """
+    publisher, repository = _snapshot_publisher()
+    publisher._candle_id_cache[("instrument", "1m")] = (START, "cached-id")
+    assert await _resolve_test_identity(publisher) == "cached-id"
+    await _resolve_other_identity(publisher)
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    publisher._candle_id_cache.clear()
+    repository.get_canonical_candle_public_id.return_value = "cached-id"
+    assert await _resolve_test_identity(publisher) == "cached-id"
+    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+    publisher._mark_candle_writes_committed([_committed_row(publisher, "cached-id")])
+    assert publisher._unacknowledged_live_identities == {
+        ("1m", START): {"other-instrument": monotonic_clock.now}
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unacknowledged_key_is_released_after_its_age_bound(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A resolved key whose write never commits stops excluding itself after the bound.
+
+    Given: A key resolved for persistence whose write is never acknowledged.
+    When: More than thirty minutes later another window is read.
+    Then: The stale entry is dropped and only fresh entries remain.
+    """
+    publisher, _repository = _snapshot_publisher()
+    await _resolve_test_identity(publisher)
+    monotonic_clock.now += 1801.0
+    await _resolve_test_identity(publisher, 1)
+    assert publisher._unacknowledged_live_identities == {
+        ("1m", START + timedelta(minutes=1)): {"instrument": monotonic_clock.now}
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_long_burst_reads_once_per_occupied_lifetime(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """Reads follow the occupied lifetimes of a burst, not the number of keys.
+
+    Given: Six instruments of one window resolved half a second apart.
+    When: The burst lasts three seconds.
+    Then: Two reads answer all six keys, and no per-key lookup runs.
+    """
+    publisher, repository = _snapshot_publisher()
+    publisher._instrument_cache = {f"S{index}-USD": f"instrument-{index}" for index in range(6)}
+    for index in range(6):
+        await publisher._resolve_live_candle_public_id(
+            f"instrument-{index}", "1m", START, f"S{index}-USD"
+        )
+        monotonic_clock.now += 0.5
+    assert repository.get_canonical_candle_public_ids.await_count == 2
+    repository.get_canonical_candle_public_id.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1712,7 +1818,7 @@ async def test_reconciliation_writes_drop_their_window_snapshot_first(
     """
     publisher, repository = _snapshot_publisher()
     await _resolve_test_identity(publisher)
-    _forget_local_identity(publisher)
+    _acknowledge_and_advance(publisher)
     row = _native_identity_row(publisher)
     seen: list[bool] = []
 
@@ -1778,13 +1884,22 @@ async def test_a_failed_read_falls_back_and_is_not_retried_within_the_bound(
 async def test_a_cancelled_read_propagates_and_installs_nothing(
     monotonic_clock: _MonotonicClock,
 ) -> None:
-    """Cancellation is not a read failure: it propagates and leaves no snapshot."""
+    """Cancellation is not a read failure: it propagates and leaves no state behind.
+
+    Given: A window read that is cancelled.
+    When: A key of that window is resolved.
+    Then: The cancellation propagates, nothing is installed or remembered,
+        no identity is reserved and the identity gate is released.
+    """
     publisher, repository = _snapshot_publisher()
     repository.get_canonical_candle_public_ids.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
         await _resolve_test_identity(publisher)
     assert publisher._identity_snapshots == {}
     assert publisher._identity_read_failures == {}
+    assert publisher._pending_candle_identities == {}
+    assert publisher._unacknowledged_live_identities == {}
+    repository.get_canonical_candle_public_id.assert_not_awaited()
     assert not publisher._candle_identity_gate.locked()
 
 
@@ -1792,7 +1907,13 @@ async def test_a_cancelled_read_propagates_and_installs_nothing(
 async def test_keys_outside_the_snapshot_take_the_per_key_lookup(
     monotonic_clock: _MonotonicClock,
 ) -> None:
-    """An instrument the read did not cover, or no known roster at all, looks itself up."""
+    """An instrument the read did not cover, or no known roster at all, looks itself up.
+
+    Given: A roster that does not hold one instrument, and a publisher with no roster.
+    When: Keys of those instruments are resolved.
+    Then: Each takes the per-key lookup as not covered, and the empty roster
+        makes no window read at all.
+    """
     publisher, repository = _snapshot_publisher()
     await publisher._resolve_live_candle_public_id("new-instrument", "1m", START, "SOL-USD")
     assert publisher._identity_counters["per_key_lookups.not_covered"] == 1
@@ -1808,7 +1929,12 @@ async def test_keys_outside_the_snapshot_take_the_per_key_lookup(
 async def test_the_disabled_setting_restores_the_per_key_lookup(
     monotonic_clock: _MonotonicClock,
 ) -> None:
-    """With the setting off every unsettled key takes today's fenced per-key lookup."""
+    """With the setting off every unsettled key takes today's fenced per-key lookup.
+
+    Given: Window snapshots switched off.
+    When: Two keys of one window are resolved.
+    Then: No window read runs and each key is looked up on its own.
+    """
     publisher, repository = _snapshot_publisher()
     publisher.settings.candle_identity_window_snapshot = False
     await _resolve_test_identity(publisher)
@@ -1822,7 +1948,12 @@ async def test_the_disabled_setting_restores_the_per_key_lookup(
 async def test_old_snapshots_and_failures_are_pruned_when_a_new_read_installs(
     monotonic_clock: _MonotonicClock,
 ) -> None:
-    """Expired snapshots and remembered failures never accumulate."""
+    """Expired snapshots and remembered failures never accumulate.
+
+    Given: Snapshots and read failures of different ages.
+    When: New windows are read one second and three and a half seconds later.
+    Then: Only snapshots and failures still within the bound remain.
+    """
     publisher, _repository = _snapshot_publisher()
     publisher._identity_read_failures[("5m", START)] = monotonic_clock.now
     await _resolve_test_identity(publisher)
@@ -1840,10 +1971,16 @@ async def test_old_snapshots_and_failures_are_pruned_when_a_new_read_installs(
 
 
 @pytest.mark.asyncio
-async def test_the_heartbeat_carries_the_identity_ledger_and_sample(
+async def test_the_heartbeat_carries_the_identity_ledger_and_reserved_sample(
     monotonic_clock: _MonotonicClock,
 ) -> None:
-    """Counters, read latency and the newest snapshot reservations reach the heartbeat."""
+    """Counters, read latency and the newest snapshot reservations reach the heartbeat.
+
+    Given: One key reserved from a window snapshot.
+    When: The venue feed health is read.
+    Then: The candle identity ledger carries its counters, the read latency,
+        the live snapshot, the unacknowledged key and the reserved identity.
+    """
     publisher, _repository = _snapshot_publisher()
     reserved = await _resolve_test_identity(publisher)
     ledger = publisher._venue_feed_health().meta["candle_identity"]
@@ -1851,7 +1988,8 @@ async def test_the_heartbeat_carries_the_identity_ledger_and_sample(
         "counters": {"snapshot_answers": 1, "snapshot_reads": 1},
         "last_read_ms": 0.0,
         "snapshots": 1,
-        "sample": [
+        "unacknowledged_keys": 1,
+        "reserved_sample": [
             {
                 "instrument_public_id": "instrument",
                 "timeframe": "1m",

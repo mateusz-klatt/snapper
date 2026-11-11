@@ -919,7 +919,12 @@ async def test_batch_identities_read_all_history_and_omit_absent_instruments(
 async def test_batch_identities_refuse_conflicting_historical_logical_ids(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Two logical identities in one instrument's history refuse the whole window read."""
+    """Two logical identities in one instrument's history refuse the whole window read.
+
+    Given: One instrument whose history holds two different public IDs.
+    When: Its window is read together with another instrument.
+    Then: The read refuses with a conflict instead of choosing one.
+    """
     first = _row() | {
         "public_id": "00000000-0000-4000-8000-000000000803",
         "known_to": _ACQUIRED + timedelta(days=1),
@@ -942,7 +947,12 @@ async def test_batch_identities_refuse_conflicting_historical_logical_ids(
 async def test_batch_identities_read_sqlite_in_bounded_chunks(
     repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SQLite reads a long instrument list in chunks and still returns every identity."""
+    """SQLite reads a long instrument list in chunks and still returns every identity.
+
+    Given: A lookup chunk size of one and three listed instruments.
+    When: Their window is read on SQLite.
+    Then: Three reads run and both stored identities are returned.
+    """
     monkeypatch.setattr("snapper.data.repository._CANDLE_LOOKUP_CHUNK_SIZE", 1)
     rows = [
         _row() | {"public_id": "00000000-0000-4000-8000-000000000805", "known_to": KNOWN_TO_MAX},
@@ -989,7 +999,12 @@ async def test_batch_identities_read_sqlite_in_bounded_chunks(
 async def test_batch_identities_wait_for_the_native_transaction_outcome(
     repository: SQLAlchemyRepository, committed: bool
 ) -> None:
-    """A pending native transaction must finish before a window read can report absence."""
+    """A pending native transaction must finish before a window read can report absence.
+
+    Given: A native insert of the key that is not yet committed.
+    When: A window read starts and the insert then commits or rolls back.
+    Then: The read waits for the outcome and reports exactly that outcome.
+    """
     async with repository.session() as native:
         inserted = await repository.insert_missing_candles([_row()], session=native)
         read = asyncio.create_task(
@@ -1011,10 +1026,41 @@ async def test_batch_identities_wait_for_the_native_transaction_outcome(
 
 
 @pytest.mark.asyncio
+async def test_batch_identities_cancellation_never_reports_uncommitted_absence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Cancellation during the writer wait propagates without reporting any window.
+
+    Given: A native insert of the key that is not yet committed.
+    When: A window read waiting behind it is cancelled and the insert commits.
+    Then: The read raises the cancellation, and a later read finds the commit.
+    """
+    async with repository.session() as native:
+        staged = await repository.insert_missing_candles([_row()], session=native)
+        read = asyncio.create_task(
+            repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+        )
+        await asyncio.sleep(0.05)
+        assert not read.done()
+        read.cancel()
+        await native.commit()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+    assert await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN) == {
+        _INSTRUMENT: staged[0]["public_id"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_batch_identities_retain_caller_transaction_ownership(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """A writing caller can read its staged ID through a window read and still roll back."""
+    """A writing caller can read its staged ID through a window read and still roll back.
+
+    Given: A caller transaction that staged a native insert.
+    When: The caller reads the window in its own transaction and rolls back.
+    Then: The read saw the staged ID, and afterwards the window is empty.
+    """
     async with repository.session() as session:
         staged = await repository.insert_missing_candles([_row()], session=session)
         found = await repository.get_canonical_candle_public_ids(
@@ -1037,7 +1083,12 @@ async def test_batch_identities_retain_caller_transaction_ownership(
 async def test_batch_identities_invalid_key_refuses_before_database_work(
     repository: SQLAlchemyRepository, instruments: list[str], timeframe: str, opening: datetime
 ) -> None:
-    """An incomplete or naive window key never acquires a database writer fence."""
+    """An incomplete or naive window key never acquires a database writer fence.
+
+    Given: An empty instrument, an empty timeframe or a naive opening.
+    When: The window read is requested.
+    Then: It refuses before any statement is sent.
+    """
     session = AsyncMock(spec=AsyncSession)
     with pytest.raises(ValueError):
         await repository.get_canonical_candle_public_ids(
@@ -1050,7 +1101,12 @@ async def test_batch_identities_invalid_key_refuses_before_database_work(
 async def test_batch_identities_without_instruments_touch_no_database(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """An empty instrument list answers empty without any statement."""
+    """An empty instrument list answers empty without any statement.
+
+    Given: No instruments to read.
+    When: The window read is requested.
+    Then: It returns an empty mapping and sends nothing.
+    """
     session = AsyncMock(spec=AsyncSession)
     assert (
         await repository.get_canonical_candle_public_ids(
@@ -1063,7 +1119,12 @@ async def test_batch_identities_without_instruments_touch_no_database(
 
 @pytest.mark.asyncio
 async def test_batch_identities_unsupported_dialect_refuses_without_queries() -> None:
-    """A window read cannot fall back to an unreviewed writer protocol."""
+    """A window read cannot fall back to an unreviewed writer protocol.
+
+    Given: An engine outside the reviewed SQLite and PostgreSQL protocols.
+    When: The window read is requested.
+    Then: It refuses before any statement is sent.
+    """
     repo = _UnsupportedDialectRepository("sqlite+aiosqlite:///:memory:")
     session = AsyncMock(spec=AsyncSession)
     try:
@@ -1078,7 +1139,13 @@ async def test_batch_identities_unsupported_dialect_refuses_without_queries() ->
 
 @pytest.mark.asyncio
 async def test_batch_identities_postgres_fence_then_jit_off_then_one_bound_array_read() -> None:
-    """PostgreSQL waits under the writer protocol, disables JIT and reads one bound array."""
+    """PostgreSQL waits under the writer protocol, disables JIT and reads one bound array.
+
+    Given: The PostgreSQL protocol over a recorded session.
+    When: Two instruments' window is read.
+    Then: The fence statements come first, then JIT off, then one read whose
+        instrument list is a single bound array, and nothing is committed.
+    """
     repo = _PostgresDialectRepository("sqlite+aiosqlite:///:memory:")
     session = AsyncMock(spec=AsyncSession)
     isolation = MagicMock()

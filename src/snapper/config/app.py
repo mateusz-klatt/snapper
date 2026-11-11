@@ -735,12 +735,13 @@ class AppSettings:
         When ``True`` (default), the Kraken spot publisher resolves the public
         id of a new candle key from one fenced read of every known
         instrument's identity at that timeframe and opening, which answers for
-        two monotonic seconds, instead of one fenced lookup per key. A commit
-        by another process that lands less than two seconds before a key's
-        resolution may then not be adopted at publication; the stored row
-        still keeps one id. ``False`` restores the per-key lookup for every
-        later resolution without a restart, and cannot change ids already
-        published.
+        two monotonic seconds, instead of one fenced lookup per key. The
+        concession is up to two seconds of additional observation staleness,
+        including bypassing a reconciliation wait that another process starts
+        in between, so such a commit may not be adopted at publication; the
+        stored row still keeps one id. ``False`` restores the per-key lookup
+        for every later resolution without a restart, and cannot change ids
+        already published.
 
         Returns:
             ``True`` to resolve from window snapshots; ``False`` to look up
