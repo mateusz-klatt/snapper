@@ -338,8 +338,9 @@ exchange; only resolved Orders of the account's exchange contribute their venue
 order ids to `S`, and trade commands never assign ownership. Because Order
 persistence is best effort after the venue accepts, an unresolved-submit gate
 settles each create or submit command only through a terminal status whose
-venue order id lies in `S`; anything else — an Order or command without a venue
-order id, a live status, a status outside the closed set — refuses
+venue order id lies in `S`; anything else — a command without a venue order id,
+an Order of the wallet and mode without one (on any exchange), a live status, a
+status outside the closed set — refuses
 `own_submit_unresolved` before any row is classified, so an own order whose
 acceptance is not yet persisted can never pass as external. Then a correcting
 entry refuses; a row of an order in `S` must be MARKET_FX, witnessed by a

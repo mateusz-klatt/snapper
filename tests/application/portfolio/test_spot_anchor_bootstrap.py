@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from typing import get_args
 
 import pytest
 
@@ -16,6 +17,7 @@ from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryTip
 from snapper.application.portfolio.spot_anchor_bootstrap import _history_refusals
 from snapper.application.portfolio.spot_anchor_bootstrap import build_spot_anchor
 from snapper.application.portfolio.spot_anchor_bootstrap import spot_anchor_bootstrap_refusals
+from snapper.application.portfolio.spot_anchor_witness import WitnessRefusal
 from snapper.data.repository_types import SpotOwnedOrderPopulation
 from snapper.data.repository_types import SpotOwnedOrderRow
 from snapper.data.repository_types import SpotOwnedSubmitCommandRow
@@ -75,6 +77,7 @@ def _population(
         "resolved_orders": tuple(resolved),
         "unresolved_lineage": (),
         "blocked_order_ids": frozenset(),
+        "other_exchange_unidentified_orders": (),
         "commands": (_command(),) if commands is None else commands,
     }
 
@@ -554,6 +557,30 @@ def test_an_owned_commission_without_its_proof_is_not_ingested() -> None:
         _with_rows(_item(98, "USD", "99.98", operation_type="COMMISSION")),
         witness_refusals=("owned_commission_unproven",),
     )
+    assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
+
+
+@pytest.mark.parametrize(
+    "witness_refusal",
+    [
+        refusal
+        for refusal in get_args(WitnessRefusal.__value__)
+        if refusal != "execution_order_id_foreign"
+    ],
+)
+def test_every_other_witness_refusal_refuses_the_seal(witness_refusal: WitnessRefusal) -> None:
+    """Every witness refusal reaches the seal, even beside a complete witness map.
+
+    Given: The baseline observation, whose witness map is complete, carrying
+        one refusal of the owned witness builder other than a foreign order id.
+    When: The refusals are computed.
+    Then: Exactly ``venue_fill_not_ingested`` is returned, so the seal never
+        relies on the builder emptying its map.
+
+    Args:
+        witness_refusal: One refusal the owned witness builder can raise.
+    """
+    observation = replace(_BASELINE, witness_refusals=(witness_refusal,))
     assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
 
 

@@ -646,15 +646,20 @@ class SpotOwnedOrderPopulation(TypedDict):
     those Orders, including any whose venue order id is missing.
     ``unresolved_lineage`` holds every Order whose Instrument lineage does not
     resolve, for any exchange of the wallet and mode, and ``blocked_order_ids``
-    the usable venue order ids those Orders carry. ``commands`` lists the
-    in-scope ``create`` and ``submit`` commands. Commands never filter or assign
-    Order ownership.
+    the usable venue order ids those Orders carry.
+    ``other_exchange_unidentified_orders`` holds the public ids of resolved
+    Orders of another exchange that carry no usable venue order id: such an
+    Order is excluded from ``S``, yet it still refuses the gate, because every
+    sentinel-tip Order without a venue order id is unresolved. ``commands``
+    lists the in-scope ``create`` and ``submit`` commands. Commands never
+    filter or assign Order ownership.
     """
 
     owned_order_ids: frozenset[str]
     resolved_orders: tuple[SpotOwnedOrderRow, ...]
     unresolved_lineage: tuple[SpotOwnedOrderLineageFact, ...]
     blocked_order_ids: frozenset[str]
+    other_exchange_unidentified_orders: tuple[str, ...]
     commands: tuple[SpotOwnedSubmitCommandRow, ...]
 
 

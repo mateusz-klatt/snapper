@@ -120,7 +120,37 @@ def test_a_resolved_order_of_another_exchange_is_excluded() -> None:
     assert population["owned_order_ids"] == frozenset()
     assert population["resolved_orders"] == ()
     assert population["unresolved_lineage"] == ()
+    assert population["other_exchange_unidentified_orders"] == ()
     assert own_submit_unresolved(population) is False
+
+
+@pytest.mark.parametrize("exchange_order_id", [None, "", "  "])
+def test_a_resolved_order_of_another_exchange_without_a_venue_order_id_refuses(
+    exchange_order_id: str | None,
+) -> None:
+    """Every sentinel-tip Order without a venue order id refuses, whatever its exchange.
+
+    Given: One sentinel-tip Order resolved to a consistent Kraken Instrument
+        whose venue order id is missing or blank.
+    When: The population is built for Walutomat and the gate runs.
+    Then: The Order stays out of ``S`` and the resolved Orders, is recorded as
+        an unidentified Order of another exchange, and the gate refuses.
+
+    Args:
+        exchange_order_id: The missing or blank venue order id.
+    """
+    population = build_owned_order_population(
+        "walutomat",
+        [_order_row(1, exchange_order_id, ("kraken",))],
+        {_INSTRUMENT: frozenset({"kraken"})},
+        [],
+    )
+    assert population["owned_order_ids"] == frozenset()
+    assert population["resolved_orders"] == ()
+    assert population["other_exchange_unidentified_orders"] == (
+        "00000000-0000-7000-8000-000000000001",
+    )
+    assert own_submit_unresolved(population) is True
 
 
 @pytest.mark.parametrize(

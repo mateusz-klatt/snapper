@@ -37,6 +37,7 @@ _POPULATION: SpotOwnedOrderPopulation = {
     "resolved_orders": ({"order_public_id": _ORDER_PUBLIC_ID, "exchange_order_id": "O1"},),
     "unresolved_lineage": (),
     "blocked_order_ids": frozenset(),
+    "other_exchange_unidentified_orders": (),
     "commands": (
         {
             "public_id": "00000000-0000-7000-8000-000000000701",

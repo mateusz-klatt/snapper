@@ -179,8 +179,8 @@ class SpotAnchorObservation:
     version, ``None`` while it is unrecorded. ``external_only_operations_initiated``
     is ``False`` only when the venue adapter pins that this system initiates no
     PAYIN, PAYOUT, TRANSFER or DIRECT_FX. ``witness_refusals`` are the owned
-    witness builder's refusals, whose ownership conjunctions the module turns
-    into seal refusals.
+    witness builder's refusals, every one of which the module turns into a seal
+    refusal, so an unproven witness map can never seal by an empty map alone.
     """
 
     public_id: str
@@ -458,9 +458,11 @@ def _ownership_refusals(
 
     Runs only after the unresolved-submit gate passed. The bijection holds
     between the deduplicated witnessed item ids and the owned MARKET_FX rows at
-    or below the tip; the witness builder's ownership conjunctions surface as
-    ``execution_order_id_foreign`` and, for an unproven owned commission,
-    ``venue_fill_not_ingested``.
+    or below the tip. The witness builder's refusal map is total: a decoded
+    order id that is not its Order's id in ``S`` surfaces as
+    ``execution_order_id_foreign``, and every other witness refusal, including
+    an unproven owned commission, as ``venue_fill_not_ingested``. The seal
+    therefore never depends on an empty witness map failing some later check.
 
     Args:
         observation: The gathered bootstrap evidence.
@@ -478,9 +480,10 @@ def _ownership_refusals(
     )
     if not witness_bijection_holds(observation.execution_witnesses, owned_ids):
         refusals.add("venue_fill_not_ingested")
-    if "execution_order_id_foreign" in observation.witness_refusals:
+    witness_refusals = set(observation.witness_refusals)
+    if "execution_order_id_foreign" in witness_refusals:
         refusals.add("execution_order_id_foreign")
-    if "owned_commission_unproven" in observation.witness_refusals:
+    if witness_refusals - {"execution_order_id_foreign"}:
         refusals.add("venue_fill_not_ingested")
     return refusals
 

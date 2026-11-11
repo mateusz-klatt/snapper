@@ -263,6 +263,7 @@ async def test_the_population_is_scoped_to_wallet_mode_and_exchange(configured: 
     )
     assert population["unresolved_lineage"] == ()
     assert population["blocked_order_ids"] == frozenset()
+    assert population["other_exchange_unidentified_orders"] == ()
     assert [command["status"] for command in population["commands"]] == ["filled"]
     assert own_submit_unresolved(population) is False
 
@@ -370,6 +371,35 @@ async def test_a_null_venue_order_id_refuses(configured: _Scope) -> None:
     )
     assert [order["exchange_order_id"] for order in population["resolved_orders"]] == [None]
     assert population["owned_order_ids"] == frozenset()
+    assert own_submit_unresolved(population) is True
+
+
+async def test_a_null_venue_order_id_on_another_exchange_refuses(configured: _Scope) -> None:
+    """A resolved Kraken Order without a venue order id still refuses Walutomat.
+
+    Given: A resolved Walutomat Order with its venue order id and its filled
+        command, plus a resolved Kraken Order of the same wallet and mode whose
+        venue order id is missing.
+    When: The Walutomat population is read.
+    Then: ``S`` holds only the Walutomat id, the Kraken Order is recorded as an
+        unidentified Order of another exchange, and the gate refuses.
+    """
+    walutomat = _instrument(configured, "walutomat")
+    kraken = _instrument(configured, "kraken")
+    unidentified = _order(configured, kraken.public_id, None)
+    await _persist(
+        configured,
+        walutomat,
+        kraken,
+        _order(configured, walutomat.public_id, "WA-1"),
+        unidentified,
+        _command(configured, "filled", "WA-1"),
+    )
+    population = await configured.repository.get_spot_anchor_owned_order_population(
+        configured.wallet, "walutomat", "live"
+    )
+    assert population["owned_order_ids"] == frozenset({"WA-1"})
+    assert population["other_exchange_unidentified_orders"] == (unidentified.public_id,)
     assert own_submit_unresolved(population) is True
 
 

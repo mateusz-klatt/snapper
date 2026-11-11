@@ -3260,6 +3260,7 @@ def _anchor_population(
         "resolved_orders": resolved_orders,
         "unresolved_lineage": (),
         "blocked_order_ids": frozenset(),
+        "other_exchange_unidentified_orders": (),
         "commands": command_rows,
     }
 

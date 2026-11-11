@@ -13,8 +13,9 @@ which every version of that Instrument agrees. Any other projection is an
 unresolved lineage fact, which blocks the bootstrap for every exchange of the
 wallet and mode; its venue order id, when it has one, is kept as a blocked id so
 it can never fall through as external activity. A resolved Order of another
-exchange is excluded, and a resolved Order of the requested exchange contributes
-its venue order id to ``S``. Trade commands never filter or assign ownership.
+exchange is excluded from ``S``, and a resolved Order of the requested exchange
+contributes its venue order id to ``S``. Trade commands never filter or assign
+ownership.
 
 Order persistence happens after the venue accepts an order and is best effort,
 so ``S`` alone is not a proven superset of the orders this system placed. The
@@ -24,9 +25,10 @@ unresolved-submit gate therefore applies a closed table to every in-scope
 in ``S`` and is carried by exactly one resolved Order settles the command;
 every other status, including any value outside the closed status enum, leaves
 it unresolved. No pre-venue proof is accepted, so a ``rejected`` or ``failed``
-command that never reached the venue stays unresolved. Every resolved Order
-without a venue order id and every unresolved lineage fact is unresolved as
-well. One unresolved item refuses the whole bootstrap.
+command that never reached the venue stays unresolved. Every sentinel-tip
+Order without a venue order id is unresolved as well, whichever exchange its
+Instrument resolves to, and so is every unresolved lineage fact. One unresolved
+item refuses the whole bootstrap.
 
 A venue order id is usable only when it is a non-blank string; a blank id is
 treated exactly like a missing one wherever ownership is decided.
@@ -124,11 +126,13 @@ def build_owned_order_population(
 
     Returns:
         The owned order set, the resolved Orders of the exchange, every
-        unresolved lineage fact with its blocked venue order ids, and the
+        unresolved lineage fact with its blocked venue order ids, the resolved
+        Orders of other exchanges that carry no usable venue order id, and the
         commands, unchanged.
     """
     resolved: list[SpotOwnedOrderRow] = []
     facts: list[SpotOwnedOrderLineageFact] = []
+    other_exchange_unidentified: list[str] = []
     for row in order_rows:
         fact = _lineage_fact(row, instrument_versions)
         if fact is not None:
@@ -147,11 +151,14 @@ def build_owned_order_population(
                     "exchange_order_id": row["exchange_order_id"],
                 }
             )
+        elif not is_venue_order_id(row["exchange_order_id"]):
+            other_exchange_unidentified.append(row["order_public_id"])
     return {
         "owned_order_ids": _usable_order_ids([order["exchange_order_id"] for order in resolved]),
         "resolved_orders": tuple(resolved),
         "unresolved_lineage": tuple(facts),
         "blocked_order_ids": _usable_order_ids([fact["exchange_order_id"] for fact in facts]),
+        "other_exchange_unidentified_orders": tuple(other_exchange_unidentified),
         "commands": tuple(commands),
     }
 
@@ -197,9 +204,10 @@ def own_submit_unresolved(population: SpotOwnedOrderPopulation) -> bool:
     """Return whether the snapshot leaves any own submission unresolved.
 
     Any unresolved lineage fact (which also covers every blocked venue order
-    id), any resolved Order without a usable venue order id, and any command
-    the closed status table does not settle makes the owned order set
-    unprovable, so the bootstrap must not classify history against it.
+    id), any sentinel-tip Order without a usable venue order id (of the
+    requested exchange or of any other), and any command the closed status
+    table does not settle makes the owned order set unprovable, so the
+    bootstrap must not classify history against it.
 
     Args:
         population: The owned-order population of one snapshot.
@@ -207,7 +215,7 @@ def own_submit_unresolved(population: SpotOwnedOrderPopulation) -> bool:
     Returns:
         Whether the unresolved-submit gate refuses.
     """
-    if population["unresolved_lineage"]:
+    if population["unresolved_lineage"] or population["other_exchange_unidentified_orders"]:
         return True
     resolved = population["resolved_orders"]
     if any(not is_venue_order_id(order["exchange_order_id"]) for order in resolved):
