@@ -533,14 +533,22 @@ class TestReconcileCycleFold:
     async def test_cycle_skips_non_fold_command_types(self) -> None:
         """Cancel commands are outside the fold's scope.
 
-        Given: one active cancel command only,
+        Given: one active cancel command only, whose target has no create
+            or submit command,
         When: one reconciliation cycle runs,
-        Then: no lifecycle events are read and no advance happens.
+        Then: no lifecycle events are read, the retirement pass looks the
+            target up only, and no advance happens.
         """
         repo = _make_repo(cmds=[_make_cmd(command_type="cancel")])
+        repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        repo.get_latest_venue_event_received_at = AsyncMock(return_value=None)
         recon, _ = _make_loop(repo)
         await recon._reconcile_cycle()
         repo.get_order_lifecycle_events.assert_not_awaited()
+        repo.get_active_create_command_by_client_order_id.assert_awaited_once_with(
+            "cid-1", "kraken"
+        )
+        repo.get_latest_venue_event_received_at.assert_not_awaited()
         repo.advance_trade_command_lifecycle.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -943,3 +951,274 @@ class TestFalseRejectionResurrection:
         recon, _ = _make_loop(repo)
         await recon._reconcile_cycle()
         repo.advance_trade_command_lifecycle.assert_awaited_once()
+
+
+_CANCEL_CREATED_AT = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+_ENDED_AFTER = _CANCEL_CREATED_AT + timedelta(seconds=30)
+_ENDED_BEFORE = _CANCEL_CREATED_AT - timedelta(seconds=30)
+
+type _EvidenceKey = tuple[tuple[str, ...], tuple[str, ...] | None]
+
+
+def _cancel_cmd(status: str = "dispatched") -> TradeCommandRow:
+    """Build an over-age active cancel command sharing the target's cid.
+
+    Args:
+        status: Cancel command status.
+
+    Returns:
+        The cancel command row.
+    """
+    return _make_cmd(
+        public_id="cancel-1",
+        command_type="cancel",
+        status=status,
+        created_at=_CANCEL_CREATED_AT,
+    )
+
+
+def _retirement_repo(
+    cmds: list[TradeCommandRow],
+    target: TradeCommandRow | None,
+    evidence: dict[_EvidenceKey, datetime],
+) -> Any:
+    """Build a repo whose target lookup and venue evidence are configured.
+
+    Args:
+        cmds: Active commands of the cycle.
+        target: Create or submit command of the cancel's target, or ``None``.
+        evidence: Newest ``received_at`` per (event types, statuses) query.
+
+    Returns:
+        The repository double.
+    """
+    repo = _make_repo(cmds=cmds)
+    repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=target)
+
+    async def latest(
+        client_order_id: str,
+        event_types: tuple[str, ...],
+        statuses: tuple[str, ...] | None = None,
+    ) -> datetime | None:
+        """Return the configured evidence time for one query shape."""
+        return evidence.get((tuple(event_types), statuses))
+
+    repo.get_latest_venue_event_received_at = AsyncMock(side_effect=latest)
+    return repo
+
+
+_CANCELED_TERMINAL: _EvidenceKey = (("order_terminal",), ("canceled", "cancelled"))
+_FILLED_TERMINAL: _EvidenceKey = (("order_terminal",), ("filled", "closed"))
+_FILL_OBSERVED: _EvidenceKey = (("fill_observed",), None)
+_EXPIRED_TERMINAL: _EvidenceKey = (("order_terminal",), ("expired",))
+
+
+class TestCancelRetirement:
+    """Item G2: retire a cancel command whose target order has ended."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("target_status", "evidence", "new_status", "last_error", "terminal_at"),
+        [
+            (
+                "cancelled",
+                {_CANCELED_TERMINAL: _ENDED_AFTER},
+                TradeCommandStatusEnum.CANCELLED,
+                "target order ended canceled",
+                _ENDED_AFTER,
+            ),
+            (
+                "cancelled",
+                {_CANCELED_TERMINAL: _ENDED_BEFORE},
+                TradeCommandStatusEnum.REJECTED,
+                "target order was already canceled",
+                _ENDED_BEFORE,
+            ),
+            (
+                "filled",
+                {_FILLED_TERMINAL: _ENDED_BEFORE, _FILL_OBSERVED: _ENDED_AFTER},
+                TradeCommandStatusEnum.REJECTED,
+                "target order ended filled",
+                _ENDED_BEFORE,
+            ),
+            (
+                "filled",
+                {_FILL_OBSERVED: _ENDED_AFTER},
+                TradeCommandStatusEnum.REJECTED,
+                "target order ended filled",
+                _ENDED_AFTER,
+            ),
+            (
+                "expired",
+                {_EXPIRED_TERMINAL: _ENDED_AFTER},
+                TradeCommandStatusEnum.REJECTED,
+                "target order expired",
+                _ENDED_AFTER,
+            ),
+        ],
+    )
+    async def test_table_row_retires_cancel(
+        self,
+        target_status: str,
+        evidence: dict[_EvidenceKey, datetime],
+        new_status: TradeCommandStatusEnum,
+        last_error: str,
+        terminal_at: datetime,
+    ) -> None:
+        """Each row of the G2 table retires the cancel from its target's evidence.
+
+        Given: an over-age dispatched cancel whose target ended with venue
+            evidence, a filled target either by a terminal or by fills only,
+        When: one reconciliation cycle runs,
+        Then: the cancel is CAS-ed with the table's status and error, the
+            newest qualifying observation as terminal_at (not the cycle
+            time), and it is left out of the stale report.
+        """
+        repo = _retirement_repo(
+            [_cancel_cmd()],
+            _make_cmd(public_id="create-1", status=target_status),
+            evidence,
+        )
+        recon, trade_svc = _make_loop(repo)
+        report_stale = MagicMock(return_value=True)
+        recon._report_stale = report_stale
+        await recon._reconcile_cycle()
+        kwargs = repo.advance_trade_command_lifecycle.await_args.kwargs
+        assert (kwargs["public_id"], kwargs["expected_status"]) == ("cancel-1", "dispatched")
+        assert (kwargs["new_status"], kwargs["last_error"]) == (new_status, last_error)
+        assert kwargs["terminal_at"] == terminal_at
+        assert (kwargs["session_id"], kwargs["sequence_id"]) == ("s1", 7)
+        report_stale.assert_not_called()
+        trade_svc.record_recon_success.assert_called_with("kraken.BTC-USD.live")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("target", "evidence"),
+        [
+            (None, {}),
+            (_make_cmd(public_id="create-1", status="accepted"), {}),
+            (_make_cmd(public_id="create-1", status="rejected"), {}),
+            (_make_cmd(public_id="create-1", status="failed"), {}),
+            (_make_cmd(public_id="create-1", status="cancelled"), {}),
+            (_make_cmd(public_id="create-1", status="expired"), {}),
+            (_make_cmd(public_id="create-1", status="filled"), {}),
+        ],
+    )
+    async def test_cancel_stays_without_venue_evidenced_end(
+        self, target: TradeCommandRow | None, evidence: dict[_EvidenceKey, datetime]
+    ) -> None:
+        """A cancel keeps its stale warning unless its target ended with venue evidence.
+
+        Given: an over-age cancel whose target is missing, still open,
+            rejected, failed, or terminal without venue evidence (cancelled
+            by the guard scanner, expired by the outbox, filled locally),
+        When: one reconciliation cycle runs,
+        Then: no CAS is attempted and the cancel is still reported stale.
+        """
+        repo = _retirement_repo([_cancel_cmd()], target, evidence)
+        recon, _ = _make_loop(repo)
+        report_stale = MagicMock(return_value=True)
+        recon._report_stale = report_stale
+        await recon._reconcile_cycle()
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+        assert [call.args[0]["public_id"] for call in report_stale.call_args_list] == ["cancel-1"]
+
+    @pytest.mark.asyncio
+    async def test_raising_lookup_skips_the_cancel_this_cycle(self) -> None:
+        """A failing target lookup skips the cancel without failing the cycle.
+
+        Given: an over-age cancel whose target lookup raises,
+        When: one reconciliation cycle runs,
+        Then: no CAS is attempted, the cycle still records success, and the
+            cancel is still reported stale.
+        """
+        repo = _retirement_repo([_cancel_cmd()], None, {})
+        repo.get_active_create_command_by_client_order_id = AsyncMock(
+            side_effect=RuntimeError("multiple active create/submit commands")
+        )
+        recon, trade_svc = _make_loop(repo)
+        report_stale = MagicMock(return_value=True)
+        recon._report_stale = report_stale
+        await recon._reconcile_cycle()
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+        trade_svc.record_recon_success.assert_called_with("kraken.BTC-USD.live")
+        assert report_stale.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_lost_retirement_cas_is_skipped_and_still_reported(self) -> None:
+        """A lost CAS leaves the cancel for the next cycle and its stale report.
+
+        Given: a cancel whose target ended with evidence, but whose CAS loses,
+        When: one reconciliation cycle runs,
+        Then: the cancel is still reported stale in this cycle.
+        """
+        repo = _retirement_repo(
+            [_cancel_cmd()],
+            _make_cmd(public_id="create-1", status="cancelled"),
+            {_CANCELED_TERMINAL: _ENDED_AFTER},
+        )
+        repo.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        recon, _ = _make_loop(repo)
+        report_stale = MagicMock(return_value=True)
+        recon._report_stale = report_stale
+        await recon._reconcile_cycle()
+        repo.advance_trade_command_lifecycle.assert_awaited_once()
+        assert report_stale.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_created_cancel_is_untouched(self) -> None:
+        """A created cancel stays the outbox's territory.
+
+        Given: an over-age cancel still in created status,
+        When: one reconciliation cycle runs,
+        Then: the retirement pass reads nothing and advances nothing.
+        """
+        repo = _retirement_repo([_cancel_cmd(status="created")], None, {})
+        recon, _ = _make_loop(repo)
+        await recon._reconcile_cycle()
+        repo.get_active_create_command_by_client_order_id.assert_not_awaited()
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_only_cycle_retires_without_lifecycle_read(self) -> None:
+        """A cycle in which only the cancel is active still retires it.
+
+        Given: one accepted cancel as the only active command, its target
+            cancelled with venue evidence after the cancel was created,
+        When: one reconciliation cycle runs,
+        Then: the cancel is retired as cancelled and the lifecycle fold
+            reads no events.
+        """
+        repo = _retirement_repo(
+            [_cancel_cmd(status="accepted")],
+            _make_cmd(public_id="create-1", status="cancelled"),
+            {_CANCELED_TERMINAL: _ENDED_AFTER},
+        )
+        recon, _ = _make_loop(repo)
+        await recon._reconcile_cycle()
+        repo.get_order_lifecycle_events.assert_not_awaited()
+        kwargs = repo.advance_trade_command_lifecycle.await_args.kwargs
+        assert kwargs["new_status"] == TradeCommandStatusEnum.CANCELLED
+        assert kwargs["expected_status"] == "accepted"
+
+    def test_terminal_event_of_a_confirmed_cancel_folds_the_create_to_cancelled(self) -> None:
+        """The G1 terminal row advances the create command through the existing fold.
+
+        Given: an accepted create command and the order_terminal row with
+            status canceled that G1 records for a confirmed cancel,
+        When: the lifecycle fold runs,
+        Then: the create advances to cancelled with the terminal's time.
+        """
+        received = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+        advance = _fold_lifecycle_advance(
+            _make_cmd(status="accepted"),
+            [
+                _make_event(id=1, event_type="order_accepted", received_at=received),
+                _make_event(
+                    id=2, event_type="order_terminal", status="canceled", received_at=received
+                ),
+            ],
+        )
+        assert advance is not None
+        assert advance.status == TradeCommandStatusEnum.CANCELLED
+        assert advance.terminal_at == received

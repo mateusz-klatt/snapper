@@ -16,6 +16,7 @@ from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.service import _EVALUATOR_REGISTRY
 from snapper.application.plans.service import PlanExecutorService
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
@@ -4099,3 +4100,135 @@ class TestStrandedCancelMultiChild:
         del plan_data["params"]["child_client_order_id"]
         await service._recover_plans()
         assert mock_repo.insert_trade_command.await_count == 2
+
+
+_TARGET_ENDED_AT = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+
+def _stranded_repo(target_status: str | None, ended_at: datetime | None) -> AsyncMock:
+    """Build a SQLAlchemy-shaped repository for one stranded cancel child.
+
+    Args:
+        target_status: Status of the child's create command, ``None`` when absent.
+        ended_at: Newest venue evidence time of the child's end, or ``None``.
+
+    Returns:
+        The repository double.
+    """
+    repo = AsyncMock(spec=SQLAlchemyRepository)
+    repo.get_plan_public_ids_for_client_order_ids = AsyncMock(return_value={"cid-1": "plan-strand"})
+    repo.has_pending_cancel_command = AsyncMock(return_value=False)
+    repo.get_active_create_command_by_client_order_id = AsyncMock(
+        return_value=None if target_status is None else {"status": target_status}
+    )
+    repo.get_latest_venue_event_received_at = AsyncMock(return_value=ended_at)
+    repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+    repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+    return repo
+
+
+def _stranded_plan() -> ExecutionPlanRow:
+    """Build one cancel_requested plan whose child is ``cid-1`` on kraken.
+
+    Returns:
+        The plan row.
+    """
+    return _cast(
+        ExecutionPlanRow,
+        _make_plan_row(
+            public_id="plan-strand",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        ),
+    )
+
+
+class TestStrandedCancelEndedTarget:
+    """Item G2b: plan recovery does not re-emit a cancel for an ended target."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_status", ["cancelled", "filled", "expired"])
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_ended_target_with_venue_evidence_is_not_reemitted(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, target_status: str
+    ) -> None:
+        """Skip the cancel when the child's order ended with venue evidence.
+
+        Given: a stranded cancel whose child create command is terminal with
+            venue evidence,
+        When: plan recovery re-emits stranded cancels,
+        Then: no cancel command is inserted, and the lookup is scoped to the
+            plan's exchange.
+        """
+        repo = _stranded_repo(target_status, _TARGET_ENDED_AT)
+        mock_repo_fn.return_value = repo
+        service = PlanExecutorService()
+
+        await service._reemit_stranded_cancel(_stranded_plan())
+
+        repo.insert_trade_command.assert_not_called()
+        repo.get_active_create_command_by_client_order_id.assert_awaited_once_with(
+            "cid-1", "kraken"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("target_status", "ended_at"),
+        [
+            ("accepted", None),
+            ("rejected", None),
+            ("failed", None),
+            ("cancelled", None),
+            (None, None),
+        ],
+    )
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_target_without_venue_evidenced_end_is_reemitted(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        target_status: str | None,
+        ended_at: datetime | None,
+    ) -> None:
+        """Re-emit the cancel when the child's order may still be live.
+
+        Given: a stranded cancel whose child is accepted again after a false
+            rejection, still rejected or failed, cancelled only locally, or
+            without any create command,
+        When: plan recovery re-emits stranded cancels,
+        Then: the cancel command is inserted as before.
+        """
+        repo = _stranded_repo(target_status, ended_at)
+        mock_repo_fn.return_value = repo
+        service = PlanExecutorService()
+
+        await service._reemit_stranded_cancel(_stranded_plan())
+
+        repo.insert_trade_command.assert_awaited_once()
+        assert repo.insert_trade_command.await_args[0][0]["command_type"] == "cancel"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_raising_target_lookup_reemits_nothing(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Re-emit nothing, and log, when the child's lookup raises.
+
+        Given: a stranded cancel whose child create command lookup raises,
+        When: plan recovery re-emits stranded cancels,
+        Then: no cancel command is inserted.
+        """
+        repo = _stranded_repo("accepted", None)
+        repo.get_active_create_command_by_client_order_id = AsyncMock(
+            side_effect=RuntimeError("multiple active create/submit commands")
+        )
+        mock_repo_fn.return_value = repo
+        service = PlanExecutorService()
+
+        await service._reemit_stranded_cancel(_stranded_plan())
+
+        repo.insert_trade_command.assert_not_called()

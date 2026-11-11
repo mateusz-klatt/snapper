@@ -37,6 +37,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
@@ -74,6 +75,15 @@ _TERMINAL_EVENT_STATUS_MAP: dict[str, TradeCommandStatusEnum] = {
     "expired": TradeCommandStatusEnum.EXPIRED,
 }
 _FILL_COMPLETE_REL_TOL = 1e-9
+_CANCEL_COMMAND_TYPE = "cancel"
+_CANCEL_RETIREMENT_SOURCE_STATUSES: frozenset[str] = frozenset(
+    {
+        TradeCommandStatusEnum.DISPATCHED,
+        TradeCommandStatusEnum.DIRECT_DISPATCHED,
+        TradeCommandStatusEnum.ACCEPTED,
+    }
+)
+"""Cancel statuses the retirement pass may advance; ``created`` stays the outbox's."""
 
 
 @dataclass(frozen=True)
@@ -262,6 +272,34 @@ def _fold_lifecycle_advance(
     for event in events:
         state.ingest(event)
     return state.to_advance(cmd)
+
+
+def _cancel_retirement(
+    target_status: str, ended_at: datetime, cancel_created_at: datetime
+) -> tuple[TradeCommandStatusEnum, str]:
+    """Return a retired cancel's new status and ``last_error`` (item G2 table).
+
+    A cancelled target counts as cancelled by this cancel only when its
+    end was observed after the cancel was created; observation times are
+    compared, so a target that ended earlier but was observed late counts
+    as ended after the cancel. A filled or expired target rejects the
+    cancel whatever the timing.
+
+    Args:
+        target_status: Terminal status of the target's create or submit command.
+        ended_at: Venue observation time of the target's end.
+        cancel_created_at: Creation time of the cancel command.
+
+    Returns:
+        The cancel's new status and its ``last_error`` text.
+    """
+    if target_status == TradeCommandStatusEnum.CANCELLED:
+        if ended_at > cancel_created_at:
+            return TradeCommandStatusEnum.CANCELLED, "target order ended canceled"
+        return TradeCommandStatusEnum.REJECTED, "target order was already canceled"
+    if target_status == TradeCommandStatusEnum.FILLED:
+        return TradeCommandStatusEnum.REJECTED, "target order ended filled"
+    return TradeCommandStatusEnum.REJECTED, "target order expired"
 
 
 class ReconciliationLoop:
@@ -501,6 +539,91 @@ class ReconciliationLoop:
                 )
         return resurrected
 
+    async def _retire_ended_cancels(
+        self, commands: list[TradeCommandRow], now: datetime
+    ) -> set[str]:
+        """Retire active cancel commands whose target order has ended.
+
+        Item G2: a cancel in ``dispatched``, ``direct_dispatched`` or
+        ``accepted`` whose create or submit command is terminal with
+        venue evidence leaves its stale state. ``created`` cancels belong
+        to the outbox and are never touched.
+
+        Args:
+            commands: Active commands of this cycle.
+            now: Cycle bus time.
+
+        Returns:
+            Public ids of the cancels retired in this cycle, which the
+            stale report skips.
+        """
+        retired: set[str] = set()
+        for cmd in commands:
+            if cmd["command_type"] != _CANCEL_COMMAND_TYPE:
+                continue
+            if cmd["status"] not in _CANCEL_RETIREMENT_SOURCE_STATUSES:
+                continue
+            if await self._retire_cancel(cmd, now):
+                retired.add(cmd["public_id"])
+        return retired
+
+    async def _retire_cancel(self, cmd: TradeCommandRow, now: datetime) -> bool:
+        """Retire one cancel from its target's venue-evidenced outcome.
+
+        The cancel stays unchanged, so that its stale warning continues,
+        when the target command is missing, not terminal, ``rejected`` or
+        ``failed``, or terminal without venue evidence (a local cancel or
+        expiry). A raising lookup skips the row for this cycle; a lost CAS
+        skips it as in the fold.
+
+        Args:
+            cmd: Active cancel command.
+            now: Cycle bus time.
+
+        Returns:
+            True when the lifecycle CAS applied.
+        """
+        client_order_id = cmd["client_order_id"]
+        try:
+            target = await self._repo.get_active_create_command_by_client_order_id(
+                client_order_id, self._exchange
+            )
+            ended_at = (
+                None
+                if target is None
+                else await target_end_time(self._repo, target["status"], client_order_id)
+            )
+        except Exception:
+            logger.exception(
+                f"ReconciliationLoop[{self._exchange}] cancel retirement lookup failed for "
+                f"{cmd['public_id']} (cid={client_order_id}); skipped this cycle"
+            )
+            return False
+        if target is None or ended_at is None:
+            return False
+        new_status, last_error = _cancel_retirement(target["status"], ended_at, cmd["created_at"])
+        applied = await self._repo.advance_trade_command_lifecycle(
+            public_id=cmd["public_id"],
+            expected_status=cmd["status"],
+            new_status=new_status,
+            bus_time=now,
+            session_id=cmd["session_id"],
+            sequence_id=cmd["sequence_id"],
+            terminal_at=ended_at,
+            last_error=last_error,
+        )
+        if applied:
+            logger.info(
+                f"ReconciliationLoop[{self._exchange}] retired cancel {cmd['public_id']} "
+                f"{cmd['status']} -> {new_status} (cid={client_order_id}): {last_error}"
+            )
+        else:
+            logger.debug(
+                f"ReconciliationLoop[{self._exchange}] lost lifecycle CAS for cancel "
+                f"{cmd['public_id']} (status moved concurrently); retrying next cycle"
+            )
+        return applied
+
     def _is_stale(self, cmd: TradeCommandRow, now: datetime) -> bool:
         """Return whether a command is old enough for stale reporting."""
         age = (now - cmd["created_at"]).total_seconds()
@@ -615,8 +738,13 @@ class ReconciliationLoop:
             fold_cmds = self._foldable_commands(active_cmds)
             events_by_cid = await self._load_events_by_cid(fold_cmds)
             advanced = await self._advance_foldable_commands(fold_cmds, events_by_cid, now)
+            retired = await self._retire_ended_cancels(active_cmds, now)
             advanced += await self._resurrect_falsely_rejected(now)
-            stale_count, seen_shards = self._collect_stale_report(active_cmds, events_by_cid, now)
+            reportable = [cmd for cmd in active_cmds if cmd["public_id"] not in retired]
+            stale_count, seen_shards = self._collect_stale_report(reportable, events_by_cid, now)
+            seen_shards.update(
+                cmd["shard_key"] for cmd in active_cmds if cmd["public_id"] in retired
+            )
             self._log_cycle_result(advanced, stale_count)
             self._record_cycle_successes(seen_shards)
             logger.debug(f"ReconciliationLoop[{self._exchange}] cycle completed OK")

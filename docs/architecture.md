@@ -586,8 +586,9 @@ streaks, a reconciliation progress clock (recon swallows its
 per-cycle failures by design, so it can fail forever without dying —
 only progress age shows that), the age of the order command currently
 in flight (a command wedged inside its venue call never dies and
-never progresses), an unhealed accept-event backlog, and parked
-ambiguous submits all degrade the published status to WARNING or
+never progresses), an unhealed accept-event backlog, confirmed cancel
+terminals not yet recorded, and parked ambiguous submits all degrade
+the published status to WARNING or
 ERROR. The computation is crash-proofed: a raising status read
 degrades to WARNING with the failure in the reasons, never heartbeat
 absence or false HEALTHY. Restart-budget exhaustion at the launcher
@@ -1685,7 +1686,11 @@ failure the plan is rolled back to `failed` and the route returns
 HTTP 500 — this is terminal (no retry). `PlanExecutorService._recover_plans`
 on the next service restart re-emits cancel commands only for plans
 still in `cancel_requested` state (deduplicated via
-`has_pending_cancel_command`); `failed` plans are not retried.
+`has_pending_cancel_command`); `failed` plans are not retried. A child
+whose create or submit command already ended `cancelled`, `filled` or
+`expired` with venue evidence gets no new cancel; a child whose lookup
+fails gets none either, and the failure is logged. The plan itself stays
+`cancel_requested`.
 The outbox dispatcher branches on `command_type` and re-hydrates
 `exchange_order_id` one more time at publish time so a late venue ACK
 is picked up, then publishes `OrderCancelData` on the
