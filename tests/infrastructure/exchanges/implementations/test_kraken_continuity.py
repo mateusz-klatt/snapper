@@ -19,6 +19,7 @@ from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 
 
 def _trade(at: datetime, symbol: str = "BTC-USD") -> TradeUpdate:
@@ -35,7 +36,13 @@ def _client() -> KrakenExchangeClient:
     client._ws_client = None
     client._ws_connected = False
     client._trade_built_candle_builder = TradeCandleBuilder()
-    client._trade_built_candle_queue = asyncio.Queue[CandleUpdate]()
+    client._trade_built_candle_queue = asyncio.Queue[CandleUpdate | TradeCandleMark]()
+    client._trade_candle_generation = 0
+    client._trade_candle_marked_through = None
+    client._trade_candle_popped_through = None
+    client._trade_candle_overflow = None
+    client._trade_candle_discards = 0
+    client._trade_candle_lost_bars = 0
     return client
 
 

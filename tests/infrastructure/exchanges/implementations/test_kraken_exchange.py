@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import threading
 import time
+from collections.abc import AsyncGenerator
 from collections.abc import Coroutine
 from dataclasses import asdict
 from datetime import UTC
@@ -50,6 +51,11 @@ from snapper.infrastructure.exchanges.implementations.kraken import _OHLC_NOTICE
 from snapper.infrastructure.exchanges.implementations.kraken import _RESUBSCRIBE_CHUNK_DELAY_S
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import _enqueue_or_drop_oldest
+from snapper.infrastructure.exchanges.trade_candle_stream import LostBars
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 
 
 class _DummyWs:
@@ -84,9 +90,18 @@ def _client() -> KrakenExchangeClient:
     client._candle_queues = {}
     client._trade_queue = asyncio.Queue[TradeUpdate]()
     client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
-    client._trade_built_candle_queue = asyncio.Queue[CandleUpdate]()
+    client._trade_built_candle_queue = asyncio.Queue[CandleUpdate | TradeCandleMark]()
     client._trade_built_candle_aggregator_task = None
     client._trade_built_candles_enabled = False
+    client._trade_candle_generation = 0
+    client._trade_candle_marked_through = None
+    client._trade_candle_popped_through = None
+    client._trade_candle_overflow = None
+    client._trade_candle_last_tick_at = None
+    client._trade_candle_overflows = 0
+    client._trade_candle_discards = 0
+    client._trade_candle_lost_bars = 0
+    client._trade_candle_producer_restarts = 0
     client._ccxt_client = SimpleNamespace()
     client._subscription_cache = {}
     client._health_tracker = SubscriptionHealthTracker()
@@ -9357,6 +9372,21 @@ class TestResolveCcxtOrderType:
         assert kraken_client._convert_ccxt_order(weird).type is ExchangeOrderTypeEnum.LIMIT
 
 
+async def _next_trade_built_bar(client: KrakenExchangeClient) -> CandleUpdate:
+    """Dequeue trade-built items until the first bar, skipping marks.
+
+    Args:
+        client: Client whose trade-built queue is read.
+
+    Returns:
+        The first queued bar.
+    """
+    while True:
+        item = await client._trade_built_candle_queue.get()
+        if isinstance(item, CandleUpdate):
+            return item
+
+
 def _trade_built_candle() -> CandleUpdate:
     """Return a representative trade-built 1m candle for shadow-path tests.
 
@@ -9506,12 +9536,13 @@ async def test_trade_built_candle_aggregator_enqueues_completed_candles(
     monkeypatch.setattr(client._trade_built_candle_builder, "pop_completed", _pop_completed)
     task = asyncio.create_task(client._trade_built_candle_aggregator())
     try:
-        got = await asyncio.wait_for(client._trade_built_candle_queue.get(), timeout=3.0)
+        got = await asyncio.wait_for(_next_trade_built_bar(client), timeout=3.0)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
     assert got is candle
+    assert got.acquired_at == fixed_now
     assert observed_cutoffs == [fixed_now - timedelta(seconds=12)]
 
 
@@ -9559,7 +9590,7 @@ async def test_trade_built_candle_aggregator_survives_tick_failure(
     monkeypatch.setattr(client._trade_built_candle_builder, "pop_completed", _pop_completed)
     task = asyncio.create_task(client._trade_built_candle_aggregator())
     try:
-        got = await asyncio.wait_for(client._trade_built_candle_queue.get(), timeout=5.0)
+        got = await asyncio.wait_for(_next_trade_built_bar(client), timeout=5.0)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -9711,3 +9742,433 @@ class TestKrakenWireCorrelationIdFidelity:
         assert extra_params is not None
         assert extra_params["cl_ord_id"] == request.client_order_id
         assert extra_params["cl_ord_id"] == "0198f3d2-7a11-7c3e-9d40-6f1b2c3d4e5f"
+
+
+_TICK_NOW = datetime(2026, 11, 11, 15, 3, 15, tzinfo=UTC)
+_MINUTE_M = datetime(2026, 11, 11, 15, 1, tzinfo=UTC)
+
+
+def _minute_bar(symbol: str, minute: datetime) -> CandleUpdate:
+    """Build one trade-built bar of a symbol and minute.
+
+    Args:
+        symbol: Native symbol.
+        minute: Opening of the bar's minute.
+
+    Returns:
+        A complete one-minute bar without an acquisition time.
+    """
+    return CandleUpdate(
+        symbol=symbol,
+        open=1.0,
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        vwap=1.0,
+        trades=1,
+        volume=1.0,
+        interval_begin=minute,
+        interval=60,
+    )
+
+
+def _drain(client: KrakenExchangeClient) -> list[CandleUpdate | TradeCandleMark]:
+    """Take every item from the trade-built queue without waiting.
+
+    Args:
+        client: Client whose queue is drained.
+
+    Returns:
+        The queued items in order.
+    """
+    items: list[CandleUpdate | TradeCandleMark] = []
+    while not client._trade_built_candle_queue.empty():
+        items.append(client._trade_built_candle_queue.get_nowait())
+    return items
+
+
+def _pop_returning(
+    monkeypatch: pytest.MonkeyPatch, client: KrakenExchangeClient, bars: list[CandleUpdate]
+) -> None:
+    """Make the client's builder pop exactly these bars once.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: Client whose builder is patched.
+        bars: Bars the next pop returns.
+    """
+    batches = [bars]
+    monkeypatch.setattr(
+        client._trade_built_candle_builder,
+        "pop_completed",
+        lambda _cutoff: batches.pop() if batches else [],
+    )
+
+
+class TestTradeBuiltProducerTick:
+    """Marks enqueued in band with the bars of each producer tick."""
+
+    def test_a_mark_precedes_every_advancing_minute_group_and_closes_the_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every boundary a tick advances gets its mark before the later bars.
+
+        Given: A tick that pops two bars of minute M and one of minute M + 1.
+        When: The tick runs.
+        Then: The queue holds mark(M), the bars of M, mark(M + 1), the bar of M + 1
+            and mark(through), every bar stamped with the tick's time, and the
+            popped boundary is the tick's own.
+        """
+        client = _client()
+        later = _MINUTE_M + timedelta(minutes=1)
+        _pop_returning(
+            monkeypatch,
+            client,
+            [
+                _minute_bar("BTC-EUR", _MINUTE_M),
+                _minute_bar("ETH-EUR", _MINUTE_M),
+                _minute_bar("BTC-EUR", later),
+            ],
+        )
+
+        client._produce_trade_candle_tick(_TICK_NOW)
+
+        items = _drain(client)
+        through = datetime(2026, 11, 11, 15, 3, tzinfo=UTC)
+        marks = [
+            (i, item.through) for i, item in enumerate(items) if isinstance(item, TradeCandleMark)
+        ]
+        assert marks == [(0, _MINUTE_M), (3, later), (5, through)]
+        assert all(
+            item.generation == 0 and item.produced_at == _TICK_NOW
+            for item in items
+            if isinstance(item, TradeCandleMark)
+        )
+        assert [
+            (item.symbol, item.interval_begin, item.acquired_at)
+            for item in items
+            if isinstance(item, CandleUpdate)
+        ] == [
+            ("BTC-EUR", _MINUTE_M, _TICK_NOW),
+            ("ETH-EUR", _MINUTE_M, _TICK_NOW),
+            ("BTC-EUR", later, _TICK_NOW),
+        ]
+        assert client._trade_candle_popped_through == through
+        assert client._trade_candle_last_tick_at == _TICK_NOW
+
+    def test_a_correction_gets_no_mark_and_an_unchanged_boundary_no_new_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only an advancing boundary is marked.
+
+        Given: A boundary already marked at the tick's own minute.
+        When: A tick pops only a correction of an older minute, and a later tick
+            pops nothing in the same minute.
+        Then: The correction is queued without any mark, and nothing else is queued.
+        """
+        client = _client()
+        through = datetime(2026, 11, 11, 15, 3, tzinfo=UTC)
+        client._trade_candle_marked_through = through
+        _pop_returning(monkeypatch, client, [_minute_bar("BTC-EUR", _MINUTE_M)])
+
+        client._produce_trade_candle_tick(_TICK_NOW)
+        client._produce_trade_candle_tick(_TICK_NOW + timedelta(seconds=1))
+
+        items = _drain(client)
+        assert len(items) == 1
+        assert isinstance(items[0], CandleUpdate)
+
+    def test_a_raising_tick_enqueues_nothing_and_keeps_the_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed tick claims no minute.
+
+        Given: A builder whose pop raises, and a known popped boundary.
+        When: The tick runs.
+        Then: It raises, nothing is queued, and the popped boundary is unchanged.
+        """
+        client = _client()
+        client._trade_candle_popped_through = _MINUTE_M
+
+        def _fail(_cutoff: datetime) -> list[CandleUpdate]:
+            """Raise as a transient fault.
+
+            Args:
+                _cutoff: Ignored cutoff.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("transient")
+
+        monkeypatch.setattr(client._trade_built_candle_builder, "pop_completed", _fail)
+
+        with pytest.raises(RuntimeError):
+            client._produce_trade_candle_tick(_TICK_NOW)
+
+        assert _drain(client) == []
+        assert client._trade_candle_popped_through == _MINUTE_M
+
+    def test_the_popped_boundary_never_moves_backwards(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A backward clock step cannot lower the arming floor.
+
+        Given: A popped boundary later than the tick's own.
+        When: The tick runs.
+        Then: The popped boundary stays where it was.
+        """
+        client = _client()
+        later = datetime(2026, 11, 11, 15, 10, tzinfo=UTC)
+        client._trade_candle_popped_through = later
+        client._trade_candle_marked_through = later
+        _pop_returning(monkeypatch, client, [])
+
+        client._produce_trade_candle_tick(_TICK_NOW)
+
+        assert client._trade_candle_popped_through == later
+
+
+class TestTradeBuiltOverflowAndBreaks:
+    """Refusal instead of eviction, and the breaks that replace lost items."""
+
+    @pytest.mark.asyncio
+    async def test_an_overflow_refuses_items_and_becomes_one_break(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full queue evicts nothing; the stream reports every lost bar once.
+
+        Given: A queue of two items and a tick that pops three bars of one minute.
+        When: The stream is read.
+        Then: It first yields an overflow break counting the drained and refused bars
+            with their minute range and a new generation, and the next tick's marks
+            carry that generation.
+        """
+        client = _client()
+        client._trade_built_candle_queue = asyncio.Queue(maxsize=2)
+        _pop_returning(
+            monkeypatch,
+            client,
+            [_minute_bar(symbol, _MINUTE_M) for symbol in ("A-EUR", "B-EUR", "C-EUR")],
+        )
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        client._produce_trade_candle_tick(_TICK_NOW)
+
+        stream = client.subscribe_trade_built_stream(["*"])
+        brk = await anext(stream)
+        client._produce_trade_candle_tick(_TICK_NOW + timedelta(minutes=1))
+        mark = await anext(stream)
+        await stream.aclose()
+
+        assert brk == TradeCandleBreak(
+            reason=TradeCandleBreakReason.OVERFLOW,
+            generation=1,
+            lost_bars=3,
+            lost_from=_MINUTE_M,
+            lost_through=_MINUTE_M,
+            builder_kept=True,
+            arm_after=datetime(2026, 11, 11, 15, 3, tzinfo=UTC),
+        )
+        assert isinstance(mark, TradeCandleMark)
+        assert mark.generation == 1
+        assert client._trade_candle_overflows == 1
+        assert client._trade_candle_lost_bars == 3
+
+    @pytest.mark.asyncio
+    async def test_the_bars_only_stream_skips_marks_and_survives_an_overflow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shadow consumer keeps receiving bars, and only bars.
+
+        Given: An overflow recorded, then a mark and a bar queued after it.
+        When: The bars-only stream is read.
+        Then: It logs the overflow, skips the mark and yields the bar.
+        """
+        client = _client()
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
+        warning = MagicMock()
+        monkeypatch.setattr(kr.logger, "warning", warning)
+        client._trade_candle_overflow = LostBars()
+        stream = client.subscribe_trade_built_candles(["*"], "1m")
+
+        async def _queue_after_break() -> None:
+            """Queue a mark and a bar once the break has drained the queue."""
+            await asyncio.sleep(0.05)
+            client._trade_built_candle_queue.put_nowait(
+                TradeCandleMark(through=_MINUTE_M, generation=1, produced_at=_TICK_NOW)
+            )
+            client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
+
+        feeder = asyncio.create_task(_queue_after_break())
+        bar = await anext(stream)
+        await stream.aclose()
+        await feeder
+
+        assert isinstance(bar, CandleUpdate)
+        assert bar.symbol == "BTC-EUR"
+        warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_the_bars_only_stream_ends_with_its_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bars-only stream mirrors the item stream it filters.
+
+        Given: An item stream that yields one mark and one bar, then ends.
+        When: The bars-only stream is read to its end.
+        Then: It yields only the bar and then ends too.
+        """
+        client = _client()
+
+        async def _items() -> AsyncGenerator[TradeCandleItem]:
+            """Yield a mark and a bar, then stop.
+
+            Yields:
+                A mark, then a bar.
+            """
+            yield TradeCandleMark(through=_MINUTE_M, generation=0, produced_at=_TICK_NOW)
+            yield _minute_bar("BTC-EUR", _MINUTE_M)
+
+        monkeypatch.setattr(client, "_trade_built_items", _items)
+
+        bars = [bar async for bar in client.subscribe_trade_built_candles(["*"], "1m")]
+
+        assert [bar.symbol for bar in bars] == ["BTC-EUR"]
+
+    def test_a_discard_keeps_the_builder_and_a_reset_replaces_it(self) -> None:
+        """Both drain the queue and start a new generation; only a reset rebuilds.
+
+        Given: A queued bar and a known popped boundary.
+        When: The backlog is discarded, then the epoch is reset.
+        Then: The discard keeps the builder, counts the bar and arms after the
+            boundary; the reset replaces the builder; generations are 1 then 2.
+        """
+        client = _client()
+        builder = client._trade_built_candle_builder
+        client._trade_candle_popped_through = _MINUTE_M
+        client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
+
+        discarded = client.discard_trade_candle_backlog()
+        kept = client._trade_built_candle_builder
+        reset = client.reset_trade_candle_epoch()
+
+        assert (discarded.reason, discarded.generation, discarded.lost_bars) == (
+            TradeCandleBreakReason.LAG,
+            1,
+            1,
+        )
+        assert discarded.builder_kept and discarded.arm_after == _MINUTE_M
+        assert kept is builder
+        assert (reset.reason, reset.generation, reset.builder_kept) == (
+            TradeCandleBreakReason.RESET,
+            2,
+            False,
+        )
+        assert client._trade_built_candle_builder is not builder
+        assert client.trade_candle_generation() == 2
+        assert client._trade_candle_discards == 1
+
+    def test_a_break_before_the_first_tick_has_no_arming_floor(self) -> None:
+        """Nothing was emitted yet, so nothing needs blocking.
+
+        Given: A client whose producer never ticked.
+        When: Its epoch is reset.
+        Then: The break's arming floor is None.
+        """
+        assert _client().reset_trade_candle_epoch().arm_after is None
+
+
+class TestTradeBuiltProducerSupervision:
+    """Restarting a producer that stopped, and its health."""
+
+    @pytest.mark.asyncio
+    async def test_a_finished_producer_is_restarted_and_counted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A producer that died is restarted once, with its exception logged.
+
+        Given: Trade-built candles enabled and a producer task that raised.
+        When: The producer is ensured.
+        Then: A new task is started, the restart is counted, and the error is logged.
+        """
+        client = _client()
+        client._trade_built_candles_enabled = True
+
+        async def _die() -> None:
+            """Fail at once.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("producer died")
+
+        dead = asyncio.create_task(_die())
+        with contextlib.suppress(RuntimeError):
+            await dead
+        client._trade_built_candle_aggregator_task = dead
+        replacement = AsyncMock()
+        monkeypatch.setattr(client, "_trade_built_candle_aggregator", replacement)
+        error = MagicMock()
+        monkeypatch.setattr(kr.logger, "error", error)
+
+        assert client.ensure_trade_candle_producer() is True
+
+        restarted = client._trade_built_candle_aggregator_task
+        assert restarted is not dead
+        assert restarted is not None
+        await restarted
+        assert client._trade_candle_producer_restarts == 1
+        error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_running_cancelled_absent_or_disabled_producer_is_left_alone(
+        self,
+    ) -> None:
+        """Only a producer that stopped on its own is restarted.
+
+        Given: A running task, a cancelled task, no task, and a disabled stream.
+        When: The producer is ensured in each case.
+        Then: Nothing is restarted.
+        """
+        client = _client()
+        client._trade_built_candles_enabled = True
+        running = asyncio.create_task(asyncio.sleep(10))
+        client._trade_built_candle_aggregator_task = running
+        assert client.ensure_trade_candle_producer() is False
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+        assert client.ensure_trade_candle_producer() is False
+        client._trade_built_candle_aggregator_task = None
+        assert client.ensure_trade_candle_producer() is False
+        client._trade_built_candles_enabled = False
+        assert client.ensure_trade_candle_producer() is False
+        assert client._trade_candle_producer_restarts == 0
+
+    def test_the_health_reports_the_producer_and_its_counters(self) -> None:
+        """The heartbeat can tell a silent producer from a healthy one.
+
+        Given: A client that ticked 2.5 s ago, with one overflow and three lost bars,
+            and a queued bar.
+        When: Its producer health is read.
+        Then: It reports no live task, the counters, the age of the last tick and the
+            queue depth.
+        """
+        client = _client()
+        client._trade_candle_last_tick_at = _TICK_NOW
+        client._trade_candle_overflows = 1
+        client._trade_candle_lost_bars = 3
+        client._trade_built_candle_queue.put_nowait(_minute_bar("BTC-EUR", _MINUTE_M))
+
+        health = client.trade_candle_producer_health(_TICK_NOW + timedelta(seconds=2.5))
+
+        assert health == {
+            "producer_alive": False,
+            "producer_restarts": 0,
+            "last_tick_age_s": 2.5,
+            "overflows": 1,
+            "discards": 0,
+            "lost_bars": 3,
+        }
+        assert client.trade_candle_queue_depth() == 1
+        assert _client().trade_candle_producer_health(_TICK_NOW)["last_tick_age_s"] is None
