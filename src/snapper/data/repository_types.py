@@ -558,15 +558,104 @@ class ExecutionRow(TypedDict):
 
 
 class SpotExecutionWitnessRow(TypedDict):
-    """One sealed-prefix execution's scope sequence and venue exec id.
+    """One sealed-prefix execution's scope sequence, venue exec id, and Order.
 
     Returned by ``get_spot_execution_witness_rows`` for the spot-anchor witness
     join; ``exec_id`` is ``None`` when the venue reported no fill identity, which
-    the witness builder treats as unmappable.
+    the witness builder treats as unmappable. ``order_public_id`` is the
+    execution's immutable Order identity, which the anchor bootstrap resolves
+    through its owned-order population to the Order's authoritative venue order
+    id, so a decoded exec id can never vouch for an order it does not belong to.
     """
 
     scope_sequence: int
     exec_id: str | None
+    order_public_id: str
+
+
+type SpotOwnedOrderLineageFactKind = Literal[
+    "instrument_absent",
+    "instrument_conflicting",
+    "instrument_dangling",
+    "instrument_multiply_active",
+]
+"""Why one sentinel-tip Order's Instrument lineage does not resolve.
+
+``instrument_absent``: no Instrument version of any kind carries the Order's
+instrument id. ``instrument_dangling``: versions exist but none is at the
+sentinel tip. ``instrument_multiply_active``: more than one sentinel-tip
+Instrument carries the id. ``instrument_conflicting``: exactly one sentinel-tip
+Instrument matches, but its exchange is not a canonical venue key or the
+Instrument's versions disagree on the exchange.
+"""
+
+
+class SpotOwnedOrderSourceRow(TypedDict):
+    """One sentinel-tip Order with the sentinel-tip Instruments its left join matched.
+
+    ``order_row_id`` is the Order version's physical row id, so two sentinel-tip
+    rows sharing one public id stay distinct. ``instrument_exchanges`` holds the
+    exchange of every sentinel-tip Instrument the ``LEFT JOIN`` matched: empty
+    when none matched, and more than one entry when several did.
+    """
+
+    order_row_id: int
+    order_public_id: str
+    instrument_public_id: str
+    exchange_order_id: str | None
+    instrument_exchanges: tuple[str, ...]
+
+
+class SpotOwnedOrderRow(TypedDict):
+    """One resolved sentinel-tip Order of the requested exchange.
+
+    ``exchange_order_id`` is verbatim and may be ``None`` or blank; the
+    unresolved-submit gate refuses such an Order rather than ignore it.
+    """
+
+    order_public_id: str
+    exchange_order_id: str | None
+
+
+class SpotOwnedOrderLineageFact(TypedDict):
+    """One sentinel-tip Order whose Instrument lineage does not resolve."""
+
+    order_public_id: str
+    instrument_public_id: str
+    exchange_order_id: str | None
+    fact: SpotOwnedOrderLineageFactKind
+
+
+class SpotOwnedSubmitCommandRow(TypedDict):
+    """One in-scope sentinel-tip ``create`` or ``submit`` trade command.
+
+    ``status`` is the stored text, verbatim, so a value outside the closed
+    status enum reaches the gate and refuses there.
+    """
+
+    public_id: str
+    status: str
+    exchange_order_id: str | None
+
+
+class SpotOwnedOrderPopulation(TypedDict):
+    """The anchor bootstrap's owned-order population from one database snapshot.
+
+    ``owned_order_ids`` is the owned order set ``S``: every usable venue order
+    id of a resolved Order of the requested exchange. ``resolved_orders`` lists
+    those Orders, including any whose venue order id is missing.
+    ``unresolved_lineage`` holds every Order whose Instrument lineage does not
+    resolve, for any exchange of the wallet and mode, and ``blocked_order_ids``
+    the usable venue order ids those Orders carry. ``commands`` lists the
+    in-scope ``create`` and ``submit`` commands. Commands never filter or assign
+    Order ownership.
+    """
+
+    owned_order_ids: frozenset[str]
+    resolved_orders: tuple[SpotOwnedOrderRow, ...]
+    unresolved_lineage: tuple[SpotOwnedOrderLineageFact, ...]
+    blocked_order_ids: frozenset[str]
+    commands: tuple[SpotOwnedSubmitCommandRow, ...]
 
 
 class PnlTimelineExecutionRow(TypedDict):

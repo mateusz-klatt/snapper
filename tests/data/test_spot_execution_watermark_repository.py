@@ -625,15 +625,16 @@ async def test_witness_rows_return_the_contiguous_sealed_prefix(
 
     Given: Two committed fills for the live walutomat scope,
     When: The witness rows are read up to watermark 2,
-    Then: Both scope sequences and their exec ids project in ascending order.
+    Then: Both scope sequences, their exec ids, and their Order identity project
+        in ascending order.
     """
     await _seed_lineage(repository)
     await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
     await _insert_fill(repository, _LIVE_ORDER, _WALLET, 2)
     rows = await repository.get_spot_execution_witness_rows(_WALLET, "walutomat", "live", 2)
     assert rows == [
-        {"scope_sequence": 1, "exec_id": None},
-        {"scope_sequence": 2, "exec_id": None},
+        {"scope_sequence": 1, "exec_id": None, "order_public_id": _LIVE_ORDER},
+        {"scope_sequence": 2, "exec_id": None, "order_public_id": _LIVE_ORDER},
     ]
 
 
@@ -671,8 +672,8 @@ async def test_witness_rows_range_read_starts_after_the_from_watermark(
         _WALLET, "walutomat", "live", 3, from_watermark=1
     )
     assert rows == [
-        {"scope_sequence": 2, "exec_id": None},
-        {"scope_sequence": 3, "exec_id": None},
+        {"scope_sequence": 2, "exec_id": None, "order_public_id": _LIVE_ORDER},
+        {"scope_sequence": 3, "exec_id": None, "order_public_id": _LIVE_ORDER},
     ]
 
 
