@@ -6,8 +6,10 @@ via a per-symbol watermark, OHLCV/VWAP roll-up, late-frame dropping, and the
 restart seed path (including the cross-timeframe non-suppression watchpoint).
 """
 
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 
 import pytest
 
@@ -939,3 +941,307 @@ class TestFlushGrace:
         emitted = agg.flush(_at_s(10, 5, 5))
         begins = [bar.interval_begin for _label, bar in emitted]
         assert begins.count(_at(10, 0)) == 1
+
+
+def _acquired(
+    symbol: str, begin: datetime, acquired_at: datetime, *, close: float = 100.0
+) -> CandleUpdate:
+    """Build a trade-built 1m bar with the producer's acquisition time.
+
+    Args:
+        symbol: Native symbol.
+        begin: Opening of the bar's minute.
+        acquired_at: When the producer completed the bar's evidence.
+        close: Bar close.
+
+    Returns:
+        A 1m :class:`CandleUpdate` carrying ``acquired_at``.
+    """
+    return replace(_candle(symbol, begin, close=close), acquired_at=acquired_at)
+
+
+def _authoring(*, forward_fill: bool = False) -> CandleAggregator:
+    """Build a 5m aggregator that authors its windows.
+
+    Args:
+        forward_fill: Whether forward-fill is enabled.
+
+    Returns:
+        A live aggregator with its epoch at 15:00 and authoring on.
+    """
+    agg = CandleAggregator(["5m"], live_epoch=_at(15, 0), forward_fill=forward_fill)
+    agg.authoring = True
+    return agg
+
+
+class TestCertification:
+    """Completion marks certify the windows whose end they newly reach."""
+
+    def test_a_window_is_authored_by_its_certification_or_newest_constituent(self) -> None:
+        """A closing bar acquired later never re-authors a certified window.
+
+        Given a window whose minutes were acquired by 16:00:05 and whose end the
+            16:00 mark certified at 16:00:12,
+        When a bar acquired at 16:30:12 finalizes the next minute and closes it,
+        Then the window is authored at the certification.
+        """
+        agg = _authoring()
+        for minute in range(55, 60):
+            agg.fold(_acquired("A", _at(15, minute), _at(15, minute) + timedelta(seconds=65)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.fold(_acquired("A", _at(16, 0), _at_s(16, 1, 5)))
+
+        emitted = agg.fold(_acquired("A", _at(16, 29), _at_s(16, 30, 12)))
+
+        assert [(label, bar.interval_begin, bar.acquired_at) for label, bar in emitted] == [
+            ("5m", _at(15, 55), _at_s(16, 0, 12))
+        ]
+
+    def test_a_constituent_acquired_after_the_certification_authors_the_window(self) -> None:
+        """A timely certification stays when a late correction replaces its held minute.
+
+        Given the 15:59 minute held when the 16:00 mark certified its window at
+            16:00:12, then replaced by a correction acquired at 16:00:40,
+        When a later bar closes the window,
+        Then the window is authored at the correction, the later of the two.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 59), _at_s(16, 0, 5)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.fold(_acquired("A", _at(15, 59), _at_s(16, 0, 40), close=101.0))
+        agg.fold(_acquired("A", _at(16, 0), _at_s(16, 1, 12)))
+
+        emitted = agg.fold(_acquired("A", _at(16, 5), _at_s(16, 6, 12)))
+
+        assert [(bar.interval_begin, bar.close, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(15, 55), 101.0, _at_s(16, 0, 40))
+        ]
+
+    def test_a_held_minute_carries_its_certification_into_its_bucket(self) -> None:
+        """The held-minute case, with forward-fill off.
+
+        Given a timely bar for 15:55 held with no bucket when the 16:00 mark
+            certifies its window, and later marks that pass,
+        When a bar at 16:30 finalizes the held minute and another bar closes the
+            window,
+        Then the window is authored at the 16:00 certification, and no later
+            mark re-authors it.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 55), _at_s(15, 56, 12)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        assert agg._held_certifications == {
+            ("A", "5m", int(_at(15, 55).timestamp())): _at_s(16, 0, 12)
+        }
+        agg.fold(_acquired("A", _at(16, 30), _at_s(16, 31, 12)))
+        assert agg._held_certifications == {}
+        agg.certify(_at(16, 31), _at_s(16, 31, 12))
+
+        emitted = agg.fold(_acquired("A", _at(16, 31), _at_s(16, 32, 12)))
+
+        assert [(bar.interval_begin, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(15, 55), _at_s(16, 0, 12))
+        ]
+
+    def test_a_late_held_minute_gets_no_certification_and_a_late_created_bucket(self) -> None:
+        """A late first emission is authored by its own acquisition.
+
+        Given the 16:00 mark certified at 16:00:12 while the symbol had no input
+            in the 15:55 window, then a late first emission for 15:59 acquired at
+            16:00:45,
+        When the 16:01 mark passes and later bars finalize and close the window,
+        Then no held certification is created, the bucket is late-created, and
+            the window is authored at 16:00:45, never at 16:01:12.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 50), _at_s(15, 51, 12)))
+        agg.fold(_acquired("A", _at(15, 51), _at_s(15, 52, 12)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.fold(_acquired("A", _at(15, 59), _at_s(16, 0, 45)))
+        agg.certify(_at(16, 1), _at_s(16, 1, 12))
+        assert agg._held_certifications == {}
+        agg.fold(_acquired("A", _at(16, 0), _at_s(16, 1, 12)))
+        late = agg._buckets[("A", "5m", int(_at(15, 55).timestamp()))]
+        assert late.late_created
+        agg.certify(_at(16, 2), _at_s(16, 2, 12))
+
+        emitted = agg.fold(_acquired("A", _at(16, 5), _at_s(16, 6, 12)))
+
+        assert [(bar.interval_begin, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(15, 55), _at_s(16, 0, 45))
+        ]
+
+    def test_a_certified_window_is_not_certified_again(self) -> None:
+        """Only a newly reached end is certified, once.
+
+        Given a bucket certified by the 16:00 mark,
+        When the 16:01 mark passes,
+        Then the bucket keeps the first certification.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 58), _at_s(15, 59, 12)))
+        agg.fold(_acquired("A", _at(15, 59), _at_s(16, 0, 5)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.certify(_at(16, 1), _at_s(16, 1, 12))
+        agg.certify(_at(15, 59), _at_s(16, 1, 30))
+
+        bucket = agg._buckets[("A", "5m", int(_at(15, 55).timestamp()))]
+        assert bucket.certified_at == _at_s(16, 0, 12)
+        assert agg._certified_through_ts == int(_at(16, 1).timestamp())
+
+    def test_a_held_certification_is_dropped_with_a_late_minute_and_by_a_break(self) -> None:
+        """No certification outlives the held input it describes.
+
+        Given a held certification for a window the frontier has already passed,
+        When its minute is finalized, and then another held certification is
+            followed by a break,
+        Then the first is removed with the late drop, and the break clears the
+            second together with the certified boundary.
+        """
+        agg = _authoring()
+        key = ("A", "5m", int(_at(15, 55).timestamp()))
+        agg._closed_window[("A", "5m")] = key[2]
+        agg.fold(_acquired("A", _at(15, 57), _at_s(15, 58, 12)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        assert key in agg._held_certifications
+        agg.fold(_acquired("A", _at(16, 3), _at_s(16, 4, 12)))
+        assert key not in agg._held_certifications
+        assert agg.late_rolls_after_close == 1
+
+        agg.certify(_at(16, 5), _at_s(16, 5, 12))
+        assert agg._held_certifications
+        agg.suspend_across_feed_break(_at(16, 6))
+
+        assert agg._held_certifications == {}
+        assert agg._certified_through_ts is None
+
+    def test_a_seeded_bucket_is_never_late_created(self) -> None:
+        """The restart seed predates every mark.
+
+        Given a certified boundary past a window,
+        When a seed folds a minute of that window,
+        Then its bucket is neither late-created nor certified by a held entry.
+        """
+        agg = _authoring()
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.seed_1m("5m", _candle("A", _at(15, 55)))
+
+        bucket = agg._buckets[("A", "5m", int(_at(15, 55).timestamp()))]
+        assert (bucket.late_created, bucket.certified_at) == (False, None)
+
+    def test_without_authoring_windows_carry_no_author(self) -> None:
+        """With authoring off, the publisher stamps windows at processing.
+
+        Given certified, acquired minutes and authoring off,
+        When a bar closes their window,
+        Then the window carries no acquisition time.
+        """
+        agg = _authoring()
+        agg.authoring = False
+        for minute in range(55, 60):
+            agg.fold(_acquired("A", _at(15, minute), _at(15, minute) + timedelta(seconds=65)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.fold(_acquired("A", _at(16, 0), _at_s(16, 1, 5)))
+
+        emitted = agg.fold(_acquired("A", _at(16, 1), _at_s(16, 2, 12)))
+
+        assert [bar.acquired_at for _l, bar in emitted] == [None]
+
+    def test_bars_without_acquisition_are_authored_by_the_certification(self) -> None:
+        """A window of bars from another source still gets its certification.
+
+        Given bars without acquisition times whose window the 16:00 mark
+            certified,
+        When later bars close the window,
+        Then the window is authored at the certification.
+        """
+        agg = _authoring()
+        for minute in range(55, 60):
+            agg.fold(_candle("A", _at(15, minute)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.fold(_candle("A", _at(16, 0)))
+
+        emitted = agg.fold(_candle("A", _at(16, 1)))
+
+        assert [bar.acquired_at for _l, bar in emitted] == [_at_s(16, 0, 12)]
+
+
+class TestFlushThrough:
+    """Sealing and forward fill at a completion mark's boundary."""
+
+    def test_flush_through_is_a_no_op_without_forward_fill(self) -> None:
+        """Like the wall-clock flush, it is inert unless forward-fill is on.
+
+        Given forward-fill off and a held minute,
+        When a mark flushes through a later boundary,
+        Then nothing is emitted and the minute stays held.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 55), _at_s(15, 56, 12)))
+
+        assert agg.flush_through(_at(16, 10), _at_s(16, 10, 12)) == []
+        assert agg._open_minutes["A"]
+
+    def test_a_mark_seals_its_windows_and_fills_by_its_own_time(self) -> None:
+        """Each window is sealed or filled at the first mark that reaches its end.
+
+        Given minutes of the 15:55 window certified at 16:00:12, then nothing,
+        When the 16:10 mark flushes through 16:10,
+        Then the 15:55 window is sealed at its certification, and the empty
+            16:00 and 16:05 windows are filled at the mark's own time, without
+            subtracting a grace.
+        """
+        agg = _authoring(forward_fill=True)
+        for minute in range(55, 60):
+            agg.fold(
+                _acquired("A", _at(15, minute), _at(15, minute) + timedelta(seconds=65), close=50.0)
+            )
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        agg.certify(_at(16, 10), _at_s(16, 10, 12))
+
+        emitted = agg.flush_through(_at(16, 10), _at_s(16, 10, 12))
+
+        assert [(bar.interval_begin, bar.close, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(15, 55), 50.0, _at_s(16, 0, 12)),
+            (_at(16, 0), 50.0, _at_s(16, 10, 12)),
+            (_at(16, 5), 50.0, _at_s(16, 10, 12)),
+        ]
+        assert agg._last_close_author[("A", "5m")] == _at_s(16, 0, 12)
+
+    def test_a_fill_is_never_authored_before_its_carried_close(self) -> None:
+        """A fill states the carried close, so it cannot precede that close's author.
+
+        Given a carried close authored at 16:12:00,
+        When an earlier-produced mark fills the next empty window,
+        Then the fill is authored at the carried close's author.
+        """
+        agg = _authoring(forward_fill=True)
+        for minute in range(55, 60):
+            agg.fold(_acquired("A", _at(15, minute), _at_s(16, 12, 0), close=50.0))
+        agg.flush_through(_at(16, 0), _at_s(16, 0, 12))
+
+        emitted = agg.flush_through(_at(16, 5), _at_s(16, 5, 12))
+
+        assert [(bar.interval_begin, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(16, 0), _at_s(16, 12, 0))
+        ]
+
+    def test_a_break_forgets_the_carried_close_author(self) -> None:
+        """The author travels with the close it describes.
+
+        Given a sealed window whose close is carried,
+        When the feed breaks,
+        Then the carried close and its author are both forgotten.
+        """
+        agg = _authoring(forward_fill=True)
+        for minute in range(55, 60):
+            agg.fold(
+                _acquired("A", _at(15, minute), _at(15, minute) + timedelta(seconds=65), close=50.0)
+            )
+        agg.flush_through(_at(16, 0), _at_s(16, 0, 12))
+        assert ("A", "5m") in agg._last_close_author
+
+        agg.suspend_across_feed_break(_at(16, 1))
+
+        assert agg._last_close_author == {}
+        assert agg._last_close == {}
