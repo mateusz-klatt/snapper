@@ -3276,5 +3276,7 @@ async def test_the_heartbeat_reports_the_cutover_the_resolver_used() -> None:
     await _resolve_test_identity(publisher)
     after = publisher._venue_feed_health().meta["candle_identity"]
 
+    assert isinstance(before, dict)
+    assert isinstance(after, dict)
     assert before["deterministic_from"] is None
     assert after["deterministic_from"] == START.isoformat()
