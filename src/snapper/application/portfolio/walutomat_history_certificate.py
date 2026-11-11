@@ -10,10 +10,11 @@ runs (only absent evidence short-circuits, since nothing else is checkable
 without it), the refusal union is closed and alphabetically sorted, and
 anything unproven fails closed.
 
-Attribution doctrine (production facts): venue COMMISSION rows carry NO
-``orderedBy`` — their attribution is the ``orderId`` join against the read
-order totals, so a COMMISSION row whose ``orderId`` is outside the totals
-refuses ``venue_history_manual_unattributed``. A MARKET_FX row not covered by
+Attribution doctrine (production facts): a venue COMMISSION row may or may not
+carry an ``orderedBy`` (both shapes occur in production history), and it is
+never the attribution — that is the ``orderId`` join against the read order
+totals, so a COMMISSION row whose ``orderId`` is outside the totals refuses
+``venue_history_manual_unattributed``. A MARKET_FX row not covered by
 the composed witness map refuses ``venue_history_manual_unattributed``
 REGARDLESS of its ``orderedBy``: coverage by the fill-identity composition is
 the only accepted attribution. External operations (PAYIN, PAYOUT, TRANSFER,
@@ -211,9 +212,10 @@ def _attribution_refusals(
 
     Coverage by the witness map is the only accepted MARKET_FX attribution: the
     witnessed item ids must be exactly the in-range MARKET_FX ids, so an
-    uncovered MARKET_FX row refuses REGARDLESS of its ``orderedBy``. Venue
-    COMMISSION rows carry no ``orderedBy`` at all — their attribution is the
-    ``orderId`` join, so a fee row outside the read order totals refuses too.
+    uncovered MARKET_FX row refuses REGARDLESS of its ``orderedBy``. A venue
+    COMMISSION row's ``orderedBy``, when it has one, is not its attribution
+    either — the ``orderId`` join is, so a fee row outside the read order totals
+    refuses too.
     """
     refusals: set[HistoryCertificateRefusal] = set()
     market_fx_ids = [row.item_id for row in rows if row.operation_type == _MARKET_FX]
