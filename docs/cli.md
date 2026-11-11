@@ -819,6 +819,20 @@ as crypto. This rule applies to REST, WebSocket-only, and BTNL records. A change
 classification creates a new symbol version while preserving its public
 identity and history.
 
+Kraken's legacy `Z` prefix is removed only from its fiat codes (`ZUSD`, `ZEUR`,
+`ZGBP`, `ZJPY`, `ZCAD`, `ZAUD`). The fiat franc is `CHF`, while `ZCHF` is the
+Frankencoin token, so `ZCHF/USD` and `ZCHF/CHF` are catalogued as the crypto
+symbols `ZCHF-USD` and `ZCHF-CHF`. An alias string that another symbol already
+holds aborts the run, except for the reviewed transfers of the ZCHF REST and CCXT
+aliases from the earlier `CHF-USD` and `CHF-CHF` symbols, and their inverses.
+
+WebSocket-only discovery skips the `<X>SPV/USD` wire name of a tokenized product
+whose `<X>x/USD` alias was verified in the same run: the venue streams the same
+trades under both names, in two price units. Bitnomial relay products (`-BTNL`)
+also get a Kraken REST alias equal to their wire name, which the public OHLC
+endpoint accepts, so the candle catchup can request their closed history. They
+stay market data only: the Kraken exchange client refuses orders for them.
+
 ```bash
 snapper update-kraken-symbols [OPTIONS]
 ```
@@ -1348,7 +1362,8 @@ Direct equality with an archive pair takes priority, for example `XDGUSD` maps t
 normalization removes the X/Z prefixes from two four-character asset codes:
 `XXBTZUSD` becomes `XBTUSD`, `XETHXXBT` becomes `ETHXBT`, and `XXDGXXBT` becomes
 `XDGXBT`. Normalized collisions fail rather than choosing an instrument. Bitnomial
-`-BTNL` relay instruments without a Kraken REST alias cannot receive archive rows.
+`-BTNL` relay instruments receive no archive rows: their Kraken REST alias is their
+wire name (for example `RENDER/USD:BTNL`), which no archive pair matches.
 Native VWAP remains null because the archive does not supply it.
 
 The Futures mode pages `fetch_ohlcv` through the existing Kraken Futures client,

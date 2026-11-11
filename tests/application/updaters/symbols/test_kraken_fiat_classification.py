@@ -164,8 +164,10 @@ def _assert_aliases_and_capability(
         ("BOB", "USD", AssetTypeEnum.CRYPTO),
         ("XYZ", "EUR", AssetTypeEnum.CRYPTO),
         ("USD", "XYZ", AssetTypeEnum.CRYPTO),
-        ("ZCAD", "ZCHF", AssetTypeEnum.FOREX),
+        ("ZCAD", "CHF", AssetTypeEnum.FOREX),
         ("ZAUD", "ZGBP", AssetTypeEnum.FOREX),
+        ("ZCHF", "ZUSD", AssetTypeEnum.CRYPTO),
+        ("ZCHF", "CHF", AssetTypeEnum.CRYPTO),
     ],
 )
 async def test_rest_classification_preserves_routing_and_capability(
@@ -174,8 +176,10 @@ async def test_rest_classification_preserves_routing_and_capability(
     """Keep crypto and unknown legs distinct from supported fiat pairs.
 
     Given: REST pairs spanning known fiat, crypto, stablecoin and unknown codes,
+        Kraken's fiat franc ``CHF`` and the Frankencoin token ``ZCHF``,
     When: Their actual mapping is persisted,
-    Then: Both-leg classification preserves all aliases and tradable capability.
+    Then: Both-leg classification preserves all aliases and tradable capability,
+        and ZCHF pairs stay crypto instead of becoming franc forex.
     """
     record = catalog.rest_record(base, quote)
     await catalog.write(record, _FIRST)
@@ -252,7 +256,8 @@ async def test_btnl_discovery_uses_uniform_classification(
 
     Given: An isolated fake ticker capture containing one BTNL wire symbol,
     When: Actual BTNL discovery and the SQLite writer process that symbol,
-    Then: Classification preserves the suffix, WS alias and market-data-only capability.
+    Then: Classification preserves the suffix, the WS alias, the REST alias equal
+        to the wire string and the market-data-only capability.
     """
     client = MagicMock()
     client.collect_raw_ticker_symbols = AsyncMock(return_value={wire})
@@ -263,7 +268,7 @@ async def test_btnl_discovery_uses_uniform_classification(
     (symbol,) = catalog.history()
     assert symbol.asset_type == expected
     assert symbol.native_symbol == wire.replace("/", "-").replace(":", "-")
-    _assert_aliases_and_capability(catalog, {("ws", wire)}, False)
+    _assert_aliases_and_capability(catalog, {("ws", wire), ("rest", wire)}, False)
     with catalog.sessions() as session:
         capabilities: list[SymbolExchangeCapability] = list(
             session.scalars(select(SymbolExchangeCapability))

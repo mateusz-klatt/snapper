@@ -314,6 +314,7 @@ class TestKrakenSymbolUpdater:
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = None
         mock_session.execute.return_value.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value.first.return_value = None
         mock_repo = MagicMock()
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
@@ -631,9 +632,10 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             return None
 
         def execute(self, _stmt: Any) -> Any:
-            """Return stub supporting both scalar_one_or_none and scalars().all()."""
+            """Return stub supporting scalar_one_or_none, first and scalars().all()."""
             return SimpleNamespace(
                 scalar_one_or_none=lambda: None,
+                first=lambda: None,
                 scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
             )
 
@@ -1014,11 +1016,13 @@ class TestKrakenNormalizeCurrency:
             return KrakenSymbolUpdaterService()
 
     def test_normalize_fiat_currencies(self, updater: KrakenSymbolUpdaterService) -> None:
-        """Verify fiat currencies with Z prefix are normalized.
+        """Verify fiat currencies with Z prefix are normalized, and ZCHF is not.
 
         Given: Kraken updater instance,
-        When: _normalize_currency called with Z-prefixed fiats,
-        Then: Z prefix removed from currency codes.
+        When: _normalize_currency called with Z-prefixed fiats, the fiat franc
+            CHF and the Frankencoin token ZCHF,
+        Then: The legacy Z prefix is removed from the fiat codes, CHF stays CHF,
+            and ZCHF keeps its own code.
         """
         assert updater._normalize_currency("ZUSD") == "USD"
         assert updater._normalize_currency("ZEUR") == "EUR"
@@ -1026,7 +1030,8 @@ class TestKrakenNormalizeCurrency:
         assert updater._normalize_currency("ZJPY") == "JPY"
         assert updater._normalize_currency("ZCAD") == "CAD"
         assert updater._normalize_currency("ZAUD") == "AUD"
-        assert updater._normalize_currency("ZCHF") == "CHF"
+        assert updater._normalize_currency("CHF") == "CHF"
+        assert updater._normalize_currency("ZCHF") == "ZCHF"
 
     def test_normalize_single_x_prefix_crypto(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify crypto currencies with single X prefix are normalized.
@@ -3901,13 +3906,13 @@ class TestKrakenBtnlDiscovery:
         updater: KrakenSymbolUpdaterService,
         db_session_factory: sessionmaker,
     ) -> None:
-        """Verify BTNL records produce alias + market-data-only capability + spot spec.
+        """Verify BTNL records produce aliases + market-data-only capability + spot spec.
 
         Given: An empty SQLite DB,
         When: ``_update_database`` runs with a BTNL record,
-        Then: One WS alias is created, capability has
-        ``can_market_data=True / can_trade=False`` with the Bitnomial
-        spot venue reason, and the InstrumentSpec carries
+        Then: One WS alias and one REST alias, both the wire string, are
+        created, capability has ``can_market_data=True / can_trade=False``
+        with the Bitnomial spot venue reason, and the InstrumentSpec carries
         ``instrument_kind="spot"`` with funding fields cleared.
         """
 
@@ -3939,9 +3944,10 @@ class TestKrakenBtnlDiscovery:
                 .filter(SymbolAlias.symbol_public_id == symbol.public_id)
                 .all()
             )
-            assert len(aliases) == 1
-            assert aliases[0].channel == "ws"
-            assert aliases[0].exchange_symbol == "BTC/USD:BTNL"
+            assert {(alias.channel, alias.exchange_symbol) for alias in aliases} == {
+                ("ws", "BTC/USD:BTNL"),
+                ("rest", "BTC/USD:BTNL"),
+            }
             cap = (
                 session.query(SymbolExchangeCapability)
                 .filter(SymbolExchangeCapability.symbol_public_id == symbol.public_id)
@@ -4167,11 +4173,10 @@ class TestKrakenBtnlDiscovery:
     ) -> None:
         """Verify the alias UPDATE branch is exercised when the wire form mutates.
 
-        Given: A pre-existing BTNL ws alias under a different wire form,
+        Given: Pre-existing BTNL ws and rest aliases under a different wire form,
         When: ``_persist_btnl_symbol`` runs with the new wire form,
-        Then: ``_upsert_alias`` returns ``updated`` and the counter
-        increments by one (exercises the ``elif result == "updated"``
-        branch of the BTNL persist path).
+        Then: Both alias writes return ``updated`` and the counter increments
+        by two, one for the WS alias and one for the REST alias.
         """
         first_now = datetime(2026, 5, 12, 8, 0, tzinfo=UTC)
         with db_session_factory() as session:
@@ -4219,7 +4224,7 @@ class TestKrakenBtnlDiscovery:
             )
             session.commit()
         assert created == 0
-        assert updated == 1
+        assert updated == 2
 
     @pytest.mark.asyncio
     async def test_fetch_symbols_btnl_failure_is_non_fatal(

@@ -120,6 +120,7 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscribe
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
+from snapper.infrastructure.symbols.functions import is_kraken_bitnomial_product
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_asset_class
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
@@ -1108,10 +1109,17 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If API credentials are missing.
             ValueError: If a stop-typed request carries no
-                ``stop_price`` — raised BEFORE any network send so the
-                failure is provably-not-placed (definitive reject).
+                ``stop_price``, or if the symbol is a Bitnomial relay
+                product, which is market data only — both raised BEFORE
+                any private client or network send, so the failure is
+                provably-not-placed (definitive reject).
             Exception: If order creation fails.
         """
+        if is_kraken_bitnomial_product(request.symbol):
+            raise ValueError(
+                f"Kraken order refused for {request.symbol}: Bitnomial relay products "
+                "are market data only"
+            )
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:

@@ -782,8 +782,13 @@ ProcessRunStatusType = Literal[
 IndicatorBackend = Literal["talib", "python"]
 """Technical indicator computation backend: 'talib' for TA-Lib C library, 'python' for pure Python."""
 
-UpsertResult = Literal["created", "updated", "unchanged"]
-"""Outcome of an upsert operation: row was created, updated, or left unchanged."""
+UpsertResult = Literal["created", "updated", "unchanged", "moved"]
+"""Outcome of an upsert operation: row was created, updated, left unchanged, or moved.
+
+``moved`` is returned only by the Kraken spot updater's whitelisted alias
+transfer, when an alias string was closed on its previous owner and written for
+the new one; callers count it with ``updated``.
+"""
 
 AssetType = Literal[
     AssetTypeEnum.CRYPTO,
