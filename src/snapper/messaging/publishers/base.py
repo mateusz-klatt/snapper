@@ -2494,6 +2494,23 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             aggregator.authoring = follows
         return follows
 
+    def _wall_clock_flush_due(self) -> bool:
+        """Return whether a periodic flush tick may seal and fill on the wall clock.
+
+        Only the candle loop moves the completion state, so a wall-clock minute
+        sweep that is publishing its flat bars always finishes in the mode it
+        started in: a tick never switches the state into following the consumer
+        while that sweep is suspended. The tick therefore only reads. It flushes
+        while the state is the wall clock and the setting still says so, and
+        skips otherwise until the candle loop has synchronized.
+
+        Returns:
+            True while completion follows the wall clock.
+        """
+        if self._completion_clock is not CompletionClock.WALL:
+            return False
+        return not self._completion_follows_consumer()
+
     def _mark_is_current(self, mark: TradeCandleMark) -> bool:
         """Return whether a mark may still move the completion state.
 
@@ -3350,6 +3367,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         While completion follows the consumer its ticks do nothing: every mark
         seals and fills inline, so the wall clock never gets ahead of the queue.
+        A tick only reads the completion state and never moves it, see
+        :meth:`_wall_clock_flush_due`.
 
         Args:
             exchange: Exchange name for message provenance.
@@ -3359,7 +3378,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await asyncio.sleep(_CANDLE_FLUSH_INTERVAL_S)
                 if not self.running:
                     break
-                if self._candle_aggregator is None or self._sync_completion_mode():
+                if self._candle_aggregator is None or not self._wall_clock_flush_due():
                     continue
                 flushed = self._candle_aggregator.flush(datetime.now(UTC))
                 self._drain_aggregator_repair_signals()

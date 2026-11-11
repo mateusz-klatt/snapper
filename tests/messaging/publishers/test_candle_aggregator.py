@@ -1166,6 +1166,35 @@ class TestCertification:
         assert [bar.acquired_at for _l, bar in emitted] == [_at_s(16, 0, 12)]
 
 
+class TestLongLivedCertification:
+    """A certification lasts as long as its window's state."""
+
+    def test_a_sparse_window_open_for_a_day_closes_under_its_pinned_certification(self) -> None:
+        """Neither a late closing bar nor later marks re-author a long-open window.
+
+        Given forward-fill off, a window with two traded minutes certified at
+            16:00:12, and marks every hour for 25 hours without another bar,
+        When a bar 25 hours later finalizes the window's last minute and another
+            closes it,
+        Then the window is authored at 16:00:12.
+        """
+        agg = _authoring()
+        agg.fold(_acquired("A", _at(15, 56), _at_s(15, 57, 12)))
+        agg.fold(_acquired("A", _at(15, 57), _at_s(15, 58, 12)))
+        agg.certify(_at(16, 0), _at_s(16, 0, 12))
+        for hour in range(1, 26):
+            through = _at(16, 0) + timedelta(hours=hour)
+            agg.certify(through, through + timedelta(seconds=12))
+
+        late = _at(17, 1, day=15)
+        agg.fold(_acquired("A", late, late + timedelta(minutes=1, seconds=12)))
+        emitted = agg.fold(_acquired("A", late + timedelta(minutes=1), late + timedelta(minutes=2)))
+
+        assert [(bar.interval_begin, bar.acquired_at) for _l, bar in emitted] == [
+            (_at(15, 55), _at_s(16, 0, 12))
+        ]
+
+
 class TestFlushThrough:
     """Sealing and forward fill at a completion mark's boundary."""
 
