@@ -236,6 +236,14 @@ Components:
       `shadow_candles` table (`source='calculated'`) while leaving the live
       native plane untouched — for comparing the two sources before any
       cutover.
+      In live `trade_built` mode the producer's queue also carries completion
+      marks (`infrastructure/exchanges/trade_candle_stream.py`): before each
+      minute group that advances its boundary, and after each tick. With
+      `spot_completion_follows_consumer` on (default), the candle loop sweeps
+      tradeless minutes and seals higher-timeframe windows when it handles a
+      mark, not on the wall clock, so a lagging consumer cannot be overtaken
+      by its own flat bars or seals. The queue refuses instead of evicting;
+      an overflow becomes a break with the lost minute range.
 - **Executors** (`executors/`) — Per-wallet order execution on
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each
