@@ -97,6 +97,22 @@ def class_catalog() -> Iterator[ClassCatalog]:
         engine.dispose()
 
 
+def test_bitnomial_relay_with_a_rest_alias_is_classified_as_currency(
+    class_catalog: ClassCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bitnomial relay with its catalog REST alias derives the currency class.
+
+    Given: A Bitnomial relay stored as crypto with its wire name as Kraken REST alias,
+    When: The actual active Spot REST catalog classifies it,
+    Then: Its class is currency, so closed-candle requests send no asset class.
+    """
+    class_catalog.seed(CatalogProduct("RENDER-USD-BTNL", "crypto", "kraken", "RENDER/USD:BTNL"))
+    mapper = class_catalog.mapper
+    mapper.kraken_asset_classes = mapper.load_kraken_asset_classes_from_db()
+    monkeypatch.setattr(functions, "_get_db_mapper", lambda: mapper)
+    assert functions.native_to_kraken_asset_class("RENDER-USD-BTNL") == "currency"
+
+
 def _original_mapper_module() -> ModuleType:
     """Load the production cache method without the global test alias fixture."""
     spec = importlib.util.spec_from_file_location(

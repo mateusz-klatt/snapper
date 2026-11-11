@@ -20,6 +20,7 @@ from typing import cast
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as SyncSession
 
@@ -31,6 +32,9 @@ from snapper.application.process_manager.process_parameters import SymbolUpdater
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import PRESERVE_EXISTING
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_alias_transfer import AliasClaims
+from snapper.application.updaters.symbols.kraken_alias_transfer import KrakenAliasWrite
+from snapper.application.updaters.symbols.kraken_alias_transfer import retire_transferred_alias
 from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.settings import AppSettings
@@ -41,6 +45,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import UpsertResult
 from snapper.data.models import FundingRate
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Symbol
@@ -70,6 +75,14 @@ _BTNL_CAPABILITY_REASON = (
     "only; direct Bitnomial order route not integrated"
 )
 _BTNL_DISCOVERY_WINDOW_SECONDS = 90.0
+
+_BTNL_REST_IDENTITY_ENABLED: bool = True
+"""Item C4 of the Kraken catalog spec: Bitnomial relays get a Kraken REST alias.
+
+Setting this to False is the reviewed rollback of C4. The next updater run
+then closes each Bitnomial product's Kraken REST alias, plain SCD2 close and
+nothing else, while its WebSocket alias and market-data capability stay.
+"""
 
 
 class _KrakenPairInfo(TypedDict, total=False):
@@ -285,6 +298,24 @@ def _rest_catalog_priority(pair: tuple[str, _KrakenPairInfo]) -> tuple[bool, str
     return metadata is not None and metadata.spec_source == TOKENIZED_SPEC_SOURCE, pair[0]
 
 
+def _count_alias_result(result: UpsertResult) -> tuple[int, int]:
+    """Map one alias write result to ``(created, updated)`` increments.
+
+    A whitelisted transfer (``moved``) counts as an update of the catalog.
+
+    Args:
+        result: Outcome of the alias write.
+
+    Returns:
+        The created and updated increments.
+    """
+    if result == "created":
+        return 1, 0
+    if result in ("updated", "moved"):
+        return 0, 1
+    return 0, 0
+
+
 def _tokenized_websocket_symbol(
     pair_info: _KrakenPairInfo, fallback: str, quote: str
 ) -> str | None:
@@ -354,6 +385,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         """
         super().__init__(update_threshold_hours=update_threshold_hours, force=force)
         self._kraken_client: KrakenExchangeClient | None = None
+        self._alias_claims = AliasClaims()
 
     def _create_exchange_client(self) -> KrakenExchangeClient:
         """Create Kraken exchange client.
@@ -562,6 +594,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         """Normalize Kraken currency codes to standard format.
 
         Kraken uses prefixed codes (ZUSD, XXBT) that need normalization.
+        There is no entry for ``ZCHF``: Kraken's fiat franc is ``CHF``, and
+        ``ZCHF`` is the Frankencoin token, whose pairs ``ZCHF/USD`` and
+        ``ZCHF/CHF`` must keep their own identity.
 
         Args:
             currency_code: Kraken currency code.
@@ -576,7 +611,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "ZJPY": "JPY",
             "ZCAD": "CAD",
             "ZAUD": "AUD",
-            "ZCHF": "CHF",
             "XETH": "ETH",
             "XLTC": "LTC",
             "XETC": "ETC",
@@ -988,6 +1022,94 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             ws_only="true",
         )
 
+    @staticmethod
+    def _verified_tokenized_aliases(
+        mappings: dict[str, KrakenSymbolRecord], verified_ws_symbols: set[str]
+    ) -> set[str]:
+        """Return the verified WebSocket aliases of tokenized REST products.
+
+        Args:
+            mappings: REST-derived mappings keyed by native symbol.
+            verified_ws_symbols: WebSocket names the instrument snapshot confirmed.
+
+        Returns:
+            The exact WebSocket alias strings of tokenized REST products that
+            the snapshot verified in this run.
+        """
+        aliases: set[str] = set()
+        for record in mappings.values():
+            if record.get("asset_class") != "tokenized_asset" or record.get("ws_only") == "true":
+                continue
+            websocket_symbol = record.get("kraken_websocket_symbol")
+            if isinstance(websocket_symbol, str) and websocket_symbol in verified_ws_symbols:
+                aliases.add(websocket_symbol)
+        return aliases
+
+    def _is_spv_duplicate(
+        self, instrument: dict[str, str], verified_tokenized_aliases: set[str]
+    ) -> bool:
+        """Tell whether a WebSocket-only instrument is the SPV wire name of a verified token.
+
+        Item C3 of the Kraken catalog spec. Kraken streams each tokenized
+        product under two wire names, ``<X>x/USD`` and ``<X>SPV/USD``, carrying
+        the same venue trades in two price units. The SPV name is skipped
+        only when every part of that observed shape holds: a mixed-case base
+        ending in lowercase ``x``, a quote that normalizes to ``USD``, the wire
+        name exactly ``<base without the final x>SPV/USD``, and ``<base>/USD``
+        verified in this run as the WebSocket alias of a tokenized REST
+        product. Every other instrument is kept.
+
+        Args:
+            instrument: WebSocket-only instrument with ``symbol``, ``base`` and ``quote``.
+            verified_tokenized_aliases: Verified WebSocket aliases of tokenized
+                REST products.
+
+        Returns:
+            True when the instrument is a duplicate wire name to skip.
+        """
+        base = instrument["base"]
+        return (
+            self._is_tokenized_base(base)
+            and self._normalize_currency(instrument["quote"]) == "USD"
+            and instrument["symbol"] == f"{base.removesuffix('x')}SPV/USD"
+            and f"{base}/USD" in verified_tokenized_aliases
+        )
+
+    def _merge_ws_only_instruments(
+        self,
+        mappings: dict[str, KrakenSymbolRecord],
+        ws_only_instruments: list[dict[str, str]],
+        verified_ws_symbols: set[str],
+    ) -> tuple[int, int]:
+        """Add WebSocket-only discoveries to the mappings, skipping SPV duplicate wire names.
+
+        A discovery is added when its native symbol is new, as before.
+        Repeated instrument events for one skipped wire name count once.
+
+        Args:
+            mappings: Mappings keyed by native symbol, extended in place.
+            ws_only_instruments: Instruments the snapshot reported outside the
+                REST-derived set.
+            verified_ws_symbols: WebSocket names the snapshot confirmed.
+
+        Returns:
+            The number of WebSocket-only products added and the number of
+            distinct SPV wire names skipped.
+        """
+        verified_tokenized_aliases = self._verified_tokenized_aliases(mappings, verified_ws_symbols)
+        skipped: set[str] = set()
+        added = 0
+        for instrument in ws_only_instruments:
+            if self._is_spv_duplicate(instrument, verified_tokenized_aliases):
+                skipped.add(instrument["symbol"])
+                continue
+            ws_only_mapping = self._build_ws_only_mapping(instrument)
+            native = ws_only_mapping["native_symbol"]
+            if native not in mappings:
+                mappings[native] = ws_only_mapping
+                added += 1
+        return added, len(skipped)
+
     async def build_verified_mappings(self) -> tuple[dict[str, KrakenSymbolRecord], bool]:
         """Build verified symbol data from REST and WebSocket data.
 
@@ -1016,15 +1138,12 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     f"Verification rate {verification_rate:.1%} below threshold "
                     f"{verification_threshold:.0%}"
                 )
-            ws_only_count = 0
-            for instrument in ws_only_instruments:
-                ws_only_mapping = self._build_ws_only_mapping(instrument)
-                native = ws_only_mapping["native_symbol"]
-                if native not in mappings:
-                    mappings[native] = ws_only_mapping
-                    ws_only_count += 1
+            ws_only_count, spv_skipped = self._merge_ws_only_instruments(
+                mappings, ws_only_instruments, verified_ws_symbols
+            )
             logger.info(
-                f"Built {len(mappings)} mappings ({ws_only_count} WS-only), "
+                f"Built {len(mappings)} mappings ({ws_only_count} WS-only, "
+                f"{spv_skipped} SPV duplicate wire names skipped), "
                 f"verification: {len(verified_ws_symbols)}/{len(ws_symbols_to_verify)} "
                 f"({verification_rate:.1%})"
             )
@@ -1073,6 +1192,38 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         logger.info(f"Fetched and verified {len(mappings)} Kraken symbols ({btnl_count} BTNL)")
         return cast(list[dict[str, Any]], list(mappings.values()))
 
+    def _write_kraken_alias(self, session: SyncSession, write: KrakenAliasWrite) -> UpsertResult:
+        """Write one Kraken alias through the run's claims and the whitelisted transfer.
+
+        Every Kraken alias write of the three persist paths comes through
+        here. The claim refuses a string that another symbol already
+        claimed in this transaction, even when that first write left its row
+        unchanged. A string still held by an earlier owner is moved only when
+        :data:`KRAKEN_ALIAS_TRANSFERS` lists the move; otherwise the run
+        aborts, as the unique index made it do before.
+
+        Args:
+            session: The updater transaction's session.
+            write: Owner, channel, alias string and transaction time.
+
+        Returns:
+            ``moved`` after a whitelisted transfer, otherwise the ordinary
+            upsert result.
+        """
+        self._alias_claims.claim(write)
+        moved = retire_transferred_alias(session, write)
+        result = self._upsert_alias(
+            session,
+            write.symbol_public_id,
+            ExchangeEnum.KRAKEN,
+            write.channel,
+            write.exchange_symbol,
+            write.now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("aliases"),
+        )
+        return "moved" if moved else result
+
     def _persist_ws_only_symbol(
         self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
@@ -1092,20 +1243,18 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         sid = self._tracker.session_id
         ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
         if ws_symbol:
-            result = self._upsert_alias(
-                session,
-                symbol_public_id,
-                ExchangeEnum.KRAKEN,
-                AliasChannelEnum.WS,
-                ws_symbol,
-                now,
-                session_id=sid,
-                sequence_id=self._tracker.next_sequence("aliases"),
+            created, updated = _count_alias_result(
+                self._write_kraken_alias(
+                    session,
+                    KrakenAliasWrite(
+                        symbol_public_id,
+                        symbol_data["native_symbol"],
+                        AliasChannelEnum.WS,
+                        ws_symbol,
+                        now,
+                    ),
+                )
             )
-            if result == "created":
-                created += 1
-            elif result == "updated":
-                updated += 1
         self._upsert_capability(
             session,
             symbol_public_id,
@@ -1159,6 +1308,12 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         spot-margin rollover rows attached to this instrument are
         deactivated for safety.
 
+        The wire string is written twice: as the WS alias and, from item
+        C4 of the Kraken catalog spec, as the REST alias, because the
+        public OHLC endpoint answers under that name. The REST alias lets
+        the candle catchup request closed history; orders stay refused by
+        the capability and by the exchange client's Bitnomial check.
+
         Args:
             session: SQLAlchemy session.
             symbol_data: Symbol data dict with ``is_btnl == "true"``.
@@ -1166,28 +1321,28 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             now: Current UTC timestamp.
 
         Returns:
-            Tuple of ``(created_count, updated_count)`` for the WS
-            alias upsert.
+            Tuple of ``(created_count, updated_count)`` for the WS and
+            REST alias writes.
         """
         created = 0
         updated = 0
         sid = self._tracker.session_id
         ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
         if ws_symbol:
-            result = self._upsert_alias(
-                session,
-                symbol_public_id,
-                ExchangeEnum.KRAKEN,
-                AliasChannelEnum.WS,
-                ws_symbol,
-                now,
-                session_id=sid,
-                sequence_id=self._tracker.next_sequence("aliases"),
-            )
-            if result == "created":
-                created += 1
-            elif result == "updated":
-                updated += 1
+            channels: tuple[AliasChannelEnum, ...] = (AliasChannelEnum.WS, AliasChannelEnum.REST)
+            if not _BTNL_REST_IDENTITY_ENABLED:
+                channels = (AliasChannelEnum.WS,)
+                self._withdraw_btnl_rest_alias(session, symbol_public_id, now)
+            for channel in channels:
+                result = self._write_kraken_alias(
+                    session,
+                    KrakenAliasWrite(
+                        symbol_public_id, symbol_data["native_symbol"], channel, ws_symbol, now
+                    ),
+                )
+                created_step, updated_step = _count_alias_result(result)
+                created += created_step
+                updated += updated_step
         self._upsert_capability(
             session,
             symbol_public_id,
@@ -1223,6 +1378,33 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
         return created, updated
 
+    @staticmethod
+    def _withdraw_btnl_rest_alias(
+        session: SyncSession, symbol_public_id: str, now: datetime
+    ) -> None:
+        """Close a Bitnomial product's Kraken REST alias, and nothing else.
+
+        The reviewed rollback of item C4 (``_BTNL_REST_IDENTITY_ENABLED``).
+        A plain SCD2 close: no successor is written, and the WebSocket alias
+        and the market-data capability are left as they are.
+
+        Args:
+            session: The updater transaction's session.
+            symbol_public_id: Public id of the Bitnomial product.
+            now: Timestamp of the updater transaction.
+        """
+        session.execute(
+            update(SymbolAlias)
+            .where(
+                SymbolAlias.symbol_public_id == symbol_public_id,
+                SymbolAlias.exchange == ExchangeEnum.KRAKEN,
+                SymbolAlias.channel == AliasChannelEnum.REST,
+                SymbolAlias.timestamp <= now,
+                SymbolAlias.known_to > now,
+            )
+            .values(known_to=now)
+        )
+
     def _persist_rest_symbol(
         self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
@@ -1241,29 +1423,24 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         updated = 0
         sid = self._tracker.session_id
         reason = _tokenized_capability_reason(symbol_data)
-        alias_mappings: tuple[tuple[str, AliasChannelEnum, str], ...] = (
-            (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "kraken_websocket_symbol"),
-            (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_symbol"),
-            (ExchangeEnum.KRAKEN, AliasChannelEnum.CCXT, "ccxt_symbol"),
+        alias_mappings: tuple[tuple[AliasChannelEnum, str], ...] = (
+            (AliasChannelEnum.WS, "kraken_websocket_symbol"),
+            (AliasChannelEnum.REST, "kraken_rest_symbol"),
+            (AliasChannelEnum.CCXT, "ccxt_symbol"),
         )
-        for exchange, channel, key in alias_mappings:
+        for channel, key in alias_mappings:
             exchange_symbol = symbol_data.get(key)
             if not isinstance(exchange_symbol, str) or not exchange_symbol:
                 continue
-            result = self._upsert_alias(
+            result = self._write_kraken_alias(
                 session,
-                symbol_public_id,
-                exchange,
-                channel,
-                exchange_symbol,
-                now,
-                session_id=sid,
-                sequence_id=self._tracker.next_sequence("aliases"),
+                KrakenAliasWrite(
+                    symbol_public_id, symbol_data["native_symbol"], channel, exchange_symbol, now
+                ),
             )
-            if result == "created":
-                created += 1
-            elif result == "updated":
-                updated += 1
+            created_step, updated_step = _count_alias_result(result)
+            created += created_step
+            updated += updated_step
         self._upsert_capability(
             session,
             symbol_public_id,
@@ -1549,6 +1726,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         alias, and a capability row with ``can_trade=False`` and a reason
         explaining they are not available via REST.
 
+        The alias claims start empty for each call and are discarded when it
+        ends, whether it commits or fails.
+
         Args:
             symbols: List of symbol data dicts from Kraken.
         """
@@ -1558,6 +1738,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         updated_count = 0
         ws_only_count = 0
         btnl_count = 0
+        self._alias_claims = AliasClaims()
         try:
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
@@ -1617,3 +1798,5 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         except Exception as e:
             logger.error(f"Error updating database: {e}")
             raise
+        finally:
+            self._alias_claims = AliasClaims()

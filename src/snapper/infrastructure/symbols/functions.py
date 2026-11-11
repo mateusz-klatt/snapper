@@ -74,8 +74,15 @@ __all__ = [
     "get_tradeable_symbols",
     "get_market_data_symbols",
     "get_market_data_capability_exclusions",
+    "is_kraken_bitnomial_product",
     "_get_db_mapper",
 ]
+
+_BITNOMIAL_NATIVE_SUFFIX = "-BTNL"
+"""Native-symbol suffix that Kraken Bitnomial discovery gives every relay product."""
+
+_BITNOMIAL_WIRE_SUFFIX = ":BTNL"
+"""Suffix of the Kraken WebSocket (and catalog REST) name of a Bitnomial relay product."""
 
 
 async def resolve_symbol_public_id(
@@ -201,6 +208,31 @@ def has_kraken_candle_history_identity(native_symbol: str) -> bool:
     """
     mapper = _get_db_mapper()
     return native_symbol in mapper.native_to_ccxt or native_symbol in mapper.native_to_kraken_rest
+
+
+def is_kraken_bitnomial_product(native_symbol: str) -> bool:
+    """Tell whether a Kraken product is a relay of a Bitnomial venue product.
+
+    Bitnomial products reach Kraken as market data only. Their catalog REST
+    alias names the relay for closed candle history, so the alias maps and the
+    derived ``currency`` class no longer refuse them, and the order path must
+    recognise them on its own. Either sign is enough: the native suffix
+    ``-BTNL`` that discovery gives them, or a WebSocket alias ending in
+    ``:BTNL`` for a product with another native name.
+
+    Args:
+        native_symbol: Native identity of a Kraken product.
+
+    Returns:
+        True when either sign marks the product as a Bitnomial relay.
+    """
+    if native_symbol.endswith(_BITNOMIAL_NATIVE_SUFFIX):
+        return True
+    try:
+        websocket_symbol = native_to_kraken_websocket(native_symbol)
+    except ValueError:
+        return False
+    return websocket_symbol.endswith(_BITNOMIAL_WIRE_SUFFIX)
 
 
 def native_to_kraken_asset_class(native_symbol: str) -> str:
