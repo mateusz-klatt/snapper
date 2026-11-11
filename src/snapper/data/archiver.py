@@ -21,6 +21,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from compression import zstd
 from dataclasses import dataclass
@@ -1754,11 +1755,14 @@ class RestoreResult:
         files_processed: Number of CSV files read.
         rows_inserted: Number of rows inserted into DB.
         rows_skipped: Number of rows skipped (already exist).
+        skipped_known_to_differs: Candle rows skipped because the database
+            already stores their version with another ``known_to``.
     """
 
     files_processed: int
     rows_inserted: int
     rows_skipped: int
+    skipped_known_to_differs: int = 0
 
 
 class ArchiveRestorer:
@@ -1770,6 +1774,9 @@ class ArchiveRestorer:
     bypass the execution fence and the scope counter protocol).
     Deduplicates against existing rows by
     ``(public_id, timestamp, known_to)`` to prevent double-inserts.
+    Candle batches are classified and inserted under the candle writer
+    fence by version identity ``(public_id, timestamp)`` instead, so an
+    archived copy never re-activates a version the database has closed.
 
     Attributes:
         _repo: Sync database repository.
@@ -1837,22 +1844,25 @@ class ArchiveRestorer:
         expected_headers = _restore_headers_for_table(table)
         total_inserted = 0
         total_skipped = 0
+        total_differs = 0
         files_processed = 0
 
         for path in paths:
-            inserted, skipped = self._restore_file(
+            inserted, skipped, differs = self._restore_file(
                 model,
                 path,
                 expected_headers,
             )
             total_inserted += inserted
             total_skipped += skipped
+            total_differs += differs
             files_processed += 1
 
         return RestoreResult(
             files_processed=files_processed,
             rows_inserted=total_inserted,
             rows_skipped=total_skipped,
+            skipped_known_to_differs=total_differs,
         )
 
     def _restore_file(
@@ -1860,7 +1870,7 @@ class ArchiveRestorer:
         model: type[Any],
         path: Path,
         expected_headers: Sequence[tuple[str, ...]],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Stream one validated archive file into bounded database batches.
 
         Args:
@@ -1869,7 +1879,7 @@ class ArchiveRestorer:
             expected_headers: Exact complete layouts accepted for the table.
 
         Returns:
-            Tuple of (rows_inserted, rows_skipped).
+            Tuple of (rows_inserted, rows_skipped, skipped_known_to_differs).
 
         Raises:
             ValueError: If the header or a row width violates the archive format.
@@ -1887,12 +1897,13 @@ class ArchiveRestorer:
             parsers = _build_column_parsers(model, header)
             inserted = 0
             skipped = 0
+            differs = 0
             for raw_rows in _iter_archive_batches(
                 reader,
                 width=len(header),
                 batch_size=self._batch_size,
             ):
-                batch_inserted, batch_skipped = self._restore_batch(
+                batch_inserted, batch_skipped, batch_differs = self._restore_batch(
                     model,
                     header,
                     parsers,
@@ -1900,7 +1911,8 @@ class ArchiveRestorer:
                 )
                 inserted += batch_inserted
                 skipped += batch_skipped
-        return inserted, skipped
+                differs += batch_differs
+        return inserted, skipped, differs
 
     def _restore_batch(
         self,
@@ -1908,8 +1920,12 @@ class ArchiveRestorer:
         header: list[str],
         parsers: list[_ArchiveParser],
         raw_rows: list[tuple[str, ...]],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Deduplicate, parse, and insert one bounded archive batch.
+
+        Candle batches go to the fenced version-identity restore. Within one
+        batch, the copy of a version with the earliest ``known_to`` is the one
+        offered, so a closed copy wins over an active copy of the same version.
 
         Args:
             model: SQLAlchemy model class.
@@ -1918,8 +1934,10 @@ class ArchiveRestorer:
             raw_rows: At most the configured number of validated raw rows.
 
         Returns:
-            Tuple of (rows_inserted, rows_skipped).
+            Tuple of (rows_inserted, rows_skipped, skipped_known_to_differs).
         """
+        if model is Candle:
+            return self._restore_candle_batch(header, parsers, raw_rows)
         candidate_keys = [_archive_key(raw) for raw in raw_rows]
         existing_keys = self._repo.get_existing_archive_keys(model, candidate_keys)
         seen_keys = set(existing_keys)
@@ -1936,4 +1954,28 @@ class ArchiveRestorer:
             new_rows.append(row)
             seen_keys.add(key)
         inserted = self._repo.bulk_insert_from_archive(model, new_rows)
-        return inserted, skipped
+        return inserted, skipped, 0
+
+    def _restore_candle_batch(
+        self,
+        header: list[str],
+        parsers: list[_ArchiveParser],
+        raw_rows: list[tuple[str, ...]],
+    ) -> tuple[int, int, int]:
+        """Restore one candle batch by version identity under the candle writer fence.
+
+        Args:
+            header: Previously validated exact column names.
+            parsers: Typed CSV parsers aligned with ``header``.
+            raw_rows: At most the configured number of validated raw rows.
+
+        Returns:
+            Tuple of (rows_inserted, rows_skipped, skipped_known_to_differs).
+        """
+        ordered = sorted(raw_rows, key=_archive_key)
+        rows: list[Mapping[str, object]] = [
+            {name: parser(value) for name, parser, value in zip(header, parsers, raw, strict=True)}
+            for raw in ordered
+        ]
+        counts = self._repo.restore_candle_archive_batch(rows)
+        return counts.inserted, counts.skipped_exact, counts.skipped_known_to_differs

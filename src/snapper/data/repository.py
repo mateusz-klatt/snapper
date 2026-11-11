@@ -103,6 +103,7 @@ from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import ARRAY
+from sqlalchemy import CTE
 from sqlalchemy import ColumnElement
 from sqlalchemy import Insert
 from sqlalchemy import Row
@@ -214,6 +215,15 @@ from snapper.data.android_devices import RegistrationWrite
 from snapper.data.android_devices import android_device_info
 from snapper.data.android_devices import registration_revision
 from snapper.data.archive_symbols import resolve_archive_symbols
+from snapper.data.candle_void_types import CandleRestoreCounts
+from snapper.data.candle_void_types import CandleVersionKey
+from snapper.data.candle_void_types import CandleVersionReading
+from snapper.data.candle_void_types import CandleVoidReferences
+from snapper.data.candle_void_types import CandleVoidRefusedError
+from snapper.data.candle_void_types import CandleVoidRequest
+from snapper.data.candle_void_types import CandleVoidResult
+from snapper.data.candle_void_types import CandleVoidTarget
+from snapper.data.candle_void_types import CatalogExpectation
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
@@ -3354,6 +3364,85 @@ class PortfolioPnlSampleQuery:
     valuation_ccy: str
     epoch_public_id: str
     calc_version: str
+
+
+_CANDLE_VERSION_KEY_FIELDS: Final[tuple[str, ...]] = (
+    "instrument_public_id",
+    "timeframe",
+    "open_at",
+    "id",
+    "public_id",
+    "session_id",
+    "sequence_id",
+    "timestamp",
+)
+"""Candle columns of :class:`CandleVersionKey`, in its field order."""
+
+_CANDLE_KEY_BATCH: Final[int] = 1000
+"""Most candle version keys bound into one statement."""
+
+_CANDLE_FENCE_LOCK_TIMEOUT_SQL: Final[str] = (
+    "SELECT set_config('lock_timeout', CASE WHEN current_setting('lock_timeout')::interval = "
+    "interval '0' OR current_setting('lock_timeout')::interval > interval '1 second' "
+    "THEN '1s' ELSE current_setting('lock_timeout') END, true)"
+)
+"""Bound the candle writer fence's lock wait to at most one second, for this transaction."""
+
+
+def _candle_version_key_columns() -> tuple[ColumnElement[object], ...]:
+    """Return the candle columns that identify one stored version.
+
+    Returns:
+        The columns of :data:`_CANDLE_VERSION_KEY_FIELDS`, in order.
+    """
+    return tuple(Candle.__table__.c[name] for name in _CANDLE_VERSION_KEY_FIELDS)
+
+
+def _candle_version_key(row: Sequence[object]) -> CandleVersionKey:
+    """Build a version key from a row that starts with the key columns.
+
+    Args:
+        row: Result row whose first eight values are the key columns, in order.
+
+    Returns:
+        The version key.
+    """
+    return CandleVersionKey(
+        instrument_public_id=str(row[0]),
+        timeframe=str(row[1]),
+        open_at=cast(datetime, row[2]),
+        id=int(cast(int, row[3])),
+        public_id=str(row[4]),
+        session_id=str(row[5]),
+        sequence_id=int(cast(int, row[6])),
+        timestamp=cast(datetime, row[7]),
+    )
+
+
+def _candle_version_key_match(keys: CTE) -> tuple[ColumnElement[bool], ...]:
+    """Match candle rows to bound keys on every key column.
+
+    Args:
+        keys: CTE with one row per key, named like the key fields.
+
+    Returns:
+        One equality per key column. ``open_at`` lets PostgreSQL prune leaves.
+    """
+    return tuple(Candle.__table__.c[name] == keys.c[name] for name in _CANDLE_VERSION_KEY_FIELDS)
+
+
+def _candle_key_batches(keys: Sequence[CandleVersionKey]) -> list[Sequence[CandleVersionKey]]:
+    """Split version keys into statement-sized batches.
+
+    Args:
+        keys: Version keys.
+
+    Returns:
+        Consecutive batches of at most :data:`_CANDLE_KEY_BATCH` keys.
+    """
+    return [
+        keys[start : start + _CANDLE_KEY_BATCH] for start in range(0, len(keys), _CANDLE_KEY_BATCH)
+    ]
 
 
 class Repository(ABC):
@@ -9544,6 +9633,81 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_candle_void_targets(
+        self, instrument_public_ids: Sequence[str]
+    ) -> list[CandleVoidTarget]:
+        """Resolve requested instruments and their symbols' catalog state.
+
+        Args:
+            instrument_public_ids: Requested instrument public identities.
+
+        Returns:
+            One target per instrument with an active version, in request order.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_candle_versions(
+        self, instrument_public_ids: Sequence[str]
+    ) -> list[CandleVersionRow]:
+        """Read every active candle of some instruments, in every timeframe.
+
+        Args:
+            instrument_public_ids: Instruments to read.
+
+        Returns:
+            Stored rows sorted by instrument, timeframe and open time.
+        """
+        ...
+
+    @abstractmethod
+    async def get_candle_void_references(
+        self, instrument_public_ids: Sequence[str]
+    ) -> CandleVoidReferences:
+        """Count the FX artifacts and shadow candles that name some instruments.
+
+        Args:
+            instrument_public_ids: Instruments to count references to.
+
+        Returns:
+            Active and historical counts, which the void does not change.
+        """
+        ...
+
+    @abstractmethod
+    async def void_candle_versions(self, request: CandleVoidRequest) -> CandleVoidResult:
+        """Close exactly a voted set of active candles at one database instant.
+
+        Args:
+            request: Instruments, the expected versions, the approved catalog
+                state and the preparation hook.
+
+        Returns:
+            The committed instant and the closed versions.
+
+        Raises:
+            CandleVoidRefusedError: If the cohort, the catalog or the clock does
+                not match, or the closure does not return exactly the set; the
+                transaction is rolled back.
+        """
+        ...
+
+    @abstractmethod
+    async def observe_candle_void(
+        self,
+        keys: Sequence[CandleVersionKey],
+        decide: Callable[[dict[CandleVersionKey, CandleVersionReading]], None],
+    ) -> None:
+        """Read some versions' ``known_to`` while holding the candle writer fence.
+
+        Args:
+            keys: Versions to read.
+            decide: Called with each key's reading, an absent version included,
+                before the fence is released.
+        """
+        ...
+
+    @abstractmethod
     async def get_latest_candle_open_at_by_exchange(
         self,
         *,
@@ -12234,11 +12398,7 @@ class SQLAlchemyRepository(Repository):
             isolation = (await session.execute(text("SHOW transaction_isolation"))).scalar_one()
             if isolation != "read committed":
                 raise ValueError("missing candle insertion requires PostgreSQL READ COMMITTED")
-            await session.execute(
-                text(
-                    "SELECT set_config('lock_timeout', CASE WHEN current_setting('lock_timeout')::interval = interval '0' OR current_setting('lock_timeout')::interval > interval '1 second' THEN '1s' ELSE current_setting('lock_timeout') END, true)"
-                )
-            )
+            await session.execute(text(_CANDLE_FENCE_LOCK_TIMEOUT_SQL))
             await session.execute(text(f"LOCK TABLE public.candles IN {lock_mode} MODE"))
         elif self.dialect_name == "sqlite":
             if sqlite_write_lock:
@@ -38071,6 +38231,365 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return superseded
 
+    async def get_candle_void_targets(
+        self, instrument_public_ids: Sequence[str]
+    ) -> list[CandleVoidTarget]:
+        """Resolve requested instruments and their symbols' catalog state.
+
+        Args:
+            instrument_public_ids: Requested instrument public identities.
+
+        Returns:
+            One target per instrument with an active version, in request order.
+        """
+        async with self.session() as session:
+            targets = [
+                await self._candle_void_target(session, instrument_public_id)
+                for instrument_public_id in dict.fromkeys(instrument_public_ids)
+            ]
+        return [target for target in targets if target is not None]
+
+    @staticmethod
+    async def _candle_void_target(
+        session: AsyncSession, instrument_public_id: str
+    ) -> CandleVoidTarget | None:
+        """Resolve one active instrument and its symbol's catalog state on its exchange.
+
+        Args:
+            session: Open session.
+            instrument_public_id: Instrument public identity.
+
+        Returns:
+            The target, or None when the instrument has no active version.
+        """
+        instrument = (
+            await session.execute(
+                select(Instrument.exchange, Instrument.symbol_public_id).where(
+                    Instrument.public_id == instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).one_or_none()
+        if instrument is None:
+            return None
+        native_symbol = (
+            await session.execute(
+                select(Symbol.native_symbol).where(
+                    Symbol.public_id == instrument.symbol_public_id,
+                    Symbol.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one()
+        capability = (
+            await session.execute(
+                select(
+                    SymbolExchangeCapability.public_id,
+                    SymbolExchangeCapability.timestamp,
+                    SymbolExchangeCapability.can_market_data,
+                    SymbolExchangeCapability.can_trade,
+                ).where(
+                    SymbolExchangeCapability.symbol_public_id == instrument.symbol_public_id,
+                    SymbolExchangeCapability.exchange == instrument.exchange,
+                    SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).one_or_none()
+        aliases = (
+            await session.execute(
+                select(func.count())
+                .select_from(SymbolAlias)
+                .where(
+                    SymbolAlias.symbol_public_id == instrument.symbol_public_id,
+                    SymbolAlias.exchange == instrument.exchange,
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one()
+        catalog = CatalogExpectation(
+            instrument_public_id=instrument_public_id,
+            capability_public_id=None if capability is None else str(capability.public_id),
+            capability_timestamp=None if capability is None else capability.timestamp,
+            can_market_data=None if capability is None else bool(capability.can_market_data),
+            can_trade=None if capability is None else bool(capability.can_trade),
+            active_alias_count=int(aliases),
+        )
+        return CandleVoidTarget(
+            instrument_public_id=instrument_public_id,
+            exchange=str(instrument.exchange),
+            native_symbol=str(native_symbol),
+            catalog=catalog,
+        )
+
+    async def get_active_candle_versions(
+        self, instrument_public_ids: Sequence[str]
+    ) -> list[CandleVersionRow]:
+        """Read every active candle of some instruments, in every timeframe.
+
+        Args:
+            instrument_public_ids: Instruments to read.
+
+        Returns:
+            Stored rows sorted by instrument, timeframe and open time.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(Candle.__table__)
+                .where(
+                    Candle.instrument_public_id.in_(list(dict.fromkeys(instrument_public_ids))),
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(Candle.instrument_public_id, Candle.timeframe, Candle.open_at)
+            )
+            return [cast(CandleVersionRow, dict(row)) for row in result.mappings()]
+
+    async def get_candle_void_references(
+        self, instrument_public_ids: Sequence[str]
+    ) -> CandleVoidReferences:
+        """Count the FX artifacts and shadow candles that name some instruments.
+
+        Args:
+            instrument_public_ids: Instruments to count references to.
+
+        Returns:
+            Active and historical counts, which the void does not change.
+        """
+        ids = list(dict.fromkeys(instrument_public_ids))
+        election = FxConversionElection.selected_source_instrument_public_id.in_(ids)
+        proof = FxConversionProof.source_instrument_public_id.in_(ids)
+        async with self.session() as session:
+            elections_all = await self._count_where(session, FxConversionElection, election)
+            elections_active = await self._count_where(
+                session,
+                FxConversionElection,
+                election,
+                FxConversionElection.known_to == KNOWN_TO_MAX,
+            )
+            proofs_all = await self._count_where(session, FxConversionProof, proof)
+            proofs_active = await self._count_where(
+                session, FxConversionProof, proof, FxConversionProof.known_to == KNOWN_TO_MAX
+            )
+            shadow = (
+                await session.execute(
+                    select(
+                        ShadowCandle.instrument_public_id,
+                        ShadowCandle.timeframe,
+                        ShadowCandle.source,
+                        func.count(),
+                    )
+                    .where(
+                        ShadowCandle.instrument_public_id.in_(ids),
+                        ShadowCandle.known_to == KNOWN_TO_MAX,
+                    )
+                    .group_by(
+                        ShadowCandle.instrument_public_id,
+                        ShadowCandle.timeframe,
+                        ShadowCandle.source,
+                    )
+                )
+            ).all()
+        return CandleVoidReferences(
+            elections_active=elections_active,
+            elections_historical=elections_all - elections_active,
+            proofs_active=proofs_active,
+            proofs_historical=proofs_all - proofs_active,
+            shadow_candles={f"{row[0]}|{row[1]}|{row[2]}": int(row[3]) for row in shadow},
+        )
+
+    @staticmethod
+    async def _count_where(
+        session: AsyncSession, model: type[Base], *conditions: ColumnElement[bool]
+    ) -> int:
+        """Count the rows of one model that satisfy every condition.
+
+        Args:
+            session: Open session.
+            model: Model to count.
+            *conditions: Filters.
+
+        Returns:
+            The row count.
+        """
+        statement = select(func.count()).select_from(model).where(*conditions)
+        return int((await session.execute(statement)).scalar_one())
+
+    async def void_candle_versions(self, request: CandleVoidRequest) -> CandleVoidResult:
+        """Close exactly a voted set of active candles at one database instant.
+
+        One owned transaction holds the candle writer fence from before the
+        authoritative read until the commit, so no candle can be written to the
+        instruments in between, in any timeframe. Every refusal rolls back
+        before anything is closed.
+
+        Args:
+            request: Instruments, the expected versions, the approved catalog
+                state and the preparation hook.
+
+        Returns:
+            The committed instant and the closed versions.
+
+        Raises:
+            CandleVoidRefusedError: ``empty_cohort`` or ``duplicate_keys`` for a
+                malformed request; ``cohort_changed``, ``catalog`` or ``clock``
+                when the fenced state differs from the request; ``closed_set``
+                when the closure does not return exactly the expected versions.
+        """
+        expected = frozenset(request.expected)
+        if not expected:
+            raise CandleVoidRefusedError("empty_cohort")
+        if len(expected) != len(request.expected):
+            raise CandleVoidRefusedError("duplicate_keys")
+        async with self.session() as session:
+            await self._begin_candle_reconciliation_write(session, sqlite_write_lock=True)
+            current = await self._active_candle_version_keys(session, request.instrument_public_ids)
+            if current != expected:
+                raise CandleVoidRefusedError("cohort_changed")
+            targets = [
+                await self._candle_void_target(session, instrument_public_id)
+                for instrument_public_id in dict.fromkeys(request.instrument_public_ids)
+            ]
+            catalog = [target.catalog for target in targets if target is not None]
+            if sorted(catalog) != sorted(request.catalog):
+                raise CandleVoidRefusedError("catalog")
+            void_at = await self._candle_void_clock(session)
+            newest = max(key.timestamp for key in expected)
+            if void_at.utcoffset() != timedelta(0) or not newest < void_at < KNOWN_TO_MAX:
+                raise CandleVoidRefusedError("clock")
+            request.on_prepared(void_at)
+            closed = await self._close_candle_versions(session, sorted(expected), void_at)
+            if closed != expected:
+                raise CandleVoidRefusedError("closed_set")
+            await session.commit()
+        return CandleVoidResult(void_at=void_at, closed=tuple(sorted(closed)))
+
+    async def observe_candle_void(
+        self,
+        keys: Sequence[CandleVersionKey],
+        decide: Callable[[dict[CandleVersionKey, CandleVersionReading]], None],
+    ) -> None:
+        """Read some versions' ``known_to`` while holding the candle writer fence.
+
+        The fence conflicts with itself, so a granted fence shows that no void
+        transaction is in progress. ``decide`` runs before the fence is released
+        and the transaction ends without writing.
+
+        Args:
+            keys: Versions to read.
+            decide: Called with each key's reading, an absent version included,
+                before the fence is released.
+        """
+        async with self.session() as session:
+            await self._begin_candle_reconciliation_write(session, sqlite_write_lock=True)
+            readings = dict.fromkeys(keys, CandleVersionReading(known_to=None, active=False))
+            for batch in _candle_key_batches(sorted(set(keys))):
+                found = await session.execute(
+                    select(*_candle_version_key_columns(), Candle.known_to).where(
+                        *_candle_version_key_match(self._candle_key_cte(batch))
+                    )
+                )
+                for row in found.all():
+                    known_to = cast(datetime, row[-1])
+                    readings[_candle_version_key(row)] = CandleVersionReading(
+                        known_to=known_to, active=known_to == KNOWN_TO_MAX
+                    )
+            decide(readings)
+            await session.rollback()
+
+    async def _candle_void_clock(self, session: AsyncSession) -> datetime:
+        """Read the database clock, after the fence, for the void instant.
+
+        Args:
+            session: Session holding the candle writer fence.
+
+        Returns:
+            ``clock_timestamp()`` on PostgreSQL; the current UTC time on SQLite.
+        """
+        if self.dialect_name == "postgresql":
+            value = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+            return cast(datetime, value)
+        return datetime.now(UTC)
+
+    @staticmethod
+    async def _active_candle_version_keys(
+        session: AsyncSession, instrument_public_ids: Sequence[str]
+    ) -> frozenset[CandleVersionKey]:
+        """Read the keys of every active candle of some instruments.
+
+        Args:
+            session: Session holding the candle writer fence.
+            instrument_public_ids: Instruments to read.
+
+        Returns:
+            The active versions' keys, in every timeframe.
+        """
+        rows = await session.execute(
+            select(*_candle_version_key_columns()).where(
+                Candle.instrument_public_id.in_(list(dict.fromkeys(instrument_public_ids))),
+                Candle.known_to == KNOWN_TO_MAX,
+            )
+        )
+        return frozenset(_candle_version_key(row) for row in rows.all())
+
+    async def _close_candle_versions(
+        self,
+        session: AsyncSession,
+        keys: Sequence[CandleVersionKey],
+        void_at: datetime,
+    ) -> frozenset[CandleVersionKey]:
+        """Close exactly some active versions, matched by their full keys.
+
+        Args:
+            session: Session holding the candle writer fence.
+            keys: Versions to close.
+            void_at: Instant they now end at.
+
+        Returns:
+            The keys the closure returned.
+        """
+        closed: set[CandleVersionKey] = set()
+        for batch in _candle_key_batches(keys):
+            result = await session.execute(
+                update(Candle)
+                .where(
+                    *_candle_version_key_match(self._candle_key_cte(batch)),
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+                .values(known_to=void_at)
+                .returning(*_candle_version_key_columns())
+            )
+            closed.update(_candle_version_key(row) for row in result.all())
+        return frozenset(closed)
+
+    def _candle_key_cte(self, keys: Sequence[CandleVersionKey]) -> CTE:
+        """Bind a batch of version keys as a table the statements join against.
+
+        Args:
+            keys: At most one batch of version keys.
+
+        Returns:
+            A CTE with one row per key and the key's column names.
+        """
+        names = _CANDLE_VERSION_KEY_FIELDS
+        rows = [tuple(getattr(key, name) for name in names) for key in keys]
+        if self.dialect_name == "postgresql":
+            return select(
+                *(
+                    func.unnest(
+                        bindparam(
+                            f"void_{name}",
+                            [row[index] for row in rows],
+                            type_=ARRAY(Candle.__table__.c[name].type),
+                        ),
+                        type_=Candle.__table__.c[name].type,
+                    ).label(name)
+                    for index, name in enumerate(names)
+                )
+            ).cte("candle_void_keys")
+        return (
+            sql_values(*(column(name, Candle.__table__.c[name].type) for name in names))
+            .data(rows)
+            .cte("candle_void_keys")
+        )
+
     async def get_latest_candle_open_at_by_exchange(
         self,
         *,
@@ -39104,6 +39623,88 @@ class DatabaseRepository:
                 session.execute(insert(TradeIntegrityWorkItem), work_items)
             session.commit()
         return len(rows)
+
+    def restore_candle_archive_batch(
+        self, rows: Sequence[Mapping[str, object]]
+    ) -> CandleRestoreCounts:
+        """Classify and insert one candle restore batch under the candle writer fence.
+
+        A version is identified by ``(public_id, timestamp)``; ``known_to`` is
+        its only mutable field. When the database already stores the version,
+        its ``known_to`` is the current knowledge, so an archived copy is never
+        inserted next to it. Classification and insertion share one fenced
+        transaction, so no candle writer can close or insert a version between
+        them.
+
+        Args:
+            rows: Archived candle rows with every non-id column, typed.
+
+        Returns:
+            The inserted rows and the two kinds of skipped rows.
+        """
+        if not rows:
+            return CandleRestoreCounts(inserted=0, skipped_exact=0, skipped_known_to_differs=0)
+        with self.get_session() as session:
+            self._begin_sync_candle_fence(session)
+            identities = list(
+                dict.fromkeys(
+                    (str(row["public_id"]), cast(datetime, row["timestamp"]).astimezone(UTC))
+                    for row in rows
+                )
+            )
+            stored = session.execute(
+                select(Candle.public_id, Candle.timestamp, Candle.known_to).where(
+                    tuple_(Candle.public_id, Candle.timestamp).in_(identities)
+                )
+            ).all()
+            versions = {(str(row[0]), row[1].astimezone(UTC)) for row in stored}
+            exact = {
+                (str(row[0]), row[1].astimezone(UTC), row[2].astimezone(UTC)) for row in stored
+            }
+            inserts: list[Mapping[str, object]] = []
+            skipped_exact = 0
+            skipped_differs = 0
+            for row in rows:
+                version = (str(row["public_id"]), cast(datetime, row["timestamp"]).astimezone(UTC))
+                full = (*version, cast(datetime, row["known_to"]).astimezone(UTC))
+                if full in exact:
+                    skipped_exact += 1
+                elif version in versions:
+                    skipped_differs += 1
+                else:
+                    inserts.append(row)
+                    versions.add(version)
+                    exact.add(full)
+            if inserts:
+                session.execute(insert(Candle), inserts)
+            session.commit()
+        return CandleRestoreCounts(
+            inserted=len(inserts),
+            skipped_exact=skipped_exact,
+            skipped_known_to_differs=skipped_differs,
+        )
+
+    def _begin_sync_candle_fence(self, session: SyncSession) -> None:
+        """Take the candle writer fence in a synchronous session.
+
+        Args:
+            session: Session about to start its transaction.
+
+        Raises:
+            ValueError: If PostgreSQL does not run the session in READ COMMITTED.
+            NotImplementedError: For a dialect other than PostgreSQL or SQLite.
+        """
+        dialect = self.engine.dialect.name
+        if dialect == "postgresql":
+            isolation = session.execute(text("SHOW transaction_isolation")).scalar_one()
+            if isolation != "read committed":
+                raise ValueError("the candle restore requires PostgreSQL READ COMMITTED")
+            session.execute(text(_CANDLE_FENCE_LOCK_TIMEOUT_SQL))
+            session.execute(text("LOCK TABLE public.candles IN SHARE ROW EXCLUSIVE MODE"))
+        elif dialect == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError("the candle restore supports only SQLite and PostgreSQL")
 
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""
