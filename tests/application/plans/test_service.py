@@ -4,6 +4,8 @@ import asyncio
 import json
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast as _cast
 from unittest.mock import AsyncMock
@@ -16,8 +18,12 @@ from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.service import _EVALUATOR_REGISTRY
 from snapper.application.plans.service import PlanExecutorService
+from snapper.application.trade.reconciler import ReconciliationLoop
+from snapper.application.trade.trade_service import TradeService
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionPlanRow
+from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.data.repository_types import VenueEventInsertRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import SignalData
@@ -4144,8 +4150,123 @@ def _stranded_plan() -> ExecutionPlanRow:
     )
 
 
+def _strand_child_create(created_at: datetime) -> TradeCommandInsertRow:
+    """Build the dispatched create command of the stranded plan's child ``cid-1``.
+
+    Args:
+        created_at: Creation and version time of the command.
+
+    Returns:
+        The insert row, linked to plan ``plan-strand``.
+    """
+    return {
+        "command_type": "create",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual_once",
+        "client_order_id": "cid-1",
+        "venue_client_id": "cid-1",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 1.0,
+        "price": 50000.0,
+        "status": "dispatched",
+        "created_at": created_at,
+        "correlation_id": "plan-strand",
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": created_at,
+        "wallet_public_id": "wallet-1",
+        "plan_public_id": "plan-strand",
+    }
+
+
+def _strand_child_event(
+    event_type: str, received_at: datetime, sequence_id: int
+) -> VenueEventInsertRow:
+    """Build one venue observation of the stranded plan's child ``cid-1``.
+
+    Args:
+        event_type: Venue event type.
+        received_at: Observation time.
+        sequence_id: Provenance sequence of the row.
+
+    Returns:
+        The insert row.
+    """
+    return {
+        "event_type": event_type,
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "received_at": received_at,
+        "session_id": "s1",
+        "sequence_id": sequence_id,
+        "timestamp": received_at,
+        "client_order_id": "cid-1",
+        "venue_client_id": "cid-1",
+        "exchange_order_id": "ex-1",
+        "wallet_public_id": "wallet-1",
+        "liquidity_role": "unknown",
+    }
+
+
 class TestStrandedCancelEndedTarget:
     """Item G2b: plan recovery does not re-emit a cancel for an ended target."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_falsely_rejected_child_resurrected_and_accepted_is_reemitted(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Re-emit the cancel for a child whose rejection was false.
+
+        Given: the child's dispatched create command in a SQLite repository,
+            folded to rejected by a venue rejection and then shown alive by a
+            later venue acceptance,
+        When: the next reconciliation cycle resurrects it to accepted and plan
+            recovery then re-emits stranded cancels,
+        Then: the child counts as live and one cancel command for it is stored.
+        """
+        repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'g2b.db'}")
+        await repository.create_all()
+        mock_repo_fn.return_value = repository
+        created_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=20)
+        loop = ReconciliationLoop(
+            exchange_name="kraken",
+            repository=repository,
+            trade_service=MagicMock(spec=TradeService),
+        )
+        try:
+            await repository.insert_trade_command(_strand_child_create(created_at))
+            await repository.insert_venue_event(
+                _strand_child_event("order_rejected", created_at + timedelta(seconds=10), 1)
+            )
+            await loop._reconcile_cycle()
+            rejected = await repository.get_active_create_command_by_client_order_id(
+                "cid-1", "kraken"
+            )
+            await repository.insert_venue_event(
+                _strand_child_event("order_accepted", created_at + timedelta(seconds=30), 2)
+            )
+            await loop._reconcile_cycle()
+            resurrected = await repository.get_active_create_command_by_client_order_id(
+                "cid-1", "kraken"
+            )
+
+            await PlanExecutorService()._reemit_stranded_cancel(_stranded_plan())
+
+            pending = await repository.has_pending_cancel_command("cid-1", as_of=datetime.now(UTC))
+        finally:
+            await repository.engine.dispose()
+
+        assert rejected is not None and rejected["status"] == "rejected"
+        assert resurrected is not None and resurrected["status"] == "accepted"
+        assert pending is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_status", ["cancelled", "filled", "expired"])

@@ -29,6 +29,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
@@ -102,45 +103,71 @@ async def repository() -> AsyncIterator[SQLAlchemyRepository]:
 
 @pytest.fixture
 async def inherited_repeatable_read_repository() -> AsyncIterator[SQLAlchemyRepository]:
-    """Create a second engine whose sessions default to REPEATABLE READ.
+    """Create a second, one-connection engine whose sessions default to REPEATABLE READ.
 
-    Rebinding the session factory to the engine's ``REPEATABLE READ`` proxy
-    reproduces an inherited ``default_transaction_isolation`` while the
-    record-once insert runs unmodified.
+    Rebinding the session factory to a ``REPEATABLE READ`` proxy reproduces an
+    inherited ``default_transaction_isolation`` while the record-once insert
+    runs unmodified. The pool holds exactly one connection, so the backend pid
+    read before the race is the backend the second writer then uses, and the
+    poll watches that writer alone.
     """
     result = SQLAlchemyRepository(os.environ["DB_URL"])
+    single = create_async_engine(os.environ["DB_URL"], pool_size=1, max_overflow=0)
     result.session_factory = async_sessionmaker(
-        result.engine.execution_options(isolation_level="REPEATABLE READ"),
+        single.execution_options(isolation_level="REPEATABLE READ"),
         expire_on_commit=False,
         class_=AsyncSession,
     )
     try:
         yield result
     finally:
+        await single.dispose()
         await result.engine.dispose()
 
 
-async def _wait_until_advisory_blocked(repository: SQLAlchemyRepository) -> None:
-    """Poll until one backend waits on an advisory lock, bounded.
+async def _backend_pid(repository: SQLAlchemyRepository) -> int:
+    """Return the backend pid of the connection the repository's sessions use.
 
     Args:
-        repository: Repository used for the read-only poll.
+        repository: Repository whose session factory has one pooled connection.
+
+    Returns:
+        The PostgreSQL backend pid.
+    """
+    async with repository.session() as s:
+        pid = (await s.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+    return int(pid)
+
+
+async def _wait_until_parked_on_the_advisory_lock(observer: SQLAlchemyRepository, pid: int) -> str:
+    """Poll one backend until it waits on an advisory lock, bounded.
+
+    Args:
+        observer: Repository used for the read-only poll, on other connections.
+        pid: Backend pid of the writer to watch.
+
+    Returns:
+        The statement that backend is running while it waits.
 
     Raises:
-        TimeoutError: When no backend reaches the advisory wait in time.
+        TimeoutError: When the backend does not reach the advisory wait in time.
     """
     deadline = asyncio.get_running_loop().time() + _RACE_TIMEOUT_SECONDS
     while asyncio.get_running_loop().time() < deadline:
-        async with repository.session() as s:
-            waiting = (
+        async with observer.session() as s:
+            row = (
                 await s.execute(
-                    text("SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event = 'advisory'")
+                    text(
+                        "SELECT wait_event_type, wait_event, query "
+                        "FROM pg_stat_activity WHERE pid = :pid"
+                    ),
+                    {"pid": pid},
                 )
-            ).scalar_one()
-        if int(waiting):
-            return
+            ).first()
+        if row is not None and (row[0], row[1]) == ("Lock", "advisory"):
+            return str(row[2])
         await asyncio.sleep(0.05)
-    raise TimeoutError("no backend reached the advisory lock wait in time")
+    raise TimeoutError(f"backend {pid} did not reach the advisory lock wait in time")
 
 
 async def _terminal_count(repository: SQLAlchemyRepository, client_order_id: str) -> int:
@@ -177,8 +204,9 @@ async def test_parked_repeatable_read_writer_finds_the_first_terminal(
         took the advisory lock, and a second writer on an engine that
         inherits REPEATABLE READ,
     When: the second writer calls the record-once insert for the same order,
-    Then: it parks on the advisory lock, before its existence check, finds
-        the first writer's row once that commits, and one row exists.
+    Then: its own backend parks on the advisory lock while its current
+        statement is still the lock, so its existence check has not run; it
+        finds the first writer's row once that commits; and one row exists.
     """
     client_order_id = f"witness-{uuid4()}"
     entered = asyncio.Event()
@@ -191,6 +219,7 @@ async def test_parked_repeatable_read_writer_finds_the_first_terminal(
         entered.set()
         await release.wait()
 
+    second_pid = await _backend_pid(inherited_repeatable_read_repository)
     with patch.object(repository, "_begin_order_terminal_transaction", side_effect=held_begin):
         first = asyncio.create_task(
             repository.insert_order_terminal_once(_terminal(client_order_id, 1))
@@ -201,7 +230,8 @@ async def test_parked_repeatable_read_writer_finds_the_first_terminal(
                 _terminal(client_order_id, 2)
             )
         )
-        await _wait_until_advisory_blocked(inherited_repeatable_read_repository)
+        statement = await _wait_until_parked_on_the_advisory_lock(repository, second_pid)
+        assert "pg_advisory_xact_lock" in statement
         assert not second.done()
         release.set()
         results = await asyncio.wait_for(

@@ -3513,11 +3513,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         missing metadata resolved from the durable command and the
         record-once insert called, which rechecks atomically. An entry is
         dropped once that call returns, and kept for the next cycle when
-        the probe, the lookup or the insert raises.
+        the probe, the lookup or the insert raises. An entry that a
+        concurrent enqueue evicted from the full map while an earlier
+        entry was awaited is skipped; the eviction has already logged it.
         """
         exchange_name = self._get_exchange_name()
         for client_order_id in tuple(self._unrecorded_order_terminals):
-            params = self._unrecorded_order_terminals[client_order_id]
+            params = self._unrecorded_order_terminals.get(client_order_id)
+            if params is None:
+                continue
             try:
                 if isinstance(self.repository, SQLAlchemyRepository) and (
                     await self.repository.has_venue_event(client_order_id, "order_terminal")
