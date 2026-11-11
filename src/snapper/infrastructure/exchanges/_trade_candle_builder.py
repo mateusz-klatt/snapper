@@ -18,6 +18,7 @@ implementation in :mod:`snapper.infrastructure.exchanges.implementations.walutom
 """
 
 import asyncio
+from collections import Counter
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -91,6 +92,24 @@ def enqueue_or_drop_oldest_candle(
 type _BucketKey = tuple[str, int]
 type _TradeIdentity = tuple[datetime, float, float, str, str]
 
+_IDENTITY_FIELDS: tuple[str, ...] = ("timestamp", "price", "quantity", "side", "ord_type")
+
+
+def _identity_value_text(value: datetime | float | str) -> str:
+    """Render one identity field without losing precision for the conflict diagnostic.
+
+    Args:
+        value: Timestamp, price or quantity, or side or order type text.
+
+    Returns:
+        The ISO timestamp, the exact ``repr`` of a float, or the text itself.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, float):
+        return repr(value)
+    return value
+
 
 @dataclass(frozen=True)
 class TradeCandleRetentionPolicy:
@@ -131,10 +150,15 @@ class _SymbolHistory:
 
 @dataclass(frozen=True)
 class _RetainedTrade:
-    """An identified trade's exact immutable payload and owning retained bucket."""
+    """An identified trade's exact immutable payload, owning retained bucket and receipt time.
+
+    ``received_at`` is the builder module's ``monotonic()`` value when this first copy was
+    retained. Only the conflict diagnostic reads it.
+    """
 
     bucket: _BucketKey
     identity: _TradeIdentity
+    received_at: float
 
 
 class TradeCandleBuilder:
@@ -175,6 +199,7 @@ class TradeCandleBuilder:
         self._late_trades_after_close = 0
         self._refused_trades = 0
         self._duplicate_trades = 0
+        self._conflict_fields: Counter[str] = Counter()
 
     def _symbol_history(
         self,
@@ -211,21 +236,28 @@ class TradeCandleBuilder:
         self._histories[symbol] = history
         return history
 
-    def _refuse(self, symbol: str, minute_ts: int, reason: str) -> None:
-        """Count every refusal while bounding its warning history to the symbol cap."""
+    def _refuse(self, symbol: str, minute_ts: int, reason: str, detail: str | None = None) -> None:
+        """Count every refusal while bounding its warning history to the symbol cap.
+
+        Args:
+            symbol: Symbol whose minute is withheld.
+            minute_ts: Epoch seconds of the withheld minute.
+            reason: Stable refusal reason.
+            detail: Optional diagnostic appended to the bounded warning. It never changes a
+                decision, a counter or how often the warning is written.
+        """
         self._refused_trades += 1
         history = self._histories[symbol]
         previous = history.refused_through
         history.refused_through = minute_ts if previous is None else max(previous, minute_ts)
         if history.warned_through is None or minute_ts > history.warned_through:
             history.warned_through = minute_ts
-            logger.warning(
-                "Withholding unproven trade candle: symbol={} minute={} reason={} refused={}",
-                symbol,
-                minute_ts,
-                reason,
-                self._refused_trades,
-            )
+            message = "Withholding unproven trade candle: symbol={} minute={} reason={} refused={}"
+            arguments: list[object] = [symbol, minute_ts, reason, self._refused_trades]
+            if detail is not None:
+                message += " {}"
+                arguments.append(detail)
+            logger.warning(message, *arguments)
 
     def _evict_bucket(self, key: _BucketKey) -> None:
         """Drop a whole accumulator and all its IDs, fencing off partial recreation."""
@@ -250,11 +282,50 @@ class TradeCandleBuilder:
         if retained.identity == identity:
             self._duplicate_trades += 1
             return True
+        detail = self._conflict_detail(trade.trade_id, retained, identity)
         self._evict_bucket(retained.bucket)
         if key in self._builders:
             self._evict_bucket(key)
-        self._refuse(trade.symbol, key[1], "conflicting_trade_id")
+        self._refuse(trade.symbol, key[1], "conflicting_trade_id", detail=detail)
         return True
+
+    def _conflict_detail(
+        self, trade_id: str, retained: _RetainedTrade, identity: _TradeIdentity
+    ) -> str:
+        """Name the differing identity fields of one conflict and count them.
+
+        Args:
+            trade_id: Stable trade identifier shared by both deliveries.
+            retained: The first retained delivery for that identifier.
+            identity: Identity of the new delivery, in ``_IDENTITY_FIELDS`` order.
+
+        Returns:
+            One compact line: the differing fields, both values of each with the retained value
+            first, the seconds since the retained copy arrived, and the builder's cumulative
+            per-field conflict counts.
+        """
+        earlier_values: tuple[datetime | float | str, ...] = retained.identity
+        later_values: tuple[datetime | float | str, ...] = identity
+        differing = [
+            (name, earlier, later)
+            for name, earlier, later in zip(
+                _IDENTITY_FIELDS, earlier_values, later_values, strict=True
+            )
+            if earlier != later
+        ]
+        self._conflict_fields.update(name for name, _, _ in differing)
+        pairs = " ".join(
+            f"{name}={_identity_value_text(earlier)}->{_identity_value_text(later)}"
+            for name, earlier, later in differing
+        )
+        totals = ",".join(
+            f"{name}:{count}" for name, count in sorted(self._conflict_fields.items())
+        )
+        return (
+            f"fields={','.join(name for name, _, _ in differing)} trade_id={trade_id} "
+            f"earlier_minute={retained.bucket[1]} {pairs} "
+            f"gap_s={monotonic() - retained.received_at:.3f} totals={totals}"
+        )
 
     def _bucket_for_trade(
         self, trade: TradeUpdate, minute: datetime, key: _BucketKey
@@ -304,7 +375,7 @@ class TradeCandleBuilder:
             self._refuse(trade.symbol, key[1], "trade_identity_budget_exhausted")
             return False
         identity = (trade.timestamp, trade.price, trade.quantity, trade.side, trade.ord_type)
-        self._trade_ids[(trade.symbol, trade.trade_id)] = _RetainedTrade(key, identity)
+        self._trade_ids[(trade.symbol, trade.trade_id)] = _RetainedTrade(key, identity, monotonic())
         self._builders[key].trade_ids.add(trade.trade_id)
         return True
 
@@ -467,6 +538,18 @@ class TradeCandleBuilder:
             The cumulative number of exact identified trade redeliveries ignored.
         """
         return self._duplicate_trades
+
+    @property
+    def conflict_fields(self) -> dict[str, int]:
+        """Cumulative count of each identity field seen differing in a ``conflicting_trade_id``.
+
+        Every conflict counts, including those whose warning the per-minute bound suppresses.
+        One conflict can raise several fields.
+
+        Returns:
+            A copy keyed by field name.
+        """
+        return dict(self._conflict_fields)
 
     @property
     def retained_buckets(self) -> int:

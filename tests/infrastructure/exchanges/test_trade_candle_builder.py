@@ -9,6 +9,8 @@ assertions inside every client test file.
 """
 
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -915,3 +917,247 @@ class TestEnqueueOrDropOldestCandle:
         tcb._drop_counters.clear()
         summaries = [rec for rec in caplog.records if "candle-label queue full" in rec.message]
         assert len(summaries) <= 1
+
+
+_CONFLICT_MINUTE = datetime(2026, 11, 10, 18, 40, tzinfo=UTC)
+_CONFLICT_MINUTE_TS = int(_CONFLICT_MINUTE.timestamp())
+_CONFLICT_ID = "7706614438048191161"
+
+
+@dataclass
+class _Clock:
+    """A settable stand-in for the builder module's ``monotonic``."""
+
+    now: float = 100.0
+
+    def __call__(self) -> float:
+        """Return the current fake monotonic reading."""
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """Replace the builder module's ``monotonic`` so that ``gap_s`` is deterministic."""
+    fake = _Clock()
+    monkeypatch.setattr(tcb, "monotonic", fake)
+    return fake
+
+
+def _identified_fill(trade_id: str = _CONFLICT_ID, minute_offset: int = 0) -> TradeUpdate:
+    """Build one identified fill 3 ms into the conflict minute, shifted by whole minutes."""
+    return TradeUpdate(
+        symbol="MESZ6-CME",
+        side="buy",
+        quantity=1.0,
+        price=6500.25,
+        ord_type="fill",
+        timestamp=_CONFLICT_MINUTE + timedelta(minutes=minute_offset, milliseconds=3),
+        trade_id=trade_id,
+    )
+
+
+def _warnings_during(action: Callable[[], None]) -> list[str]:
+    """Collect the warning messages a builder action writes."""
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, format="{message}", level="WARNING")
+    try:
+        action()
+    finally:
+        logger.remove(sink_id)
+    return [message.rstrip("\n") for message in messages]
+
+
+def _conflict_line(minute_ts: int, refused: int, detail: str) -> str:
+    """Return the complete bounded warning expected for one conflicting delivery."""
+    return (
+        "Withholding unproven trade candle: symbol=MESZ6-CME "
+        f"minute={minute_ts} reason=conflicting_trade_id refused={refused} {detail}"
+    )
+
+
+class TestConflictDiagnostics:
+    """The conflict warning names what differs without changing any decision or log volume."""
+
+    @pytest.mark.parametrize(
+        ("field_name", "value", "pair"),
+        [
+            (
+                "timestamp",
+                _CONFLICT_MINUTE + timedelta(milliseconds=4),
+                "timestamp=2026-11-10T18:40:00.003000+00:00->2026-11-10T18:40:00.004000+00:00",
+            ),
+            ("price", 6500.5, "price=6500.25->6500.5"),
+            ("quantity", 2.0, "quantity=1.0->2.0"),
+            ("side", "sell", "side=buy->sell"),
+            ("ord_type", "limit", "ord_type=fill->limit"),
+        ],
+    )
+    def test_single_field_conflict_names_exactly_that_field(
+        self, clock: _Clock, field_name: str, value: datetime | float | str, pair: str
+    ) -> None:
+        """Given one retained fill, a redelivery differing in one field names only that field."""
+        builder = _builder()
+        builder.update(_identified_fill())
+        clock.now = 112.345
+        conflicting = replace(_identified_fill(), **{field_name: value})
+        lines = _warnings_during(lambda: builder.update(conflicting))
+        detail = (
+            f"fields={field_name} trade_id={_CONFLICT_ID} earlier_minute={_CONFLICT_MINUTE_TS} "
+            f"{pair} gap_s=12.345 totals={field_name}:1"
+        )
+        assert lines == [_conflict_line(_CONFLICT_MINUTE_TS, 1, detail)]
+        assert builder.conflict_fields == {field_name: 1}
+        assert (builder.refused_trades, builder.duplicate_trades) == (1, 0)
+
+    def test_two_field_conflict_lists_both_in_identity_order(self, clock: _Clock) -> None:
+        """Fields and value pairs follow the identity order; totals are sorted by field name."""
+        builder = _builder()
+        builder.update(_identified_fill())
+        clock.now = 101.5
+        moved = replace(
+            _identified_fill(), timestamp=_CONFLICT_MINUTE + timedelta(milliseconds=4), side="sell"
+        )
+        lines = _warnings_during(lambda: builder.update(moved))
+        detail = (
+            f"fields=timestamp,side trade_id={_CONFLICT_ID} earlier_minute={_CONFLICT_MINUTE_TS} "
+            "timestamp=2026-11-10T18:40:00.003000+00:00->2026-11-10T18:40:00.004000+00:00 "
+            "side=buy->sell gap_s=1.500 totals=side:1,timestamp:1"
+        )
+        assert lines == [_conflict_line(_CONFLICT_MINUTE_TS, 1, detail)]
+        assert builder.conflict_fields == {"side": 1, "timestamp": 1}
+
+    def test_exact_redelivery_stays_a_silent_duplicate(self, clock: _Clock) -> None:
+        """An identical redelivery counts as a duplicate, writes nothing and counts no field."""
+        builder = _builder()
+        builder.update(_identified_fill())
+        clock.now = 130.0
+        lines = _warnings_during(lambda: builder.update(_identified_fill()))
+        assert lines == []
+        assert (builder.refused_trades, builder.duplicate_trades) == (0, 1)
+        assert builder.conflict_fields == {}
+
+    def test_gap_counts_from_the_first_retained_copy(self, clock: _Clock) -> None:
+        """An exact duplicate in between does not restart the gap of a later conflict."""
+        builder = _builder()
+        builder.update(_identified_fill())
+        clock.now = 105.0
+        builder.update(_identified_fill())
+        clock.now = 110.0
+        lines = _warnings_during(lambda: builder.update(replace(_identified_fill(), price=6501.0)))
+        assert " gap_s=10.000 " in lines[0]
+        assert builder.duplicate_trades == 1
+
+    def test_suppressed_warning_still_raises_the_totals(self, clock: _Clock) -> None:
+        """A second conflict in the same minute writes no line, and the next line counts it."""
+        builder = _builder()
+        builder.update(_identified_fill(trade_id="m-2", minute_offset=-2))
+        builder.update(_identified_fill(trade_id="m-1", minute_offset=-1))
+        builder.update(_identified_fill(trade_id="m+1", minute_offset=1))
+        clock.now = 103.0
+
+        def conflicts() -> None:
+            """Move two identities into minute M, then a third into minute M+1."""
+            for trade_id, offset in (("m-2", -2), ("m-1", -1)):
+                builder.update(
+                    replace(
+                        _identified_fill(trade_id=trade_id, minute_offset=offset),
+                        timestamp=_CONFLICT_MINUTE + timedelta(seconds=10),
+                    )
+                )
+            builder.update(
+                replace(
+                    _identified_fill(trade_id="m+1", minute_offset=1),
+                    timestamp=_CONFLICT_MINUTE + timedelta(minutes=1, seconds=10),
+                )
+            )
+
+        lines = _warnings_during(conflicts)
+        assert [line.split(" reason=")[0] for line in lines] == [
+            f"Withholding unproven trade candle: symbol=MESZ6-CME minute={_CONFLICT_MINUTE_TS}",
+            f"Withholding unproven trade candle: symbol=MESZ6-CME minute={_CONFLICT_MINUTE_TS + 60}",
+        ]
+        assert lines[0].endswith(" gap_s=3.000 totals=timestamp:1")
+        assert lines[1].endswith(" gap_s=3.000 totals=timestamp:3")
+        assert builder.conflict_fields == {"timestamp": 3}
+        assert builder.refused_trades == 3
+
+    def test_redelivery_after_conflict_eviction_is_still_refused(self, clock: _Clock) -> None:
+        """A trade whose bucket a conflict evicted is refused again, under the same bound."""
+        builder = _builder()
+        builder.update(_identified_fill(trade_id="a"))
+        builder.update(_identified_fill(trade_id="b"))
+        clock.now = 104.0
+
+        def conflict_then_redelivery() -> None:
+            """Contradict trade a, then deliver trade b again unchanged."""
+            builder.update(replace(_identified_fill(trade_id="a"), price=6501.0))
+            builder.update(_identified_fill(trade_id="b"))
+
+        lines = _warnings_during(conflict_then_redelivery)
+        assert len(lines) == 1
+        assert " reason=conflicting_trade_id refused=1 fields=price " in lines[0]
+        assert (builder.refused_trades, builder.duplicate_trades) == (2, 0)
+        assert builder.conflict_fields == {"price": 1}
+        assert builder.pop_all() == []
+
+    def test_conflict_counts_are_returned_as_a_copy(self, clock: _Clock) -> None:
+        """Changing the returned mapping cannot change the builder's own counts."""
+        builder = _builder()
+        builder.update(_identified_fill())
+        builder.update(replace(_identified_fill(), side="sell"))
+        counts = builder.conflict_fields
+        counts["side"] = 99
+        assert builder.conflict_fields == {"side": 1}
+
+    def test_decisions_counts_candles_and_warnings_match_the_previous_behaviour(
+        self, clock: _Clock
+    ) -> None:
+        """A fixed sequence gives the refusals, duplicates, candles and warnings of the old code."""
+        builder = _builder()
+        sequence = [
+            _identified_fill(trade_id="a"),
+            _identified_fill(trade_id="b", minute_offset=1),
+            _identified_fill(trade_id="a"),
+            replace(_identified_fill(trade_id="b", minute_offset=1), quantity=3.0),
+            _identified_fill(trade_id="c", minute_offset=2),
+            replace(_identified_fill(trade_id="d", minute_offset=2), side="sell"),
+            _identified_fill(trade_id="c", minute_offset=2),
+        ]
+
+        def run() -> None:
+            """Fold the whole sequence."""
+            for trade in sequence:
+                builder.update(trade)
+
+        lines = _warnings_during(run)
+        candles = builder.pop_all()
+        assert len(lines) == 1
+        assert (builder.refused_trades, builder.duplicate_trades) == (1, 2)
+        assert candles == [
+            CandleUpdate(
+                symbol="MESZ6-CME",
+                open=6500.25,
+                high=6500.25,
+                low=6500.25,
+                close=6500.25,
+                vwap=6500.25,
+                trades=1,
+                volume=1.0,
+                interval_begin=_CONFLICT_MINUTE,
+                interval=60,
+                complete=True,
+            ),
+            CandleUpdate(
+                symbol="MESZ6-CME",
+                open=6500.25,
+                high=6500.25,
+                low=6500.25,
+                close=6500.25,
+                vwap=6500.25,
+                trades=2,
+                volume=2.0,
+                interval_begin=_CONFLICT_MINUTE + timedelta(minutes=2),
+                interval=60,
+                complete=True,
+            ),
+        ]
