@@ -316,6 +316,7 @@ from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
 from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CancelClaimResult
+from snapper.data.repository_types import CandlePredecessor
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CandleVersionRow
@@ -1499,6 +1500,7 @@ a legal retry would race the retry's own lifecycle).
 """
 _LIFECYCLE_FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _CandleNaturalKey = tuple[str, str, datetime]
+_ReconciledCandleSource = Literal["native", "calculated", "synthesized"]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
 _PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
@@ -3824,7 +3826,12 @@ class Repository(ABC):
 
     @abstractmethod
     async def correct_false_zero_candles(
-        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+        self,
+        rows: list[CandleUpsertRow],
+        *,
+        dry_run: bool = False,
+        source: Literal["native", "calculated"] = "native",
+        expected_predecessors: Mapping[tuple[str, str, datetime], CandlePredecessor] | None = None,
     ) -> list[CandleUpsertRow]:
         """Replace flat synthesized zero minutes that native trade evidence disproves.
 
@@ -3839,8 +3846,13 @@ class Repository(ABC):
         published.
 
         Args:
-            rows: Complete closed native minutes stamped at actual acquisition.
+            rows: Complete closed minutes of ``source`` stamped at actual acquisition.
             dry_run: Return the correctable rows without a writer fence or a write.
+            source: Source every row must carry; the replacement keeps it.
+            expected_predecessors: Optional exact zero version per natural key
+                (instrument, timeframe, ``open_at``). A row whose current zero
+                differs in physical id, ``public_id`` or ``timestamp``, checked
+                again under the writer fence, is skipped.
 
         Returns:
             Correctable rows in dry-run, otherwise corrected rows after commit.
@@ -3855,6 +3867,21 @@ class Repository(ABC):
 
         Args:
             rows: Official native OHLCV rows with real trades or an unavailable count.
+            dry_run: Return absent candidates without acquiring a writer fence or writing.
+
+        Returns:
+            Absent candidates in dry-run, otherwise committed inserted rows.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_missing_calculated_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Repair at most 100 absent calculated minutes under the native repair rules.
+
+        Args:
+            rows: Calculated OHLCV rows built from stored trades.
             dry_run: Return absent candidates without acquiring a writer fence or writing.
 
         Returns:
@@ -11628,11 +11655,13 @@ class SQLAlchemyRepository(Repository):
             if self._candle_natural_key(normalized_row) in keys
         ]
 
-    def _validate_missing_candle_batch(self, rows: list[CandleUpsertRow]) -> list[CandleUpsertRow]:
+    def _validate_missing_candle_batch(
+        self, rows: list[CandleUpsertRow], source: Literal["native", "calculated"] = "native"
+    ) -> list[CandleUpsertRow]:
         """Validate the entire input before any read or write transaction is opened."""
         if len(rows) > 720:
             raise ValueError("missing candle insert batch exceeds 720 rows")
-        normalized = self._normalize_reconciled_candle_rows(rows, "native")
+        normalized = self._normalize_reconciled_candle_rows(rows, source)
         if self.dialect_name not in {"sqlite", "postgresql"}:
             raise NotImplementedError(
                 "missing candle insertion supports only SQLite and PostgreSQL"
@@ -11692,18 +11721,28 @@ class SQLAlchemyRepository(Repository):
             return inserted
 
     async def correct_false_zero_candles(
-        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+        self,
+        rows: list[CandleUpsertRow],
+        *,
+        dry_run: bool = False,
+        source: Literal["native", "calculated"] = "native",
+        expected_predecessors: Mapping[tuple[str, str, datetime], CandlePredecessor] | None = None,
     ) -> list[CandleUpsertRow]:
         """Recheck each correction candidate under the candle writer fence before replacing it.
 
         The read-only preflight keeps replays without a correctable minute out
         of the fence. A live or catchup writer can version a minute between the
         preflight and the fence, so the owned transaction repeats the proof for
-        the preflight candidates before it closes any zero.
+        the preflight candidates before it closes any zero. Expected
+        predecessors are compared in both reads; the comparison under the fence
+        decides, in the transaction that replaces the zero.
 
         Args:
-            rows: At most 720 complete closed native one-minute candidates.
+            rows: At most 720 complete closed one-minute candidates of ``source``.
             dry_run: Return correctable rows without acquiring a writer fence.
+            source: Source every row must carry; the replacement keeps it.
+            expected_predecessors: Optional exact zero version per natural key;
+                rows without a matching current zero are skipped.
 
         Returns:
             Normalized correctable rows in dry-run, otherwise the corrected rows
@@ -11711,18 +11750,48 @@ class SQLAlchemyRepository(Repository):
         """
         if not rows:
             return []
-        normalized = self._validate_missing_candle_batch(rows)
+        normalized = self._validate_missing_candle_batch(rows, source)
         async with self.session() as preflight:
-            targets = await self._false_zero_targets(preflight, normalized)
+            targets = self._retain_expected_predecessors(
+                await self._false_zero_targets(preflight, normalized), expected_predecessors
+            )
         if dry_run or not targets:
             return [row for row, _ in targets]
         async with self.session() as owned:
             await self._begin_candle_reconciliation_write(owned, sqlite_write_lock=True)
-            targets = await self._false_zero_targets(owned, [row for row, _ in targets])
+            targets = self._retain_expected_predecessors(
+                await self._false_zero_targets(owned, [row for row, _ in targets]),
+                expected_predecessors,
+            )
             for row, existing in targets:
                 await self._replace_synthesized_candle_version(owned, row, existing)
             await owned.commit()
             return [row for row, _ in targets]
+
+    @classmethod
+    def _retain_expected_predecessors(
+        cls,
+        targets: list[tuple[CandleUpsertRow, CandleVersionRow]],
+        expected: Mapping[tuple[str, str, datetime], CandlePredecessor] | None,
+    ) -> list[tuple[CandleUpsertRow, CandleVersionRow]]:
+        """Keep the targets whose current zero is exactly the expected version.
+
+        Without expectations every target is kept. Otherwise a target is kept
+        only when its natural key has an expectation equal to the zero in
+        physical id, ``public_id`` and ``timestamp``.
+        """
+        if expected is None:
+            return targets
+        kept: list[tuple[CandleUpsertRow, CandleVersionRow]] = []
+        for row, existing in targets:
+            voted = expected.get(cls._candle_natural_key(row))
+            if voted is not None and (
+                voted["id"],
+                voted["public_id"],
+                voted["timestamp"],
+            ) == (existing["id"], existing["public_id"], existing["timestamp"]):
+                kept.append((row, existing))
+        return kept
 
     @classmethod
     async def _false_zero_targets(
@@ -11807,6 +11876,24 @@ class SQLAlchemyRepository(Repository):
         """
         return await self._repair_missing_candles(rows, "native", dry_run)
 
+    async def insert_missing_calculated_candles(
+        self, rows: list[CandleUpsertRow], *, dry_run: bool = False
+    ) -> list[CandleUpsertRow]:
+        """Insert closed trade-built minutes with the native repair's checks and lock.
+
+        Rows must carry source ``calculated``; every other rule, the batch
+        limit, the knowledge time and the ROW EXCLUSIVE lock match
+        :meth:`insert_missing_native_candles`.
+
+        Args:
+            rows: At most 100 closed calculated candidates.
+            dry_run: Inspect absence without changing any row.
+
+        Returns:
+            Absent candidates or acknowledged inserted rows.
+        """
+        return await self._repair_missing_candles(rows, "calculated", dry_run)
+
     async def insert_missing_synthesized_candles(
         self, rows: list[CandleUpsertRow], *, dry_run: bool = False
     ) -> list[CandleUpsertRow]:
@@ -11827,7 +11914,7 @@ class SQLAlchemyRepository(Repository):
         return await self._repair_missing_candles(rows, "synthesized", dry_run)
 
     async def _repair_missing_candles(
-        self, rows: list[CandleUpsertRow], source: Literal["native", "synthesized"], dry_run: bool
+        self, rows: list[CandleUpsertRow], source: _ReconciledCandleSource, dry_run: bool
     ) -> list[CandleUpsertRow]:
         """Validate and insert one short closed-window repair transaction."""
         if not rows:
@@ -11861,7 +11948,7 @@ class SQLAlchemyRepository(Repository):
     def _normalize_reconciled_candle_rows(
         cls,
         rows: list[CandleUpsertRow],
-        source: Literal["native", "synthesized"],
+        source: _ReconciledCandleSource,
         *,
         allow_unknown_statistics: bool = False,
     ) -> list[CandleUpsertRow]:
@@ -11885,7 +11972,7 @@ class SQLAlchemyRepository(Repository):
         cls,
         original: CandleUpsertRow,
         acquired_before: datetime,
-        source: Literal["native", "synthesized"],
+        source: _ReconciledCandleSource,
         allow_unknown_statistics: bool = False,
     ) -> CandleUpsertRow:
         """Require a coherent closed source-owned candle and preserve acquisition provenance."""
@@ -11935,7 +12022,7 @@ class SQLAlchemyRepository(Repository):
 
     @staticmethod
     def _reconciled_candle_seconds(
-        timeframe: str, source: Literal["native", "synthesized"], *, venue_bars: bool = False
+        timeframe: str, source: _ReconciledCandleSource, *, venue_bars: bool = False
     ) -> int:
         """Restrict live native catchup to one minute and others to supported closed windows.
 

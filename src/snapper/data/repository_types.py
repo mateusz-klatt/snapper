@@ -256,6 +256,19 @@ class CandleVersionRow(CandleUpsertRow):
     id: int
 
 
+class CandlePredecessor(TypedDict):
+    """The exact current candle version a guarded correction was approved to replace.
+
+    A correction compares all three fields with the version it finds under its
+    writer fence. The physical ``id`` tells apart a replacement that kept the
+    same ``public_id`` and ``timestamp``.
+    """
+
+    id: int
+    public_id: str
+    timestamp: datetime
+
+
 class ShadowCandleUpsertRow(TypedDict, total=False):
     """Row dict for upsert_shadow_candles.
 
