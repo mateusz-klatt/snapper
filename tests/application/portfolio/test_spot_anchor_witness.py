@@ -9,10 +9,12 @@ order-close emissions that share their predecessor's legs.
 
 from decimal import Decimal
 
+from snapper.application.portfolio.spot_anchor_witness import OwnedWitnessScope
 from snapper.application.portfolio.spot_anchor_witness import WitnessExecution
 from snapper.application.portfolio.spot_anchor_witness import WitnessHistoryLeg
 from snapper.application.portfolio.spot_anchor_witness import WitnessOrderTotals
 from snapper.application.portfolio.spot_anchor_witness import build_execution_witnesses
+from snapper.application.portfolio.spot_anchor_witness import build_owned_execution_witnesses
 from snapper.application.portfolio.spot_anchor_witness import decode_execution_cumulative
 
 
@@ -385,6 +387,221 @@ def test_commission_sum_matching_the_order_total_certifies() -> None:
         {"O1": _totals(bought="6", sold="30", commission="0.02")},
         100,
         {"O1": Decimal("0.02")},
+    )
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}
+
+
+def _scope(
+    *,
+    owned: frozenset[str] = frozenset({"O1"}),
+    authoritative: dict[int, str | None] | None = None,
+    tip_item_id: int = 100,
+) -> OwnedWitnessScope:
+    """Build the bootstrap's ownership evidence for a witness scenario."""
+    return OwnedWitnessScope(
+        tip_item_id=tip_item_id,
+        owned_order_ids=owned,
+        authoritative_order_ids={1: "O1"} if authoritative is None else authoritative,
+    )
+
+
+def test_owned_entry_selects_legs_by_the_owned_order_set() -> None:
+    """The bootstrap's legs are chosen by ``S``, never by ``orderedBy``.
+
+    Given: Non-API legs of the owned order ``O1`` and an API leg of foreign
+        order ``M1``, with one execution of ``O1``.
+    When: The owned witness map is built,
+    Then: The non-API owned legs are witnessed and the foreign API leg is not.
+    """
+    legs = [
+        _leg(100, "EUR", "6", is_api_attributed=False),
+        _leg(99, "PLN", "-30", is_api_attributed=False),
+        _leg(98, "EUR", "5", order_id="M1", transaction_id="TX"),
+    ]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, {}, _scope()
+    )
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}
+
+
+def test_certificate_entry_keeps_its_api_selection() -> None:
+    """The certificate's entry point still witnesses only API-attributed legs.
+
+    Given: The same non-API legs of order ``O1`` with one execution of ``O1``.
+    When: The certificate's witness map is built,
+    Then: The non-API legs are not witnessable, so the order's base legs
+        disagree with its total exactly as before.
+    """
+    legs = [
+        _leg(100, "EUR", "6", is_api_attributed=False),
+        _leg(99, "PLN", "-30", is_api_attributed=False),
+    ]
+    outcome = build_execution_witnesses(
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
+    )
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("order_base_legs_disagree_with_total",)
+
+
+def test_owned_entry_excludes_legs_above_the_tip() -> None:
+    """An owned leg above the seal tip is not part of the seal page.
+
+    Given: The owned fill of ``O1`` plus a later owned leg above the tip.
+    When: The owned witness map is built,
+    Then: Only the at-or-below-tip fill is witnessed.
+    """
+    legs = [
+        _leg(100, "EUR", "6"),
+        _leg(99, "PLN", "-30"),
+        _leg(150, "EUR", "9", transaction_id="TX"),
+    ]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, {}, _scope()
+    )
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}
+
+
+def test_an_execution_decoding_another_owned_order_is_foreign() -> None:
+    """An execution linked to Order A but decoding Order B is refused.
+
+    Given: Both ``O1`` and ``O2`` in ``S``, and an execution whose exec id decodes
+        ``O2`` while its Order's authoritative venue order id is ``O1``.
+    When: The owned witness map is built,
+    Then: ``execution_order_id_foreign`` is refused and no map is returned.
+    """
+    legs = [
+        _leg(100, "EUR", "6", order_id="O2"),
+        _leg(99, "PLN", "-30", order_id="O2"),
+    ]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6", venue_order_id="O2")],
+        legs,
+        {"O2": _totals(bought="6", sold="30")},
+        {},
+        _scope(owned=frozenset({"O1", "O2"}), authoritative={1: "O1"}),
+    )
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("execution_order_id_foreign",)
+
+
+def test_an_execution_without_an_authoritative_order_is_foreign() -> None:
+    """An execution whose Order does not resolve is refused.
+
+    Given: An execution of ``O1`` whose Order resolved to no venue order id.
+    When: The owned witness map is built,
+    Then: ``execution_order_id_foreign`` is refused.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30")},
+        {},
+        _scope(authoritative={1: None}),
+    )
+    assert outcome.refusals == ("execution_order_id_foreign",)
+
+
+def test_an_execution_whose_authoritative_order_is_outside_s_is_foreign() -> None:
+    """An execution matching its Order but outside ``S`` is refused.
+
+    Given: An execution decoding ``O1`` whose Order's venue order id is ``O1``,
+        while ``O1`` is not in ``S``.
+    When: The owned witness map is built,
+    Then: ``execution_order_id_foreign`` is refused.
+    """
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        [],
+        {"O1": _totals(bought="6", sold="30")},
+        {},
+        _scope(owned=frozenset({"O9"})),
+    )
+    assert "execution_order_id_foreign" in outcome.refusals
+
+
+def test_an_owned_commission_of_an_order_without_an_execution_is_unproven() -> None:
+    """An owned fee whose order has no ingested execution cannot pass.
+
+    Given: An owned order ``O2`` with venue totals and a COMMISSION on the page,
+        but no committed execution and no witnessed fill.
+    When: The owned witness map is built,
+    Then: ``owned_commission_unproven`` is refused.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {
+            "O1": _totals(bought="6", sold="30"),
+            "O2": _totals(bought="1", sold="5", commission="0.02"),
+        },
+        {"O2": Decimal("0.02")},
+        _scope(owned=frozenset({"O1", "O2"})),
+    )
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("owned_commission_unproven",)
+
+
+def test_an_owned_commission_of_an_order_without_totals_is_unproven() -> None:
+    """An owned fee whose order has no venue totals cannot pass.
+
+    Given: An owned order ``O2`` with a COMMISSION on the page and no totals.
+    When: The owned witness map is built,
+    Then: ``owned_commission_unproven`` is refused.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30")},
+        {"O2": Decimal("0.02")},
+        _scope(owned=frozenset({"O1", "O2"})),
+    )
+    assert outcome.refusals == ("owned_commission_unproven",)
+
+
+def test_an_owned_commission_disagreeing_with_its_totals_is_unproven() -> None:
+    """An owned fee whose page sum disagrees with the order's total refuses.
+
+    Given: An executed owned order ``O1`` whose page commissions fall short of
+        its reported cumulative commission.
+    When: The owned witness map is built,
+    Then: Both the composition's commission disagreement and the owned
+        commission proof refuse.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30", commission="0.05")},
+        {"O1": Decimal("0.02")},
+        _scope(),
+    )
+    assert outcome.refusals == (
+        "commission_sum_disagrees_with_order_total",
+        "owned_commission_unproven",
+    )
+
+
+def test_an_owned_commission_with_totals_and_a_witnessed_fill_is_proven() -> None:
+    """An owned fee with totals, a witnessed fill, and an exact sum certifies.
+
+    Given: An executed owned order ``O1`` whose page commissions sum exactly to
+        its reported cumulative commission, plus a foreign order's commission.
+    When: The owned witness map is built,
+    Then: The map certifies and the foreign commission plays no part.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_owned_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30", commission="0.02")},
+        {"O1": Decimal("0.02"), "M1": Decimal("0.07")},
+        _scope(),
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99})}
