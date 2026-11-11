@@ -1,7 +1,7 @@
 """Verify the guarded writers the candle repair driver uses for calculated rows and voted zeros.
 
 ``insert_missing_calculated_candles`` applies the native repair's rules to
-calculated rows. ``correct_false_zero_candles`` takes the rows' source and,
+calculated rows, which are one-minute bars only. ``correct_false_zero_candles`` takes the rows' source and,
 optionally, the exact zero version each correction was approved to replace;
 that check is repeated under the writer fence.
 """
@@ -9,6 +9,8 @@ that check is repeated under the writer fence.
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -17,6 +19,7 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import update
@@ -85,6 +88,22 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         yield repo
     finally:
         await repo.engine.dispose()
+
+
+@contextmanager
+def _statements(repo: SQLAlchemyRepository) -> Iterator[list[str]]:
+    """Capture the SQL text sent to the driver, without its bound parameters."""
+    statements: list[str] = []
+
+    def capture(*arguments: object) -> None:
+        """Record one statement's text in upper case."""
+        statements.append(cast(str, arguments[2]).strip().upper())
+
+    event.listen(repo.engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        yield statements
+    finally:
+        event.remove(repo.engine.sync_engine, "before_cursor_execute", capture)
 
 
 async def _versions(repo: SQLAlchemyRepository) -> list[dict[str, object]]:
@@ -206,6 +225,73 @@ async def test_each_insert_mode_refuses_the_other_source(
     with pytest.raises(ValueError, match="source-owned"):
         await repository.insert_missing_native_candles([_calculated(0)])
     assert await _versions(repository) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_calculated_insert_refuses_a_batch_holding_a_five_minute_row(
+    repository: SQLAlchemyRepository, dry_run: bool
+) -> None:
+    """A calculated row that is not one minute refuses its whole batch before any statement.
+
+    Given: An empty table and a batch of a valid calculated minute and a closed,
+        aligned calculated 5m bar.
+    When: The batch is inserted, as a write or as a dry run.
+    Then: The whole batch is refused as an unsupported timeframe before any SQL
+        statement is sent, and nothing is stored.
+    """
+    five_minutes = _calculated() | {"timeframe": "5m"}
+    with (
+        _statements(repository) as statements,
+        pytest.raises(ValueError, match="timeframe is not supported for its source"),
+    ):
+        await repository.insert_missing_calculated_candles(
+            [_calculated(1), five_minutes], dry_run=dry_run
+        )
+    assert statements == []
+    assert await _versions(repository) == []
+
+
+@pytest.mark.parametrize("timeframe", ["5m", "15m", "30m", "1h", "4h", "1d"])
+def test_calculated_rows_are_never_venue_bars_while_native_ones_still_are(
+    timeframe: str,
+) -> None:
+    """Only native repairs may hold venue bars above one minute.
+
+    Given: A supported higher timeframe in the bounded repair's validation.
+    When: Its bar length is resolved for a calculated and for a native row.
+    Then: The calculated row is refused, the native row keeps its venue bar length and
+        a calculated minute is still sixty seconds.
+    """
+    with pytest.raises(ValueError, match="timeframe is not supported for its source"):
+        SQLAlchemyRepository._reconciled_candle_seconds(timeframe, "calculated", venue_bars=True)
+    assert (
+        SQLAlchemyRepository._reconciled_candle_seconds(timeframe, "native", venue_bars=True) > 60
+    )
+    assert (
+        SQLAlchemyRepository._reconciled_candle_seconds("1m", "calculated", venue_bars=True) == 60
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_insert_still_accepts_a_five_minute_venue_bar(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A native 5m venue bar remains repairable through the native insert.
+
+    Given: An empty table and a closed, aligned native 5m bar.
+    When: It is inserted as a dry run and then as a write.
+    Then: The dry run reports it and the write stores it as a native 5m bar.
+    """
+    five_minutes = _native() | {"timeframe": "5m"}
+    candidates = await repository.insert_missing_native_candles([five_minutes], dry_run=True)
+    inserted = await repository.insert_missing_native_candles([five_minutes])
+    assert [row["timeframe"] for row in candidates] == ["5m"]
+    assert [(row["timeframe"], row["source"]) for row in inserted] == [("5m", "native")]
+    stored = await _versions(repository)
+    assert [(row["timeframe"], row["source"], row["open_at"]) for row in stored] == [
+        ("5m", "native", _OPEN)
+    ]
 
 
 @pytest.mark.asyncio

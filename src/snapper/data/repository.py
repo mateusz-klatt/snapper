@@ -3880,8 +3880,12 @@ class Repository(ABC):
     ) -> list[CandleUpsertRow]:
         """Repair at most 100 absent calculated minutes under the native repair rules.
 
+        Calculated rows are one-minute bars only. A row of any other timeframe
+        refuses the whole batch with ``ValueError`` before any read or write;
+        venue bars of 5m to 1d remain a native repair.
+
         Args:
-            rows: Calculated OHLCV rows built from stored trades.
+            rows: Calculated one-minute OHLCV rows built from stored trades.
             dry_run: Return absent candidates without acquiring a writer fence or writing.
 
         Returns:
@@ -11881,12 +11885,15 @@ class SQLAlchemyRepository(Repository):
     ) -> list[CandleUpsertRow]:
         """Insert closed trade-built minutes with the native repair's checks and lock.
 
-        Rows must carry source ``calculated``; every other rule, the batch
-        limit, the knowledge time and the ROW EXCLUSIVE lock match
-        :meth:`insert_missing_native_candles`.
+        Rows must carry source ``calculated`` and timeframe ``1m``. Calculated
+        rows are never venue bars, so a row of any other timeframe refuses the
+        whole batch with ``ValueError`` before any read or write, in a dry run
+        too. Every other rule, the batch limit, the knowledge time and the ROW
+        EXCLUSIVE lock match :meth:`insert_missing_native_candles`, which still
+        accepts native venue bars of 5m to 1d.
 
         Args:
-            rows: At most 100 closed calculated candidates.
+            rows: At most 100 closed calculated one-minute candidates.
             dry_run: Inspect absence without changing any row.
 
         Returns:
@@ -12027,13 +12034,17 @@ class SQLAlchemyRepository(Repository):
         """Restrict live native catchup to one minute and others to supported closed windows.
 
         Only the bounded insert-only repair sets ``venue_bars``: a venue that keeps no
-        minutes for an old range still publishes higher native bars for it.
+        minutes for an old range still publishes higher native bars for it. Calculated
+        rows are built from stored trades one minute at a time and are never venue
+        bars, so any other calculated timeframe is refused even there.
         """
         supported = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
         if source == "synthesized":
             seconds = supported.get(timeframe)
         elif timeframe == "1m":
             seconds = 60
+        elif source == "calculated":
+            seconds = None
         else:
             seconds = supported.get(timeframe) if venue_bars else None
         if seconds is None:
