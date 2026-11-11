@@ -143,6 +143,13 @@ lifetime."""
 _IDENTITY_SAMPLE_SIZE: Final[int] = 5
 """Snapshot reservations kept on the heartbeat for the published-equals-stored check."""
 
+_IDENTITY_PRUNE_INTERVAL_S: Final[float] = 1.0
+"""Monotonic seconds between two cleanups of the identity snapshot state.
+
+The cleanup runs from every persisted resolution, at most this often, whether
+window snapshots are switched on and whether their reads succeed, so expired
+snapshots, failure records and stale unacknowledged entries stay bounded."""
+
 _UNACKNOWLEDGED_IDENTITY_MAX_AGE_S: Final[float] = 1800.0
 """Monotonic seconds a resolved key stays excluded from window snapshots unacknowledged.
 
@@ -465,6 +472,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._identity_read_failures: dict[tuple[str, datetime], float] = {}
         self._unacknowledged_live_identities: dict[tuple[str, datetime], dict[str, float]] = {}
         self._identity_snapshot_builds: dict[tuple[str, datetime], set[str]] = {}
+        self._identity_last_prune: float | None = None
         self._identity_counters: dict[str, int] = {}
         self._identity_samples: deque[JsonObject] = deque(maxlen=_IDENTITY_SAMPLE_SIZE)
         self._identity_last_read_ms: float | None = None
@@ -539,8 +547,15 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             key: Natural key just resolved for publication and persistence.
         """
         instrument_public_id, timeframe, open_at = key
+        now = monotonic()
         window = self._unacknowledged_live_identities.setdefault((timeframe, open_at), {})
-        window[instrument_public_id] = monotonic()
+        window[instrument_public_id] = now
+        if (
+            self._identity_last_prune is None
+            or now - self._identity_last_prune >= _IDENTITY_PRUNE_INTERVAL_S
+        ):
+            self._identity_last_prune = now
+            self._prune_identity_snapshots(now)
 
     def _forget_acknowledged_live_identities(self, rows: list[CandleUpsertRow]) -> None:
         """Re-admit keys to window snapshots once a commit for them is acknowledged.
@@ -607,7 +622,9 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         A snapshot answers for at most :data:`IDENTITY_SNAPSHOT_TTL_S` monotonic
         seconds after its read began, and only for instruments it covered and
         did not exclude. An expired or dropped snapshot is read again; a read
-        that failed is not retried within the same bound.
+        that failed is not retried within the same bound. With the setting off
+        every installed snapshot is discarded, so switching it back on starts
+        from fresh reads.
 
         Args:
             key: Natural key about to be resolved, with the identity gate held.
@@ -618,6 +635,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             ``excluded_unacknowledged``.
         """
         if not self.settings.candle_identity_window_snapshot:
+            self._identity_snapshots.clear()
             return None, "disabled"
         instrument_public_id, timeframe, open_at = key
         window = (timeframe, open_at)
@@ -684,7 +702,6 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         finished = monotonic()
         self._identity_last_read_ms = round((finished - now) * 1000.0, 3)
         self._bump_identity_counter("snapshot_reads")
-        self._prune_identity_snapshots(finished)
         if finished - now > IDENTITY_SNAPSHOT_TTL_S:
             self._bump_identity_counter("snapshot_reads_expired")
             return None, "read_expired"

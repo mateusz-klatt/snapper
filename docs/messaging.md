@@ -979,6 +979,10 @@ newest cached key, the publisher holds its identity gate and does this:
     older than thirty minutes is dropped, since such a write is not coming.
 - A catchup or repair write drops the snapshots of its windows before it
     writes, whatever the write's outcome.
+- Switching `candle_identity_window_snapshot` off discards every installed
+    snapshot, so switching it back on starts from fresh reads. Every persisted
+    resolution cleans the snapshot state at most once a second, whether
+    snapshots are on and whether their reads succeed.
 - Every other key takes the fenced per-key lookup.
 
 Measured on production on 2026-11-11, the per-key lookup alone cost 5.5 to

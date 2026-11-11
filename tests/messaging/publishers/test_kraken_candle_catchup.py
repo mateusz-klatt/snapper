@@ -1845,6 +1845,104 @@ async def test_a_row_queued_after_installation_excludes_unless_it_carries_the_sn
 
 
 @pytest.mark.asyncio
+async def test_a_commit_after_installation_never_yields_a_second_identity(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """Sol's sequence: an installed absence cannot answer after this process commits.
+
+    Given: A snapshot installed by another instrument that reports this key absent,
+        and an identity for the key taken from the cache without a reservation.
+    When: That row is queued and acknowledged, the cache moves past the window,
+        and the key is resolved again within the snapshot's lifetime.
+    Then: The queued row excluded the key from the installed snapshot, so the
+        per-key lookup adopts the committed identity and no second one is minted.
+    """
+    publisher, repository = _snapshot_publisher()
+    await _resolve_other_identity(publisher)
+    publisher._candle_id_cache[("instrument", "1m")] = (START, "cached-id")
+    assert await _resolve_test_identity(publisher) == "cached-id"
+    row = _queued_row(publisher, "instrument", "cached-id")
+    publisher._assign_candle_write_sequence(row)
+    publisher._mark_candle_writes_committed([row])
+    publisher._candle_id_cache.clear()
+    repository.get_canonical_candle_public_id.return_value = "cached-id"
+    assert await _resolve_test_identity(publisher) == "cached-id"
+    assert ("instrument", "1m", START) not in publisher._pending_candle_identities
+    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+
+
+@pytest.mark.asyncio
+async def test_a_row_admitted_after_a_policy_flip_is_excluded(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """An identity chosen while persistence was off cannot be contradicted later.
+
+    Given: A key resolved while its instrument was not persisted, so its identity
+        lives only in the series cache, and an installed snapshot of its window.
+    When: Persistence is switched on and the row is admitted to the writer queue.
+    Then: The admission excludes the instrument from the installed snapshot.
+    """
+    publisher, _repository = _snapshot_publisher()
+    publisher._should_persist_row = MagicMock(return_value=False)
+    unpersisted = await _resolve_test_identity(publisher)
+    publisher._should_persist_row = MagicMock(return_value=True)
+    await _resolve_other_identity(publisher)
+    snapshot = publisher._identity_snapshots[("1m", START)]
+    assert "instrument" not in snapshot.excluded
+    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", unpersisted))
+    assert "instrument" in snapshot.excluded
+
+
+@pytest.mark.asyncio
+async def test_switching_the_setting_off_discards_installed_snapshots(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A setting cycled off and on never reuses a snapshot from before the cycle.
+
+    Given: An installed snapshot.
+    When: The setting is switched off for one resolution and then on again.
+    Then: The off resolution discards the snapshot, and the next one reads anew.
+    """
+    publisher, repository = _snapshot_publisher()
+    await _resolve_test_identity(publisher)
+    publisher.settings.candle_identity_window_snapshot = False
+    await _resolve_other_identity(publisher)
+    assert publisher._identity_snapshots == {}
+    publisher.settings.candle_identity_window_snapshot = True
+    _acknowledge_and_advance(publisher)
+    await _resolve_test_identity(publisher)
+    assert repository.get_canonical_candle_public_ids.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["disabled", "failing"])
+async def test_identity_state_is_pruned_without_a_successful_read(
+    monotonic_clock: _MonotonicClock, mode: str
+) -> None:
+    """The cleanup bound holds while snapshots are off or every read fails.
+
+    Given: Snapshots switched off, or a window read that always fails.
+    When: Keys are resolved, then more than thirty minutes pass and another key
+        is resolved.
+    Then: Stale unacknowledged entries and failure records are gone, and only
+        the newest resolution remains recorded.
+    """
+    publisher, repository = _snapshot_publisher()
+    if mode == "disabled":
+        publisher.settings.candle_identity_window_snapshot = False
+    else:
+        repository.get_canonical_candle_public_ids.side_effect = RuntimeError("failing")
+    await _resolve_test_identity(publisher)
+    await _resolve_other_identity(publisher)
+    monotonic_clock.now += 1801.0
+    await _resolve_test_identity(publisher, 1)
+    assert publisher._unacknowledged_live_identities == {
+        ("1m", START + timedelta(minutes=1)): {"instrument": monotonic_clock.now}
+    }
+    assert set(publisher._identity_read_failures) <= {("1m", START + timedelta(minutes=1))}
+
+
+@pytest.mark.asyncio
 async def test_an_unacknowledged_key_is_released_after_its_age_bound(
     monotonic_clock: _MonotonicClock,
 ) -> None:
