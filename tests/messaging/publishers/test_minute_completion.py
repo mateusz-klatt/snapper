@@ -40,7 +40,9 @@ from snapper.messaging.publishers.minute_completion import PUBLISH_FAILED
 from snapper.messaging.publishers.minute_completion import SKIP_ALREADY_EMITTED
 from snapper.messaging.publishers.minute_completion import SKIP_FEED_BREAK
 from snapper.messaging.publishers.minute_completion import SKIP_NOT_OBSERVED
+from snapper.messaging.publishers.minute_completion import SKIP_UNARMED
 from snapper.messaging.publishers.minute_completion import SKIP_UNCONFIRMED
+from snapper.messaging.publishers.minute_completion import SKIP_UNSWEPT
 from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitter
 from snapper.messaging.publishers.minute_completion import build_flat_minute_bar
 from snapper.messaging.publishers.minute_completion import confirmed_trade_symbols
@@ -53,6 +55,8 @@ _SPOT_SETTLE_S = 20.0
 _MINUTE = 60
 _BASE = int(datetime(2026, 8, 4, 12, 0, tzinfo=UTC).timestamp())
 """UNIX start of the reference minute every test sweeps."""
+_MARK_AT = datetime(2026, 8, 4, 12, 5, 12, tzinfo=UTC)
+"""Production time of the completion marks the mark-driven tests sweep."""
 
 
 class _Roster:
@@ -346,6 +350,17 @@ class TestFlatBarShape:
         assert bar.complete is True
         assert bar.interval == 60
         assert bar.interval_begin == _begin(_BASE)
+        assert bar.acquired_at is None
+
+    def test_flat_bar_carries_the_author_it_is_given(self) -> None:
+        """A flat bar built for a certified minute is authored by its mark.
+
+        Given the production time of the mark that certified the minute,
+        When the flat bar is built with it,
+        Then the bar carries it as its acquisition time.
+        """
+        bar = build_flat_minute_bar(_SYMBOL, _begin(_BASE), 105.0, acquired_at=_MARK_AT)
+        assert bar.acquired_at == _MARK_AT
 
 
 class TestTradelessMinute:
@@ -677,9 +692,203 @@ class TestCursorTraps:
         Then only a bounded number of spans is retained.
         """
         emitter = _make_emitter()
-        for index in range(60):
+        for index in range(400):
             emitter.observe_feed_frame(float(_BASE + index * _MINUTE))
-        assert len(emitter._observed) <= 9
+        assert len(emitter._observed) <= 131
+
+
+def _sweep_mark(
+    emitter: MinuteCompletionEmitter, through: int
+) -> list[tuple[int, list[CandleUpdate]]]:
+    """Consider every minute that one completion mark lets the sweep consider.
+
+    Args:
+        emitter: Emitter under test.
+        through: UNIX time of the boundary the mark certifies.
+
+    Returns:
+        Each minute considered, with its flat bars, in order.
+    """
+    considered: list[tuple[int, list[CandleUpdate]]] = []
+    while (step := emitter.next_flat_minute(float(through), acquired_at=_MARK_AT)) is not None:
+        considered.append(step)
+    return considered
+
+
+class TestMarkDrivenSweep:
+    """The sweep that follows the consumer's completion marks, one minute at a time."""
+
+    def test_the_first_mark_only_seeds_the_cursor(self) -> None:
+        """A fresh emitter asserts no minute it was not running for.
+
+        Given a witnessed minute and a known close,
+        When the first mark arrives, and then the same mark again,
+        Then neither call considers a minute and the cursor rests before the mark.
+        """
+        emitter = _make_emitter()
+        _witness_live_around(emitter, _BASE)
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE))
+
+        assert emitter.next_flat_minute(float(_BASE + _MINUTE), acquired_at=_MARK_AT) is None
+        assert emitter.next_flat_minute(float(_BASE + _MINUTE), acquired_at=_MARK_AT) is None
+        assert emitter._swept_through == _BASE
+
+    def test_a_mark_sweeps_one_minute_per_call_authored_by_the_mark(self) -> None:
+        """The caller can stop between minutes, and each flat bar names its mark.
+
+        Given a cursor before the reference minute, four witnessed minutes and a
+            known close,
+        When a mark two minutes later is swept,
+        Then two calls each consider one minute with a flat bar authored at the
+            mark, and the next call considers nothing.
+        """
+        emitter = _make_emitter()
+        for offset in (-1, 0, 1, 2):
+            _witness_minute(emitter, _BASE + offset * _MINUTE)
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE))
+        emitter.next_flat_minute(float(_BASE), acquired_at=_MARK_AT)
+
+        steps = _sweep_mark(emitter, _BASE + 2 * _MINUTE)
+
+        assert [
+            (minute, [(bar.interval_begin, bar.close, bar.acquired_at) for bar in bars])
+            for minute, bars in steps
+        ] == [
+            (_BASE, [(_begin(_BASE), 105.0, _MARK_AT)]),
+            (_BASE + _MINUTE, [(_begin(_BASE + _MINUTE), 105.0, _MARK_AT)]),
+        ]
+        assert emitter.counters()["last_swept_minute"] == _begin(_BASE + _MINUTE).isoformat()
+
+    def test_a_switched_off_or_unwitnessed_minute_is_considered_without_bars(self) -> None:
+        """The cursor moves through minutes that produce nothing.
+
+        Given a seeded cursor, a known close, no witness and the emitter off,
+        When a mark sweeps one minute, the emitter is switched on, and a mark
+            sweeps the next minute,
+        Then both minutes are considered without bars, and only the second
+            counts as not observed.
+        """
+        switch = _Switch(False)
+        emitter = _make_emitter(switch=switch)
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE))
+        emitter.next_flat_minute(float(_BASE), acquired_at=_MARK_AT)
+
+        assert _sweep_mark(emitter, _BASE + _MINUTE) == [(_BASE, [])]
+        switch.on = True
+        assert _sweep_mark(emitter, _BASE + 2 * _MINUTE) == [(_BASE + _MINUTE, [])]
+        assert emitter.counters()[SKIP_NOT_OBSERVED] == 1
+
+    def test_a_mark_behind_the_cursor_considers_nothing(self) -> None:
+        """A cursor the wall-clock sweep moved ahead never rewinds.
+
+        Given a cursor the wall-clock sweep left on the reference minute,
+        When an older mark arrives,
+        Then nothing is considered and the cursor stays.
+        """
+        emitter = _make_emitter()
+        _prime_and_sweep(emitter, _BASE)
+
+        assert emitter.next_flat_minute(float(_BASE - _MINUTE), acquired_at=_MARK_AT) is None
+        assert emitter._swept_through == _BASE
+
+    def test_minutes_older_than_the_witness_retention_are_passed_over_at_once(self) -> None:
+        """A long consumer lag costs one step, not one call per lost minute.
+
+        Given a cursor 200 minutes behind the newest witnessed minute, and the
+            oldest assertable minute witnessed with its neighbours,
+        When a mark at the newest witnessed minute is swept once,
+        Then the expired minutes count as unswept, and the minute considered is
+            the oldest assertable one, with its flat bar.
+        """
+        emitter = _make_emitter()
+        emitter.next_flat_minute(float(_BASE), acquired_at=_MARK_AT)
+        newest = _BASE + 200 * _MINUTE
+        oldest = newest - 129 * _MINUTE
+        for minute in (oldest - _MINUTE, oldest, oldest + _MINUTE, newest):
+            _witness_minute(emitter, minute)
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE))
+
+        step = emitter.next_flat_minute(float(newest), acquired_at=_MARK_AT)
+
+        assert step is not None
+        minute, bars = step
+        assert minute == oldest
+        assert [bar.interval_begin for bar in bars] == [_begin(oldest)]
+        assert emitter.counters()[SKIP_UNSWEPT] == 71
+
+    def test_a_jump_never_passes_the_mark(self) -> None:
+        """Minutes the mark does not certify stay unconsidered.
+
+        Given a cursor far behind, and an oldest assertable minute newer than the
+            mark's last minute,
+        When the mark is swept,
+        Then the cursor stops at the mark's last minute, every minute up to it
+            counts as unswept, and nothing is considered.
+        """
+        emitter = _make_emitter()
+        emitter.next_flat_minute(float(_BASE), acquired_at=_MARK_AT)
+        _witness_minute(emitter, _BASE + 300 * _MINUTE)
+
+        assert emitter.next_flat_minute(float(_BASE + 10 * _MINUTE), acquired_at=_MARK_AT) is None
+        assert emitter._swept_through == _BASE + 9 * _MINUTE
+        assert emitter.counters()[SKIP_UNSWEPT] == 10
+
+
+class TestTradeBreak:
+    """A break of the trade-built stream forgets every close and arms a floor."""
+
+    def test_a_trade_break_forgets_every_close_and_bars_the_settle_window(self) -> None:
+        """A carried close is stale after any break.
+
+        Given a known close, four witnessed minutes and a seeded cursor,
+        When a trade break without a floor is marked at the reference minute,
+        Then no close is known, the reference minute is refused as a feed
+            break, and no floor is set.
+        """
+        emitter = _make_emitter()
+        for offset in (-1, 0, 1, 2):
+            _witness_minute(emitter, _BASE + offset * _MINUTE)
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE))
+        emitter.next_flat_minute(float(_BASE), acquired_at=_MARK_AT)
+
+        emitter.mark_trade_break(arm_after=None, now=float(_BASE))
+
+        assert emitter.counters()["known_closes"] == 0
+        assert _sweep_mark(emitter, _BASE + _MINUTE) == [(_BASE, [])]
+        assert emitter.counters()[SKIP_FEED_BREAK] == 1
+        assert emitter._arm_floor is None
+
+    def test_a_bar_below_the_arming_floor_arms_no_close(self) -> None:
+        """A bar emitted before the break cannot become the newest close.
+
+        Given a trade break whose arming floor is the reference minute,
+        When a real bar of the previous minute arrives, then one of the
+            reference minute,
+        Then the first is counted as unarmed and arms nothing, and the second
+            arms its close.
+        """
+        emitter = _make_emitter()
+        emitter.mark_trade_break(arm_after=_BASE, now=float(_BASE))
+
+        emitter.observe_real_bar(_real_bar(_BASE - _MINUTE, close=99.0))
+        assert emitter.counters()["known_closes"] == 0
+        assert emitter.counters()[SKIP_UNARMED] == 1
+        emitter.observe_real_bar(_real_bar(_BASE, close=101.0))
+        assert emitter._last_close[_SYMBOL].close == 101.0
+
+    def test_the_arming_floor_only_rises(self) -> None:
+        """An older or missing floor never lowers the current one.
+
+        Given a floor one minute after the reference minute,
+        When a break with the reference minute and one without a floor follow,
+        Then the floor stays where it was.
+        """
+        emitter = _make_emitter()
+        emitter.mark_trade_break(arm_after=_BASE + _MINUTE, now=float(_BASE))
+        emitter.mark_trade_break(arm_after=_BASE, now=float(_BASE))
+        emitter.mark_trade_break(arm_after=None, now=float(_BASE))
+
+        assert emitter._arm_floor == _BASE + _MINUTE
 
 
 class TestSweepCounters:

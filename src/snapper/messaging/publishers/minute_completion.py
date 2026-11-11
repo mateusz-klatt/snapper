@@ -80,13 +80,16 @@ on the futures ticker feed a frame arrives every few milliseconds, so a 5 s hole
 is a genuine stall, never a quiet market. A false negative costs coverage — the
 minute is simply skipped — and never produces a bar."""
 
-_WITNESS_RETENTION_MINUTES: Final[int] = 8
+_WITNESS_RETENTION_MINUTES: Final[int] = 130
 """Minutes of witness history retained.
 
-The sweep only ever considers the single minute that just settled, so three
-consecutive spans is all the gate reads; the rest is headroom for a delayed
-sweep tick. A stall longer than this window silently stops asserting, which is
-the correct outcome: no evidence, no assertion."""
+The wall-clock sweep only reads the three spans around the minute that just
+settled. The sweep that follows the consumer's completion marks runs behind the
+wall clock by the consumer's lag, so the history covers a lag of about two hours.
+A minute is assertable only while its predecessor is retained, so the oldest
+assertable minute lies ``_WITNESS_RETENTION_MINUTES - 1`` minutes behind the
+newest witnessed one. A longer lag stops asserting, which is the correct outcome:
+no evidence, no assertion."""
 
 _TRADE_CHANNEL: Final[str] = "trade"
 
@@ -95,6 +98,10 @@ SKIP_FEED_BREAK: Final[str] = "skipped_feed_break"
 SKIP_UNCONFIRMED: Final[str] = "skipped_subscription_unconfirmed"
 SKIP_ALREADY_EMITTED: Final[str] = "skipped_already_emitted"
 EMITTED: Final[str] = "emitted"
+SKIP_UNSWEPT: Final[str] = "skipped_unswept"
+"""Minutes the mark-driven sweep passed over because their witness had expired."""
+SKIP_UNARMED: Final[str] = "skipped_unarmed"
+"""Real bars below the arming floor of a trade break, which arm no close."""
 PUBLISH_FAILED: Final[str] = "publish_failed"
 """Bars built and counted as emitted whose publish then raised.
 
@@ -168,7 +175,13 @@ def confirmed_trade_symbols(
     return native
 
 
-def build_flat_minute_bar(symbol: str, interval_begin: datetime, close: float) -> CandleUpdate:
+def build_flat_minute_bar(
+    symbol: str,
+    interval_begin: datetime,
+    close: float,
+    *,
+    acquired_at: datetime | None = None,
+) -> CandleUpdate:
     """Build the flat zero-volume bar for one tradeless minute.
 
     Every field matches ``CandleAggregator._flat_fill`` so the 1m plane states
@@ -182,6 +195,9 @@ def build_flat_minute_bar(symbol: str, interval_begin: datetime, close: float) -
         symbol: Native symbol the bar belongs to.
         interval_begin: Canonical UTC minute start.
         close: Last close observed for the symbol on this connection.
+        acquired_at: The bar's author: the production time of the completion
+            mark that certified the minute, or ``None`` to stamp it at
+            processing, as the wall-clock sweep does.
 
     Returns:
         A ``complete`` zero-volume :class:`CandleUpdate` flat at ``close``.
@@ -198,6 +214,7 @@ def build_flat_minute_bar(symbol: str, interval_begin: datetime, close: float) -
         interval_begin=interval_begin,
         interval=_MINUTE_SECONDS,
         complete=True,
+        acquired_at=acquired_at,
     )
 
 
@@ -250,8 +267,10 @@ class MinuteCompletionEmitter:
         self._settle_s = settle_seconds
         self._resubscribe_settle_s = resubscribe_settle_seconds
         self._observed: dict[int, _WitnessSpan] = {}
+        self._newest_witnessed: int | None = None
         self._last_close: dict[str, _LastClose] = {}
         self._feed_break_until: float = 0.0
+        self._arm_floor: int | None = None
         self._swept_through: int | None = None
         self._last_swept_minute: int | None = None
         self._counters: dict[str, int] = {}
@@ -271,6 +290,8 @@ class MinuteCompletionEmitter:
         span = self._observed.get(minute)
         if span is None:
             self._observed[minute] = _WitnessSpan(first=received, last=received, continuous=True)
+            newest = self._newest_witnessed
+            self._newest_witnessed = minute if newest is None else max(newest, minute)
             self._prune_observed(minute)
             return
         if received - span.last > _WITNESS_GAP_TOLERANCE_S:
@@ -285,10 +306,18 @@ class MinuteCompletionEmitter:
         observed, and seeding it from the ticker's ``last`` field would couple
         candle VALUES to a subscription the architecture keeps droppable.
 
+        A bar for a minute below the arming floor of a trade break neither arms
+        a close nor moves a floor, and is counted: it had its first emission
+        before the break, so it may be a correction of a lost minute whose close
+        is no longer the newest.
+
         Args:
             candle: A real 1m candle observed on this connection.
         """
         minute = int(candle.interval_begin.timestamp())
+        if self._arm_floor is not None and minute < self._arm_floor:
+            self._bump(SKIP_UNARMED)
+            return
         known = self._last_close.get(candle.symbol)
         if known is not None and known.minute_ts > minute:
             return
@@ -302,6 +331,25 @@ class MinuteCompletionEmitter:
         """
         received = time.time() if now is None else now
         self._feed_break_until = max(self._feed_break_until, received + self._resubscribe_settle_s)
+
+    def mark_trade_break(self, *, arm_after: int | None, now: float | None = None) -> None:
+        """Bar the minutes around a break of the trade-built stream and forget every close.
+
+        A break lost or discarded bars, so any carried close may be stale. The
+        arming floor keeps a bar that had its first emission before the break
+        from arming a close afterwards.
+
+        Args:
+            arm_after: UNIX time of the producer's newest popped boundary at the
+                break, or ``None`` before its first completed tick, which leaves
+                the floor unchanged because nothing was emitted yet.
+            now: Wall-clock time of the break; defaults to the current time.
+        """
+        self.mark_feed_break(now)
+        self._last_close.clear()
+        if arm_after is not None:
+            floor = self._arm_floor
+            self._arm_floor = arm_after if floor is None else max(floor, arm_after)
 
     def due_flat_bars(self, now: float) -> list[CandleUpdate]:
         """Return the flat bars owed for the minute that has just settled.
@@ -321,6 +369,71 @@ class MinuteCompletionEmitter:
         if not self._minute_is_assertable(minute):
             return []
         return self._flat_bars_for(minute)
+
+    def next_flat_minute(
+        self, through: float, *, acquired_at: datetime
+    ) -> tuple[int, list[CandleUpdate]] | None:
+        """Consider the next minute that a completion mark has certified.
+
+        Considers at most one minute per call, so the caller can stop between
+        minutes when the stream breaks. The first call only seeds the cursor
+        just before ``through``, exactly as the wall-clock sweep seeds it.
+        Minutes whose witness has expired are passed over in one step.
+
+        Args:
+            through: UNIX time of the boundary the mark certifies.
+            acquired_at: Production time of the mark, the author of every flat
+                bar built for the minute.
+
+        Returns:
+            ``None`` when the cursor was just seeded or has reached the last
+            minute before ``through``. Otherwise the minute considered and its
+            flat bars, empty when the emitter is switched off or the minute is
+            not assertable.
+        """
+        target = int(through) - _MINUTE_SECONDS
+        previous = self._swept_through
+        if previous is None:
+            self._swept_through = target
+            return None
+        cursor = self._skip_expired_minutes(previous, target)
+        if cursor >= target:
+            return None
+        minute = cursor + _MINUTE_SECONDS
+        self._swept_through = minute
+        if not self._enabled():
+            return minute, []
+        self._last_swept_minute = minute
+        if not self._minute_is_assertable(minute):
+            return minute, []
+        return minute, self._flat_bars_for(minute, acquired_at=acquired_at)
+
+    def _skip_expired_minutes(self, cursor: int, target: int) -> int:
+        """Move the cursor past minutes that can no longer be asserted.
+
+        After a long consumer lag the next minute can be older than the witness
+        retention. Such minutes are counted once instead of being considered one
+        by one, which bounds the work of a single mark. The jump stops just
+        before the oldest assertable minute, and never passes ``target``.
+
+        Args:
+            cursor: UNIX start of the newest minute already considered.
+            target: UNIX start of the newest minute the mark lets the sweep
+                consider.
+
+        Returns:
+            The cursor, moved forward when minutes were passed over.
+        """
+        newest = self._newest_witnessed
+        if cursor >= target or newest is None:
+            return cursor
+        oldest = newest - (_WITNESS_RETENTION_MINUTES - 1) * _MINUTE_SECONDS
+        if cursor + _MINUTE_SECONDS >= oldest:
+            return cursor
+        stop = min(oldest - _MINUTE_SECONDS, target)
+        self._bump(SKIP_UNSWEPT, (stop - cursor) // _MINUTE_SECONDS)
+        self._swept_through = stop
+        return stop
 
     def counters(self) -> JsonObject:
         """Return cumulative sweep outcomes for the heartbeat surface.
@@ -434,7 +547,9 @@ class MinuteCompletionEmitter:
             and following.first <= end + tolerance
         )
 
-    def _flat_bars_for(self, minute: int) -> list[CandleUpdate]:
+    def _flat_bars_for(
+        self, minute: int, *, acquired_at: datetime | None = None
+    ) -> list[CandleUpdate]:
         """Build the flat bars for every symbol still owed one for ``minute``.
 
         Iterates the last-close map rather than the roster, because a symbol
@@ -445,6 +560,8 @@ class MinuteCompletionEmitter:
 
         Args:
             minute: UNIX start of the settled minute.
+            acquired_at: Author of the bars, or ``None`` to stamp them at
+                processing.
 
         Returns:
             Flat bars for the eligible symbols, possibly empty.
@@ -459,7 +576,9 @@ class MinuteCompletionEmitter:
             if known.minute_ts >= minute:
                 self._bump(SKIP_ALREADY_EMITTED)
                 continue
-            bars.append(build_flat_minute_bar(symbol, interval_begin, known.close))
+            bars.append(
+                build_flat_minute_bar(symbol, interval_begin, known.close, acquired_at=acquired_at)
+            )
             self._last_close[symbol] = _LastClose(minute_ts=minute, close=known.close)
         self._bump(EMITTED, len(bars))
         return bars
