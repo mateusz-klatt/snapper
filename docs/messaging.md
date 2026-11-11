@@ -192,7 +192,8 @@ reporting a fixed healthy value. ERROR fires on an active loop death streak
 of at least 600 s, no successful reconciliation pass for 900 s, or an order
 command in flight for 600 s; WARNING fires on 2+ deaths within an active
 streak, reconciliation progress age of at least 300 s, a command in flight
-for 120 s, an unhealed accept-event backlog, or parked ambiguous submits
+for 120 s, an unhealed accept-event backlog, confirmed cancel terminals not
+yet recorded (`meta.unrecorded_order_terminals`), or parked ambiguous submits
 awaiting venue verification. A death streak counts as active only while its
 last death is younger than 300 s, so a loop that died once and then
 self-healed never ages into a false alarm. `lag_ms` carries the
@@ -1369,7 +1370,13 @@ Executor:
     (`fill_observed`), terminal (`order_terminal`), rejected
     (`order_rejected`), ambiguous-submit (`order_submit_unknown`),
     breaker-open (`order_breaker_open`), and interlock-blocked
-    (`order_interlock_blocked`) observations
+    (`order_interlock_blocked`) observations. An order's `order_terminal`
+    is recorded once: the venue stream, a venue-confirmed requested cancel
+    and the reconciliation retry all write it through one serialised
+    repository insert, so several executors never add a second row. A
+    confirmed cancel never turns into `REJECTED`; when its terminal cannot
+    be recorded at once, it waits in a bounded retry map that the next
+    reconciliation cycle drains.
 5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
 
 Before the venue order-placement call, each submit passes the pre-placement

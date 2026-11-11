@@ -26882,6 +26882,127 @@ class SQLAlchemyRepository(Repository):
             )
             return result.first() is not None
 
+    async def insert_order_terminal_once(self, row: VenueEventInsertRow) -> bool:
+        """Insert one ``order_terminal`` venue event unless its order already has one.
+
+        The record-once write for a confirmed terminal (item G): the
+        requested-cancel path, the stream path and the executor's retry
+        all record an order's terminal evidence through this method, so
+        several executors, or a retry after an ambiguous commit, never add
+        a second row. One fresh session opens its own transaction,
+        serialises on the client order id, checks for an existing
+        ``order_terminal`` row with the full client order id, inserts
+        through the same session and commits. A commit that raises after
+        it reached the database is resolved by calling this method again,
+        which then finds the row and returns ``False``.
+
+        Args:
+            row: Complete ``order_terminal`` event with a client order id.
+
+        Returns:
+            ``True`` when this call inserted the row, ``False`` when the
+            order already had an ``order_terminal`` row.
+
+        Raises:
+            ValueError: If the row is not an ``order_terminal`` event with
+                a non-empty client order id.
+        """
+        client_order_id = row.get("client_order_id")
+        if row.get("event_type") != "order_terminal" or not client_order_id:
+            raise ValueError(
+                "insert_order_terminal_once requires an order_terminal row with a client order id"
+            )
+        async with self.session() as s:
+            await self._begin_order_terminal_transaction(s, client_order_id)
+            existing = await s.execute(
+                select(VenueEvent.id)
+                .where(
+                    VenueEvent.client_order_id == client_order_id,
+                    VenueEvent.event_type == "order_terminal",
+                )
+                .limit(1)
+            )
+            if existing.first() is not None:
+                await s.commit()
+                return False
+            s.add(VenueEvent(**row))
+            await s.commit()
+            return True
+
+    async def _begin_order_terminal_transaction(
+        self, s: AsyncSession, client_order_id: str
+    ) -> None:
+        """Open the record-once transaction and serialise on one client order id.
+
+        Must be the transaction's first statement. PostgreSQL forces
+        ``READ COMMITTED`` explicitly, because an inherited ``REPEATABLE
+        READ`` snapshot taken before the lock wait would miss a row that
+        the first writer committed, then takes a transaction-scoped
+        advisory lock keyed by ``hashtextextended('order_terminal:' ||
+        client_order_id, 0)``. A 64-bit collision only serialises two
+        unrelated orders, because the existence check compares the full
+        id. SQLite takes the database write reservation with ``BEGIN
+        IMMEDIATE`` before the check. Any other dialect fails closed.
+
+        Args:
+            s: Fresh session whose transaction this call opens.
+            client_order_id: Order whose terminal evidence is written.
+
+        Raises:
+            NotImplementedError: For a dialect other than PostgreSQL or SQLite.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            await s.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtextextended('order_terminal:' || :client_order_id, 0))"
+                ),
+                {"client_order_id": client_order_id},
+            )
+        elif dialect == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                f"order terminal transaction not implemented for dialect={dialect}"
+            )
+
+    async def get_latest_venue_event_received_at(
+        self,
+        client_order_id: str,
+        event_types: Sequence[str],
+        statuses: Sequence[str] | None = None,
+    ) -> datetime | None:
+        """Return the newest ``received_at`` of an order's venue events of the given types.
+
+        When ``statuses`` is given, only events whose lower-cased
+        ``status`` is one of them count; the trade-command lifecycle fold
+        lower-cases the status the same way. The result is both the venue
+        evidence test of the cancel retirement pass (item G) and its end
+        time. Served by ``ix_venue_events_cid_event_type``.
+
+        Args:
+            client_order_id: Order whose venue events are read.
+            event_types: Venue event types that count.
+            statuses: Optional statuses that count, compared case-insensitively.
+
+        Returns:
+            The newest qualifying ``received_at``, or ``None`` when no
+            event qualifies.
+        """
+        conditions: list[ColumnElement[bool]] = [
+            VenueEvent.client_order_id == client_order_id,
+            VenueEvent.event_type.in_(list(event_types)),
+        ]
+        if statuses is not None:
+            conditions.append(
+                func.lower(VenueEvent.status).in_([status.lower() for status in statuses])
+            )
+        async with self.session() as s:
+            result = await s.execute(select(func.max(VenueEvent.received_at)).where(*conditions))
+            return result.scalar_one_or_none()
+
     async def get_order_lifecycle_events(self, client_order_ids: list[str]) -> list[VenueEventRow]:
         """Return lifecycle venue events for a batch of client order ids.
 

@@ -30,6 +30,7 @@ from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
+from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.config.settings import AppSettings
@@ -637,6 +638,55 @@ class PlanExecutorService(RegisterableProcess):
                 row["submitted_notional_usd"] = caps_guard.submitted_notional_usd
                 await self.repository.insert_trade_command(row, ownership=None)
 
+    async def _stranded_cancel_target_ended(
+        self, plan: ExecutionPlanRow, child_client_order_id: str
+    ) -> bool:
+        """Return whether a stranded cancel must not be re-emitted for this child.
+
+        Item G2b: a child whose create or submit command ended
+        ``cancelled``, ``filled`` or ``expired`` with venue evidence (the
+        same rule the reconciliation loop retires cancels on) gets no new
+        cancel. Every other child is re-emitted as before, including a
+        ``rejected`` or ``failed`` one, which can still change. A raising
+        lookup also suppresses the re-emit and is logged as an error.
+
+        Args:
+            plan: Recovered plan row in cancel_requested status.
+            child_client_order_id: Child order the cancel would target.
+
+        Returns:
+            True when the cancel must not be re-emitted.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        try:
+            target = await self.repository.get_active_create_command_by_client_order_id(
+                child_client_order_id, plan["exchange"]
+            )
+            ended_at = (
+                None
+                if target is None
+                else await target_end_time(self.repository, target["status"], child_client_order_id)
+            )
+        except Exception as exc:
+            logger.error(
+                "Stranded cancel target lookup failed for plan {} child {}: {}",
+                plan["public_id"],
+                child_client_order_id,
+                exc,
+            )
+            return True
+        if target is None or ended_at is None:
+            return False
+        logger.info(
+            "PlanExecutorService: stranded cancel not re-emitted for plan {}: child {} "
+            "already ended {}",
+            plan["public_id"],
+            child_client_order_id,
+            target["status"],
+        )
+        return True
+
     async def _reemit_single_stranded_cancel(
         self,
         plan: ExecutionPlanRow,
@@ -685,6 +735,8 @@ class PlanExecutorService(RegisterableProcess):
                 plan["public_id"],
                 child_client_order_id,
             )
+            return
+        if await self._stranded_cancel_target_ended(plan, child_client_order_id):
             return
         try:
             exchange_order_id = await self.repository.get_exchange_order_id_for_client_order_id(

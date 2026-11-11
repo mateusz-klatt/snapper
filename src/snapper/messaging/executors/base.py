@@ -57,6 +57,7 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_material import require_consistent_execution_command
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.execution_observation_ingestion import (
     DurableExecutionObservationSink,
 )
@@ -118,6 +119,7 @@ from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
+from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CORE_TO_EXCHANGE_ORDER_TYPE
@@ -509,6 +511,11 @@ recorded as an ``error`` observation (last-good retained, stale-visible) and
 never blocks the observer loop or the order-reconciliation cycle."""
 _PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
 """Bound on the complete observer-side portfolio reconciliation branch."""
+_UNRECORDED_ORDER_TERMINAL_LIMIT = 1_000
+"""Bound on the executor's retry map of confirmed terminals not yet recorded.
+When it is full, the oldest entry is dropped with a critical log; the map lives
+in memory only, so a restart loses it and the enqueue-time critical log is the
+trace."""
 _SPOT_ANCHOR_HISTORY_LIMIT = 100
 """Page size for the anchor bootstrap's account-history tip reads (OQ-3). The
 local execution tip must be on the page or the bootstrap refuses, so the page
@@ -769,6 +776,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
+        self._unrecorded_order_terminals: dict[str, RecordVenueEventParams] = {}
         self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self._exec_stream_restarts: int = 0
         self._task_restarts: dict[str, int] = {}
@@ -3278,12 +3286,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             exchange_client = self._require_exchange_client()
             result = await exchange_client.cancel_order(cancel.exchange_order_id, cancel.instrument)
-            await self._handle_cancel_result(cancel, result, exchange_name)
         except Exception as e:
             logger.error(
                 f"[{exchange_name}] Error cancelling order {cancel.exchange_order_id}: {e}"
             )
             await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
+            return
+        await self._handle_cancel_result(cancel, result, exchange_name)
 
     async def _handle_cancel_result(
         self,
@@ -3291,9 +3300,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         result: ExchangeOrderSnapshot,
         exchange_name: OrderExchange,
     ) -> None:
-        """Publish and persist the result of a venue cancel attempt."""
+        """Publish and persist the result of a venue cancel attempt.
+
+        Once the venue has confirmed the cancel, no error leads to a
+        ``REJECTED`` event: the confirmed terminal is recorded, or held
+        for the reconciliation retry, and ``CANCELLED`` is published.
+        """
         if result and result.status == ExchangeOrderStatusEnum.CANCELED:
-            await self._finalize_successful_cancel(cancel)
+            await self._finalize_successful_cancel(cancel, exchange_name)
             await self._publish_cancel_event(cancel, OrderEventEnum.CANCELLED)
             logger.info(
                 f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
@@ -3302,22 +3316,233 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
         logger.warning(f"[{exchange_name}] Cancel request for {cancel.exchange_order_id} failed")
 
-    async def _finalize_successful_cancel(self, cancel: OrderCancelData) -> None:
-        """Clean tracked order state and persist the terminal cancel status."""
-        exchange_client = self._require_exchange_client()
+    async def _finalize_successful_cancel(
+        self, cancel: OrderCancelData, exchange_name: OrderExchange
+    ) -> None:
+        """Record a venue-confirmed cancel and drop its tracked state; never raises.
+
+        For a tracked order the terminal is recorded under the order's
+        ``fill_lock`` before the order row is updated and the entries are
+        removed, so a concurrent stream terminal for the same order writes
+        no second row (:meth:`_record_order_terminal_once`). An untracked
+        order still gets its terminal, with metadata from the durable
+        create or submit command. A failed order-row update is logged and
+        does not stop the caller's publish.
+
+        Args:
+            cancel: The cancel request the venue confirmed.
+            exchange_name: Executor exchange, for lookups and logs.
+        """
         client_id = self.client_by_exchange.get(cancel.exchange_order_id)
         holder = self.pending_orders.get(client_id) if client_id else None
         if holder is None:
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
+            await self._record_confirmed_cancel_terminal(cancel, None, exchange_name)
             return
         async with holder.fill_lock:
+            await self._record_confirmed_cancel_terminal(cancel, holder, exchange_name)
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
             pending = self.pending_orders.pop(client_id, None) if client_id else None
             if pending and pending.db_order_id is not None:
-                await exchange_client._log_order_update_to_db(
-                    db_order_id=pending.db_order_id,
-                    status=ExchangeOrderStatusEnum.CANCELED,
+                await self._mark_cancelled_order_row(pending.db_order_id, cancel, exchange_name)
+
+    async def _mark_cancelled_order_row(
+        self, db_order_id: int, cancel: OrderCancelData, exchange_name: OrderExchange
+    ) -> None:
+        """Project a confirmed cancel onto the order row, logging instead of raising.
+
+        Args:
+            db_order_id: Local order row to update.
+            cancel: The confirmed cancel request, for the log.
+            exchange_name: Executor exchange, for the log.
+        """
+        try:
+            exchange_client = self._require_exchange_client()
+            await exchange_client._log_order_update_to_db(
+                db_order_id=db_order_id,
+                status=ExchangeOrderStatusEnum.CANCELED,
+            )
+        except Exception:
+            logger.exception(
+                f"[{exchange_name}] Confirmed cancel of {cancel.client_order_id} "
+                f"(exchange {cancel.exchange_order_id}): order row update failed"
+            )
+
+    async def _record_confirmed_cancel_terminal(
+        self,
+        cancel: OrderCancelData,
+        holder: PendingOrderState | None,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Record the confirmed cancel's ``order_terminal`` once, or hold it for retry.
+
+        The cancel carries the target order's client order id. The
+        instrument and strategy tag follow :meth:`_order_terminal_metadata`;
+        when that lookup or the record-once insert raises, the terminal is
+        queued in the retry map with whatever metadata is known, and the
+        reconciliation retry completes it.
+
+        Args:
+            cancel: The cancel request the venue confirmed.
+            holder: The tracked entry the caller locked, or ``None``.
+            exchange_name: Executor exchange, for lookups and logs.
+        """
+        client_order_id = cancel.client_order_id
+        params: RecordVenueEventParams = {
+            "event_type": "order_terminal",
+            "exchange_name": exchange_name,
+            "instrument": cancel.instrument,
+            "exchange_order_id": cancel.exchange_order_id,
+            "client_order_id": client_order_id,
+            "status": "canceled",
+        }
+        try:
+            instrument, strategy_tag = await self._order_terminal_metadata(
+                client_order_id, holder, exchange_name, cancel.instrument
+            )
+            params["instrument"] = instrument
+            params["strategy_tag"] = strategy_tag
+            await self._record_order_terminal_once(params)
+        except Exception:
+            self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
+
+    def _hold_unrecorded_order_terminal(
+        self,
+        client_order_id: str,
+        params: RecordVenueEventParams,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Queue a confirmed terminal for the reconciliation retry, bounded.
+
+        The map is bounded by ``_UNRECORDED_ORDER_TERMINAL_LIMIT``; when it
+        is full the oldest entry is dropped with a critical log. The
+        enqueue itself logs at critical level with both order ids, because
+        the map does not survive a restart.
+
+        Args:
+            client_order_id: Target order's client order id, the map key.
+            params: The terminal event, with the metadata known so far.
+            exchange_name: Executor exchange, for the logs.
+        """
+        if (
+            client_order_id not in self._unrecorded_order_terminals
+            and len(self._unrecorded_order_terminals) >= _UNRECORDED_ORDER_TERMINAL_LIMIT
+        ):
+            dropped = next(iter(self._unrecorded_order_terminals))
+            self._unrecorded_order_terminals.pop(dropped)
+            logger.critical(
+                f"[{exchange_name}] Unrecorded order_terminal retry map full: dropped the "
+                f"oldest entry for {dropped}; its terminal must be recorded by repair"
+            )
+        self._unrecorded_order_terminals[client_order_id] = params
+        logger.critical(
+            f"[{exchange_name}] order_terminal for confirmed cancel of {client_order_id} "
+            f"(exchange {params.get('exchange_order_id')}) not recorded; held for the "
+            f"reconciliation retry, which a restart loses"
+        )
+
+    async def _order_terminal_metadata(
+        self,
+        client_order_id: str,
+        holder: PendingOrderState | None,
+        exchange_name: OrderExchange,
+        fallback_instrument: str,
+    ) -> tuple[str, str | None]:
+        """Return the instrument and strategy tag of an order's terminal evidence.
+
+        The tracked request is canonical only while ``pending_orders``
+        still maps the client order id to ``holder``, which the caller has
+        locked. Otherwise the durable create or submit command's
+        ``shard_key`` decides; without such a command the fallback
+        instrument is used without a tag, and a warning names the order.
+
+        Args:
+            client_order_id: Target order's client order id.
+            holder: Tracked entry whose ``fill_lock`` the caller holds, or ``None``.
+            exchange_name: Executor exchange, scoping the command lookup.
+            fallback_instrument: Instrument to use when no command exists.
+
+        Returns:
+            The instrument and the strategy tag, ``None`` when absent.
+        """
+        if holder is not None and self.pending_orders.get(client_order_id) is holder:
+            return holder.request.instrument, holder.request.strategy_tag
+        command = None
+        if isinstance(self.repository, SQLAlchemyRepository):
+            command = await self.repository.get_active_create_command_by_client_order_id(
+                client_order_id, exchange_name
+            )
+        parsed = parse_shard_key(command["shard_key"]) if command is not None else None
+        if parsed is None:
+            logger.warning(
+                f"[{exchange_name}] No create or submit command for {client_order_id}: "
+                f"order_terminal recorded without a strategy tag"
+            )
+            return fallback_instrument, None
+        _, instrument, _, _, strategy_tag = parsed
+        return instrument, strategy_tag
+
+    async def _record_order_terminal_once(self, params: RecordVenueEventParams) -> bool:
+        """Write ``order_terminal`` evidence through the record-once repository path.
+
+        Every writer of an order's terminal evidence uses this method, so
+        several executors, a stream terminal and a retry never add a second
+        row. Repository errors propagate; each caller decides how to retry.
+
+        Args:
+            params: The ``order_terminal`` event to record.
+
+        Returns:
+            ``True`` when this call inserted the row; ``False`` when the
+            order already had one, when the repository keeps no venue
+            events, or when the identifiers are incomplete.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        row = self._venue_event_row(params)
+        if row is None:
+            return False
+        return await self.repository.insert_order_terminal_once(row)
+
+    async def _retry_unrecorded_order_terminals(self) -> None:
+        """Retry the confirmed terminals that could not be recorded inline.
+
+        Never takes ``fill_lock``. Each entry is first probed with
+        ``has_venue_event``, and dropped when a terminal already exists,
+        because another executor may have recorded it. Only otherwise is
+        missing metadata resolved from the durable command and the
+        record-once insert called, which rechecks atomically. An entry is
+        dropped once that call returns, and kept for the next cycle when
+        the probe, the lookup or the insert raises. An entry that a
+        concurrent enqueue evicted from the full map while an earlier
+        entry was awaited is skipped; the eviction has already logged it.
+        """
+        exchange_name = self._get_exchange_name()
+        for client_order_id in tuple(self._unrecorded_order_terminals):
+            params = self._unrecorded_order_terminals.get(client_order_id)
+            if params is None:
+                continue
+            try:
+                if isinstance(self.repository, SQLAlchemyRepository) and (
+                    await self.repository.has_venue_event(client_order_id, "order_terminal")
+                ):
+                    self._unrecorded_order_terminals.pop(client_order_id, None)
+                    continue
+                if "strategy_tag" not in params:
+                    instrument, strategy_tag = await self._order_terminal_metadata(
+                        client_order_id, None, exchange_name, params.get("instrument", "")
+                    )
+                    params = params.copy()
+                    params["instrument"] = instrument
+                    params["strategy_tag"] = strategy_tag
+                await self._record_order_terminal_once(params)
+            except Exception:
+                logger.warning(
+                    f"[{exchange_name}] Recon: order_terminal for {client_order_id} still "
+                    f"not recorded — retrying next cycle"
                 )
+                continue
+            self._unrecorded_order_terminals.pop(client_order_id, None)
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Reject an order-replace request (replace is not implemented).
@@ -3612,62 +3837,80 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
+        row = self._venue_event_row(params)
+        if row is None:
+            return
+        try:
+            await self.repository.insert_venue_event(row)
+        except Exception:
+            logger.error(
+                f"[{row['exchange']}] FAIL-CLOSED: venue event {row['event_type']} write failed "
+                f"for {row['instrument']}. Durable mode requires all events persisted."
+            )
+            raise
+
+    def _venue_event_row(self, params: RecordVenueEventParams) -> VenueEventInsertRow | None:
+        """Build the durable venue event row for ``params``.
+
+        Shared by :meth:`_record_venue_event` and
+        :meth:`_record_order_terminal_once`, so both compute the mode, the
+        shard key and the provenance identically. Building the row draws
+        the shard's next sequence number.
+
+        Args:
+            params: Event data including event_type, exchange_name, instrument,
+                and optional fill/error fields.
+
+        Returns:
+            The insert row, or ``None`` (logged) when a required identifier
+            is missing.
+        """
         event_type = params.get("event_type")
         exchange_name = params.get("exchange_name")
         instrument = params.get("instrument")
         if event_type is None or exchange_name is None or instrument is None:
             logger.error("Venue event params missing required identifiers: {}", params)
-            return
+            return None
         mode = (
             ExecutionModeEnum.PAPER
             if exchange_name == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
-        strategy_tag = params.get("strategy_tag")
         shard_key = compute_shard_key(
             instrument=instrument,
             exchange=cast(OrderExchange, exchange_name),
             mode=mode,
             wallet_public_id=self.wallet_public_id,
-            strategy_tag=strategy_tag,
+            strategy_tag=params.get("strategy_tag"),
         )
         now = datetime.now(UTC)
-        try:
-            await self.repository.insert_venue_event(
-                {
-                    "event_type": event_type,
-                    "shard_key": shard_key,
-                    "wallet_public_id": self.wallet_public_id,
-                    "exchange": exchange_name,
-                    "instrument": instrument,
-                    "mode": mode,
-                    "received_at": now,
-                    "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence(f"venue.{shard_key}"),
-                    "timestamp": now,
-                    "exchange_order_id": params.get("exchange_order_id"),
-                    "client_order_id": params.get("client_order_id"),
-                    "side": params.get("side"),
-                    "status": params.get("status"),
-                    "fill_price": params.get("fill_price"),
-                    "fill_size": params.get("fill_size"),
-                    "cum_fill_size": params.get("cum_fill_size"),
-                    "fee": params.get("fee"),
-                    "fee_asset": params.get("fee_asset"),
-                    "exec_id": params.get("exec_id"),
-                    "trade_id": params.get("trade_id"),
-                    "error": params.get("error"),
-                    "venue_timestamp": params.get("venue_timestamp"),
-                    "payload_json": params.get("payload_json"),
-                    "liquidity_role": params.get("liquidity_role") or "unknown",
-                }
-            )
-        except Exception:
-            logger.error(
-                f"[{exchange_name}] FAIL-CLOSED: venue event {event_type} write failed "
-                f"for {instrument}. Durable mode requires all events persisted."
-            )
-            raise
+        return {
+            "event_type": event_type,
+            "shard_key": shard_key,
+            "wallet_public_id": self.wallet_public_id,
+            "exchange": exchange_name,
+            "instrument": instrument,
+            "mode": mode,
+            "received_at": now,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(f"venue.{shard_key}"),
+            "timestamp": now,
+            "exchange_order_id": params.get("exchange_order_id"),
+            "client_order_id": params.get("client_order_id"),
+            "side": params.get("side"),
+            "status": params.get("status"),
+            "fill_price": params.get("fill_price"),
+            "fill_size": params.get("fill_size"),
+            "cum_fill_size": params.get("cum_fill_size"),
+            "fee": params.get("fee"),
+            "fee_asset": params.get("fee_asset"),
+            "exec_id": params.get("exec_id"),
+            "trade_id": params.get("trade_id"),
+            "error": params.get("error"),
+            "venue_timestamp": params.get("venue_timestamp"),
+            "payload_json": params.get("payload_json"),
+            "liquidity_role": params.get("liquidity_role") or "unknown",
+        }
 
     async def _reconciliation_handler(self) -> None:
         """Periodic exchange API reconciliation.
@@ -5205,8 +5448,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         each cycle, and entries whose durable ``order_accepted`` write
         failed (``accept_event_pending``) get the write retried until
         it sticks — the 60s loop is the steady-state resolver for
-        everything the inline paths could not settle.
+        everything the inline paths could not settle. Confirmed cancel
+        terminals that could not be recorded inline are retried first, so
+        the Kraken Futures early return cannot skip them.
         """
+        await self._retry_unrecorded_order_terminals()
         if self.exchange_client is None:
             return
         exchange_name = self._get_exchange_name()
@@ -6890,12 +7136,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self.exchange_client._log_order_update_to_db(
                 db_order_id=pending.db_order_id, status=status
             )
-        instrument = getattr(execution, "symbol", "") or ""
-        tag = None
-        if pending and pending.request:
-            instrument = pending.request.instrument
-            tag = pending.request.strategy_tag
-        await self._record_venue_event(
+        instrument, tag = await self._order_terminal_metadata(
+            client_order_id,
+            pending,
+            exchange_name,
+            getattr(execution, "symbol", "") or "",
+        )
+        await self._record_order_terminal_once(
             {
                 "event_type": "order_terminal",
                 "exchange_name": exchange_name,
@@ -7895,6 +8142,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             reasons.append(f"order command in flight for {inflight_age:.0f}s")
         if self._unhealed_accept_events:
             reasons.append(f"unhealed accept events: {len(self._unhealed_accept_events)}")
+        if self._unrecorded_order_terminals:
+            reasons.append(f"unrecorded order terminals: {len(self._unrecorded_order_terminals)}")
         parked = self._parked_ambiguous_order_count()
         if parked:
             reasons.append(f"parked ambiguous orders: {parked}")
@@ -7971,6 +8220,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "task_restarts": cast("dict[str, JsonValue]", dict(self._task_restarts)),
                     "exec_stream_restarts": self._exec_stream_restarts,
                     "unhealed_accept_events": len(self._unhealed_accept_events),
+                    "unrecorded_order_terminals": len(self._unrecorded_order_terminals),
                     "parked_unknown": sum(
                         1
                         for entry in self.pending_orders.values()

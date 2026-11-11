@@ -852,7 +852,13 @@ create/submit command with ZERO venue evidence (a real anomaly);
 unknown-only evidence logs at INFO (executor verification is already
 working it); a command with real evidence is silent — an old open
 limit order is healthy, not stale. Cancel commands keep the legacy
-WARN. The executor's 60s cycle works the zero-evidence queue from the
+WARN until their target order has ended: a `dispatched`,
+`direct_dispatched` or `accepted` cancel whose create or submit command is
+`cancelled`, `filled` or `expired` with venue evidence is retired, as
+`cancelled` when the target's cancel was observed after the cancel was
+created and as `rejected` otherwise, with the target's end in
+`terminal_at` and the reason in `last_error`. A target cancelled or
+expired only locally leaves the cancel and its WARN unchanged. The executor's 60s cycle works the zero-evidence queue from the
 venue side: each unresolved DISPATCHED command gets a client-id lookup
 — a found order is adopted under its original request (this also
 recovers parked-UNKNOWN entries lost to an executor restart; the
@@ -1001,8 +1007,8 @@ for 5 / 15 minutes reports WARNING / ERROR (recon swallows per-cycle
 faults by design, so only its progress clock can expose a recon that
 fails forever without dying); an order command stuck in flight for
 2 / 10 minutes reports WARNING / ERROR (a wedged handler neither dies
-nor progresses); an unhealed accept-event backlog or parked-UNKNOWN
-submits report WARNING. The executor heartbeat's `lag_ms` is the age
+nor progresses); an unhealed accept-event backlog, confirmed cancel
+terminals not yet recorded, or parked-UNKNOWN submits report WARNING. The executor heartbeat's `lag_ms` is the age
 of the last successful reconciliation pass. Per-wallet executor
 instances publish on per-wallet heartbeat topics
 (`system.heartbeats.executor.{exchange}.{wallet_short}`), and the
