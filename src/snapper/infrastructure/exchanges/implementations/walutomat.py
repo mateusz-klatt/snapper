@@ -1045,6 +1045,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
     account_history_capability = CapabilityStatus.SUPPORTED
     """Walutomat exposes a faithful append-only ``account/history`` ledger, the
     substrate the spot-anchor bootstrap seals and the witness join folds."""
+    initiates_external_only_history_operations = False
+    """This adapter's only outbound writers place and close ``market_fx`` orders.
+
+    It has no writer for a PAYIN, PAYOUT, TRANSFER or DIRECT_FX operation, so
+    such history rows never originate here; a regression test pins the writer
+    set. Adding a writer for any of them requires an operation-taxonomy review
+    before this may stay ``False``."""
 
     def __init__(
         self,

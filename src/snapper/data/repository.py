@@ -179,6 +179,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
+from snapper.application.portfolio.spot_anchor_ownership import build_owned_order_population
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -438,6 +439,9 @@ from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotInstrumentIdentitySourceRow
+from snapper.data.repository_types import SpotOwnedOrderPopulation
+from snapper.data.repository_types import SpotOwnedOrderSourceRow
+from snapper.data.repository_types import SpotOwnedSubmitCommandRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.data.repository_types import SpotReplayExecutionSourceRow
@@ -5814,16 +5818,35 @@ class Repository(ABC):
     ) -> list[SpotExecutionWitnessRow]:
         """Read the range ``(from_watermark, upto_watermark]`` for a witness join.
 
-        Returns one ``(scope_sequence, exec_id)`` row per execution in ascending
-        ``scope_sequence`` order, with no ``known_to`` filter (the total-unique
-        index gives one row per sequence value). The default ``from_watermark=0``
-        is the anchor bootstrap's sealed prefix ``[1, W]``; the venue-cursor
-        certificate passes the anchor watermark to read its replay range. Raises
-        ``ExecutionChainError`` when the range is not contiguous
-        (``count != upto_watermark - from_watermark``) — a gap is a purge or a
-        tamper and the caller must fail closed rather than certify a ledger it
-        cannot fully witness. The read is unlocked, mirroring the watermark and
-        chain-tip reads.
+        Returns one ``(scope_sequence, exec_id, order_public_id)`` row per
+        execution in ascending ``scope_sequence`` order, with no ``known_to``
+        filter (the total-unique index gives one row per sequence value). The
+        default ``from_watermark=0`` is the anchor bootstrap's sealed prefix
+        ``[1, W]``; the venue-cursor certificate passes the anchor watermark to
+        read its replay range. Raises ``ExecutionChainError`` when the range is
+        not contiguous (``count != upto_watermark - from_watermark``) — a gap is
+        a purge or a tamper and the caller must fail closed rather than certify
+        a ledger it cannot fully witness. The read is unlocked, mirroring the
+        watermark and chain-tip reads.
+        """
+        ...
+
+    @abstractmethod
+    async def get_spot_anchor_owned_order_population(
+        self, wallet_public_id: str, exchange: str, mode: str
+    ) -> SpotOwnedOrderPopulation:
+        """Read the anchor bootstrap's owned-order population in one snapshot.
+
+        Starts from every sentinel-tip Order of the wallet and mode, left-joins
+        its sentinel-tip Instrument (an inner join would drop the missing
+        lineage that is itself evidence), reads every version of each
+        referenced Instrument, and reads the sentinel-tip ``create`` and
+        ``submit`` commands of the exact wallet, exchange, and mode. On
+        PostgreSQL the reads share one ``REPEATABLE READ, READ ONLY``
+        transaction; on SQLite they share one transaction. Commands never
+        filter or assign Order ownership. Used only by the spot anchor
+        bootstrap, which must read it after both its history and watermark
+        captures.
         """
         ...
 
@@ -27899,10 +27922,152 @@ class SQLAlchemyRepository(Repository):
                     f"({from_watermark}, {upto_watermark}], found {len(executions)}"
                 )
             rows: list[SpotExecutionWitnessRow] = [
-                {"scope_sequence": int(execution.scope_sequence), "exec_id": execution.exec_id}
+                {
+                    "scope_sequence": int(execution.scope_sequence),
+                    "exec_id": execution.exec_id,
+                    "order_public_id": str(execution.order_public_id),
+                }
                 for execution in executions
             ]
         return rows
+
+    async def get_spot_anchor_owned_order_population(
+        self, wallet_public_id: str, exchange: str, mode: str
+    ) -> SpotOwnedOrderPopulation:
+        """Read the anchor bootstrap's owned-order population in one snapshot.
+
+        See the abstract declaration. The three reads run inside one explicit
+        database transaction, so the Orders, the Instrument versions, and the
+        commands describe one database cut. On PostgreSQL it is opened
+        ``REPEATABLE READ, READ ONLY``. On SQLite the driver's legacy
+        transaction control issues no ``BEGIN`` before a ``SELECT``, so each
+        read would see its own cut; an explicit deferred ``BEGIN`` makes the
+        first read take the snapshot that the later reads share. The rows are
+        projected inside the session and classified by the pure population
+        builder. Alias UUID spellings of the wallet are canonicalized before
+        filtering; a malformed wallet identity raises ``ValueError`` like the
+        other reconciliation reads.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        async with self.session() as s, s.begin():
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            else:
+                await s.execute(text("BEGIN"))
+            order_rows = await self._spot_owned_order_source_rows(s, wallet_public_id, mode)
+            instrument_versions = await self._spot_owned_instrument_versions(
+                s, wallet_public_id, mode
+            )
+            commands = await self._spot_owned_submit_commands(s, wallet_public_id, exchange, mode)
+        return build_owned_order_population(exchange, order_rows, instrument_versions, commands)
+
+    @staticmethod
+    async def _spot_owned_order_source_rows(
+        s: AsyncSession, wallet_public_id: str, mode: str
+    ) -> list[SpotOwnedOrderSourceRow]:
+        """Left-join every sentinel-tip Order of the scope to its sentinel-tip Instruments.
+
+        Rows are grouped by the Order version's physical id, so two sentinel-tip
+        rows sharing one public id stay distinct, and every matched Instrument's
+        exchange is kept so a multiply active Instrument stays visible.
+        """
+        result = await s.execute(
+            select(
+                Order.id.label("order_row_id"),
+                Order.public_id,
+                Order.instrument_public_id,
+                Order.exchange_order_id,
+                Instrument.id.label("instrument_row_id"),
+                Instrument.exchange,
+            )
+            .select_from(Order)
+            .outerjoin(
+                Instrument,
+                and_(
+                    Instrument.public_id == Order.instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(
+                Order.known_to == KNOWN_TO_MAX,
+                Order.wallet_public_id == wallet_public_id,
+                Order.mode == mode,
+            )
+            .order_by(Order.id.asc(), Instrument.id.asc())
+        )
+        grouped: dict[int, SpotOwnedOrderSourceRow] = {}
+        for (
+            order_row_id,
+            order_public_id,
+            instrument_public_id,
+            exchange_order_id,
+            instrument_row_id,
+            instrument_exchange,
+        ) in result.all():
+            row = grouped.setdefault(
+                int(order_row_id),
+                {
+                    "order_row_id": int(order_row_id),
+                    "order_public_id": str(order_public_id),
+                    "instrument_public_id": str(instrument_public_id),
+                    "exchange_order_id": exchange_order_id,
+                    "instrument_exchanges": (),
+                },
+            )
+            if instrument_row_id is not None:
+                row["instrument_exchanges"] = (*row["instrument_exchanges"], instrument_exchange)
+        return list(grouped.values())
+
+    @staticmethod
+    async def _spot_owned_instrument_versions(
+        s: AsyncSession, wallet_public_id: str, mode: str
+    ) -> dict[str, frozenset[str]]:
+        """Return the exchanges named by every version of each referenced Instrument.
+
+        The referenced set is the sentinel-tip Orders' instrument ids of the
+        scope, read as a subquery inside the same transaction, so an Instrument
+        whose only versions are closed still reports them and an id with no
+        version at all is simply absent from the result.
+        """
+        referenced = select(Order.instrument_public_id).where(
+            Order.known_to == KNOWN_TO_MAX,
+            Order.wallet_public_id == wallet_public_id,
+            Order.mode == mode,
+        )
+        result = await s.execute(
+            select(Instrument.public_id, Instrument.exchange).where(
+                Instrument.public_id.in_(referenced)
+            )
+        )
+        versions: dict[str, set[str]] = {}
+        for instrument_public_id, instrument_exchange in result.all():
+            versions.setdefault(str(instrument_public_id), set()).add(str(instrument_exchange))
+        return {key: frozenset(value) for key, value in versions.items()}
+
+    @staticmethod
+    async def _spot_owned_submit_commands(
+        s: AsyncSession, wallet_public_id: str, exchange: str, mode: str
+    ) -> list[SpotOwnedSubmitCommandRow]:
+        """Read the sentinel-tip ``create`` and ``submit`` commands of the exact scope."""
+        result = await s.execute(
+            select(TradeCommand.public_id, TradeCommand.status, TradeCommand.exchange_order_id)
+            .where(
+                TradeCommand.known_to == KNOWN_TO_MAX,
+                TradeCommand.wallet_public_id == wallet_public_id,
+                TradeCommand.exchange == exchange,
+                TradeCommand.mode == mode,
+                TradeCommand.command_type.in_(("create", "submit")),
+            )
+            .order_by(TradeCommand.id.asc())
+        )
+        return [
+            {
+                "public_id": str(public_id),
+                "status": str(status),
+                "exchange_order_id": exchange_order_id,
+            }
+            for public_id, status, exchange_order_id in result.all()
+        ]
 
     @staticmethod
     def _spot_bundle_unavailable(error: str) -> SpotReconciliationBundle:

@@ -8,6 +8,7 @@ the single-cycle snapshot assembly, and the supervised observer loop.
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -20,8 +21,11 @@ from unittest.mock import patch
 
 import pytest
 
+import snapper.application.portfolio.walutomat_order_ownership_artifact as ownership_artifact
 from snapper.application.portfolio.pnl_snapshot_planner import evaluate_basket
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
+from snapper.application.portfolio.spot_anchor_bootstrap import SpotAnchorObservation
+from snapper.application.portfolio.spot_anchor_bootstrap import spot_anchor_bootstrap_refusals
 from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
 from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
 from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
@@ -30,6 +34,9 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotOwnedOrderPopulation
+from snapper.data.repository_types import SpotOwnedOrderRow
+from snapper.data.repository_types import SpotOwnedSubmitCommandRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.data.repository_types import VenueAccountObservationAttemptRow
@@ -3227,8 +3234,35 @@ class TestPortfolioDriftNotificationEmission:
 
 
 _ANCHOR_WALLET = "0198f0a1-2b3c-7d4e-8f90-a1b2c3d4e5f6"
+_ANCHOR_ORDER = "0198f0a1-2b3c-7d4e-8f90-a1b2c3d40601"
 _ANCHOR_EVALUATED_AT = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
 _VALID_WITNESSES = WitnessOutcome(witnesses={1: frozenset({100})}, refusals=())
+
+
+def _anchor_population(
+    *,
+    resolved: tuple[tuple[str, str | None], ...] = ((_ANCHOR_ORDER, "O1"),),
+    commands: tuple[tuple[str, str | None], ...] = (("filled", "O1"),),
+) -> SpotOwnedOrderPopulation:
+    """Return an owned-order population of resolved Orders and submit commands."""
+    resolved_orders: tuple[SpotOwnedOrderRow, ...] = tuple(
+        {"order_public_id": order_public_id, "exchange_order_id": exchange_order_id}
+        for order_public_id, exchange_order_id in resolved
+    )
+    command_rows: tuple[SpotOwnedSubmitCommandRow, ...] = tuple(
+        {"public_id": f"command-{index}", "status": status, "exchange_order_id": venue_id}
+        for index, (status, venue_id) in enumerate(commands)
+    )
+    return {
+        "owned_order_ids": frozenset(
+            venue_id for _order, venue_id in resolved if venue_id is not None
+        ),
+        "resolved_orders": resolved_orders,
+        "unresolved_lineage": (),
+        "blocked_order_ids": frozenset(),
+        "other_exchange_unidentified_orders": (),
+        "commands": command_rows,
+    }
 
 
 def _anchor_history_item() -> VenueAccountHistoryItem:
@@ -3332,12 +3366,18 @@ def _bootstrap_executor() -> tuple[Any, Any]:
     ex.wallet_public_id = _ANCHOR_WALLET
     client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
     client.account_history_capability = CapabilityStatus.SUPPORTED
+    client.initiates_external_only_history_operations = False
     client.read_native_balances = AsyncMock(
         return_value=[
             NativeBalanceEntry(
-                currency="EUR", total=100.25, free=None, used=None, total_decimal="100.25"
+                currency="EUR",
+                total=100.25,
+                free=None,
+                used=0.0,
+                total_decimal="100.25",
+                used_decimal="0.00",
             ),
-            NativeBalanceEntry(currency="PLN", total=10.0, free=None, used=None),
+            NativeBalanceEntry(currency="PLN", total=10.0, free=None, used=0.0),
         ]
     )
     client.read_account_history_tip = AsyncMock(return_value=_anchor_history_tip(501))
@@ -3360,7 +3400,10 @@ def _bootstrap_executor() -> tuple[Any, Any]:
     ex.repository.has_spot_margin_reconciliation_signal = AsyncMock(return_value=False)
     ex.repository.get_spot_execution_chain_tip = AsyncMock(return_value="chain-tip")
     ex.repository.get_spot_execution_witness_rows = AsyncMock(
-        return_value=[{"exec_id": "E1", "scope_sequence": 1}]
+        return_value=[{"exec_id": "E1", "scope_sequence": 1, "order_public_id": _ANCHOR_ORDER}]
+    )
+    ex.repository.get_spot_anchor_owned_order_population = AsyncMock(
+        return_value=_anchor_population()
     )
     ex.repository.record_spot_reconciliation_anchor = AsyncMock(return_value=1)
     return ex, client
@@ -3682,25 +3725,31 @@ class TestBootstrapSpotAnchor:
         ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_witness_refusals_log_and_return(self) -> None:
-        """Unresolved witnesses seal nothing and are logged by name.
+    async def test_witness_refusals_reach_the_pure_bootstrap(self) -> None:
+        """Unresolved witnesses are logged and handed to the pure bootstrap.
 
         Given: A witness build that returns named refusals and no map.
         When: The bootstrap runs.
-        Then: It returns without sealing an anchor.
+        Then: The observation carries the refusals and the empty map, the pure
+            bootstrap refuses it, and no anchor is sealed.
         """
         ex, _ = _bootstrap_executor()
+        refusals = ("execution_order_id_foreign", "execution_order_totals_missing")
         with (
             patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
             patch.object(
                 base_module,
-                "build_witnesses_from_reads",
-                return_value=WitnessOutcome(
-                    witnesses={}, refusals=("execution_order_totals_missing",)
-                ),
+                "build_owned_witnesses_from_reads",
+                return_value=WitnessOutcome(witnesses={}, refusals=refusals),
             ),
+            patch.object(
+                base_module, "build_spot_anchor", side_effect=base_module.build_spot_anchor
+            ) as builder,
         ):
             await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        observation = builder.call_args.args[0]
+        assert observation.witness_refusals == refusals
+        assert observation.execution_witnesses == {}
         ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -3719,7 +3768,9 @@ class TestBootstrapSpotAnchor:
         )
         with (
             patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
-            patch.object(base_module, "build_witnesses_from_reads", return_value=_VALID_WITNESSES),
+            patch.object(
+                base_module, "build_owned_witnesses_from_reads", return_value=_VALID_WITNESSES
+            ),
             patch.object(
                 base_module,
                 "build_spot_anchor",
@@ -3744,13 +3795,524 @@ class TestBootstrapSpotAnchor:
         anchor_row = {"public_id": "anchor-1"}
         with (
             patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
-            patch.object(base_module, "build_witnesses_from_reads", return_value=_VALID_WITNESSES),
+            patch.object(
+                base_module, "build_owned_witnesses_from_reads", return_value=_VALID_WITNESSES
+            ),
             patch.object(base_module, "build_spot_anchor", return_value=anchor_row),
         ):
             await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
         ex.repository.record_spot_reconciliation_anchor.assert_awaited_once()
         recorded = ex.repository.record_spot_reconciliation_anchor.await_args
         assert recorded.args[0] == anchor_row
+
+
+_WAL_ORDER_2 = "0198f0a1-2b3c-7d4e-8f90-a1b2c3d40602"
+_WAL_GUARANTEE = ownership_artifact.WalutomatOrderOwnershipGuarantee(
+    revision="ownership-review-test",
+    reviewed_at=datetime(2026, 7, 1, tzinfo=UTC),
+    order_id_non_reuse_source="support-ticket-test",
+    order_id_in_history_source="https://api.walutomat.pl/v2.0.0/",
+)
+
+
+def _wal_row(
+    item_id: int,
+    operation_type: str,
+    amount: str,
+    balance_after: str,
+    currency: str,
+) -> VenueAccountHistoryItem:
+    """Return one raw API-placed Walutomat row of order ``O1``'s first transaction."""
+    return VenueAccountHistoryItem(
+        item_id=item_id,
+        operation_type=operation_type,
+        operation_amount=Decimal(amount),
+        balance_after=Decimal(balance_after),
+        currency=currency,
+        transaction_id="tx-1",
+        ordered_by="API/key-1",
+        order_id="O1",
+    )
+
+
+def _wal_tip(*older: VenueAccountHistoryItem) -> VenueAccountHistoryTip:
+    """Return a genesis page whose newest rows are owned order ``O1``'s one fill."""
+    owned = (
+        _wal_row(490, "MARKET_FX", "6", "106", "EUR"),
+        _wal_row(489, "MARKET_FX", "-30", "70", "PLN"),
+    )
+    return VenueAccountHistoryTip(item_id=490, items=(*owned, *older), reached_genesis=True)
+
+
+def _wal_foreign_fill(order_id: str = "M1") -> tuple[VenueAccountHistoryItem, ...]:
+    """Return an older fill's two legs for an order the scenario decides on."""
+    return (
+        replace(
+            _wal_row(480, "MARKET_FX", "5", "100", "EUR"), order_id=order_id, transaction_id="tx-2"
+        ),
+        replace(
+            _wal_row(479, "MARKET_FX", "-25", "100", "PLN"),
+            order_id=order_id,
+            transaction_id="tx-2",
+        ),
+    )
+
+
+def _wal_totals(order_id: str, *, commission: str = "0") -> VenueOrderFillLegs:
+    """Return one Walutomat order's cumulative totals for a BUY EUR/PLN fill."""
+    bought, sold = ("6", "30") if order_id == "O1" else ("5", "25")
+    return VenueOrderFillLegs(
+        order_id=order_id,
+        bought_amount=Decimal(bought),
+        sold_amount=Decimal(sold),
+        commission_amount=Decimal(commission),
+        bought_currency="EUR",
+        sold_currency="PLN",
+        commission_currency="EUR",
+        buy_sell="BUY",
+    )
+
+
+def _wal_work(tip: VenueAccountHistoryTip) -> _PortfolioReconciliationWork:
+    """Return Walutomat bootstrap work whose sealed prefix is one execution."""
+    captured_at = datetime(2026, 7, 17, 9, 59, tzinfo=UTC)
+    boundary = SpotReplayBoundaryCapture(
+        wallet_public_id=_ANCHOR_WALLET,
+        exchange="walutomat",
+        mode="live",
+        session_id="session-1",
+        sequence_id=7,
+        source_watermark=1,
+        as_of=captured_at - timedelta(milliseconds=1),
+        watermark_captured_at=captured_at,
+        request_started_at=captured_at + timedelta(milliseconds=1),
+        request_completed_at=captured_at + timedelta(milliseconds=2),
+        watermark_after=1,
+        watermark_after_captured_at=captured_at + timedelta(milliseconds=3),
+        watermark_unchanged=True,
+    )
+    requested_at = datetime(2026, 7, 17, 9, 58, tzinfo=UTC)
+    return _PortfolioReconciliationWork(
+        state_id=41,
+        identity=(_ANCHOR_WALLET, "walutomat", "live", "session-1", 7),
+        position_capability=CapabilityStatus.NOT_APPLICABLE,
+        boundary=boundary,
+        cursor_capture=_SpotAnchorCursorCapture(
+            tip=tip, requested_at=requested_at, observed_at=requested_at + timedelta(seconds=1)
+        ),
+        history_capture=None,
+    )
+
+
+def _wal_executor(
+    tip: VenueAccountHistoryTip,
+    *,
+    population: SpotOwnedOrderPopulation | None = None,
+    second_used: str | None = "0.00",
+    totals: dict[str, VenueOrderFillLegs] | None = None,
+) -> tuple[Any, Any]:
+    """Return a Walutomat executor whose reads describe one owned fill of ``O1``.
+
+    Only the venue and repository reads are stubbed; the assembly, ownership,
+    witness, and pure bootstrap modules run for real. The confirming tip read
+    returns the captured page, so the tip does not advance.
+    """
+    ex = _make_executor()
+    ex.wallet_public_id = _ANCHOR_WALLET
+    client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+    client.account_history_capability = CapabilityStatus.SUPPORTED
+    client.initiates_external_only_history_operations = False
+    client.read_native_balances = AsyncMock(
+        return_value=[
+            NativeBalanceEntry(
+                currency="EUR",
+                total=106.0,
+                free=None,
+                used=None if second_used is None else float(second_used),
+                total_decimal="106",
+                used_decimal=second_used,
+            ),
+            NativeBalanceEntry(currency="PLN", total=70.0, free=None, used=0.0),
+        ]
+    )
+    client.read_account_history_tip = AsyncMock(return_value=tip)
+    client.parse_execution_exec_id = MagicMock(return_value=("O1", 600000000, False))
+    venue_totals = {"O1": _wal_totals("O1")} if totals is None else totals
+
+    async def read_totals(order_id: str) -> VenueOrderFillLegs | None:
+        """Return the venue's totals for a known order, or None."""
+        return venue_totals.get(order_id)
+
+    client.read_order_fill_legs = AsyncMock(side_effect=read_totals)
+    ex.exchange_client = client
+    ex.repository.get_venue_account_state_version = AsyncMock(
+        return_value=_anchor_state_row(
+            exchange="walutomat",
+            balances_json=json.dumps(
+                [
+                    {"currency": "EUR", "total_decimal": "106", "used_decimal": "0.00"},
+                    {"currency": "PLN", "total_decimal": "70", "used_decimal": "0.00"},
+                ]
+            ),
+        )
+    )
+    ex.repository.get_spot_asset_precision_evidence = AsyncMock(
+        return_value={"EUR": object(), "PLN": object()}
+    )
+    ex.repository.has_spot_margin_reconciliation_signal = AsyncMock(return_value=False)
+    ex.repository.get_spot_execution_chain_tip = AsyncMock(return_value="chain-tip")
+    ex.repository.get_spot_execution_witness_rows = AsyncMock(
+        return_value=[{"exec_id": "wal-1", "scope_sequence": 1, "order_public_id": _ANCHOR_ORDER}]
+    )
+    ex.repository.get_spot_anchor_owned_order_population = AsyncMock(
+        return_value=_anchor_population() if population is None else population
+    )
+    ex.repository.record_spot_reconciliation_anchor = AsyncMock(return_value=1)
+    return ex, client
+
+
+async def _wal_bootstrap(
+    ex: Any,
+    tip: VenueAccountHistoryTip,
+    *,
+    guarantee: ownership_artifact.WalutomatOrderOwnershipGuarantee | None = _WAL_GUARANTEE,
+) -> SpotAnchorObservation:
+    """Run one bootstrap and return the observation handed to the pure builder."""
+    with (
+        patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
+        patch.object(ownership_artifact, "WALUTOMAT_ORDER_OWNERSHIP_GUARANTEE", guarantee),
+        patch.object(
+            base_module, "build_spot_anchor", side_effect=base_module.build_spot_anchor
+        ) as builder,
+    ):
+        await ex._bootstrap_spot_anchor(_wal_work(tip), _ANCHOR_EVALUATED_AT)
+    observation: SpotAnchorObservation = builder.call_args.args[0]
+    return observation
+
+
+class TestBootstrapSpotAnchorOwnership:
+    """The executor's ownership wiring, run through the real pure modules."""
+
+    @pytest.mark.asyncio
+    async def test_a_fully_owned_page_seals_once_the_guarantee_is_recorded(self) -> None:
+        """An owned, witnessed page seals with a recorded venue guarantee.
+
+        Given: A genesis page holding only owned order ``O1``'s witnessed fill,
+            a settled submit command, and a recorded ownership guarantee.
+        When: The bootstrap runs.
+        Then: Exactly one anchor is sealed and its provenance has no external
+            suffix.
+        """
+        tip = _wal_tip()
+        ex, _ = _wal_executor(tip)
+        await _wal_bootstrap(ex, tip)
+        ex.repository.record_spot_reconciliation_anchor.assert_awaited_once()
+        row = ex.repository.record_spot_reconciliation_anchor.await_args.args[0]
+        assert row["provenance"].endswith(":genesis")
+        assert row["venue_cursor_value"] == "490"
+
+    @pytest.mark.asyncio
+    async def test_the_seal_refuses_while_the_guarantee_is_unrecorded(self) -> None:
+        """Without the recorded guarantee the same page never seals.
+
+        Given: The fully owned page and no recorded guarantee.
+        When: The bootstrap runs.
+        Then: The only refusal is ``venue_ownership_guarantee_unrecorded`` and
+            nothing is sealed.
+        """
+        tip = _wal_tip()
+        ex, _ = _wal_executor(tip)
+        observation = await _wal_bootstrap(ex, tip, guarantee=None)
+        assert spot_anchor_bootstrap_refusals(observation) == (
+            "venue_ownership_guarantee_unrecorded",
+        )
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_manual_fill_is_absorbed_as_external(self) -> None:
+        """A manual fill with an order id outside ``S`` seals as external.
+
+        Given: The owned page plus an older manual fill of order ``M1``.
+        When: The bootstrap runs with the guarantee recorded.
+        Then: The anchor seals with the ``:external_observed`` suffix and no
+            totals are read for the foreign order.
+        """
+        tip = _wal_tip(*(replace(row, ordered_by="GUI/user") for row in _wal_foreign_fill()))
+        ex, client = _wal_executor(tip)
+        await _wal_bootstrap(ex, tip)
+        row = ex.repository.record_spot_reconciliation_anchor.await_args.args[0]
+        assert row["provenance"].endswith(":genesis:external_observed")
+        assert [call.args[0] for call in client.read_order_fill_legs.await_args_list] == ["O1"]
+
+    @pytest.mark.asyncio
+    async def test_the_population_guarantee_and_both_reservations_are_wired(self) -> None:
+        """Every ownership input reaches the observation unchanged.
+
+        Given: The fully owned page and a recorded guarantee.
+        When: The bootstrap runs.
+        Then: The observation carries the repository population, both reads'
+            reserved funds, the guarantee's version, the pinned capability, and
+            the witness outcome.
+        """
+        tip = _wal_tip()
+        population = _anchor_population()
+        ex, _ = _wal_executor(tip, population=population)
+        observation = await _wal_bootstrap(ex, tip)
+        assert observation.ownership is population
+        assert observation.balances_reserved == {"EUR": Decimal("0.00"), "PLN": Decimal("0.00")}
+        assert observation.balances_reserved_2 == {"EUR": Decimal("0.00"), "PLN": Decimal("0.0")}
+        assert observation.ownership_guarantee_version == (
+            ownership_artifact.walutomat_order_ownership_guarantee_version(_WAL_GUARANTEE)
+        )
+        assert observation.external_only_operations_initiated is False
+        assert observation.witness_refusals == ()
+        assert observation.execution_witnesses == {1: frozenset({490, 489})}
+
+    @pytest.mark.asyncio
+    async def test_an_unpinned_client_capability_refuses_external_only_rows(self) -> None:
+        """A client that does not pin the capability to False fails closed.
+
+        Given: The owned page plus an older PAYIN without an order id, and a
+            client whose external-only capability is not pinned to False.
+        When: The bootstrap runs.
+        Then: The observation marks the capability unpinned and refuses the
+            PAYIN as an unsupported operation.
+        """
+        payin = replace(
+            _wal_row(480, "PAYIN", "50", "100", "EUR"), order_id=None, transaction_id=None
+        )
+        tip = _wal_tip(payin)
+        ex, client = _wal_executor(tip)
+        client.initiates_external_only_history_operations = AsyncMock()
+        observation = await _wal_bootstrap(ex, tip)
+        assert observation.external_only_operations_initiated is True
+        assert spot_anchor_bootstrap_refusals(observation) == (
+            "venue_history_unsupported_operation",
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_manual_order_opened_between_the_reads_refuses(self) -> None:
+        """Funds reserved by an order opened between the two reads refuse.
+
+        Given: A first read with nothing reserved and a second read that shows
+            EUR reserved, as when a manual order opens between them.
+        When: The bootstrap runs.
+        Then: ``venue_reserved_funds_present`` refuses and nothing is sealed.
+        """
+        tip = _wal_tip()
+        ex, _ = _wal_executor(tip, second_used="5.00")
+        observation = await _wal_bootstrap(ex, tip)
+        assert spot_anchor_bootstrap_refusals(observation) == ("venue_reserved_funds_present",)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_second_read_without_reservations_refuses(self) -> None:
+        """A second read that reports no reservation cannot prove there is none.
+
+        Given: A second read whose EUR entry carries no reserved amount at all.
+        When: The bootstrap runs.
+        Then: The observation has no second reservation map and refuses
+            ``venue_reserved_funds_present``.
+        """
+        tip = _wal_tip()
+        ex, _ = _wal_executor(tip, second_used=None)
+        observation = await _wal_bootstrap(ex, tip)
+        assert observation.balances_reserved_2 is None
+        assert spot_anchor_bootstrap_refusals(observation) == ("venue_reserved_funds_present",)
+
+    @pytest.mark.asyncio
+    async def test_an_ack_persisted_before_the_snapshot_needs_a_witness(self) -> None:
+        """An own fill whose acceptance is already persisted is never external.
+
+        Given: Order ``O2``'s acceptance persisted before the ownership read, so
+            ``O2`` is in ``S``, and its fill on the page has no committed
+            execution inside the fixed watermark.
+        When: The bootstrap runs.
+        Then: Its totals are read and the seal refuses ``venue_fill_not_ingested``
+            instead of absorbing the fill as external.
+        """
+        tip = _wal_tip(*_wal_foreign_fill("O2"))
+        population = _anchor_population(
+            resolved=((_ANCHOR_ORDER, "O1"), (_WAL_ORDER_2, "O2")),
+            commands=(("filled", "O1"), ("filled", "O2")),
+        )
+        ex, client = _wal_executor(
+            tip,
+            population=population,
+            totals={"O1": _wal_totals("O1"), "O2": _wal_totals("O2")},
+        )
+        observation = await _wal_bootstrap(ex, tip)
+        assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
+        assert sorted(call.args[0] for call in client.read_order_fill_legs.await_args_list) == [
+            "O1",
+            "O2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_ack_persisted_after_the_snapshot_keeps_the_submit_unresolved(
+        self,
+    ) -> None:
+        """An own fill whose acceptance is not yet persisted refuses at the gate.
+
+        Given: Order ``O2``'s fill on the page while its acceptance is not yet
+            persisted: no Order carries ``O2`` and its command is still
+            dispatched without a venue id.
+        When: The bootstrap runs with the guarantee recorded.
+        Then: The seal refuses ``own_submit_unresolved`` before classifying the
+            fill, so it is never absorbed as external.
+        """
+        tip = _wal_tip(*_wal_foreign_fill("O2"))
+        population = _anchor_population(commands=(("filled", "O1"), ("dispatched", None)))
+        ex, _ = _wal_executor(tip, population=population)
+        observation = await _wal_bootstrap(ex, tip)
+        assert spot_anchor_bootstrap_refusals(observation) == ("own_submit_unresolved",)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_owned_commission_without_an_execution_is_not_ingested(self) -> None:
+        """An owned fee of an order with no ingested execution refuses.
+
+        Given: A page holding a COMMISSION of owned order ``O2``, which has venue
+            totals but no committed execution.
+        When: The bootstrap runs.
+        Then: Totals are read for both orders and the seal refuses
+            ``venue_fill_not_ingested``.
+        """
+        fee = replace(_wal_row(480, "COMMISSION", "-0.02", "105.98", "EUR"), order_id="O2")
+        tip = _wal_tip(fee)
+        population = _anchor_population(
+            resolved=((_ANCHOR_ORDER, "O1"), (_WAL_ORDER_2, "O2")),
+            commands=(("filled", "O1"), ("filled", "O2")),
+        )
+        ex, client = _wal_executor(
+            tip,
+            population=population,
+            totals={"O1": _wal_totals("O1"), "O2": _wal_totals("O2", commission="0.02")},
+        )
+        observation = await _wal_bootstrap(ex, tip)
+        assert observation.witness_refusals == ("owned_commission_unproven",)
+        assert spot_anchor_bootstrap_refusals(observation) == (
+            "local_execution_not_in_venue_history",
+            "venue_fill_not_ingested",
+        )
+        assert sorted(call.args[0] for call in client.read_order_fill_legs.await_args_list) == [
+            "O1",
+            "O2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_population_is_read_after_the_watermark_and_before_the_totals(
+        self,
+    ) -> None:
+        """The ownership snapshot follows both captures and precedes the totals.
+
+        Given: A bootstrap whose witness-row, population, and totals reads log
+            their order.
+        When: The bootstrap runs.
+        Then: The sealed-prefix rows are read first, then the population, then
+            the venue totals.
+        """
+        tip = _wal_tip()
+        ex, client = _wal_executor(tip)
+        calls: list[str] = []
+        rows = ex.repository.get_spot_execution_witness_rows.return_value
+        population = ex.repository.get_spot_anchor_owned_order_population.return_value
+
+        async def witness_rows(*_args: object) -> object:
+            """Log and return the sealed-prefix rows."""
+            calls.append("witness_rows")
+            return rows
+
+        async def owned_population(*_args: object) -> object:
+            """Log and return the population."""
+            calls.append("population")
+            return population
+
+        async def totals(order_id: str) -> VenueOrderFillLegs:
+            """Log and return the order's totals."""
+            calls.append("totals")
+            return _wal_totals(order_id)
+
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(side_effect=witness_rows)
+        ex.repository.get_spot_anchor_owned_order_population = AsyncMock(
+            side_effect=owned_population
+        )
+        client.read_order_fill_legs = AsyncMock(side_effect=totals)
+        await _wal_bootstrap(ex, tip)
+        assert calls == ["witness_rows", "population", "totals"]
+        ex.repository.get_spot_anchor_owned_order_population.assert_awaited_once_with(
+            _ANCHOR_WALLET, "walutomat", "live"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param(
+                replace(_wal_row(480, "COMMISSION", "-0.02", "100", "EUR"), order_id=None),
+                id="null_order_commission",
+            ),
+            pytest.param(
+                replace(_wal_row(480, "MARKET_FX", "5", "100", "EUR"), order_id=" "),
+                id="blank_order_market_fx",
+            ),
+            pytest.param(
+                replace(
+                    _wal_row(480, "PAYIN", "5", "100", "EUR"), order_id=None, correcting_entry=True
+                ),
+                id="correcting_entry",
+            ),
+        ],
+    )
+    async def test_a_doomed_page_skips_before_any_read(self, row: VenueAccountHistoryItem) -> None:
+        """A page the pure bootstrap must refuse is skipped before any read.
+
+        Given: The owned page plus one row without an order id or one
+            correcting entry.
+        When: The bootstrap runs.
+        Then: Neither the account state nor any venue read is attempted.
+
+        Args:
+            row: The doomed row added below the owned fill.
+        """
+        tip = _wal_tip(row)
+        ex, client = _wal_executor(tip)
+        await ex._bootstrap_spot_anchor(_wal_work(tip), _ANCHOR_EVALUATED_AT)
+        ex.repository.get_venue_account_state_version.assert_not_awaited()
+        client.read_native_balances.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_non_api_fill_is_no_longer_skipped(self) -> None:
+        """A manual fill carrying an order id proceeds to the full gather.
+
+        Given: The owned page plus a manual non-API fill of foreign order ``M1``.
+        When: The bootstrap runs.
+        Then: The account state and the second balance read are both read.
+        """
+        tip = _wal_tip(*(replace(row, ordered_by="") for row in _wal_foreign_fill()))
+        ex, client = _wal_executor(tip)
+        await _wal_bootstrap(ex, tip)
+        ex.repository.get_venue_account_state_version.assert_awaited_once()
+        client.read_native_balances.assert_awaited_once()
+
+    def test_the_guarantee_version_is_walutomat_only(self) -> None:
+        """Only a Walutomat account receives the recorded guarantee's version.
+
+        Given: A recorded Walutomat guarantee.
+        When: The version is resolved for Walutomat and for Kraken.
+        Then: Walutomat receives it and Kraken receives nothing.
+        """
+        with patch.object(
+            ownership_artifact, "WALUTOMAT_ORDER_OWNERSHIP_GUARANTEE", _WAL_GUARANTEE
+        ):
+            walutomat = ExchangeExecutorService._spot_anchor_ownership_guarantee_version(
+                "walutomat"
+            )
+            kraken = ExchangeExecutorService._spot_anchor_ownership_guarantee_version("kraken")
+        assert walutomat == ownership_artifact.walutomat_order_ownership_guarantee_version(
+            _WAL_GUARANTEE
+        )
+        assert kraken is None
 
 
 def _history_anchor_row() -> SpotReconciliationAnchorRow:

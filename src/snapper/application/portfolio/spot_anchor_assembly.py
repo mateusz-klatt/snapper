@@ -11,15 +11,18 @@ remaining directly-observed fields of the observation.
 import json
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryItem
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryTip
+from snapper.application.portfolio.spot_anchor_witness import OwnedWitnessScope
 from snapper.application.portfolio.spot_anchor_witness import WitnessExecution
 from snapper.application.portfolio.spot_anchor_witness import WitnessHistoryLeg
 from snapper.application.portfolio.spot_anchor_witness import WitnessOrderTotals
 from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
 from snapper.application.portfolio.spot_anchor_witness import build_execution_witnesses
+from snapper.application.portfolio.spot_anchor_witness import build_owned_execution_witnesses
 from snapper.application.portfolio.spot_anchor_witness import decode_execution_cumulative
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
@@ -34,19 +37,27 @@ def _is_api_attributed(ordered_by: str) -> bool:
     return ordered_by.startswith(_API_PREFIX)
 
 
-def build_witnesses_from_reads(
+@dataclass(frozen=True)
+class _WitnessInputs:
+    """The witness builder's inputs mapped from the raw venue reads."""
+
+    legs: list[WitnessHistoryLeg]
+    executions: list[WitnessExecution]
+    totals: dict[str, WitnessOrderTotals]
+    commission_by_order: dict[str, Decimal]
+
+
+def _witness_inputs(
     raw_tip: VenueAccountHistoryTip,
     parsed_executions: Sequence[tuple[int, str, int, bool]],
     order_totals: Mapping[str, VenueOrderFillLegs],
-) -> WitnessOutcome:
-    """Compose the execution witness map from the raw venue reads.
+) -> _WitnessInputs:
+    """Map the raw reads to witness legs, executions, totals, and fee sums.
 
-    Maps the tip page's MARKET_FX rows to witness legs, the exec-id-decoded
-    prefix to witness executions (exact cumulative), the per-order fill legs to
-    witness totals, and the page's COMMISSION items to exact per-order fee sums
-    (the fee-leg completeness evidence; commission rows carry no ``orderedBy``
-    on the venue, so the ``orderId`` join — sourced from our own order reads —
-    is their attribution), then defers to the pure witness builder.
+    Maps the page's MARKET_FX rows to witness legs, the exec-id-decoded prefix to
+    witness executions (exact cumulative), the per-order fill legs to witness
+    totals, and the page's COMMISSION items to exact per-order fee sums (the
+    fee-leg completeness evidence, joined to orders by ``orderId``).
 
     Args:
         raw_tip: The venue account-history tip and its descending page.
@@ -55,7 +66,7 @@ def build_witnesses_from_reads(
         order_totals: Per venue order id, the market_fx/orders cumulative totals.
 
     Returns:
-        The witness map, or the ordered refusals when it cannot be composed.
+        The mapped witness inputs.
     """
     legs = [
         WitnessHistoryLeg(
@@ -95,15 +106,113 @@ def build_witnesses_from_reads(
         )
         for order_id, fill_legs in order_totals.items()
     }
-    return build_execution_witnesses(executions, legs, totals, raw_tip.item_id, commission_by_order)
+    return _WitnessInputs(
+        legs=legs, executions=executions, totals=totals, commission_by_order=commission_by_order
+    )
+
+
+def build_witnesses_from_reads(
+    raw_tip: VenueAccountHistoryTip,
+    parsed_executions: Sequence[tuple[int, str, int, bool]],
+    order_totals: Mapping[str, VenueOrderFillLegs],
+) -> WitnessOutcome:
+    """Compose the execution witness map from the raw venue reads.
+
+    The venue-cursor certificate's composition: its witnessable legs are the
+    ones our own API key placed. COMMISSION rows may carry an ``orderedBy`` or
+    not; the ``orderId`` join, sourced from our own order reads, is their
+    attribution either way.
+
+    Args:
+        raw_tip: The venue account-history tip and its descending page.
+        parsed_executions: The sealed prefix as
+            ``(scope_sequence, venue_order_id, cumulative_basis_units, is_terminal)``.
+        order_totals: Per venue order id, the market_fx/orders cumulative totals.
+
+    Returns:
+        The witness map, or the ordered refusals when it cannot be composed.
+    """
+    inputs = _witness_inputs(raw_tip, parsed_executions, order_totals)
+    return build_execution_witnesses(
+        inputs.executions, inputs.legs, inputs.totals, raw_tip.item_id, inputs.commission_by_order
+    )
+
+
+def build_owned_witnesses_from_reads(
+    raw_tip: VenueAccountHistoryTip,
+    parsed_executions: Sequence[tuple[int, str, int, bool]],
+    order_totals: Mapping[str, VenueOrderFillLegs],
+    owned_order_ids: frozenset[str],
+    authoritative_order_ids: Mapping[int, str | None],
+) -> WitnessOutcome:
+    """Compose the anchor bootstrap's witness map from the raw venue reads.
+
+    The bootstrap's composition: its witnessable legs are exactly those whose
+    order id lies in the owned order set ``S``, each execution's decoded order
+    id must be its Order's authoritative venue order id in ``S``, and every
+    owned COMMISSION on the page must be proven against its order's totals and
+    witnessed fills.
+
+    Args:
+        raw_tip: The seal page's tip and its descending rows.
+        parsed_executions: The sealed prefix as
+            ``(scope_sequence, venue_order_id, cumulative_basis_units, is_terminal)``.
+        order_totals: Per venue order id, the market_fx/orders cumulative totals
+            of every executed order and every owned order on the page.
+        owned_order_ids: The owned order set ``S``.
+        authoritative_order_ids: Per scope sequence, the execution's Order's
+            authoritative venue order id, or ``None`` when it does not resolve.
+
+    Returns:
+        The witness map, or the ordered refusals when it cannot be composed.
+    """
+    inputs = _witness_inputs(raw_tip, parsed_executions, order_totals)
+    return build_owned_execution_witnesses(
+        inputs.executions,
+        inputs.legs,
+        inputs.totals,
+        inputs.commission_by_order,
+        OwnedWitnessScope(
+            tip_item_id=raw_tip.item_id,
+            owned_order_ids=owned_order_ids,
+            authoritative_order_ids=authoritative_order_ids,
+        ),
+    )
+
+
+def owned_page_order_ids(
+    raw_tip: VenueAccountHistoryTip, owned_order_ids: frozenset[str]
+) -> frozenset[str]:
+    """Return every owned order id that appears on the page as MARKET_FX or COMMISSION.
+
+    The bootstrap reads venue totals for these orders as well as for the
+    executed ones, so an owned commission or fill whose order has no ingested
+    execution is still checked against the venue's own totals.
+
+    Args:
+        raw_tip: The seal page's tip and its descending rows.
+        owned_order_ids: The owned order set ``S``.
+
+    Returns:
+        The owned order ids present on the page.
+    """
+    return frozenset(
+        item.order_id
+        for item in raw_tip.items
+        if item.operation_type in (_MARKET_FX, _COMMISSION)
+        and item.order_id is not None
+        and item.order_id in owned_order_ids
+    )
 
 
 def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryTip:
     """Normalize a raw account-history tip into the bootstrap's fold input.
 
     Projects each raw row to the certification-plane fields the bootstrap needs:
-    the MARKET_FX marker, our-key attribution, currency, and the venue's own
-    post-event balance. The page order (descending) is preserved.
+    the MARKET_FX marker, our-key attribution (evidence only), currency, the
+    venue's own post-event balance, and — verbatim — the operation type, the
+    order id, and the correcting-entry flag the ownership classification reads.
+    The page order (descending) is preserved.
 
     Args:
         raw_tip: The venue account-history tip and its descending page.
@@ -118,6 +227,9 @@ def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryT
             is_api_attributed=_is_api_attributed(item.ordered_by),
             currency=item.currency,
             balance_after=item.balance_after,
+            operation_type=item.operation_type,
+            order_id=item.order_id,
+            correcting_entry=item.correcting_entry,
         )
         for item in raw_tip.items
     )

@@ -35,6 +35,18 @@ consensus notes):
   witness legs, and the bootstrap deduplicates the witnessed item ids so the
   sharing does not double-count.
 
+Two entry points select which history legs are witnessable. The venue-cursor
+certificate calls :func:`build_execution_witnesses`, which keeps the legs our
+own API key placed (an ``API/`` ``orderedBy``). The anchor bootstrap calls
+:func:`build_owned_execution_witnesses`, which keeps exactly the legs whose order
+id lies in the owned order set ``S`` — ``orderedBy`` is evidence there, never
+ownership — and adds two conjunctions: every execution's decoded venue order id
+must equal its Order's authoritative venue order id, which must lie in ``S``
+(``execution_order_id_foreign``), and every owned order with a COMMISSION on the
+page must have totals, at least one witnessed fill, and page commissions summing
+exactly to its reported cumulative commission (``owned_commission_unproven``),
+so an owned fee of an order without an ingested execution can never pass.
+
 Every check runs (no short-circuit) so the caller sees all reasons at once; the
 refusal union is closed and alphabetically sorted; anything unproven fails closed
 by returning refusals and no map.
@@ -50,11 +62,13 @@ from typing import Literal
 type WitnessRefusal = Literal[
     "commission_sum_disagrees_with_order_total",
     "execution_cumulative_off_fill_boundary",
+    "execution_order_id_foreign",
     "execution_order_totals_missing",
     "history_fill_leg_incomplete",
     "history_leg_unidentified",
     "non_terminal_cumulative_collision",
     "order_base_legs_disagree_with_total",
+    "owned_commission_unproven",
     "unassigned_venue_fill",
 ]
 
@@ -126,6 +140,22 @@ class WitnessOutcome:
 
     witnesses: Mapping[int, frozenset[int]]
     refusals: tuple[WitnessRefusal, ...]
+
+
+@dataclass(frozen=True)
+class OwnedWitnessScope:
+    """The ownership evidence the anchor bootstrap's witness selection requires.
+
+    ``tip_item_id`` is the seal page's tip ``H0``; legs above it are excluded.
+    ``owned_order_ids`` is the owned order set ``S``. ``authoritative_order_ids``
+    maps each sealed-prefix ``scope_sequence`` to the venue order id of the
+    execution's sentinel-tip Order, resolved through the owned-order population,
+    or ``None`` when that Order does not resolve.
+    """
+
+    tip_item_id: int
+    owned_order_ids: frozenset[str]
+    authoritative_order_ids: Mapping[int, str | None]
 
 
 @dataclass(frozen=True)
@@ -269,41 +299,31 @@ def _build_order_witnesses(
     return _assign_order_witnesses(order_executions, fills)
 
 
-def build_execution_witnesses(
+def _compose_witnesses(
     executions: Sequence[WitnessExecution],
-    legs: Sequence[WitnessHistoryLeg],
+    selected: Sequence[WitnessHistoryLeg],
     order_totals: Mapping[str, WitnessOrderTotals],
-    tip_item_id: int,
     commission_by_order: Mapping[str, Decimal],
-) -> WitnessOutcome:
-    """Compose the sealed-prefix execution-to-history-item witness map.
+) -> tuple[dict[int, frozenset[int]], set[WitnessRefusal]]:
+    """Compose the witness map over an already selected witnessable leg set.
 
-    Runs every check; on any refusal returns an empty map with the exact ordered
-    reasons, never a partial map. On success returns one witness item-id set per
-    execution ``scope_sequence`` present in ``executions``. Leg completeness is
-    ENFORCED, not assumed: every fill must carry exactly its base and quote legs,
-    and every order's witnessed COMMISSION items must sum exactly to the order's
-    reported cumulative commission — an in-flight quote or fee leg refuses.
+    Every selected leg must carry an order id and a transaction id; each
+    executed order is then composed against its totals by cumulative interval.
 
     Args:
-        executions: The sealed-prefix executions ``[1, W]``, exec-id decoded.
-        legs: The venue MARKET_FX account-history legs (pre-filtered to MARKET_FX
-            by the caller); attribution and the tip bound are applied here.
-        order_totals: Per venue order id, the ``market_fx/orders`` cumulative
-            totals used as the independent leg-sum cross-checks.
-        tip_item_id: The venue history tip ``H0``; legs above it are excluded.
-        commission_by_order: Per venue order id, the exact sum of the COMMISSION
-            history items on the observed page (absent → zero).
+        executions: The sealed-prefix executions, exec-id decoded.
+        selected: The witnessable MARKET_FX legs at or below the tip.
+        order_totals: Per venue order id, the cumulative venue totals.
+        commission_by_order: Per venue order id, the exact page commission sum.
 
     Returns:
-        The witness map, or the ordered refusals when it cannot be composed.
+        The composed witnesses and every refusal raised while composing them.
     """
     refusals: set[WitnessRefusal] = set()
-    attributed = [leg for leg in legs if leg.is_api_attributed and leg.item_id <= tip_item_id]
-    if any(leg.order_id is None or leg.transaction_id is None for leg in attributed):
+    if any(leg.order_id is None or leg.transaction_id is None for leg in selected):
         refusals.add("history_leg_unidentified")
     identified = [
-        leg for leg in attributed if leg.order_id is not None and leg.transaction_id is not None
+        leg for leg in selected if leg.order_id is not None and leg.transaction_id is not None
     ]
 
     executions_by_order, legs_by_order = _group_witness_inputs(executions, identified)
@@ -319,10 +339,163 @@ def build_execution_witnesses(
         )
         refusals |= order_refusals
         witnesses.update(order_witnesses)
+    return witnesses, refusals
 
+
+def _witness_outcome(
+    witnesses: Mapping[int, frozenset[int]], refusals: set[WitnessRefusal]
+) -> WitnessOutcome:
+    """Return the composed map, or no map with the ordered refusals.
+
+    Args:
+        witnesses: The composed per-execution witness item ids.
+        refusals: Every refusal raised during composition.
+
+    Returns:
+        The outcome, which never carries a partial map.
+    """
     if refusals:
         return WitnessOutcome(witnesses={}, refusals=tuple(sorted(refusals)))
     return WitnessOutcome(witnesses=witnesses, refusals=())
+
+
+def build_execution_witnesses(
+    executions: Sequence[WitnessExecution],
+    legs: Sequence[WitnessHistoryLeg],
+    order_totals: Mapping[str, WitnessOrderTotals],
+    tip_item_id: int,
+    commission_by_order: Mapping[str, Decimal],
+) -> WitnessOutcome:
+    """Compose the execution-to-history-item witness map over our API key's legs.
+
+    The venue-cursor certificate's entry point. Runs every check; on any refusal
+    returns an empty map with the exact ordered reasons, never a partial map. On
+    success returns one witness item-id set per execution ``scope_sequence``
+    present in ``executions``. Leg completeness is ENFORCED, not assumed: every
+    fill must carry exactly its base and quote legs, and every order's witnessed
+    COMMISSION items must sum exactly to the order's reported cumulative
+    commission — an in-flight quote or fee leg refuses.
+
+    Args:
+        executions: The sealed-prefix executions ``[1, W]``, exec-id decoded.
+        legs: The venue MARKET_FX account-history legs (pre-filtered to MARKET_FX
+            by the caller); attribution and the tip bound are applied here.
+        order_totals: Per venue order id, the ``market_fx/orders`` cumulative
+            totals used as the independent leg-sum cross-checks.
+        tip_item_id: The venue history tip ``H0``; legs above it are excluded.
+        commission_by_order: Per venue order id, the exact sum of the COMMISSION
+            history items on the observed page (absent → zero).
+
+    Returns:
+        The witness map, or the ordered refusals when it cannot be composed.
+    """
+    attributed = [leg for leg in legs if leg.is_api_attributed and leg.item_id <= tip_item_id]
+    witnesses, refusals = _compose_witnesses(
+        executions, attributed, order_totals, commission_by_order
+    )
+    return _witness_outcome(witnesses, refusals)
+
+
+def _execution_order_id_foreign(execution: WitnessExecution, scope: OwnedWitnessScope) -> bool:
+    """Return whether an execution's decoded order id fails the ownership conjunction.
+
+    Args:
+        execution: One sealed-prefix execution, exec-id decoded.
+        scope: The bootstrap's ownership evidence.
+
+    Returns:
+        Whether the execution's Order has no authoritative venue order id, the
+        decoded id differs from it, or it lies outside ``S``.
+    """
+    authoritative = scope.authoritative_order_ids.get(execution.scope_sequence)
+    return (
+        authoritative is None
+        or authoritative != execution.venue_order_id
+        or authoritative not in scope.owned_order_ids
+    )
+
+
+def _owned_commissions_unproven(
+    witnesses: Mapping[int, frozenset[int]],
+    owned_legs: Sequence[WitnessHistoryLeg],
+    order_totals: Mapping[str, WitnessOrderTotals],
+    commission_by_order: Mapping[str, Decimal],
+    owned_order_ids: frozenset[str],
+) -> bool:
+    """Return whether any owned order's page commissions lack their proof.
+
+    Every owned order with a COMMISSION on the page needs venue totals, at
+    least one witnessed MARKET_FX fill, and page commissions summing exactly to
+    its reported cumulative commission. An order with no ingested execution has
+    no witnessed fill, so its owned fee refuses instead of escaping every check.
+
+    Args:
+        witnesses: The composed per-execution witness item ids.
+        owned_legs: The owned MARKET_FX legs at or below the tip.
+        order_totals: Per venue order id, the cumulative venue totals.
+        commission_by_order: Per venue order id, the exact page commission sum.
+        owned_order_ids: The owned order set ``S``.
+
+    Returns:
+        Whether any owned commission is unproven.
+    """
+    witnessed = set(chain.from_iterable(witnesses.values()))
+    witnessed_orders = {leg.order_id for leg in owned_legs if leg.item_id in witnessed}
+    for order_id, commission in commission_by_order.items():
+        if order_id not in owned_order_ids:
+            continue
+        totals = order_totals.get(order_id)
+        if (
+            totals is None
+            or order_id not in witnessed_orders
+            or commission != totals.commission_amount
+        ):
+            return True
+    return False
+
+
+def build_owned_execution_witnesses(
+    executions: Sequence[WitnessExecution],
+    legs: Sequence[WitnessHistoryLeg],
+    order_totals: Mapping[str, WitnessOrderTotals],
+    commission_by_order: Mapping[str, Decimal],
+    scope: OwnedWitnessScope,
+) -> WitnessOutcome:
+    """Compose the anchor bootstrap's witness map over the owned order set's legs.
+
+    The anchor bootstrap's entry point. A leg is witnessable exactly when its
+    order id lies in ``S`` and it is at or below the tip; ``is_api_attributed``
+    plays no part. On top of the shared composition it refuses
+    ``execution_order_id_foreign`` for any execution whose decoded venue order
+    id is not its Order's authoritative venue order id in ``S``, and
+    ``owned_commission_unproven`` for any owned order whose page commissions are
+    not proven. Runs every check and never returns a partial map.
+
+    Args:
+        executions: The sealed-prefix executions ``[1, W]``, exec-id decoded.
+        legs: The venue MARKET_FX account-history legs of the seal page.
+        order_totals: Per venue order id, the cumulative venue totals of every
+            executed order and every owned order on the page.
+        commission_by_order: Per venue order id, the exact sum of the COMMISSION
+            history items on the page (absent → zero).
+        scope: The seal tip, ``S``, and each execution's authoritative order id.
+
+    Returns:
+        The witness map, or the ordered refusals when it cannot be composed.
+    """
+    owned = [
+        leg
+        for leg in legs
+        if leg.order_id in scope.owned_order_ids and leg.item_id <= scope.tip_item_id
+    ]
+    witnesses, refusals = _compose_witnesses(executions, owned, order_totals, commission_by_order)
+    if any(_execution_order_id_foreign(execution, scope) for execution in executions):
+        refusals.add("execution_order_id_foreign")
+    if _owned_commissions_unproven(
+        witnesses, owned, order_totals, commission_by_order, scope.owned_order_ids
+    ):
+        refusals.add("owned_commission_unproven")
+    return _witness_outcome(witnesses, refusals)
 
 
 def witness_reverse_coverage_holds(

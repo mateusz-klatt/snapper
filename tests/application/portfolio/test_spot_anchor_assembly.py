@@ -1,9 +1,12 @@
 """Tests for the pure raw-read to witness/bootstrap mappers."""
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 
+from snapper.application.portfolio.spot_anchor_assembly import build_owned_witnesses_from_reads
 from snapper.application.portfolio.spot_anchor_assembly import build_witnesses_from_reads
+from snapper.application.portfolio.spot_anchor_assembly import owned_page_order_ids
 from snapper.application.portfolio.spot_anchor_assembly import parse_observed_balances
 from snapper.application.portfolio.spot_anchor_assembly import venue_history_tip_from_raw
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryItem
@@ -135,11 +138,12 @@ def test_committed_recon_exec_id_composes_a_clean_witness() -> None:
 
 
 def test_venue_history_tip_from_raw_normalizes_markers() -> None:
-    """Given: A tip mixing a MARKET_FX our-key row, a fee row, and a manual row.
+    """Given: A tip mixing a MARKET_FX our-key row, a fee row, and manual rows.
 
     When: The tip is normalized,
-    Then: Each item's MARKET_FX marker and API attribution project faithfully and
-        the descending page order is preserved.
+    Then: Each item's MARKET_FX marker and API attribution project faithfully,
+        the operation type, order id, and correcting-entry flag are carried
+        verbatim, and the descending page order is preserved.
     """
     tip = VenueAccountHistoryTip(
         item_id=100,
@@ -148,6 +152,7 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
             _item(100, "MARKET_FX", "6", "EUR", balance_after="106"),
             _item(99, "COMMISSION", "-0.02", "EUR", ordered_by="API/key"),
             _item(98, "MARKET_FX", "5", "EUR", ordered_by="GUI/user@example.com"),
+            replace(_item(97, "PAYIN", "50", "EUR", order_id=None), correcting_entry=True),
         ),
     )
     normalized = venue_history_tip_from_raw(tip)
@@ -158,9 +163,16 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
         is_api_attributed=True,
         currency="EUR",
         balance_after=Decimal("106"),
+        operation_type="MARKET_FX",
+        order_id="O1",
+        correcting_entry=False,
     )
     assert normalized.page[1].is_market_fx is False
+    assert normalized.page[1].operation_type == "COMMISSION"
     assert normalized.page[2].is_api_attributed is False
+    assert normalized.page[3].operation_type == "PAYIN"
+    assert normalized.page[3].order_id is None
+    assert normalized.page[3].correcting_entry is True
 
 
 def test_parse_observed_balances_venue_raw() -> None:
@@ -274,3 +286,96 @@ def test_in_flight_commission_refuses_through_the_assembly() -> None:
     outcome = build_witnesses_from_reads(tip, [(1, "O1", 600_000_000, False)], totals)
     assert outcome.witnesses == {}
     assert outcome.refusals == ("commission_sum_disagrees_with_order_total",)
+
+
+def test_owned_witnesses_from_reads_select_by_the_owned_order_set() -> None:
+    """Given: A non-API fill of the owned order and a foreign API fill on the page.
+
+    When: The bootstrap's owned witnesses are composed from the raw reads,
+    Then: The owned fill is witnessed by order id and the foreign API fill is not,
+        while the certificate's composition of the same reads keeps its API
+        selection and refuses the non-API order.
+    """
+    tip = VenueAccountHistoryTip(
+        item_id=100,
+        reached_genesis=True,
+        items=(
+            _item(100, "MARKET_FX", "6", "EUR", ordered_by="GUI/user"),
+            _item(99, "MARKET_FX", "-30", "PLN", ordered_by="GUI/user"),
+            _item(98, "MARKET_FX", "5", "EUR", order_id="M1", transaction_id="TM"),
+            _item(97, "MARKET_FX", "-25", "PLN", order_id="M1", transaction_id="TM"),
+        ),
+    )
+    totals = {
+        "O1": VenueOrderFillLegs(
+            order_id="O1",
+            bought_amount=Decimal("6"),
+            sold_amount=Decimal("30"),
+            commission_amount=Decimal("0"),
+            bought_currency="EUR",
+            sold_currency="PLN",
+            commission_currency="EUR",
+            buy_sell="BUY",
+        )
+    }
+    parsed = [(1, "O1", 600_000_000, False)]
+    owned = build_owned_witnesses_from_reads(tip, parsed, totals, frozenset({"O1"}), {1: "O1"})
+    assert owned.refusals == ()
+    assert owned.witnesses == {1: frozenset({100, 99})}
+    certificate = build_witnesses_from_reads(tip, parsed, totals)
+    assert certificate.refusals == ("order_base_legs_disagree_with_total",)
+
+
+def test_owned_witnesses_from_reads_prove_owned_commissions() -> None:
+    """Given: An owned COMMISSION of an order with no execution on the page.
+
+    When: The bootstrap's owned witnesses are composed from the raw reads,
+    Then: The owned commission proof refuses.
+    """
+    tip = VenueAccountHistoryTip(
+        item_id=101,
+        reached_genesis=True,
+        items=(
+            _item(101, "COMMISSION", "-0.02", "EUR", order_id="O2", ordered_by=""),
+            _item(100, "MARKET_FX", "6", "EUR", transaction_id="T1"),
+            _item(99, "MARKET_FX", "-30", "PLN", transaction_id="T1"),
+        ),
+    )
+    totals = {
+        order_id: VenueOrderFillLegs(
+            order_id=order_id,
+            bought_amount=Decimal("6"),
+            sold_amount=Decimal("30"),
+            commission_amount=commission,
+            bought_currency="EUR",
+            sold_currency="PLN",
+            commission_currency="EUR",
+            buy_sell="BUY",
+        )
+        for order_id, commission in (("O1", Decimal("0")), ("O2", Decimal("0.02")))
+    }
+    outcome = build_owned_witnesses_from_reads(
+        tip, [(1, "O1", 600_000_000, False)], totals, frozenset({"O1", "O2"}), {1: "O1"}
+    )
+    assert outcome.refusals == ("owned_commission_unproven",)
+
+
+def test_owned_page_order_ids_keep_owned_fills_and_commissions_only() -> None:
+    """Given: Owned and foreign MARKET_FX and COMMISSION rows plus an owned PAYIN id.
+
+    When: The owned page order ids are derived,
+    Then: Only owned MARKET_FX and COMMISSION order ids remain.
+    """
+    tip = VenueAccountHistoryTip(
+        item_id=100,
+        reached_genesis=False,
+        items=(
+            _item(100, "MARKET_FX", "6", "EUR", order_id="O1"),
+            _item(99, "COMMISSION", "-0.02", "EUR", order_id="O2"),
+            _item(98, "MARKET_FX", "5", "EUR", order_id="M1"),
+            _item(97, "PAYIN", "50", "EUR", order_id="O3"),
+            _item(96, "COMMISSION", "-0.01", "EUR", order_id=None),
+        ),
+    )
+    owned = owned_page_order_ids(tip, frozenset({"O1", "O2", "O3"}))
+    assert owned == frozenset({"O1", "O2"})
