@@ -220,6 +220,16 @@ class ExchangeClientBase(ABC):
     observed but the configured reconciliation method cannot account for it.
     """
     account_history_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
+    initiates_external_only_history_operations: bool = True
+    """Whether this system may initiate the venue's external-only history operations.
+
+    The spot anchor bootstrap treats a PAYIN, PAYOUT, TRANSFER or DIRECT_FX
+    history row as external activity only when the adapter pins this to
+    ``False``: a deposit, withdrawal, transfer, or direct exchange that no
+    outbound writer of ours can produce. The fail-closed default refuses such
+    rows; an adapter may pin ``False`` only while it has no writer for any of
+    those operations, and adding one requires an operation-taxonomy review.
+    """
 
     def __init__(
         self, repository: Repository | None = None, exchange_name: str = "unknown"
