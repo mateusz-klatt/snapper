@@ -1,7 +1,9 @@
 """Dialect routing tests for incremental trade-integrity probes."""
 
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
@@ -18,26 +20,41 @@ from snapper.data.models import TradeIntegrityWorkItem
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeIntegrityFinding
 from snapper.data.repository_types import TradeIntegrityRunResult
+from snapper.data.trade_integrity import _M1_WINDOWED_POSTGRES_QUERY
+from snapper.data.trade_integrity import _M2_WINDOWED_POSTGRES_QUERY
+from snapper.data.trade_integrity import TRADE_INTEGRITY_PROBE_WINDOW
 from snapper.data.trade_integrity import TradeIntegrityPassRequest
 from snapper.data.trade_integrity import _find_m1_postgresql
 from snapper.data.trade_integrity import _find_m1_sqlite
+from snapper.data.trade_integrity import _find_m1_windowed_postgresql
+from snapper.data.trade_integrity import _find_m1_windowed_sqlite
 from snapper.data.trade_integrity import _find_m2_postgresql
+from snapper.data.trade_integrity import _find_m2_windowed_postgresql
+from snapper.data.trade_integrity import _find_m2_windowed_sqlite
 from snapper.data.trade_integrity import _find_violations
-from snapper.data.trade_integrity import _m1_candidates
+from snapper.data.trade_integrity import _FindingCollector
 from snapper.data.trade_integrity import _M1Candidate
+from snapper.data.trade_integrity import _M1Route
+from snapper.data.trade_integrity import _M1WindowCandidate
+from snapper.data.trade_integrity import _M2Route
+from snapper.data.trade_integrity import _M2WindowCandidate
+from snapper.data.trade_integrity import _route_m1
+from snapper.data.trade_integrity import _route_m2
 from snapper.data.trade_integrity import run_trade_integrity_monitor
 
 _NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+
+type _Probe = Callable[..., object]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("dialect", "timeout_seconds", "expected_timeout"),
     [
-        ("postgresql", 28.0, "28000ms"),
+        ("postgresql", 43.0, "43000ms"),
         ("postgresql", 1.234, "1234ms"),
         ("postgresql", 0.0, "1000ms"),
-        ("sqlite", 28.0, None),
+        ("sqlite", 43.0, None),
     ],
 )
 async def test_repository_bounds_postgresql_statements_before_monitor_pass(
@@ -109,6 +126,95 @@ def _session_with_rows(rows: list[dict[str, object]]) -> AsyncSession:
     return cast(AsyncSession, session)
 
 
+def _m1_finding(
+    trade_id: str,
+    expected: datetime | None,
+    conflicting: datetime | None,
+) -> TradeIntegrityFinding:
+    """Build the M1 finding expected for one venue identity of ``instrument-1``.
+
+    Args:
+        trade_id: Venue trade identity.
+        expected: Candidate execution time.
+        conflicting: Stored execution time that conflicts with it.
+
+    Returns:
+        The structured M1 finding.
+    """
+    return TradeIntegrityFinding(
+        monitor="m1",
+        public_id=None,
+        instrument_public_id="instrument-1",
+        trade_id=trade_id,
+        expected_executed_at=expected,
+        conflicting_executed_at=conflicting,
+        active_count=None,
+    )
+
+
+def _m2_finding(public_id: str, active_count: int) -> TradeIntegrityFinding:
+    """Build the M2 finding expected for one public identity.
+
+    Args:
+        public_id: Logical row identity.
+        active_count: Bounded number of active rows.
+
+    Returns:
+        The structured M2 finding.
+    """
+    return TradeIntegrityFinding(
+        monitor="m2",
+        public_id=public_id,
+        instrument_public_id=None,
+        trade_id=None,
+        expected_executed_at=None,
+        conflicting_executed_at=None,
+        active_count=active_count,
+    )
+
+
+def _trade(public_id: str, trade_id: str | None, executed_at: datetime) -> Trade:
+    """Build one detached swept trade.
+
+    Args:
+        public_id: Logical row identity.
+        trade_id: Venue trade identity, or ``None``.
+        executed_at: Venue execution time.
+
+    Returns:
+        A trade that is never added to a session.
+    """
+    return Trade(
+        public_id=public_id,
+        instrument_public_id="instrument-1",
+        trade_id=trade_id,
+        executed_at=executed_at,
+    )
+
+
+def _work_item(
+    public_id: str,
+    trade_id: str | None,
+    executed_at: datetime | None,
+) -> TradeIntegrityWorkItem:
+    """Build one detached worklog obligation.
+
+    Args:
+        public_id: Logical row identity.
+        trade_id: Venue trade identity, or ``None``.
+        executed_at: Obligation execution time, or ``None``.
+
+    Returns:
+        An obligation that is never added to a session.
+    """
+    return TradeIntegrityWorkItem(
+        public_id=public_id,
+        instrument_public_id="instrument-1",
+        trade_id=trade_id,
+        executed_at=executed_at,
+    )
+
+
 @pytest.mark.asyncio
 async def test_postgresql_m1_probe_maps_structured_findings() -> None:
     """Map PostgreSQL M1 evidence into a deduplicated finding.
@@ -135,17 +241,7 @@ async def test_postgresql_m1_probe_maps_structured_findings() -> None:
         [_M1Candidate("instrument-1", "trade-1", expected)],
     )
 
-    assert findings == (
-        TradeIntegrityFinding(
-            monitor="m1",
-            public_id=None,
-            instrument_public_id="instrument-1",
-            trade_id="trade-1",
-            expected_executed_at=expected,
-            conflicting_executed_at=conflicting,
-            active_count=None,
-        ),
-    )
+    assert findings == (_m1_finding("trade-1", expected, conflicting),)
 
 
 @pytest.mark.asyncio
@@ -160,16 +256,77 @@ async def test_postgresql_m2_probe_maps_active_count() -> None:
 
     findings = await _find_m2_postgresql(session, ["public-1"])
 
-    assert findings == (
-        TradeIntegrityFinding(
-            monitor="m2",
-            public_id="public-1",
-            instrument_public_id=None,
-            trade_id=None,
-            expected_executed_at=None,
-            conflicting_executed_at=None,
-            active_count=3,
-        ),
+    assert findings == (_m2_finding("public-1", 3),)
+
+
+@pytest.mark.asyncio
+async def test_postgresql_windowed_m1_probe_binds_the_window_per_candidate() -> None:
+    """Send each windowed M1 candidate's time with the fixed probe window.
+
+    Given: One swept venue identity and one PostgreSQL conflict row.
+    When: The windowed PostgreSQL M1 probe executes.
+    Then: It sends the windowed statement with the candidate arrays, the
+        seven-day window and the full cap, and maps the row into a finding.
+    """
+    conflicting = _NOW + timedelta(days=6)
+    session = _session_with_rows(
+        [
+            {
+                "instrument_public_id": "instrument-1",
+                "trade_id": "trade-1",
+                "expected_executed_at": _NOW,
+                "conflicting_executed_at": conflicting,
+            }
+        ]
+    )
+    collector = _FindingCollector()
+
+    findings = await _find_m1_windowed_postgresql(
+        session,
+        [_M1WindowCandidate("instrument-1", "trade-1", _NOW)],
+        collector,
+    )
+
+    assert findings == (_m1_finding("trade-1", _NOW, conflicting),)
+    cast(AsyncMock, session.execute).assert_awaited_once_with(
+        _M1_WINDOWED_POSTGRES_QUERY,
+        {
+            "instrument_public_ids": ["instrument-1"],
+            "trade_ids": ["trade-1"],
+            "executed_ats": [_NOW],
+            "probe_window": TRADE_INTEGRITY_PROBE_WINDOW,
+            "finding_limit": 20,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_postgresql_windowed_m2_probe_binds_the_window_per_candidate() -> None:
+    """Send each windowed M2 candidate's time with the fixed probe window.
+
+    Given: Two windowed candidates of one public id and one PostgreSQL row.
+    When: The windowed PostgreSQL M2 probe executes.
+    Then: It sends both candidate times with the seven-day window and maps
+        the row into a finding.
+    """
+    session = _session_with_rows([{"public_id": "public-1", "active_count": 2}])
+    later = _NOW + timedelta(days=3)
+
+    findings = await _find_m2_windowed_postgresql(
+        session,
+        [_M2WindowCandidate("public-1", _NOW), _M2WindowCandidate("public-1", later)],
+        _FindingCollector(),
+    )
+
+    assert findings == (_m2_finding("public-1", 2),)
+    cast(AsyncMock, session.execute).assert_awaited_once_with(
+        _M2_WINDOWED_POSTGRES_QUERY,
+        {
+            "public_ids": ["public-1", "public-1"],
+            "executed_ats": [_NOW, later],
+            "probe_window": TRADE_INTEGRITY_PROBE_WINDOW,
+            "finding_limit": 20,
+        },
     )
 
 
@@ -179,12 +336,14 @@ async def test_probe_limits_skip_database_work(
 ) -> None:
     """Stop every dialect probe before querying after its finding cap.
 
-    Given: A zero finding limit and non-empty candidates.
+    Given: A zero finding limit and non-empty exact and windowed candidates.
     When: Each PostgreSQL and SQLite probe begins a candidate chunk.
     Then: No database query executes and every probe returns no findings.
     """
     session = _session_with_rows([])
     candidate = _M1Candidate("instrument-1", "trade-1", _NOW)
+    m1_window = _M1WindowCandidate("instrument-1", "trade-1", _NOW)
+    m2_window = _M2WindowCandidate("public-1", _NOW)
     monkeypatch.setattr(integrity_module, "_FINDING_LIMIT", 0)
 
     results = (
@@ -192,118 +351,300 @@ async def test_probe_limits_skip_database_work(
         await _find_m1_sqlite(session, [candidate]),
         await _find_m2_postgresql(session, ["public-1"]),
         await integrity_module._find_m2_sqlite(session, ["public-1"]),
+        await _find_m1_windowed_postgresql(session, [m1_window], _FindingCollector()),
+        await _find_m1_windowed_sqlite(session, [m1_window], _FindingCollector()),
+        await _find_m2_windowed_postgresql(session, [m2_window], _FindingCollector()),
+        await _find_m2_windowed_sqlite(session, [m2_window], _FindingCollector()),
     )
 
-    assert results == ((), (), (), ())
+    assert results == ((), (), (), (), (), (), (), ())
     cast(AsyncMock, session.execute).assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_sqlite_m1_probe_accepts_null_execution_candidates() -> None:
-    """Use the nullable SQLite predicate for an unknown execution time.
+async def test_sqlite_m1_probe_reports_any_time_for_a_candidate_without_one() -> None:
+    """Treat a stored time as distinct from a candidate without a time.
 
-    Given: An M1 candidate whose execution time is unavailable.
-    When: The SQLite probe builds and executes its candidate query.
-    Then: The query completes through the null-time predicate.
+    Given: An exact M1 candidate without an execution time and one stored row
+        of its venue identity.
+    When: The SQLite M1 probe evaluates the supplied candidate.
+    Then: The stored row is a finding without an expected time, as
+        ``IS DISTINCT FROM`` reports it on PostgreSQL.
     """
-    session = _session_with_rows([])
+    stored = _NOW - timedelta(days=30)
+    session = _session_with_rows(
+        [{"instrument_public_id": "instrument-1", "trade_id": "trade-1", "executed_at": stored}]
+    )
 
     findings = await _find_m1_sqlite(
         session,
         [_M1Candidate("instrument-1", "trade-1", None)],
     )
 
-    assert findings == ()
+    assert findings == (_m1_finding("trade-1", None, stored),)
     cast(AsyncMock, session.execute).assert_awaited_once()
 
 
-def test_m1_candidates_skip_null_worklog_trade_identity() -> None:
-    """Exclude worklog obligations that lack a venue trade identity.
+@pytest.mark.asyncio
+async def test_sqlite_probes_stop_at_the_cap_inside_one_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Record no finding beyond the cap from later candidates of the same chunk.
 
-    Given: A worklog item whose trade ID is null.
-    When: M1 candidates are assembled.
-    Then: The incomplete identity is omitted.
+    Given: A cap of one finding and two candidates in one chunk, both with
+        stored conflicts inside the window, for each SQLite probe.
+    When: Each SQLite probe evaluates its chunk.
+    Then: Each records only the first candidate's finding.
     """
-    item = MagicMock(trade_id=None)
+    monkeypatch.setattr(integrity_module, "_FINDING_LIMIT", 1)
+    conflicting = _NOW + timedelta(days=1)
+    m1_rows: list[dict[str, object]] = [
+        {"instrument_public_id": "instrument-1", "trade_id": trade_id, "executed_at": conflicting}
+        for trade_id in ("trade-1", "trade-2")
+    ]
+    m2_rows: list[dict[str, object]] = [
+        {"public_id": public_id, "executed_at": executed_at}
+        for public_id in ("public-1", "public-2")
+        for executed_at in (_NOW, conflicting)
+    ]
 
-    assert _m1_candidates([], [cast(TradeIntegrityWorkItem, item)]) == []
+    exact = await _find_m1_sqlite(
+        _session_with_rows(m1_rows),
+        [_M1Candidate("instrument-1", trade_id, _NOW) for trade_id in ("trade-1", "trade-2")],
+    )
+    windowed = await _find_m1_windowed_sqlite(
+        _session_with_rows(m1_rows),
+        [_M1WindowCandidate("instrument-1", trade_id, _NOW) for trade_id in ("trade-1", "trade-2")],
+        _FindingCollector(),
+    )
+    active = await _find_m2_windowed_sqlite(
+        _session_with_rows(m2_rows),
+        [_M2WindowCandidate(public_id, _NOW) for public_id in ("public-1", "public-2")],
+        _FindingCollector(),
+    )
+
+    assert exact == (_m1_finding("trade-1", _NOW, conflicting),)
+    assert windowed == (_m1_finding("trade-1", _NOW, conflicting),)
+    assert active == (_m2_finding("public-1", 2),)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("monitor", ["m1", "m2"])
-async def test_postgresql_dispatch_uses_monitor_specific_probe(
+async def test_sqlite_windowed_probes_ignore_rows_without_a_time() -> None:
+    """Never count a stored row without an execution time inside a window.
+
+    Given: Windowed M1 and M2 candidates whose identities have stored rows
+        without an execution time besides rows at the candidate's own time.
+    When: The windowed SQLite probes evaluate them.
+    Then: Neither reports a finding.
+    """
+    m1_rows: list[dict[str, object]] = [
+        {"instrument_public_id": "instrument-1", "trade_id": "trade-1", "executed_at": None},
+        {"instrument_public_id": "instrument-1", "trade_id": "trade-1", "executed_at": _NOW},
+    ]
+    m2_rows: list[dict[str, object]] = [
+        {"public_id": "public-1", "executed_at": None},
+        {"public_id": "public-1", "executed_at": _NOW},
+    ]
+
+    windowed = await _find_m1_windowed_sqlite(
+        _session_with_rows(m1_rows),
+        [_M1WindowCandidate("instrument-1", "trade-1", _NOW)],
+        _FindingCollector(),
+    )
+    active = await _find_m2_windowed_sqlite(
+        _session_with_rows(m2_rows),
+        [_M2WindowCandidate("public-1", _NOW)],
+        _FindingCollector(),
+    )
+
+    assert (windowed, active) == ((), ())
+
+
+def test_route_m1_skips_rows_without_a_trade_identity() -> None:
+    """Exclude sweep rows and worklog obligations that lack a venue trade identity.
+
+    Given: A swept trade and a worklog obligation, both without a trade id.
+    When: M1 candidates are routed.
+    Then: Neither probe receives a candidate.
+    """
+    route = _route_m1(
+        [_trade("public-1", None, _NOW)],
+        [_work_item("public-2", None, _NOW)],
+    )
+
+    assert route == _M1Route(windowed=[], exact=[])
+
+
+def test_route_m1_gives_owed_identities_exact_precedence() -> None:
+    """Probe an identity that is both swept and owed only exactly.
+
+    Given: Two swept rows of one owed identity, one swept row of another
+        identity twice, and an owed identity without an execution time.
+    When: M1 candidates are routed.
+    Then: The owed identities are exact with their worklog values, and only
+        the other identity is windowed, once.
+    """
+    owed_time = _NOW - timedelta(days=9)
+    route = _route_m1(
+        [
+            _trade("public-1", "owed", _NOW),
+            _trade("public-2", "owed", _NOW + timedelta(days=1)),
+            _trade("public-3", "free", _NOW),
+            _trade("public-3", "free", _NOW),
+        ],
+        [
+            _work_item("public-1", "owed", owed_time),
+            _work_item("public-4", "untimed", None),
+        ],
+    )
+
+    assert route == _M1Route(
+        windowed=[_M1WindowCandidate("instrument-1", "free", _NOW)],
+        exact=[
+            _M1Candidate("instrument-1", "owed", owed_time),
+            _M1Candidate("instrument-1", "untimed", None),
+        ],
+    )
+
+
+def test_route_m2_keeps_distinct_execution_times_of_one_public_id_windowed() -> None:
+    """Keep each distinct execution time of a public id as its own candidate.
+
+    Given: Swept rows of one public id at two times, one of them twice, and a
+        swept row of an owed public id.
+    When: M2 candidates are routed.
+    Then: The owed public id is exact only, and the other public id has one
+        windowed candidate per distinct execution time.
+    """
+    later = _NOW + timedelta(days=10)
+    route = _route_m2(
+        [
+            _trade("public-1", "trade-1", _NOW),
+            _trade("public-1", "trade-2", later),
+            _trade("public-1", "trade-3", later),
+            _trade("public-2", "trade-4", _NOW),
+        ],
+        [_work_item("public-2", "trade-4", _NOW), _work_item("public-2", "trade-4", None)],
+    )
+
+    assert route == _M2Route(
+        windowed=[_M2WindowCandidate("public-1", _NOW), _M2WindowCandidate("public-1", later)],
+        exact=["public-2"],
+    )
+
+
+def _recording_probe(
+    calls: list[tuple[str, object]],
+    name: str,
+    key: tuple[str, ...],
+    finding: TradeIntegrityFinding,
+) -> AsyncMock:
+    """Build a probe double that records its call and adds one finding.
+
+    Args:
+        calls: Shared call log of probe names and candidate lists.
+        name: Name recorded for this probe.
+        key: Collector key of the finding it adds.
+        finding: Finding it adds to the shared collector.
+
+    Returns:
+        An asynchronous probe double.
+    """
+
+    async def probe(
+        session: AsyncSession,
+        candidates: object,
+        collector: _FindingCollector,
+    ) -> tuple[TradeIntegrityFinding, ...]:
+        """Record the call and add the finding to the shared collector."""
+        calls.append((name, candidates))
+        collector.add(key, finding)
+        return collector.findings()
+
+    return AsyncMock(side_effect=probe)
+
+
+_PROBE_NAMES: dict[tuple[str, str], tuple[str, str]] = {
+    ("m1", "postgresql"): ("_find_m1_postgresql", "_find_m1_windowed_postgresql"),
+    ("m1", "sqlite"): ("_find_m1_sqlite", "_find_m1_windowed_sqlite"),
+    ("m2", "postgresql"): ("_find_m2_postgresql", "_find_m2_windowed_postgresql"),
+    ("m2", "sqlite"): ("_find_m2_sqlite", "_find_m2_windowed_sqlite"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("monitor", "dialect"), list(_PROBE_NAMES))
+async def test_dispatch_runs_exact_then_windowed_probes_with_one_collector(
     monkeypatch: pytest.MonkeyPatch,
     monitor: Literal["m1", "m2"],
+    dialect: str,
 ) -> None:
-    """Route PostgreSQL candidates to the selected monitor probe.
+    """Route a page to the exact probe first and the windowed probe second.
 
-    Given: A PostgreSQL pass with one candidate for the selected monitor.
-    When: Violation discovery dispatches by monitor.
-    Then: It returns the finding produced by that monitor's PostgreSQL probe.
+    Given: One swept trade and one owed obligation of different identities.
+    When: Violation discovery runs for the selected monitor and dialect.
+    Then: The exact probe receives the obligation, the windowed probe the
+        swept row, and both findings come back from one shared collector.
     """
-    finding = MagicMock()
-    m1_probe = AsyncMock(return_value=(finding,))
-    m2_probe = AsyncMock(return_value=(finding,))
-    monkeypatch.setattr(integrity_module, "_find_m1_postgresql", m1_probe)
-    monkeypatch.setattr(integrity_module, "_find_m2_postgresql", m2_probe)
-    request = TradeIntegrityPassRequest(
-        monitor=monitor,
-        now=_NOW,
-        sweep_limit=1,
-        worklog_limit=1,
+    exact_name, windowed_name = _PROBE_NAMES[(monitor, dialect)]
+    calls: list[tuple[str, object]] = []
+    exact_finding = _m2_finding("exact", 2)
+    windowed_finding = _m2_finding("windowed", 2)
+    monkeypatch.setattr(
+        integrity_module,
+        exact_name,
+        _recording_probe(calls, "exact", ("exact",), exact_finding),
     )
-    trade = MagicMock(
-        public_id="public-1",
-        instrument_public_id="instrument-1",
-        trade_id="trade-1",
-        executed_at=_NOW,
+    monkeypatch.setattr(
+        integrity_module,
+        windowed_name,
+        _recording_probe(calls, "windowed", ("windowed",), windowed_finding),
     )
+    request = TradeIntegrityPassRequest(monitor=monitor, now=_NOW, sweep_limit=1, worklog_limit=1)
 
     findings = await _find_violations(
         MagicMock(),
-        "postgresql",
+        dialect,
         request,
-        [cast(Trade, trade)],
-        [],
+        [_trade("public-1", "trade-1", _NOW)],
+        [_work_item("public-2", "trade-2", _NOW)],
     )
 
-    assert findings == (finding,)
-    selected = m1_probe if monitor == "m1" else m2_probe
-    selected.assert_awaited_once()
+    assert findings == (exact_finding, windowed_finding)
+    expected_exact: object = (
+        [_M1Candidate("instrument-1", "trade-2", _NOW)] if monitor == "m1" else ["public-2"]
+    )
+    expected_windowed: object = (
+        [_M1WindowCandidate("instrument-1", "trade-1", _NOW)]
+        if monitor == "m1"
+        else [_M2WindowCandidate("public-1", _NOW)]
+    )
+    assert calls == [("exact", expected_exact), ("windowed", expected_windowed)]
 
 
 @pytest.mark.asyncio
-async def test_m2_dispatch_short_circuits_without_candidates(
+@pytest.mark.parametrize(("monitor", "dialect"), list(_PROBE_NAMES))
+async def test_dispatch_short_circuits_without_candidates(
     monkeypatch: pytest.MonkeyPatch,
+    monitor: Literal["m1", "m2"],
+    dialect: str,
 ) -> None:
-    """Skip every M2 database probe when the pass has no candidate identity.
+    """Skip every database probe when the page has no candidate identity.
 
-    Given: An M2 pass with no sweep rows or pending worklog obligations,
-    When: Violation discovery assembles its public-ID candidates,
-    Then: It returns no finding without invoking either dialect probe.
+    Given: A pass with no sweep rows or pending worklog obligations.
+    When: Violation discovery routes the page for the selected monitor and dialect.
+    Then: It returns no finding without invoking either probe.
     """
-    postgresql_probe = AsyncMock()
-    sqlite_probe = AsyncMock()
-    monkeypatch.setattr(integrity_module, "_find_m2_postgresql", postgresql_probe)
-    monkeypatch.setattr(integrity_module, "_find_m2_sqlite", sqlite_probe)
-    request = TradeIntegrityPassRequest(
-        monitor="m2",
-        now=_NOW,
-        sweep_limit=1,
-        worklog_limit=1,
-    )
+    probes = {name: AsyncMock() for name in _PROBE_NAMES[(monitor, dialect)]}
+    for name, probe in probes.items():
+        monkeypatch.setattr(integrity_module, name, probe)
+    request = TradeIntegrityPassRequest(monitor=monitor, now=_NOW, sweep_limit=1, worklog_limit=1)
 
-    findings = await _find_violations(
-        MagicMock(),
-        "postgresql",
-        request,
-        [],
-        [],
-    )
+    findings = await _find_violations(MagicMock(), dialect, request, [], [])
 
     assert findings == ()
-    postgresql_probe.assert_not_awaited()
-    sqlite_probe.assert_not_awaited()
+    for probe in probes.values():
+        probe.assert_not_awaited()
 
 
 @pytest.mark.asyncio

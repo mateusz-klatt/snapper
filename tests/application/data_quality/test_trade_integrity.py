@@ -204,6 +204,19 @@ def test_default_config_reads_only_interval_env(monkeypatch: pytest.MonkeyPatch)
     )
 
 
+def test_default_budget_fits_one_windowed_page_in_45_seconds() -> None:
+    """Pin the default page and time budget chosen for windowed probes.
+
+    Given the module defaults,
+    When a watchdog configuration is built without arguments,
+    Then the sweep page is 15,000 rows and the monitor timeout is 45 seconds.
+    """
+    config = TradeIntegrityMonitorConfig()
+
+    assert (DEFAULT_SWEEP_LIMIT, DEFAULT_MONITOR_TIMEOUT_SECONDS) == (15_000, 45.0)
+    assert (config.sweep_limit, config.monitor_timeout_seconds) == (15_000, 45.0)
+
+
 def test_m2_finding_details_retain_active_identity_evidence() -> None:
     """Preserve active-identity evidence in serialized M2 findings.
 
@@ -249,14 +262,14 @@ async def test_clean_tick_publishes_one_healthy_frame_per_monitor() -> None:
             now=_NOW,
             sweep_limit=DEFAULT_SWEEP_LIMIT,
             worklog_limit=DEFAULT_WORKLOG_LIMIT,
-            statement_timeout_seconds=28.0,
+            statement_timeout_seconds=43.0,
         ),
         call(
             monitor="m2",
             now=_NOW,
             sweep_limit=DEFAULT_SWEEP_LIMIT,
             worklog_limit=DEFAULT_WORKLOG_LIMIT,
-            statement_timeout_seconds=28.0,
+            statement_timeout_seconds=43.0,
         ),
     ]
     assert publisher.send.await_count == 2
@@ -281,6 +294,8 @@ async def test_clean_tick_publishes_one_healthy_frame_per_monitor() -> None:
     assert first_frame.meta["configured_sweep_limit"] == DEFAULT_SWEEP_LIMIT
     assert first_frame.meta["configured_worklog_limit"] == DEFAULT_WORKLOG_LIMIT
     assert first_frame.meta["monitor_timeout_seconds"] == DEFAULT_MONITOR_TIMEOUT_SECONDS
+    assert first_frame.meta["probe_window_days"] == 7
+    assert second_frame.meta["probe_window_days"] == 7
 
 
 @pytest.mark.asyncio

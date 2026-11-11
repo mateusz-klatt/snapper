@@ -1,6 +1,17 @@
-"""Bounded database primitives for the two trade-integrity monitors."""
+"""Bounded database primitives for the two trade-integrity monitors.
 
+M1 looks for one venue identity (instrument and trade id) stored with two
+execution times; M2 looks for more than one active row per public id. Sweep
+candidates are probed only within :data:`TRADE_INTEGRITY_PROBE_WINDOW` of
+their own ``executed_at``, so that each probe reads only the daily
+``trades`` partitions around the candidate. Durable worklog obligations
+(restore, import and replay) and candidates without an execution time are
+still probed exactly, over every partition.
+"""
+
+from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
@@ -15,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import tuple_
 from sqlalchemy import update
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
@@ -50,6 +62,19 @@ TRADE_INTEGRITY_SWEEP_LIMIT: Final = 25_000
 TRADE_INTEGRITY_WORKLOG_LIMIT: Final = 2_000
 """Hard maximum durable work obligations returned by one monitor pass."""
 
+TRADE_INTEGRITY_PROBE_WINDOW: Final = timedelta(days=7)
+"""Inclusive distance around a sweep candidate's ``executed_at`` that its probe reads.
+
+For a candidate routed to a windowed probe, a stored row can contribute to a
+finding only if its ``executed_at`` differs from the candidate's by at most
+this interval. The bound lets PostgreSQL prune the daily ``trades``
+partitions per candidate, so a probe's cost no longer grows with the number
+of partitions. A conflict further apart is not detected for sweep
+candidates; worklog obligations keep the exact check over every partition.
+PostgreSQL sessions run with the time zone UTC, so the interval arithmetic of
+the windowed statements adds exactly this duration.
+"""
+
 _FINDING_LIMIT: Final = 20
 _CANDIDATE_CHUNK_SIZE: Final = 1_000
 
@@ -80,6 +105,58 @@ class _M1Candidate:
     executed_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class _M1WindowCandidate:
+    """One sweep venue identity probed only around its execution time."""
+
+    instrument_public_id: str
+    trade_id: str
+    executed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _M2WindowCandidate:
+    """One sweep public identity probed only around its execution time."""
+
+    public_id: str
+    executed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _M1Route:
+    """M1 candidates of one page, split between windowed and exact probes."""
+
+    windowed: list[_M1WindowCandidate]
+    exact: list[_M1Candidate]
+
+
+@dataclass(frozen=True, slots=True)
+class _M2Route:
+    """M2 candidates of one page, split between windowed and exact probes."""
+
+    windowed: list[_M2WindowCandidate]
+    exact: list[str]
+
+
+@dataclass(slots=True)
+class _FindingCollector:
+    """Deduplicated findings of one monitor page under one shared cap."""
+
+    by_key: dict[tuple[str, ...], TradeIntegrityFinding] = field(default_factory=dict)
+
+    def remaining(self) -> int:
+        """Return how many more findings this page may record."""
+        return _FINDING_LIMIT - len(self.by_key)
+
+    def add(self, key: tuple[str, ...], finding: TradeIntegrityFinding) -> None:
+        """Record one finding under its identity key, replacing an earlier one."""
+        self.by_key[key] = finding
+
+    def findings(self) -> tuple[TradeIntegrityFinding, ...]:
+        """Return the recorded findings in first-recorded order."""
+        return tuple(self.by_key.values())
+
+
 class _M1PostgresParams(TypedDict):
     """Bound arrays for one PostgreSQL M1 candidate chunk."""
 
@@ -89,10 +166,29 @@ class _M1PostgresParams(TypedDict):
     finding_limit: int
 
 
+class _M1WindowedPostgresParams(TypedDict):
+    """Bound arrays and window for one windowed PostgreSQL M1 chunk."""
+
+    instrument_public_ids: list[str]
+    trade_ids: list[str]
+    executed_ats: list[datetime]
+    probe_window: timedelta
+    finding_limit: int
+
+
 class _M2PostgresParams(TypedDict):
     """Bound array for one PostgreSQL M2 candidate chunk."""
 
     public_ids: list[str]
+    finding_limit: int
+
+
+class _M2WindowedPostgresParams(TypedDict):
+    """Bound arrays and window for one windowed PostgreSQL M2 chunk."""
+
+    public_ids: list[str]
+    executed_ats: list[datetime]
+    probe_window: timedelta
     finding_limit: int
 
 
@@ -143,6 +239,55 @@ _M2_POSTGRES_QUERY = text("""
             WHERE matched.public_id = candidate.public_id
               AND matched.known_to =
                   TIMESTAMPTZ '9999-12-31 23:59:59+00'
+            LIMIT 2
+        ) AS bounded_active_rows
+    ) AS active_rows
+    WHERE active_rows.active_count > 1
+    LIMIT :finding_limit
+    """)
+
+_M1_WINDOWED_POSTGRES_QUERY = text("""
+    SELECT
+        candidate.instrument_public_id::text AS instrument_public_id,
+        candidate.trade_id,
+        candidate.executed_at AS expected_executed_at,
+        conflicting.executed_at AS conflicting_executed_at
+    FROM unnest(
+        CAST(:instrument_public_ids AS text[])::uuid[],
+        CAST(:trade_ids AS text[]),
+        CAST(:executed_ats AS timestamptz[])
+    ) AS candidate(instrument_public_id, trade_id, executed_at)
+    CROSS JOIN LATERAL (
+        SELECT matched.executed_at
+        FROM trades AS matched
+        WHERE matched.instrument_public_id = candidate.instrument_public_id
+          AND matched.trade_id = candidate.trade_id
+          AND matched.executed_at >= candidate.executed_at - CAST(:probe_window AS interval)
+          AND matched.executed_at <= candidate.executed_at + CAST(:probe_window AS interval)
+          AND matched.executed_at IS DISTINCT FROM candidate.executed_at
+        LIMIT 1
+    ) AS conflicting
+    LIMIT :finding_limit
+    """)
+
+_M2_WINDOWED_POSTGRES_QUERY = text("""
+    SELECT
+        candidate.public_id::text AS public_id,
+        active_rows.active_count
+    FROM unnest(
+        CAST(:public_ids AS text[])::uuid[],
+        CAST(:executed_ats AS timestamptz[])
+    ) AS candidate(public_id, executed_at)
+    CROSS JOIN LATERAL (
+        SELECT count(*)::integer AS active_count
+        FROM (
+            SELECT 1
+            FROM trades AS matched
+            WHERE matched.public_id = candidate.public_id
+              AND matched.known_to =
+                  TIMESTAMPTZ '9999-12-31 23:59:59+00'
+              AND matched.executed_at >= candidate.executed_at - CAST(:probe_window AS interval)
+              AND matched.executed_at <= candidate.executed_at + CAST(:probe_window AS interval)
             LIMIT 2
         ) AS bounded_active_rows
     ) AS active_rows
@@ -234,43 +379,66 @@ async def _load_sweep(
     return list((await session.scalars(statement)).all())
 
 
-def _m1_candidates(
+def _route_m1(
     sweep: list[Trade],
     worklog: list[TradeIntegrityWorkItem],
-) -> list[_M1Candidate]:
-    """Deduplicate non-null venue identities from both monitor inputs."""
-    candidates: dict[tuple[str, str, datetime | None], _M1Candidate] = {}
+) -> _M1Route:
+    """Split venue identities between exact worklog and windowed sweep probes.
+
+    Every worklog obligation with a trade id is an exact candidate, including
+    one without an execution time. Sweep rows always carry an execution time,
+    because ``trades.executed_at`` is the non-nullable partition key, so they
+    are windowed candidates, except that an identity which also occurs among
+    the exact candidates is probed only exactly, with the exact candidates'
+    values. Rows without a trade id stay out of M1.
+    """
+    exact: dict[tuple[str, str, datetime | None], _M1Candidate] = {}
+    for item in worklog:
+        if item.trade_id is not None:
+            exact[(item.instrument_public_id, item.trade_id, item.executed_at)] = _M1Candidate(
+                instrument_public_id=item.instrument_public_id,
+                trade_id=item.trade_id,
+                executed_at=item.executed_at,
+            )
+    exact_identities = {(item.instrument_public_id, item.trade_id) for item in exact.values()}
+    windowed: dict[tuple[str, str, datetime], _M1WindowCandidate] = {}
     for trade in sweep:
         if trade.trade_id is None:
             continue
-        candidate = _M1Candidate(
-            instrument_public_id=trade.instrument_public_id,
-            trade_id=trade.trade_id,
-            executed_at=trade.executed_at,
-        )
-        candidates[(candidate.instrument_public_id, candidate.trade_id, candidate.executed_at)] = (
-            candidate
-        )
-    for item in worklog:
-        if item.trade_id is None:
+        if (trade.instrument_public_id, trade.trade_id) in exact_identities:
             continue
-        candidate = _M1Candidate(
-            instrument_public_id=item.instrument_public_id,
-            trade_id=item.trade_id,
-            executed_at=item.executed_at,
+        windowed[(trade.instrument_public_id, trade.trade_id, trade.executed_at)] = (
+            _M1WindowCandidate(
+                instrument_public_id=trade.instrument_public_id,
+                trade_id=trade.trade_id,
+                executed_at=trade.executed_at,
+            )
         )
-        candidates[(candidate.instrument_public_id, candidate.trade_id, candidate.executed_at)] = (
-            candidate
-        )
-    return list(candidates.values())
+    return _M1Route(windowed=list(windowed.values()), exact=list(exact.values()))
 
 
-def _m2_candidates(
+def _route_m2(
     sweep: list[Trade],
     worklog: list[TradeIntegrityWorkItem],
-) -> list[str]:
-    """Deduplicate public identities from both monitor inputs."""
-    return list({trade.public_id for trade in sweep} | {item.public_id for item in worklog})
+) -> _M2Route:
+    """Split public identities between exact worklog and windowed sweep probes.
+
+    Every worklog obligation makes its public id exact, and sweep rows of that
+    public id are then not probed separately. Each other sweep row is a
+    windowed candidate centred on its own execution time, so one public id
+    can have several.
+    """
+    exact = list(dict.fromkeys(item.public_id for item in worklog))
+    exact_ids = set(exact)
+    windowed: dict[tuple[str, datetime], _M2WindowCandidate] = {}
+    for trade in sweep:
+        if trade.public_id in exact_ids:
+            continue
+        windowed[(trade.public_id, trade.executed_at)] = _M2WindowCandidate(
+            public_id=trade.public_id,
+            executed_at=trade.executed_at,
+        )
+    return _M2Route(windowed=list(windowed.values()), exact=exact)
 
 
 def _chunks[T](values: list[T]) -> list[list[T]]:
@@ -281,14 +449,54 @@ def _chunks[T](values: list[T]) -> list[list[T]]:
     ]
 
 
+def _record_m1_rows(rows: Sequence[RowMapping], collector: _FindingCollector) -> None:
+    """Map PostgreSQL M1 result rows into findings keyed by venue identity."""
+    for row in rows:
+        instrument_public_id = cast(str, row["instrument_public_id"])
+        trade_id = cast(str, row["trade_id"])
+        collector.add(
+            (instrument_public_id, trade_id),
+            TradeIntegrityFinding(
+                monitor="m1",
+                public_id=None,
+                instrument_public_id=instrument_public_id,
+                trade_id=trade_id,
+                expected_executed_at=cast(datetime | None, row["expected_executed_at"]),
+                conflicting_executed_at=cast(datetime | None, row["conflicting_executed_at"]),
+                active_count=None,
+            ),
+        )
+
+
+def _record_m2_rows(rows: Sequence[RowMapping], collector: _FindingCollector) -> None:
+    """Map PostgreSQL M2 result rows into findings keyed by public identity."""
+    for row in rows:
+        public_id = cast(str, row["public_id"])
+        collector.add((public_id,), _m2_finding(public_id, cast(int, row["active_count"])))
+
+
+def _m2_finding(public_id: str, active_count: int) -> TradeIntegrityFinding:
+    """Build one M2 finding for a public identity and its bounded active count."""
+    return TradeIntegrityFinding(
+        monitor="m2",
+        public_id=public_id,
+        instrument_public_id=None,
+        trade_id=None,
+        expected_executed_at=None,
+        conflicting_executed_at=None,
+        active_count=active_count,
+    )
+
+
 async def _find_m1_postgresql(
     session: AsyncSession,
     candidates: list[_M1Candidate],
+    collector: _FindingCollector | None = None,
 ) -> tuple[TradeIntegrityFinding, ...]:
-    """Probe candidate venue identities through the U2 or U3 index."""
-    findings: dict[tuple[str, str], TradeIntegrityFinding] = {}
+    """Probe exact venue identities over every partition through the U2 or U3 index."""
+    collector = collector if collector is not None else _FindingCollector()
     for chunk in _chunks(candidates):
-        remaining = _FINDING_LIMIT - len(findings)
+        remaining = collector.remaining()
         if remaining <= 0:
             break
         params = _M1PostgresParams(
@@ -298,131 +506,187 @@ async def _find_m1_postgresql(
             finding_limit=remaining,
         )
         rows = (await session.execute(_M1_POSTGRES_QUERY, params)).mappings().all()
-        for row in rows:
-            instrument_public_id = cast(str, row["instrument_public_id"])
-            trade_id = cast(str, row["trade_id"])
-            findings[(instrument_public_id, trade_id)] = TradeIntegrityFinding(
-                monitor="m1",
-                public_id=None,
-                instrument_public_id=instrument_public_id,
-                trade_id=trade_id,
-                expected_executed_at=cast(datetime | None, row["expected_executed_at"]),
-                conflicting_executed_at=cast(datetime | None, row["conflicting_executed_at"]),
-                active_count=None,
-            )
-    return tuple(findings.values())
+        _record_m1_rows(rows, collector)
+    return collector.findings()
+
+
+async def _find_m1_windowed_postgresql(
+    session: AsyncSession,
+    candidates: list[_M1WindowCandidate],
+    collector: _FindingCollector,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Probe sweep venue identities only within the window around each execution time."""
+    for chunk in _chunks(candidates):
+        remaining = collector.remaining()
+        if remaining <= 0:
+            break
+        params = _M1WindowedPostgresParams(
+            instrument_public_ids=[item.instrument_public_id for item in chunk],
+            trade_ids=[item.trade_id for item in chunk],
+            executed_ats=[item.executed_at for item in chunk],
+            probe_window=TRADE_INTEGRITY_PROBE_WINDOW,
+            finding_limit=remaining,
+        )
+        rows = (await session.execute(_M1_WINDOWED_POSTGRES_QUERY, params)).mappings().all()
+        _record_m1_rows(rows, collector)
+    return collector.findings()
+
+
+async def _sqlite_m1_times(
+    session: AsyncSession,
+    identities: list[tuple[str, str]],
+) -> dict[tuple[str, str], list[datetime | None]]:
+    """Read every stored execution time of the given venue identities."""
+    statement = (
+        select(
+            Trade.instrument_public_id.label("instrument_public_id"),
+            Trade.trade_id.label("trade_id"),
+            Trade.executed_at.label("executed_at"),
+        )
+        .where(
+            tuple_(Trade.instrument_public_id, Trade.trade_id).in_(list(dict.fromkeys(identities)))
+        )
+        .order_by(Trade.id)
+    )
+    times: dict[tuple[str, str], list[datetime | None]] = {}
+    for row in (await session.execute(statement)).mappings().all():
+        key = (cast(str, row["instrument_public_id"]), cast(str, row["trade_id"]))
+        times.setdefault(key, []).append(cast(datetime | None, row["executed_at"]))
+    return times
+
+
+def _m1_sqlite_finding(
+    instrument_public_id: str,
+    trade_id: str,
+    expected: datetime | None,
+    conflicting: datetime | None,
+) -> TradeIntegrityFinding:
+    """Build one M1 finding from supplied candidate values and a stored time."""
+    return TradeIntegrityFinding(
+        monitor="m1",
+        public_id=None,
+        instrument_public_id=instrument_public_id,
+        trade_id=trade_id,
+        expected_executed_at=expected,
+        conflicting_executed_at=conflicting,
+        active_count=None,
+    )
 
 
 async def _find_m1_sqlite(
     session: AsyncSession,
     candidates: list[_M1Candidate],
+    collector: _FindingCollector | None = None,
 ) -> tuple[TradeIntegrityFinding, ...]:
-    """Run the M1 mutation probe with SQLite-native tuple predicates."""
-    candidate_trade = aliased(Trade)
-    conflicting_trade = aliased(Trade)
-    findings: dict[tuple[str, str], TradeIntegrityFinding] = {}
+    """Evaluate exact M1 candidates from their supplied values, as PostgreSQL does.
+
+    A stored time conflicts when it is distinct from the candidate's time in
+    the sense of ``IS DISTINCT FROM``, so a candidate without a time conflicts
+    with any stored row of its identity that has one.
+    """
+    collector = collector if collector is not None else _FindingCollector()
     for chunk in _chunks(candidates):
-        remaining = _FINDING_LIMIT - len(findings)
-        if remaining <= 0:
+        if collector.remaining() <= 0:
             break
-        non_null = [
-            (item.instrument_public_id, item.trade_id, item.executed_at)
-            for item in chunk
-            if item.executed_at is not None
-        ]
-        null_times = [
-            (item.instrument_public_id, item.trade_id) for item in chunk if item.executed_at is None
-        ]
-        candidate_filters: list[ColumnElement[bool]] = []
-        if non_null:
-            candidate_filters.append(
-                tuple_(
-                    candidate_trade.instrument_public_id,
-                    candidate_trade.trade_id,
-                    candidate_trade.executed_at,
-                ).in_(non_null)
-            )
-        if null_times:
-            candidate_filters.append(
-                and_(
-                    tuple_(
-                        candidate_trade.instrument_public_id,
-                        candidate_trade.trade_id,
-                    ).in_(null_times),
-                    candidate_trade.executed_at.is_(None),
-                )
-            )
-        statement = (
-            select(
-                candidate_trade.instrument_public_id,
-                candidate_trade.trade_id,
-                candidate_trade.executed_at,
-                conflicting_trade.executed_at,
-            )
-            .join(
-                conflicting_trade,
-                and_(
-                    conflicting_trade.instrument_public_id == candidate_trade.instrument_public_id,
-                    conflicting_trade.trade_id == candidate_trade.trade_id,
-                    conflicting_trade.executed_at.is_distinct_from(candidate_trade.executed_at),
-                ),
-            )
-            .where(or_(*candidate_filters))
-            .limit(remaining)
+        times = await _sqlite_m1_times(
+            session, [(item.instrument_public_id, item.trade_id) for item in chunk]
         )
-        rows = (await session.execute(statement)).all()
-        for row in rows:
-            instrument_public_id = row[0]
-            trade_id = cast(str, row[1])
-            findings[(instrument_public_id, trade_id)] = TradeIntegrityFinding(
-                monitor="m1",
-                public_id=None,
-                instrument_public_id=instrument_public_id,
-                trade_id=trade_id,
-                expected_executed_at=cast(datetime | None, row[2]),
-                conflicting_executed_at=cast(datetime | None, row[3]),
-                active_count=None,
-            )
-    return tuple(findings.values())
+        for item in chunk:
+            distinct = [
+                stored
+                for stored in times.get((item.instrument_public_id, item.trade_id), [])
+                if stored != item.executed_at
+            ]
+            if distinct and collector.remaining() > 0:
+                collector.add(
+                    (item.instrument_public_id, item.trade_id),
+                    _m1_sqlite_finding(
+                        item.instrument_public_id, item.trade_id, item.executed_at, distinct[0]
+                    ),
+                )
+    return collector.findings()
+
+
+async def _find_m1_windowed_sqlite(
+    session: AsyncSession,
+    candidates: list[_M1WindowCandidate],
+    collector: _FindingCollector,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Evaluate sweep M1 candidates only within the window around each execution time."""
+    for chunk in _chunks(candidates):
+        if collector.remaining() <= 0:
+            break
+        times = await _sqlite_m1_times(
+            session, [(item.instrument_public_id, item.trade_id) for item in chunk]
+        )
+        for item in chunk:
+            lower = item.executed_at - TRADE_INTEGRITY_PROBE_WINDOW
+            upper = item.executed_at + TRADE_INTEGRITY_PROBE_WINDOW
+            distinct = [
+                stored
+                for stored in times.get((item.instrument_public_id, item.trade_id), [])
+                if stored is not None and lower <= stored <= upper and stored != item.executed_at
+            ]
+            if distinct and collector.remaining() > 0:
+                collector.add(
+                    (item.instrument_public_id, item.trade_id),
+                    _m1_sqlite_finding(
+                        item.instrument_public_id, item.trade_id, item.executed_at, distinct[0]
+                    ),
+                )
+    return collector.findings()
 
 
 async def _find_m2_postgresql(
     session: AsyncSession,
     public_ids: list[str],
+    collector: _FindingCollector | None = None,
 ) -> tuple[TradeIntegrityFinding, ...]:
-    """Probe active public identities through the literal partial index."""
-    findings: dict[str, TradeIntegrityFinding] = {}
+    """Probe exact public identities over every partition through the literal partial index."""
+    collector = collector if collector is not None else _FindingCollector()
     for chunk in _chunks(public_ids):
-        remaining = _FINDING_LIMIT - len(findings)
+        remaining = collector.remaining()
         if remaining <= 0:
             break
         params = _M2PostgresParams(public_ids=chunk, finding_limit=remaining)
         rows = (await session.execute(_M2_POSTGRES_QUERY, params)).mappings().all()
-        for row in rows:
-            public_id = cast(str, row["public_id"])
-            findings[public_id] = TradeIntegrityFinding(
-                monitor="m2",
-                public_id=public_id,
-                instrument_public_id=None,
-                trade_id=None,
-                expected_executed_at=None,
-                conflicting_executed_at=None,
-                active_count=cast(int, row["active_count"]),
-            )
-    return tuple(findings.values())
+        _record_m2_rows(rows, collector)
+    return collector.findings()
+
+
+async def _find_m2_windowed_postgresql(
+    session: AsyncSession,
+    candidates: list[_M2WindowCandidate],
+    collector: _FindingCollector,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Probe sweep public identities only within the window around each execution time."""
+    for chunk in _chunks(candidates):
+        remaining = collector.remaining()
+        if remaining <= 0:
+            break
+        params = _M2WindowedPostgresParams(
+            public_ids=[item.public_id for item in chunk],
+            executed_ats=[item.executed_at for item in chunk],
+            probe_window=TRADE_INTEGRITY_PROBE_WINDOW,
+            finding_limit=remaining,
+        )
+        rows = (await session.execute(_M2_WINDOWED_POSTGRES_QUERY, params)).mappings().all()
+        _record_m2_rows(rows, collector)
+    return collector.findings()
 
 
 async def _find_m2_sqlite(
     session: AsyncSession,
     public_ids: list[str],
+    collector: _FindingCollector | None = None,
 ) -> tuple[TradeIntegrityFinding, ...]:
-    """Run the M2 mutation probe with the SQLite partial-index literal."""
+    """Run the exact M2 mutation probe with the SQLite partial-index literal."""
+    collector = collector if collector is not None else _FindingCollector()
     first = aliased(Trade)
     second = aliased(Trade)
     active: ColumnElement[str] = literal_column("'9999-12-31 23:59:59.000000'")
-    findings: dict[str, TradeIntegrityFinding] = {}
     for chunk in _chunks(public_ids):
-        remaining = _FINDING_LIMIT - len(findings)
+        remaining = collector.remaining()
         if remaining <= 0:
             break
         statement = (
@@ -442,16 +706,87 @@ async def _find_m2_sqlite(
             .limit(remaining)
         )
         for public_id in (await session.scalars(statement)).all():
-            findings[public_id] = TradeIntegrityFinding(
-                monitor="m2",
-                public_id=public_id,
-                instrument_public_id=None,
-                trade_id=None,
-                expected_executed_at=None,
-                conflicting_executed_at=None,
-                active_count=2,
+            collector.add((public_id,), _m2_finding(public_id, 2))
+    return collector.findings()
+
+
+async def _find_m2_windowed_sqlite(
+    session: AsyncSession,
+    candidates: list[_M2WindowCandidate],
+    collector: _FindingCollector,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Count active rows of each public id only within the window around its candidate.
+
+    Both counted rows are compared with the candidate's time, not with each
+    other, so two rows can be up to twice the window apart. The count is
+    bounded at two, as in the PostgreSQL probe.
+    """
+    active: ColumnElement[str] = literal_column("'9999-12-31 23:59:59.000000'")
+    for chunk in _chunks(candidates):
+        if collector.remaining() <= 0:
+            break
+        statement = select(
+            Trade.public_id.label("public_id"), Trade.executed_at.label("executed_at")
+        ).where(
+            Trade.public_id.in_(sorted({item.public_id for item in chunk})),
+            Trade.known_to == active,
+        )
+        times: dict[str, list[datetime | None]] = {}
+        for row in (await session.execute(statement)).mappings().all():
+            times.setdefault(cast(str, row["public_id"]), []).append(
+                cast(datetime | None, row["executed_at"])
             )
-    return tuple(findings.values())
+        for item in chunk:
+            lower = item.executed_at - TRADE_INTEGRITY_PROBE_WINDOW
+            upper = item.executed_at + TRADE_INTEGRITY_PROBE_WINDOW
+            count = sum(
+                1
+                for stored in times.get(item.public_id, [])
+                if stored is not None and lower <= stored <= upper
+            )
+            if count > 1 and collector.remaining() > 0:
+                collector.add((item.public_id,), _m2_finding(item.public_id, min(count, 2)))
+    return collector.findings()
+
+
+async def _find_m1_violations(
+    session: AsyncSession,
+    dialect_name: str,
+    route: _M1Route,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Run the exact and then the windowed M1 probes under one finding cap."""
+    collector = _FindingCollector()
+    if dialect_name == "postgresql":
+        if route.exact:
+            await _find_m1_postgresql(session, route.exact, collector)
+        if route.windowed:
+            await _find_m1_windowed_postgresql(session, route.windowed, collector)
+        return collector.findings()
+    if route.exact:
+        await _find_m1_sqlite(session, route.exact, collector)
+    if route.windowed:
+        await _find_m1_windowed_sqlite(session, route.windowed, collector)
+    return collector.findings()
+
+
+async def _find_m2_violations(
+    session: AsyncSession,
+    dialect_name: str,
+    route: _M2Route,
+) -> tuple[TradeIntegrityFinding, ...]:
+    """Run the exact and then the windowed M2 probes under one finding cap."""
+    collector = _FindingCollector()
+    if dialect_name == "postgresql":
+        if route.exact:
+            await _find_m2_postgresql(session, route.exact, collector)
+        if route.windowed:
+            await _find_m2_windowed_postgresql(session, route.windowed, collector)
+        return collector.findings()
+    if route.exact:
+        await _find_m2_sqlite(session, route.exact, collector)
+    if route.windowed:
+        await _find_m2_windowed_sqlite(session, route.windowed, collector)
+    return collector.findings()
 
 
 async def _find_violations(
@@ -461,20 +796,10 @@ async def _find_violations(
     sweep: list[Trade],
     worklog: list[TradeIntegrityWorkItem],
 ) -> tuple[TradeIntegrityFinding, ...]:
-    """Dispatch one monitor to its dialect-specific bounded query."""
+    """Route one monitor's page to its windowed and exact dialect probes."""
     if request.monitor == "m1":
-        candidates = _m1_candidates(sweep, worklog)
-        if not candidates:
-            return ()
-        if dialect_name == "postgresql":
-            return await _find_m1_postgresql(session, candidates)
-        return await _find_m1_sqlite(session, candidates)
-    public_ids = _m2_candidates(sweep, worklog)
-    if not public_ids:
-        return ()
-    if dialect_name == "postgresql":
-        return await _find_m2_postgresql(session, public_ids)
-    return await _find_m2_sqlite(session, public_ids)
+        return await _find_m1_violations(session, dialect_name, _route_m1(sweep, worklog))
+    return await _find_m2_violations(session, dialect_name, _route_m2(sweep, worklog))
 
 
 async def _ack_worklog(
