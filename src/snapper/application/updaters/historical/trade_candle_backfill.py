@@ -10,6 +10,8 @@ from loguru import logger
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TradeCandleBackfillParameters
 from snapper.application.process_manager.registry import register_process
+from snapper.application.updaters.historical.trade_candle_rows import calculated_row
+from snapper.application.updaters.historical.trade_candle_rows import trade_update
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.types import ExchangeEnum
@@ -27,9 +29,6 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.utils.logging import set_log_context
 
 _CANDLE_STREAM = "candles"
-_ORD_TYPE = "market"
-_SOURCE_CALCULATED = "calculated"
-_TIMEFRAME = "1m"
 
 
 def _utc_now() -> datetime:
@@ -359,15 +358,7 @@ class TradeCandleBackfillService(RegisterableProcess):
         Returns:
             TradeUpdate ready for TradeCandleBuilder.
         """
-        return TradeUpdate(
-            symbol=instrument_public_id,
-            side=trade["side"],
-            quantity=float(trade["size"]),
-            price=float(trade["price"]),
-            ord_type=_ORD_TYPE,
-            timestamp=event_time,
-            trade_id=trade["trade_id"],
-        )
+        return trade_update(trade, instrument_public_id, event_time)
 
     @staticmethod
     def _trade_event_time(trade: TradeRow) -> datetime:
@@ -436,20 +427,10 @@ class TradeCandleBackfillService(RegisterableProcess):
         Returns:
             CandleUpsertRow ready for idempotent SCD2 upsert.
         """
-        return {
-            "instrument_public_id": instrument_public_id,
-            "open_at": _as_utc(candle.interval_begin),
-            "timestamp": _as_utc(self._clock()),
-            "timeframe": _TIMEFRAME,
-            "open": candle.open,
-            "high": candle.high,
-            "low": candle.low,
-            "close": candle.close,
-            "volume": candle.volume,
-            "vwap": candle.vwap,
-            "trades": candle.trades,
-            "source": _SOURCE_CALCULATED,
-            "complete": True,
-            "session_id": self._tracker.session_id,
-            "sequence_id": self._tracker.next_sequence(_CANDLE_STREAM),
-        }
+        return calculated_row(
+            candle,
+            instrument_public_id,
+            timestamp=_as_utc(self._clock()),
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_CANDLE_STREAM),
+        )
