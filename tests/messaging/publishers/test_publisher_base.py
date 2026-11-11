@@ -13479,22 +13479,24 @@ class TestResetBetweenEmissionAndPublication:
 
     @staticmethod
     def _reset_on(pub: Any, timeframe: str, opened: datetime) -> None:
-        """Reset the stream while one message is being published.
+        """Reset the stream once, while the first matching message is being published.
 
         Args:
             pub: Publisher under test.
             timeframe: Timeframe of the message that triggers the reset.
             opened: Opening of that message.
         """
+        fired: list[CandleData] = []
 
         async def _publish(_topic: str, message: CandleData) -> None:
-            """Break the stream when the trigger message is published.
+            """Break the stream when the first trigger message is published.
 
             Args:
                 _topic: Ignored topic.
                 message: Published message.
             """
-            if message.timeframe == timeframe and message.open_at == opened:
+            if not fired and message.timeframe == timeframe and message.open_at == opened:
+                fired.append(message)
                 pub._suspend_candle_synthesis_across_break()
                 pub.generation += 1
 
@@ -13584,9 +13586,10 @@ class TestResetBetweenEmissionAndPublication:
 
         Given the same window of two symbols, each with its last minute still
             held, a forward-filling aggregator, and a mark that seals both inline,
-        When the stream resets while the first symbol's window is published,
-        Then the second symbol's window is still published under its fixed
-            author and loses to a later repair.
+        When the stream resets while the first sealed window is published,
+        Then the other symbol's window is still published under its fixed
+            author and loses to a later repair. The flush walks symbols in no
+            fixed order, so neither symbol is assumed to come first.
 
         Args:
             tmp_path: Pytest temporary directory.
@@ -13604,7 +13607,7 @@ class TestResetBetweenEmissionAndPublication:
         await pub._advance_completion(mark, ExchangeEnum.KRAKEN)
 
         windows = self._windows(pub)
-        assert [(w.instrument, w.open_at, w.timestamp) for w in windows] == [
+        assert sorted((w.instrument, w.open_at, w.timestamp) for w in windows) == [
             ("BTC-USD", _WINDOW, mark.produced_at),
             ("ETH-USD", _WINDOW, mark.produced_at),
         ]
