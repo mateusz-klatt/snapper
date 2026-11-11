@@ -464,6 +464,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._identity_snapshots: dict[tuple[str, datetime], _IdentitySnapshot] = {}
         self._identity_read_failures: dict[tuple[str, datetime], float] = {}
         self._unacknowledged_live_identities: dict[tuple[str, datetime], dict[str, float]] = {}
+        self._identity_snapshot_builds: dict[tuple[str, datetime], set[str]] = {}
         self._identity_counters: dict[str, int] = {}
         self._identity_samples: deque[JsonObject] = deque(maxlen=_IDENTITY_SAMPLE_SIZE)
         self._identity_last_read_ms: float | None = None
@@ -663,6 +664,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         timeframe, open_at = window
         covered = frozenset(self._instrument_cache.values())
         excluded = self._window_identity_exclusions(window)
+        self._identity_snapshot_builds[window] = excluded
         try:
             identities = await self._require_repository().get_canonical_candle_public_ids(
                 sorted(covered), timeframe, open_at
@@ -677,6 +679,8 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                 type(error).__name__,
             )
             return None, "read_failed"
+        finally:
+            self._identity_snapshot_builds.pop(window, None)
         finished = monotonic()
         self._identity_last_read_ms = round((finished - now) * 1000.0, 3)
         self._bump_identity_counter("snapshot_reads")
@@ -685,29 +689,67 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             self._bump_identity_counter("snapshot_reads_expired")
             return None, "read_expired"
         snapshot = _IdentitySnapshot(
-            taken_at=now, covered=covered, excluded=excluded, identities=dict(identities)
+            taken_at=now,
+            covered=covered,
+            excluded=frozenset(excluded),
+            identities=dict(identities),
         )
         self._identity_snapshots[window] = snapshot
         return snapshot, ""
 
-    def _window_identity_exclusions(self, window: tuple[str, datetime]) -> frozenset[str]:
+    def _window_identity_exclusions(self, window: tuple[str, datetime]) -> set[str]:
         """Return the instruments whose own write at this window may still commit.
+
+        Three records together see every live write of this process that is
+        not known to be committed: pending reservations, persisted resolutions
+        not yet acknowledged, and rows tracked on the writer queue whatever
+        branch chose their identity.
 
         Args:
             window: Timeframe and opening of the read about to begin.
 
         Returns:
-            Instruments with a pending reservation or an unacknowledged
-            resolution at the window.
+            Instruments with any such write at the window.
         """
         timeframe, open_at = window
-        pending = {
+        excluded = {
             instrument
             for instrument, pending_timeframe, pending_open in self._pending_candle_identities
             if pending_timeframe == timeframe and pending_open == open_at
         }
-        pending.update(self._unacknowledged_live_identities.get(window, {}))
-        return frozenset(pending)
+        excluded.update(self._unacknowledged_live_identities.get(window, {}))
+        for tracked in self._candle_write_sequence_by_row_id.values():
+            if tracked.row["timeframe"] == timeframe and tracked.row["open_at"] == open_at:
+                excluded.add(tracked.row["instrument_public_id"])
+        return excluded
+
+    def _assign_candle_write_sequence(self, row: CandleUpsertRow) -> int:
+        """Track a queued live row and keep it out of identity snapshots of its window.
+
+        Both enqueue sites of the live writer call this before a row is
+        queued, whichever branch chose the row's identity. A row queued while
+        its window is being read joins that read's exclusions; a row queued
+        after its window's snapshot was installed excludes its instrument
+        there unless it carries the identity the snapshot holds.
+
+        Args:
+            row: Candle row about to be placed on the writer queue.
+
+        Returns:
+            Monotonic publisher-local write sequence.
+        """
+        sequence = super()._assign_candle_write_sequence(row)
+        window = (row["timeframe"], row["open_at"])
+        instrument_public_id = row["instrument_public_id"]
+        build = self._identity_snapshot_builds.get(window)
+        if build is not None:
+            build.add(instrument_public_id)
+        snapshot = self._identity_snapshots.get(window)
+        if snapshot is not None and snapshot.identities.get(instrument_public_id) != row.get(
+            "public_id"
+        ):
+            snapshot.excluded = snapshot.excluded | {instrument_public_id}
+        return sequence
 
     def _prune_identity_snapshots(self, now: float) -> None:
         """Forget snapshots, read failures and unacknowledged keys past their bounds.

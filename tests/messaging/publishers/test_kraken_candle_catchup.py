@@ -1763,6 +1763,87 @@ async def test_a_cached_identity_without_reservation_is_excluded_until_acknowled
     }
 
 
+def _queued_row(
+    publisher: KrakenMarketDataPublisher, instrument: str, public_id: str
+) -> CandleUpsertRow:
+    """Build a live writer row of the shared test window for one instrument."""
+    row = _native_identity_row(publisher)
+    row["instrument_public_id"] = instrument
+    row["public_id"] = public_id
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_row_queued_before_the_read_is_excluded_from_its_snapshot(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A queued live row keeps its instrument out of the read, whatever chose its ID.
+
+    Given: A live row of the window on the writer queue whose identity came from
+        the non-persisted branch, so no reservation or persisted resolution exists.
+    When: Another instrument's resolution reads the window.
+    Then: The queued row's instrument is excluded and resolves by the per-key
+        lookup, while a queued row of another window excludes nothing here.
+    """
+    publisher, repository = _snapshot_publisher()
+    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
+    later = _queued_row(publisher, "other-instrument", "later-id")
+    later["open_at"] = START + timedelta(minutes=1)
+    publisher._assign_candle_write_sequence(later)
+    await _resolve_other_identity(publisher)
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    repository.get_canonical_candle_public_id.return_value = "queued-id"
+    assert await _resolve_test_identity(publisher) == "queued-id"
+    assert publisher._identity_counters["per_key_lookups.excluded_unacknowledged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_row_queued_during_the_read_joins_its_exclusions(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A row queued while its window is read is excluded from that read.
+
+    Given: A window read during which a live row of the window is queued.
+    When: The read installs its snapshot.
+    Then: The queued instrument is excluded and no build stays behind.
+    """
+    publisher, repository = _snapshot_publisher()
+
+    async def _read_while_queueing(*_args: object) -> dict[str, str]:
+        """Queue a live row for the window while the read is in flight."""
+        publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
+        return {}
+
+    repository.get_canonical_candle_public_ids.side_effect = _read_while_queueing
+    await _resolve_other_identity(publisher)
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    assert publisher._identity_snapshot_builds == {}
+
+
+@pytest.mark.asyncio
+async def test_a_row_queued_after_installation_excludes_unless_it_carries_the_snapshot_id(
+    monotonic_clock: _MonotonicClock,
+) -> None:
+    """A row queued after the snapshot excludes its instrument unless the IDs agree.
+
+    Given: An installed snapshot holding a stored identity for one instrument.
+    When: Rows are queued for an absent instrument, for the stored identity, and
+        for a different identity of the stored instrument.
+    Then: Only the rows whose identity differs from the snapshot's exclude.
+    """
+    publisher, _repository = _snapshot_publisher({"other-instrument": "stored-id"})
+    await _resolve_other_identity(publisher)
+    snapshot = publisher._identity_snapshots[("1m", START)]
+    publisher._assign_candle_write_sequence(_queued_row(publisher, "other-instrument", "stored-id"))
+    assert snapshot.excluded == frozenset()
+    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
+    assert snapshot.excluded == frozenset({"instrument"})
+    publisher._assign_candle_write_sequence(
+        _queued_row(publisher, "other-instrument", "different-id")
+    )
+    assert snapshot.excluded == frozenset({"instrument", "other-instrument"})
+
+
 @pytest.mark.asyncio
 async def test_an_unacknowledged_key_is_released_after_its_age_bound(
     monotonic_clock: _MonotonicClock,
@@ -1899,6 +1980,7 @@ async def test_a_cancelled_read_propagates_and_installs_nothing(
     assert publisher._identity_read_failures == {}
     assert publisher._pending_candle_identities == {}
     assert publisher._unacknowledged_live_identities == {}
+    assert publisher._identity_snapshot_builds == {}
     repository.get_canonical_candle_public_id.assert_not_awaited()
     assert not publisher._candle_identity_gate.locked()
 

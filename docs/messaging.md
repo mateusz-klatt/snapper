@@ -969,11 +969,14 @@ newest cached key, the publisher holds its identity gate and does this:
     protocol as the per-key lookup. A snapshot answers for two monotonic
     seconds; a key it finds absent gets a new UUID7, which is written into the
     snapshot at once.
-- Keys this process resolved for persistence and whose write is not yet
-    acknowledged are excluded when the read begins, because their own writer
-    may commit during the read. That covers pending reservations and also
-    identities taken from the cache without one. An entry older than thirty
-    minutes is dropped, since such a write is not coming.
+- Every key with a live write of this process that is not known to be
+    committed is excluded from the read, because that write may commit while
+    the read runs. That means pending reservations, persisted resolutions not
+    yet acknowledged, and rows on the writer queue, whatever branch chose
+    their identity. A row queued while the read runs joins its exclusions; a
+    row queued after the snapshot is installed excludes its instrument unless
+    it carries the identity the snapshot holds. An unacknowledged resolution
+    older than thirty minutes is dropped, since such a write is not coming.
 - A catchup or repair write drops the snapshots of its windows before it
     writes, whatever the write's outcome.
 - Every other key takes the fenced per-key lookup.
