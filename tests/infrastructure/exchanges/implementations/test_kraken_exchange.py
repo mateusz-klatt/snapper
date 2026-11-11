@@ -10258,7 +10258,16 @@ class TestTradeBuiltInBandResets:
         monkeypatch.setattr(client, "_trade_built_candle_aggregator", AsyncMock())
         client._trade_candle_popped_through = _MINUTE_M
         stream = client.subscribe_trade_built_stream(["*"])
-        waiting = asyncio.create_task(anext(stream))
+
+        async def _first() -> TradeCandleItem:
+            """Read the stream's next item.
+
+            Returns:
+                The item the waiting read receives.
+            """
+            return await anext(stream)
+
+        waiting = asyncio.create_task(_first())
         await asyncio.sleep(0.02)
 
         client._reset_trade_candle_epoch_in_band()
