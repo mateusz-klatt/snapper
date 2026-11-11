@@ -129,8 +129,17 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         await repo.engine.dispose()
 
 
+_WIDE = RepairWindow(OPEN - timedelta(hours=1), OPEN + timedelta(hours=5))
+"""A window wide enough for 250 minutes from ``OPEN``."""
+
+
 async def _plan(
-    repository: SQLAlchemyRepository, tmp_path: Path, *, minutes: int = 3, zeros: int = 1
+    repository: SQLAlchemyRepository,
+    tmp_path: Path,
+    *,
+    minutes: int = 3,
+    zeros: int = 1,
+    window: RepairWindow | None = None,
 ) -> str:
     """Save a snapshot, store zeros for its first minutes and run the dry run into ``plan``.
 
@@ -144,7 +153,7 @@ async def _plan(
     await repository.upsert_candles(
         [candle(XRP, OPEN + timedelta(minutes=offset)) for offset in range(zeros)]
     )
-    request = snapshot_request(tmp_path / "snap", tmp_path / "plan")
+    request = snapshot_request(tmp_path / "snap", tmp_path / "plan", window=window)
     return (await plan_repair(fixed_context(repository), request)).digest
 
 
@@ -155,10 +164,14 @@ def _options(tmp_path: Path, digest: str, **changes: object) -> WriteOptions:
 
 
 async def _write(
-    context: RunContext, tmp_path: Path, name: str, options: WriteOptions
+    context: RunContext,
+    tmp_path: Path,
+    name: str,
+    options: WriteOptions,
+    window: RepairWindow | None = None,
 ) -> WriteReport:
     """Run one write into a fresh output directory."""
-    request = snapshot_request(tmp_path / "snap", tmp_path / name)
+    request = snapshot_request(tmp_path / "snap", tmp_path / name, window=window)
     return await write_repair(context, request, options)
 
 
@@ -249,7 +262,7 @@ async def test_write_applies_the_voted_plan_and_a_rerun_reports_equal(
     assert receipt["stop_reason"] == "completed"
     assert receipt["voted_digest"] == digest
     assert receipt["write_time"] == RUN_TIME.isoformat()
-    assert (receipt["selected"], receipt["attempted"], receipt["left"]) == (3, 3, 0)
+    assert (receipt["selected"], receipt["scheduled"], receipt["reached"]) == (3, 3, 3)
     assert receipt["not_voted"] == receipt["already_applied"] == receipt["changed"] == []
     chunks = cast(list[JsonObject], receipt["chunks"])
     assert [(chunk["action"], chunk["rows"], chunk["attempt_count"]) for chunk in chunks] == [
@@ -664,7 +677,7 @@ async def test_max_rows_stops_early_and_a_resume_applies_only_what_is_left(
     )
     receipt = _receipt(tmp_path, "first")
     assert (first.stop_reason, first.complete) == ("max_rows", True)
-    assert (receipt["selected"], receipt["attempted"], receipt["left"]) == (5, 2, 3)
+    assert (receipt["selected"], receipt["scheduled"], receipt["reached"]) == (5, 2, 2)
     assert first.totals["applied"] == 2
 
     second = await _write(fixed_context(repository), tmp_path, "second", _options(tmp_path, digest))
@@ -1010,6 +1023,30 @@ async def test_supersession_after_the_clock_and_before_the_read_is_found_superse
     assert [row["minute_utc"] for row in cast(list[JsonObject], chunk["applied_superseded"])] == [
         (OPEN + timedelta(minutes=1)).isoformat()
     ]
+
+
+@pytest.mark.asyncio
+async def test_receipt_counts_scheduled_rows_and_rows_in_reached_chunks(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """A run that stops in its first chunk reaches only that chunk's rows.
+
+    Given: 250 scheduled inserts and a first chunk of 100 whose connection is lost
+        before anything is written.
+    When: The voted plan is written.
+    Then: The receipt counts 250 scheduled and 100 reached rows, in one chunk whose
+        100 rows are uncertain.
+    """
+    digest = await _plan(repository, tmp_path, minutes=250, zeros=0, window=_WIDE)
+    _script(repository, "insert_missing_native_candles", [ConnectionResetError("lost")])
+    report = await _write(
+        fixed_context(repository), tmp_path, "write", _options(tmp_path, digest), _WIDE
+    )
+    receipt = _receipt(tmp_path, "write")
+    assert report.stop_reason == "uncertain_acknowledgement"
+    assert (receipt["selected"], receipt["scheduled"], receipt["reached"]) == (250, 250, 100)
+    chunks = cast(list[JsonObject], receipt["chunks"])
+    assert [(chunk["rows"], _outcomes(chunk)["uncertain"]) for chunk in chunks] == [(100, 100)]
 
 
 @pytest.mark.asyncio

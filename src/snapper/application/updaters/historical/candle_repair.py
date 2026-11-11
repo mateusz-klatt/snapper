@@ -2167,6 +2167,11 @@ class _ChunkWriter:
             record.reconciliation_error = error_fields(error)
 
 
+def _reached(records: Sequence[JsonObject]) -> int:
+    """Count the rows of every chunk the run submitted."""
+    return sum(cast(int, record["rows"]) for record in records)
+
+
 def _totals(records: Sequence[JsonObject]) -> JsonObject:
     """Count rows per outcome over all chunk receipts."""
     return {
@@ -2177,14 +2182,19 @@ def _totals(records: Sequence[JsonObject]) -> JsonObject:
 
 @dataclass(frozen=True, slots=True)
 class _WriteRun:
-    """Fixed facts of one write run, for its receipt."""
+    """Fixed facts of one write run, for its receipt.
+
+    ``scheduled`` counts the selected rows this run is to write, at most
+    ``--max-rows`` of them; the receipt adds ``reached``, the rows of the
+    chunks the run actually submitted.
+    """
 
     voted_digest: str
     run_id: str
     write_time: datetime
     started_at: datetime
     selection: Selection
-    batch: int
+    scheduled: int
 
     def receipt(
         self, stop_reason: str, records: Sequence[JsonObject], ended_at: datetime
@@ -2198,8 +2208,8 @@ class _WriteRun:
             "ended_at": ended_at.isoformat(),
             "stop_reason": stop_reason,
             "selected": len(self.selection.selected),
-            "attempted": self.batch,
-            "left": len(self.selection.selected) - self.batch,
+            "scheduled": self.scheduled,
+            "reached": _reached(records),
             "not_voted": [_entry_reference(entry) for entry in self.selection.not_voted],
             "already_applied": [_line_reference(line) for line in self.selection.already_applied],
             "changed": [_line_reference(line) for line in self.selection.changed],
@@ -2237,7 +2247,7 @@ async def apply_selection(
         stop_reason = await writer.apply(
             write_chunks(batch, request.source, run.run_id, write_time)
         )
-        if stop_reason == "completed" and run.batch < len(selection.selected):
+        if stop_reason == "completed" and run.scheduled < len(selection.selected):
             stop_reason = "max_rows"
     except (asyncio.CancelledError, KeyboardInterrupt):
         stop_reason = "cancelled"

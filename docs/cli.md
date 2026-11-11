@@ -454,7 +454,9 @@ timeout, a serialization failure, a deadlock or a conflict on the candle
 natural-key index. Any other error makes the chunk uncertain: one read without a
 table lock reports its rows as `applied`, `applied_superseded` or `uncertain`,
 and the write stops. `receipt.jsonl` gets one line per chunk as soon as the
-chunk ends, and `receipt.json` is written even when the write fails or is
+chunk ends. `receipt.json` counts the rows the vote selected, the rows this run
+`scheduled` (at most `--max-rows`) and the rows in chunks it `reached`, lists every
+attempt and row outcome, and is written even when the write fails or is
 cancelled. A write that stops before its end exits `1`.
 
 Each correction chunk takes `SHARE ROW EXCLUSIVE` on `candles`, so live candle
