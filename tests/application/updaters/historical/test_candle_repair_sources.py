@@ -16,7 +16,9 @@ from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
+from asyncpg import connect_utils
 from sqlalchemy import update
+from sqlalchemy.engine import make_url
 
 from snapper.application.updaters.historical import candle_repair
 from snapper.application.updaters.historical import trade_candle_backfill
@@ -198,40 +200,140 @@ def test_live_edge_refuses_minutes_newer_than_180_minutes_before_the_run() -> No
         )
 
 
-def test_database_endpoint_names_postgresql_without_credentials_or_query() -> None:
-    """The endpoint keeps dialect, host, effective port and database only.
+_PRODUCTION_URL = "postgresql+asyncpg://snapper_repair:Pa55-w0rd@db.internal:6543/snapper_prod"
+"""The production shape: user, password, host, port and database, and no query."""
 
-    Given: PostgreSQL URLs with credentials and a query, with and without a port.
-    When: Their endpoints are taken.
-    Then: The port defaults to 5432 and no user, password or query appears.
+_PRODUCTION_ENDPOINT = {
+    "dialect": "postgresql",
+    "host": "db.internal",
+    "port": 6543,
+    "database": "snapper_prod",
+}
+
+
+def test_production_shaped_postgresql_url_is_bound_as_written() -> None:
+    """A URL naming host, port and database without query binds exactly those fields.
+
+    Given: A PostgreSQL URL with user, password, host, port and database and no query.
+    When: Its endpoint is taken.
+    Then: The endpoint holds the host, port and database as written and no credential.
     """
-    with_port = database_endpoint(
-        "postgresql+asyncpg://operator:secret@db.example:6543/snapper?application_name=x"
+    endpoint = database_endpoint(_PRODUCTION_URL)
+    assert endpoint == _PRODUCTION_ENDPOINT
+    rendered = canonical_json(endpoint).decode()
+    assert "snapper_repair" not in rendered
+    assert "Pa55-w0rd" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("query", "option"),
+    [
+        ("?database=other", "database"),
+        ("?host=other.internal", "host"),
+        ("?port=6000", "port"),
+        ("?service=reporting", "service"),
+        ("?target_session_attrs=read-write", "target_session_attrs"),
+        ("?application_name=repair", "application_name"),
+        ("?ssl=require&passfile=/tmp/pass", "passfile"),
+    ],
+)
+def test_postgresql_query_options_outside_the_allowlist_refuse(query: str, option: str) -> None:
+    """A query option could replace the URL's own fields, so only ``ssl`` is allowed.
+
+    Given: An explicit URL with a query override of the database, the host or the port,
+        or another option outside the allowlist.
+    When: Its endpoint is taken.
+    Then: It is refused, naming the option.
+    """
+    with pytest.raises(RepairRefusedError, match=f"options are not allowed: {option}$"):
+        database_endpoint(_PRODUCTION_URL + query)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://snapper_repair:secret@:6543/snapper_prod",
+        "postgresql+asyncpg://snapper_repair:secret@db.internal/snapper_prod",
+        "postgresql+asyncpg://snapper_repair:secret@db.internal:6543",
+        "postgresql+asyncpg://snapper_repair:secret@db.internal:6543/",
+        "postgresql+asyncpg://snapper_repair:secret@db1.internal,db2.internal:6543/snapper_prod",
+        "postgresql+asyncpg://",
+    ],
+)
+def test_postgresql_url_without_one_explicit_host_port_or_database_refuses(url: str) -> None:
+    """A missing field would come from an environment or service default.
+
+    Given: A URL without its host, its port or its database, or with two hosts.
+    When: Its endpoint is taken.
+    Then: It is refused.
+    """
+    with pytest.raises(RepairRefusedError, match="must name one host, its port and its database"):
+        database_endpoint(url)
+
+
+def test_allowed_ssl_option_is_accepted_and_leaves_the_endpoint_unchanged() -> None:
+    """``ssl`` selects the TLS mode of the same connection and is not part of the endpoint.
+
+    Given: The production URL with ``ssl=require``.
+    When: Its endpoint is taken.
+    Then: It is accepted and equals the endpoint without the option.
+    """
+    assert database_endpoint(_PRODUCTION_URL + "?ssl=require") == _PRODUCTION_ENDPOINT
+
+
+def test_environment_defaults_change_neither_the_endpoint_nor_the_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With every field explicit, environment and service defaults cannot redirect the run.
+
+    Given: PGHOST, PGPORT, PGDATABASE, PGSERVICE and a service file that all name
+        another database.
+    When: The production URL's endpoint is taken and asyncpg resolves the connection
+        from SQLAlchemy's arguments.
+    Then: The endpoint is unchanged and the connection goes to the URL's own host,
+        port and database.
+    """
+    service_file = tmp_path / "pg_service.conf"
+    service_file.write_text("[reporting]\nhost=other.internal\nport=7000\ndbname=other\n")
+    for name, value in {
+        "PGHOST": "other.internal",
+        "PGPORT": "7000",
+        "PGDATABASE": "other",
+        "PGSERVICE": "reporting",
+        "PGSERVICEFILE": str(service_file),
+    }.items():
+        monkeypatch.setenv(name, value)
+    url = make_url(_PRODUCTION_URL)
+    _, arguments = url.get_dialect()().create_connect_args(url)
+    addresses, parameters = connect_utils._parse_connect_dsn_and_args(
+        dsn=None,
+        host=arguments["host"],
+        port=arguments["port"],
+        user=arguments["user"],
+        password=arguments["password"],
+        passfile=None,
+        database=arguments["database"],
+        ssl=None,
+        service=None,
+        servicefile=None,
+        direct_tls=None,
+        server_settings=None,
+        target_session_attrs=None,
+        krbsrvname=None,
+        gsslib=None,
     )
-    without_port = database_endpoint("postgresql+asyncpg://operator:secret@db.example/snapper")
-    assert with_port == {
-        "dialect": "postgresql",
-        "host": "db.example",
-        "port": 6543,
-        "database": "snapper",
-    }
-    assert without_port["port"] == 5432
-    assert "secret" not in canonical_json(with_port).decode()
-    assert "operator" not in canonical_json(with_port).decode()
-    assert database_endpoint("postgresql+asyncpg://") == {
-        "dialect": "postgresql",
-        "host": "",
-        "port": 5432,
-        "database": "",
-    }
+    assert database_endpoint(_PRODUCTION_URL) == _PRODUCTION_ENDPOINT
+    assert addresses == [("db.internal", 6543)]
+    assert parameters.database == "snapper_prod"
 
 
 def test_database_endpoint_resolves_the_sqlite_file_and_refuses_others(tmp_path: Path) -> None:
-    """SQLite is named by its canonical absolute path; memory and other dialects refuse.
+    """SQLite is named by its canonical absolute path; memory, options and other dialects refuse.
 
-    Given: A SQLite URL through a symbolic link, an in-memory URL and a MySQL URL.
+    Given: A SQLite URL through a symbolic link, in-memory URLs, a URL with a query
+        option and a MySQL URL.
     When: Their endpoints are taken.
-    Then: The link resolves to the real file and the other two are refused.
+    Then: The link resolves to the real file and every other URL is refused.
     """
     real = tmp_path / "real.db"
     real.touch()
@@ -241,12 +343,15 @@ def test_database_endpoint_resolves_the_sqlite_file_and_refuses_others(tmp_path:
         "dialect": "sqlite",
         "path": str(real.resolve()),
     }
-    with pytest.raises(RepairRefusedError, match="database file"):
-        database_endpoint("sqlite+aiosqlite:///:memory:")
-    with pytest.raises(RepairRefusedError, match="database file"):
-        database_endpoint("sqlite+aiosqlite://")
+    for refused in (
+        "sqlite+aiosqlite:///:memory:",
+        "sqlite+aiosqlite://",
+        f"sqlite+aiosqlite:///file:{real}?mode=memory&uri=true",
+    ):
+        with pytest.raises(RepairRefusedError, match="database file without query options"):
+            database_endpoint(refused)
     with pytest.raises(RepairRefusedError, match="mysql"):
-        database_endpoint("mysql+aiomysql://user:secret@host/db")
+        database_endpoint("mysql+aiomysql://user:secret@host:3306/db")
 
 
 def test_code_revision_hashes_every_installed_module_that_decides_writes() -> None:

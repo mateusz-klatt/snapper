@@ -30,10 +30,7 @@ from tests.helpers.candle_repair import write_snapshot
 _START = "2026-11-10T14:00:00+00:00"
 _END = "2026-11-10T16:00:00Z"
 _SENTINELS = ("SENTINEL_USER", "SENTINEL_PASSWORD", "SENTINEL_ACCOUNT")
-_SENTINEL_URL = (
-    "postgresql+asyncpg://SENTINEL_USER:SENTINEL_PASSWORD@db.example/snapper"
-    "?application_name=SENTINEL_ACCOUNT"
-)
+_SENTINEL_URL = "postgresql+asyncpg://SENTINEL_USER:SENTINEL_PASSWORD@db.example:5432/snapper"
 
 
 def _invoke(*arguments: str) -> Result:
@@ -488,14 +485,17 @@ def test_no_credential_reaches_output_files_or_logs(
 ) -> None:
     """A credential-bearing database URL never appears in output, files or logs.
 
-    Given: A configured PostgreSQL URL with user, password and query sentinels, and a
-        repository that actually reads the seeded SQLite database.
-    When: A dry run and a refused unsupported-dialect run are made.
-    Then: The approval names host, port and database only, and no sentinel appears on
-        stdout, stderr, in any output file or in any log message.
+    Given: A configured PostgreSQL URL with user and password sentinels and the allowed
+        ``ssl`` option, and a repository that actually reads the seeded SQLite database.
+    When: A dry run, a run whose URL carries a query sentinel in a refused option and a
+        refused unsupported-dialect run are made.
+    Then: The approval names host, port and database only, the refusals name no value,
+        and no sentinel appears on stdout, stderr, in any output file or in any log message.
     """
     monkeypatch.setattr(
-        candle_repair_cli, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=_SENTINEL_URL)
+        candle_repair_cli,
+        "get_bootstrap_settings",
+        lambda: SimpleNamespace(db_url=_SENTINEL_URL + "?ssl=require"),
     )
     monkeypatch.setattr(
         candle_repair_cli, "configured_repository", lambda db_url: configured_repository(database)
@@ -512,12 +512,23 @@ def test_no_credential_reaches_output_files_or_logs(
     monkeypatch.setattr(
         candle_repair_cli,
         "get_bootstrap_settings",
+        lambda: SimpleNamespace(db_url=_SENTINEL_URL + "?application_name=SENTINEL_ACCOUNT"),
+    )
+    optioned = _invoke(*_snapshot_arguments(snapshot, tmp_path / "optioned"))
+    assert optioned.exit_code == 1
+    assert optioned.stderr.strip() == (
+        "refused: PostgreSQL target URL options are not allowed: application_name"
+    )
+    monkeypatch.setattr(
+        candle_repair_cli,
+        "get_bootstrap_settings",
         lambda: SimpleNamespace(db_url="mysql+aiomysql://SENTINEL_USER:SENTINEL_PASSWORD@h/db"),
     )
     refused = _invoke(*_snapshot_arguments(snapshot, tmp_path / "refused"))
     assert refused.exit_code == 1
     assert refused.stderr.strip() == "refused: database dialect mysql is not supported"
     texts = [result.stdout, result.stderr, refused.stdout, refused.stderr, *captured_logs]
+    texts.extend([optioned.stdout, optioned.stderr])
     texts.extend(path.read_text() for path in (tmp_path / "out").iterdir())
     assert not any(sentinel in text for sentinel in _SENTINELS for text in texts)
     for path in (tmp_path / "out").iterdir():

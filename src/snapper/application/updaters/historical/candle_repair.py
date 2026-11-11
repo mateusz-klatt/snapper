@@ -60,6 +60,7 @@ from uuid import uuid7
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import tuple_
+from sqlalchemy.engine import URL
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
@@ -160,6 +161,14 @@ _SQLITE_NATURAL_KEY_VIOLATION: Final[str] = (
 
 _SQLITE_UNIQUE_VIOLATION: Final[int] = 2067
 """SQLite extended result code of a unique-constraint violation."""
+
+POSTGRESQL_URL_OPTIONS: Final[frozenset[str]] = frozenset({"ssl"})
+"""Query options a PostgreSQL target URL may carry.
+
+SQLAlchemy's asyncpg dialect hands every query option to ``asyncpg.connect``
+in place of the URL's own fields. ``ssl`` only selects the TLS mode of the
+same connection; every other option is refused, routing or not.
+"""
 
 _RETRYABLE_SQLSTATES: Final[Mapping[str, str]] = {
     "55P03": "lock_timeout",
@@ -644,32 +653,60 @@ def canonical_json(document: JsonValue) -> bytes:
 
 
 def database_endpoint(db_url: str) -> JsonObject:
-    """Name the target database without user, password or query.
+    """Name the database the run will reach, exactly as its URL writes it, without credentials.
+
+    A PostgreSQL URL must itself name one host, its port and its database,
+    and may carry no query option other than those in
+    :data:`POSTGRESQL_URL_OPTIONS`, which is ``ssl`` alone. A missing field
+    would fall back to an environment or service-file default (``PGHOST``,
+    ``PGPORT``, ``PGDATABASE``, ``PGSERVICE`` and the like), and query options
+    such as ``database``, ``host``, ``port`` or ``service`` replace the URL's
+    own fields, so the approval could name a database other than the one
+    written. With all three fields explicit, the driver uses them over every
+    such default. A SQLite target is named by the canonical absolute path of
+    its file and may carry no query option, because one such as ``uri`` can
+    select another or an in-memory database.
 
     Args:
         db_url: Configured SQLAlchemy URL.
 
     Returns:
-        Dialect, host, effective port and database name, or the canonical
-        absolute file path for SQLite.
+        Dialect, host, port and database name as the URL writes them, or the
+        canonical absolute file path for SQLite.
 
     Raises:
-        RepairRefusedError: For an in-memory SQLite database or an unsupported dialect.
+        RepairRefusedError: For an incomplete PostgreSQL URL, a query option
+            outside the allowlist, an in-memory or optioned SQLite URL, or
+            another dialect.
     """
     url = make_url(db_url)
     dialect = url.get_backend_name()
     if dialect == "sqlite":
-        if not url.database or url.database == ":memory:":
-            raise RepairRefusedError("a SQLite target must be a database file")
-        return {"dialect": dialect, "path": str(Path(url.database).resolve())}
+        return _sqlite_endpoint(url)
     if dialect != "postgresql":
         raise RepairRefusedError(f"database dialect {dialect} is not supported")
-    return {
-        "dialect": dialect,
-        "host": url.host or "",
-        "port": url.port or 5432,
-        "database": url.database or "",
-    }
+    return _postgresql_endpoint(url)
+
+
+def _sqlite_endpoint(url: URL) -> JsonObject:
+    """Name a SQLite database file by its canonical absolute path."""
+    if not url.database or url.database == ":memory:" or url.query:
+        raise RepairRefusedError("a SQLite target must be a database file without query options")
+    return {"dialect": "sqlite", "path": str(Path(url.database).resolve())}
+
+
+def _postgresql_endpoint(url: URL) -> JsonObject:
+    """Name a PostgreSQL database by the explicit host, port and database of its URL."""
+    if not url.host or "," in url.host or url.port is None or not url.database:
+        raise RepairRefusedError(
+            "a PostgreSQL target URL must name one host, its port and its database"
+        )
+    options = sorted(set(url.query) - POSTGRESQL_URL_OPTIONS)
+    if options:
+        raise RepairRefusedError(
+            f"PostgreSQL target URL options are not allowed: {', '.join(options)}"
+        )
+    return {"dialect": "postgresql", "host": url.host, "port": url.port, "database": url.database}
 
 
 def code_revision(extra_modules: Sequence[ModuleType]) -> JsonObject:
