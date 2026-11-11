@@ -3260,6 +3260,36 @@ async def test_keys_before_the_cutover_keep_todays_resolution() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timeframe", "opening"),
+    [
+        ("1h", START.replace(minute=0)),
+        ("1m", START - timedelta(hours=3)),
+    ],
+    ids=["window-open-across-the-cutover", "old-frame-after-a-reconnect"],
+)
+async def test_keys_opening_before_the_cutover_still_take_a_lookup(
+    timeframe: str, opening: datetime
+) -> None:
+    """A key that opened before the cutover is looked up even after the cutover.
+
+    Given: A cutover at the test opening, a one-hour window that opened before it,
+        and an old one-minute frame such as a reconnect can deliver.
+    When: Each key is resolved after the cutover.
+    Then: The per-key lookup answers it and no deterministic answer is counted.
+    """
+    publisher, repository = _identity_publisher()
+    publisher.settings.candle_identity_deterministic_from = START
+
+    await publisher._resolve_live_candle_public_id(INSTRUMENT_ID, timeframe, opening, "BTC-USD")
+
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(
+        INSTRUMENT_ID, timeframe, opening
+    )
+    assert "deterministic_answers" not in publisher._identity_counters
+
+
+@pytest.mark.asyncio
 async def test_the_heartbeat_reports_the_cutover_the_resolver_used() -> None:
     """Each publisher shows the cutover its resolver actually read.
 
